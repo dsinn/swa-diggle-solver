@@ -1,5 +1,6 @@
 pub mod config;
 pub mod game;
+pub mod win;
 
 use std::path::PathBuf;
 
@@ -15,4 +16,6 @@ pub enum Error {
     Lua(#[from] mlua::Error),
     #[error("config: {0}")]
     Config(String),
+    #[error("win32: {0}")]
+    Win32(String),
 }
