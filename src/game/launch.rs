@@ -37,6 +37,13 @@ impl GameProcess {
     pub fn is_running(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
+
+    /// Terminates the game. Spikes and the loop must not leave stray processes.
+    pub fn kill(&mut self) -> Result<(), crate::Error> {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        Ok(())
+    }
 }
 
 #[cfg(test)]

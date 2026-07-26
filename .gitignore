@@ -1,2 +1,5 @@
 /target
 /fixtures/**/*.png
+/config.toml
+/diggle-verbose.log
+/diggle-decisions.log

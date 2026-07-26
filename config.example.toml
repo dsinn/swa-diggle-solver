@@ -1,0 +1,9 @@
+# Copy to config.toml and set the paths for your machine.
+game_dir = "../sternly-worded-adventures"
+# MUST be lovec.exe, not love.exe — only the console build writes to our stdout pipe.
+lovec_path = "C:/path/to/lovec.exe"
+# Optional: mirror the raw verbose log for post-hoc inspection.
+# log_mirror = "diggle-verbose.log"
+# Optional: override the save directory. Leave unset to use the unfused path that
+# lovec.exe writes to (%APPDATA%/LOVE/SternlyWordedAdventures).
+# save_dir = "C:/Users/you/AppData/Roaming/LOVE/SternlyWordedAdventures"
