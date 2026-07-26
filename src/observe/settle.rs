@@ -14,6 +14,9 @@ pub const REACT_FLOOR: f64 = 0.02;
 pub fn sample_noise_floor(
     win: &GameWindow, samples: usize, gap: Duration,
 ) -> Result<f64, crate::Error> {
+    // Never sample during a transition — a floor measured mid-animation is inflated
+    // and will mask real reactions (Task 24, step 00).
+    let _ = wait_for_quiescence(win, 0.02, Duration::from_secs(5))?;
     let mut prev = capture_window(win)?;
     let mut worst = 0.0f64;
     for _ in 0..samples {

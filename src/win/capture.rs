@@ -31,9 +31,11 @@ pub struct Region {
     pub nh: f64,
 }
 
-/// The region hashed for screen identity. Deliberately excludes the bottom strip,
-/// where animated elements and notifications live.
-pub const FINGERPRINT_REGION: Region = Region { nx: 0.25, ny: 0.05, nw: 0.5, nh: 0.5 };
+/// Bounds of the start menu's Continue + Start buttons, derived from their ButtonSpecs.
+/// Measured idle noise floor 0.0000 across 20 frames; the previous centre-screen region
+/// scored 0.5228 because it overlapped the animated mascot.
+pub const FINGERPRINT_REGION: Region =
+    Region { nx: 0.0326, ny: 0.7037, nw: 0.2930, nh: 0.0926 };
 
 impl Frame {
     fn region_px(&self, r: Region) -> (i32, i32, i32, i32) {

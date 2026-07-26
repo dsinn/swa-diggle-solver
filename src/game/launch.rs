@@ -19,10 +19,22 @@ fn build_command(cfg: &Config) -> Command {
 
 impl GameProcess {
     pub fn launch(cfg: &Config) -> Result<Self, crate::Error> {
+        Self::launch_with_env(cfg, &[])
+    }
+
+    /// Launch with extra environment variables for the child.
+    ///
+    /// SDL reads its hints from the environment, so this is how we influence SDL's
+    /// input behaviour without modifying the game.
+    pub fn launch_with_env(
+        cfg: &Config, env: &[(&str, &str)],
+    ) -> Result<Self, crate::Error> {
         let mut cmd = build_command(cfg);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
         cmd.stdout(Stdio::piped()).stderr(Stdio::null());
-        let child = cmd.spawn()?;
-        Ok(Self { child })
+        Ok(Self { child: cmd.spawn()? })
     }
 
     pub fn pid(&self) -> u32 {

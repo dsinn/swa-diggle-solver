@@ -2,7 +2,8 @@ use crate::win::window::GameWindow;
 use std::time::Duration;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    PostMessageW, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    PostMessageW, SetForegroundWindow, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE,
 };
 
 pub const VK_RETURN: u16 = 0x0D;
@@ -26,6 +27,12 @@ pub struct PostMessageInput {
 impl PostMessageInput {
     pub fn new(win: GameWindow) -> Self {
         Self { win }
+    }
+
+    /// Give the game real focus WITHOUT moving the physical cursor. SDL may require
+    /// focus before it will deliver mouse buttons.
+    pub fn focus(&self) {
+        unsafe { let _ = SetForegroundWindow(self.win.hwnd); }
     }
 }
 
