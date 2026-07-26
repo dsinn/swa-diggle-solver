@@ -1,3 +1,4 @@
+pub mod config;
 pub mod game;
 
 use std::path::PathBuf;
@@ -12,4 +13,6 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("lua: {0}")]
     Lua(#[from] mlua::Error),
+    #[error("config: {0}")]
+    Config(String),
 }
