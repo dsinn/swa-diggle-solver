@@ -18,7 +18,7 @@ use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
     TerminateProcess, UpdateProcThreadAttribute, EXTENDED_STARTUPINFO_PRESENT,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, STARTUPINFOEXW,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, STARTUPINFOEXW, STARTUPINFOW,
 };
 
 /// PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE. Defined manually because the crate does not
@@ -62,9 +62,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let size = COORD { X: 200, Y: 50 };
         hpc = CreatePseudoConsole(size, in_read, out_write, 0)?;
 
-        // The pty owns these ends now.
-        let _ = CloseHandle(in_read);
-        let _ = CloseHandle(out_write);
+        // NOTE: per Microsoft's "Creating a Pseudoconsole session" doc, the caller's
+        // copies of in_read/out_write are freed AFTER CreateProcessW succeeds, not
+        // immediately here (moved below).
 
         // Build the attribute list carrying the pseudoconsole. First call (with a null
         // list) is expected to "fail" -- it only exists to report the required size.
@@ -78,6 +78,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut buf = vec![0u8; bytes];
         let attrs = LPPROC_THREAD_ATTRIBUTE_LIST(buf.as_mut_ptr() as *mut _);
         InitializeProcThreadAttributeList(attrs, 1, 0, &mut bytes)?;
+        // Matches Microsoft's own sample at
+        // learn.microsoft.com/windows/console/creating-a-pseudoconsole-session, which
+        // passes `hpc` directly as lpValue (`UpdateProcThreadAttribute(..., hpc,
+        // sizeof(hpc), ...)`) -- the handle's bit pattern used directly as the PVOID
+        // value, not a pointer to a variable holding it. An earlier revision of this
+        // file tried `&hpc as *const HPCON as *const c_void` (pointer TO the handle)
+        // on the theory that the original was backwards; empirically, verified via
+        // spike_conpty_control.rs, that "fix" is wrong: it made the child receive no
+        // usable console at all (0 bytes captured, no leak anywhere), a strictly worse
+        // result than this version. Reverted.
         UpdateProcThreadAttribute(
             attrs,
             0,
@@ -101,6 +111,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut cmd: Vec<u16> = cmdline.encode_utf16().collect();
         cmd.push(0);
 
+        // Take the address of the WHOLE STARTUPINFOEXW and round-trip it through usize
+        // before casting down to *const STARTUPINFOW, rather than `&si.StartupInfo`
+        // directly. This is the fix reported in microsoft/windows-rs#1397 for exactly
+        // this symptom (child bypasses the pty, inherits the parent's real console):
+        // `&si.StartupInfo` borrows only the nested sub-object, and rustc attaches
+        // noalias/dereferenceable(size_of::<STARTUPINFOW>()) provenance to that
+        // reference regardless of optimization level -- narrower than what
+        // CreateProcessW actually reads once EXTENDED_STARTUPINFO_PRESENT is set (it
+        // reads lpAttributeList too, past the end of that narrower borrow).
+        let si_ptr = &si as *const STARTUPINFOEXW;
+        let si_ptr_addr = si_ptr as usize;
+        let si_w_ptr = si_ptr_addr as *const STARTUPINFOW;
+
         let started = Instant::now();
         CreateProcessW(
             None,
@@ -111,11 +134,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             EXTENDED_STARTUPINFO_PRESENT,
             None,
             None,
-            &si.StartupInfo,
+            si_w_ptr,
             &mut pi,
         )?;
 
         DeleteProcThreadAttributeList(attrs);
+
+        // Now that the child has been created attached to the pseudoconsole, free our
+        // copies of the ends the pty owns -- per Microsoft's documented ordering.
+        let _ = CloseHandle(in_read);
+        let _ = CloseHandle(out_write);
 
         // Drain the pty output on a background thread. HANDLE wraps a raw pointer and
         // is not Send, but a Win32 HANDLE is just an opaque integer that is valid to

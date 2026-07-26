@@ -24,7 +24,7 @@ use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
     TerminateProcess, UpdateProcThreadAttribute, EXTENDED_STARTUPINFO_PRESENT,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, STARTUPINFOEXW,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, STARTUPINFOEXW, STARTUPINFOW,
 };
 
 /// PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE. Defined manually because the crate does not
@@ -63,9 +63,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let size = COORD { X: 200, Y: 50 };
             hpc = CreatePseudoConsole(size, in_read, out_write, 0)?;
 
-            // The pty owns these ends now.
-            let _ = CloseHandle(in_read);
-            let _ = CloseHandle(out_write);
+            // NOTE: per Microsoft's own "Creating a Pseudoconsole session" doc, the
+            // caller's copies of in_read/out_write should be freed AFTER CreateProcess
+            // succeeds, not immediately here. Moved below, after CreateProcessW.
 
             // Build the attribute list carrying the pseudoconsole. First call (with a
             // null list) is expected to "fail" -- it only exists to report the
@@ -80,6 +80,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut buf = vec![0u8; bytes];
             let attrs = LPPROC_THREAD_ATTRIBUTE_LIST(buf.as_mut_ptr() as *mut _);
             InitializeProcThreadAttributeList(attrs, 1, 0, &mut bytes)?;
+            // REVERTED: Microsoft's own sample at
+            // learn.microsoft.com/windows/console/creating-a-pseudoconsole-session
+            // passes `hpc` directly as lpValue (`UpdateProcThreadAttribute(..., hpc,
+            // sizeof(hpc), ...)`), not `&hpc`. HPCON is itself a pointer-sized opaque
+            // handle (like HANDLE), and for this specific attribute the API wants the
+            // handle's bit pattern used directly as the PVOID value -- not a pointer
+            // to a variable holding it. Passing `&hpc` (verified by direct test) makes
+            // CreateProcessW attach an invalid pseudoconsole reference, causing the
+            // child to receive no usable console at all (0 bytes captured, no leak to
+            // the real terminal either -- consistent with Windows' documented failure
+            // mode "given an invalid pseudoconsole handle for startup").
             UpdateProcThreadAttribute(
                 attrs,
                 0,
@@ -103,6 +114,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut cmd: Vec<u16> = cmdline.encode_utf16().collect();
             cmd.push(0);
 
+            // BUG FIX #3: `&si.StartupInfo` borrows only the nested STARTUPINFOW
+            // sub-object; rustc attaches noalias/dereferenceable(size_of::<STARTUPINFOW>())
+            // provenance to that reference regardless of optimization level, which is
+            // narrower than the full STARTUPINFOEXW CreateProcessW actually reads once
+            // EXTENDED_STARTUPINFO_PRESENT is set (it reads lpAttributeList, which
+            // lives past the end of that narrower borrow). This is a documented
+            // windows-rs gotcha (microsoft/windows-rs#1397) with exactly this
+            // symptom: the attribute list is silently ignored and the child inherits
+            // the parent's real console instead of the pseudoconsole. The fix is to
+            // take the address of the WHOLE STARTUPINFOEXW and round-trip it through
+            // usize to erase that narrow provenance before casting down to
+            // *const STARTUPINFOW.
+            let si_ptr = &si as *const STARTUPINFOEXW;
+            let si_ptr_addr = si_ptr as usize;
+            let si_w_ptr = si_ptr_addr as *const STARTUPINFOW;
+
             let started = Instant::now();
             CreateProcessW(
                 None,
@@ -113,26 +140,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 EXTENDED_STARTUPINFO_PRESENT,
                 None,
                 None,
-                &si.StartupInfo,
+                si_w_ptr,
                 &mut pi,
             )?;
+            eprintln!(
+                "DEBUG hpc.0={:#x} pid={} tid={}",
+                hpc.0, pi.dwProcessId, pi.dwThreadId
+            );
 
             DeleteProcThreadAttributeList(attrs);
+
+            // Now that the child has been created attached to the pseudoconsole, free
+            // our copies of the ends the pty owns -- per Microsoft's documented
+            // ordering ("Upon completion of the CreateProcess call ... the handles
+            // given during creation should be freed from this process").
+            let _ = CloseHandle(in_read);
+            let _ = CloseHandle(out_write);
 
             // Drain the pty output on a background thread. Identical to
             // spike_conpty.rs.
             let (tx, rx) = mpsc::channel::<Vec<u8>>();
             let reader_raw = out_read.0 as usize;
             std::thread::spawn(move || {
+                eprintln!("DEBUG reader thread started, handle={:#x}", reader_raw);
                 let reader = HANDLE(reader_raw as *mut std::ffi::c_void);
                 let mut buf = [0u8; 4096];
                 loop {
                     let mut read = 0u32;
-                    if ReadFile(reader, Some(&mut buf), Some(&mut read), None).is_err()
-                        || read == 0
-                    {
+                    let r = ReadFile(reader, Some(&mut buf), Some(&mut read), None);
+                    if let Err(e) = &r {
+                        eprintln!("DEBUG ReadFile error: {e:?}");
+                    }
+                    if r.is_err() || read == 0 {
+                        eprintln!("DEBUG reader thread exiting, read={read}");
                         break;
                     }
+                    eprintln!("DEBUG reader thread got {read} bytes");
                     if tx.send(buf[..read as usize].to_vec()).is_err() {
                         break;
                     }
@@ -171,6 +214,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            eprintln!("DEBUG raw bytes captured: {:?}", acc.as_bytes());
             // Deliberately NOT closing out_read here -- same race as documented in
             // spike_conpty.rs: the background reader thread may still be blocked
             // inside a synchronous ReadFile on this exact handle value. Closing it
