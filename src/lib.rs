@@ -1,5 +1,6 @@
 pub mod config;
 pub mod game;
+pub mod observe;
 pub mod win;
 
 use std::path::PathBuf;
