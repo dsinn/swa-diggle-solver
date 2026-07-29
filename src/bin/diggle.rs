@@ -21,6 +21,7 @@ use diggle_solver::win::input::{
     Input, PostMessageInput, SC_DOWN, SC_LEFT, SC_RETURN, SC_RIGHT, SC_SPACE, SC_UP, VK_DOWN,
     VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
 };
+use diggle_solver::observe::template::Template;
 use diggle_solver::win::window::{self, GameWindow};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -239,6 +240,232 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let landed = cursor();
             println!("landed={landed:?} target={target:?} on_target={}", dist(landed, target) <= 60.0);
+        }
+        "find" => {
+            // Locate a game sprite in the current frame. Reports the whole scale sweep,
+            // not just the winner: the gap between best and runner-up is what says whether
+            // the match is DISTINCTIVE rather than merely lowest-scoring.
+            let png_path = args.get(1).ok_or("usage: find <sprite.png> [step]")?;
+            let step: i32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2);
+            let (_, win) = attach()?;
+            let f = capture_window(&win)?;
+            let tpl = Template::load(Path::new(png_path))?;
+            println!(
+                "template {} {}x{} opaque={:.3}",
+                tpl.name,
+                tpl.width,
+                tpl.height,
+                tpl.opaque_fraction(diggle_solver::observe::template::ALPHA_MIN)
+            );
+            // Optional bounds let us run a FAIR step=1 test in a region where the sprite is
+            // known to be, instead of a coarse full-frame sweep that cannot separate
+            // "rendering differs" from "never tested the right offset".
+            let bounds = if args.len() >= 7 {
+                let n: Vec<i32> = args[3..7].iter().filter_map(|a| a.parse().ok()).collect();
+                if n.len() == 4 { Some((n[0], n[1], n[2], n[3])) } else { None }
+            } else {
+                None
+            };
+            let scales: Vec<f64> = if bounds.is_some() {
+                // Fine sweep: 0.30 .. 2.00 in 0.05 steps.
+                (6..=40).map(|i| i as f64 * 0.05).collect()
+            } else {
+                (2..=12).map(|i| i as f64 * 0.25).collect()
+            };
+            let t0 = std::time::Instant::now();
+            let results =
+                diggle_solver::observe::template::sweep_in(&f, &tpl, &scales, step, bounds);
+            println!(
+                "swept {} scales, step={step}, bounds={bounds:?}, in {:?}\n",
+                scales.len(),
+                t0.elapsed()
+            );
+            println!("  scale  inliers   error   top-left      centre");
+            for m in results.iter().take(6) {
+                println!(
+                    "  {:5.2}   {:.3}   {:.4}   ({:4},{:4})   ({:4},{:4})",
+                    m.scale, m.inliers, m.error, m.x, m.y, m.cx, m.cy
+                );
+            }
+            if let (Some(a), Some(b)) = (results.first(), results.get(1)) {
+                println!(
+                    "\nbest_inliers={:.3} runner_up={:.3} margin={:.3}",
+                    a.inliers, b.inliers, a.inliers - b.inliers
+                );
+            }
+        }
+        "selftest" => {
+            // Positive control on the INSTRUMENT. Crops a patch out of the live frame and
+            // searches for it. Must return inliers=1.000 at exactly (x,y), scale 1.00.
+            // If this fails, the matcher is broken; if it passes, any failure to find a
+            // real sprite is about how the game RENDERS it, not about the search.
+            let x: i32 = args.get(1).ok_or("usage: selftest <x> <y> <size>")?.parse()?;
+            let y: i32 = args.get(2).ok_or("usage: selftest <x> <y> <size>")?.parse()?;
+            let size: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(32);
+            let (_, win) = attach()?;
+            let f = capture_window(&win)?;
+            let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+            for dy in 0..size as i32 {
+                for dx in 0..size as i32 {
+                    let i = (((y + dy) * f.width + (x + dx)) * 4) as usize;
+                    rgba.extend_from_slice(&[f.bgra[i + 2], f.bgra[i + 1], f.bgra[i], 255]);
+                }
+            }
+            let tpl = Template { name: "crop".into(), width: size, height: size, rgba };
+            let m = diggle_solver::observe::template::find_at_scale(&f, &tpl, 1.0, 1)
+                .ok_or("no match at all — matcher is broken")?;
+            println!("cropped {size}x{size} at ({x},{y})");
+            println!(
+                "best: ({:4},{:4}) scale={:.2} inliers={:.3} error={:.4}",
+                m.x, m.y, m.scale, m.inliers, m.error
+            );
+            let exact = m.x == x && m.y == y && m.inliers > 0.999;
+            println!("SELFTEST {}", if exact { "PASS" } else { "FAIL" });
+        }
+        "pantest" => {
+            // Measures how far one held arrow press pans the overworld map.
+            //
+            // Uses crop-and-track rather than sprite matching: a patch cropped from the
+            // frame is compared against the SAME rendering after the pan, so tint and
+            // scale cancel out. `selftest` verifies this instrument returns inliers=1.000.
+            let dir = args.get(1).map(|s| s.as_str()).unwrap_or("left");
+            let ms: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(400);
+            let (vk, sc) = match dir {
+                "u" | "up" => (VK_UP, SC_UP),
+                "d" | "down" => (VK_DOWN, SC_DOWN),
+                "l" | "left" => (VK_LEFT, SC_LEFT),
+                "r" | "right" => (VK_RIGHT, SC_RIGHT),
+                other => return Err(format!("unknown direction {other:?}").into()),
+            };
+            let (_, win) = attach()?;
+            let input = PostMessageInput::new(win);
+
+            // GUARD (design v2 §7.1): panning only happens while the highlight is on the
+            // map hotspot, where the cursor is pinned to the client centre. If it is not
+            // there, arrows move a highlight instead and the measurement is meaningless.
+            let (ox, oy) = win.client_origin()?;
+            let c = cursor();
+            let (ccx, ccy) = (c.0 - ox, c.1 - oy);
+            let (cw, ch) = win.client_size()?;
+            if (ccx - cw / 2).abs() > 4 || (ccy - ch / 2).abs() > 4 {
+                return Err(format!(
+                    "cursor at client ({ccx},{ccy}), not the map hotspot ({},{}). \
+                     Run `diggle nav {} {}` first — refusing to measure.",
+                    cw / 2, ch / 2, cw / 2, ch / 2
+                )
+                .into());
+            }
+
+            // Crop from well inside the map, away from the UI panels.
+            const PATCH: u32 = 48;
+            let (px, py) = (cw / 2 + 120, ch / 2 - 160);
+            let before = capture_window(&win)?;
+            let mut rgba = Vec::with_capacity((PATCH * PATCH * 4) as usize);
+            for dy in 0..PATCH as i32 {
+                for dx in 0..PATCH as i32 {
+                    let i = (((py + dy) * before.width + (px + dx)) * 4) as usize;
+                    rgba.extend_from_slice(&[
+                        before.bgra[i + 2],
+                        before.bgra[i + 1],
+                        before.bgra[i],
+                        255,
+                    ]);
+                }
+            }
+            let tpl = Template { name: "patch".into(), width: PATCH, height: PATCH, rgba };
+
+            input.hold_extended_key(vk, sc, Duration::from_millis(ms))?;
+            std::thread::sleep(Duration::from_millis(400)); // let momentum settle
+            let after = capture_window(&win)?;
+
+            // Search a generous band around the original position, step=1.
+            let m = diggle_solver::observe::template::find_at_scale_in(
+                &after,
+                &tpl,
+                1.0,
+                1,
+                Some((0, py - 400, after.width, py + 400)),
+            )
+            .ok_or("patch not found after pan")?;
+            println!(
+                "hold {dir} {ms}ms: patch ({px},{py}) -> ({},{})  d=({:+},{:+})  inliers={:.3}",
+                m.x,
+                m.y,
+                m.x - px,
+                m.y - py,
+                m.inliers
+            );
+            if m.inliers < 0.6 {
+                println!("WARNING: low inliers — the patch may have been re-rendered or left the frame");
+            }
+        }
+        "hold" => {
+            // Map panning is a HELD gesture: overworldview.hotspotDirection stores a
+            // direction on key-down and hotspotDirectionRelease clears it on key-up
+            // (overworldview.lua:1115-1133), with acceleration applied in core:update.
+            // `key` holds for a fixed 60ms, which is useless for measuring pan distance.
+            let dir = args.get(1).ok_or("usage: hold <dir> <ms>")?.as_str();
+            let ms: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(500);
+            let (vk, sc) = match dir {
+                "u" | "up" => (VK_UP, SC_UP),
+                "d" | "down" => (VK_DOWN, SC_DOWN),
+                "l" | "left" => (VK_LEFT, SC_LEFT),
+                "r" | "right" => (VK_RIGHT, SC_RIGHT),
+                other => return Err(format!("unknown direction {other:?}").into()),
+            };
+            let (_, win) = attach()?;
+            PostMessageInput::new(win).hold_extended_key(vk, sc, Duration::from_millis(ms))?;
+            println!("held {dir} for {ms}ms; cursor={:?}", cursor());
+        }
+        "walk" => {
+            // Enumerate a screen's hotspot graph against the ALREADY-RUNNING game.
+            // spike_hotspot_graph does something similar but launches its own game and
+            // resets the sandbox save, so it cannot be pointed at a live run.
+            //
+            // Presses a comma-separated arrow sequence, reading GetCursorPos after each
+            // press, and clusters the distinct positions visited. Never presses Return —
+            // exploration must not activate anything (design v2 §7.1).
+            let seq = args.get(1).cloned().unwrap_or_default();
+            if seq.is_empty() {
+                return Err("usage: walk <dirs>   e.g. walk d,d,r,r,u,l".into());
+            }
+            let (_, win) = attach()?;
+            let (ox, oy) = win.client_origin()?;
+            let input = PostMessageInput::new(win);
+            let mut visited: Vec<(i32, i32)> = Vec::new();
+            let start = cursor();
+            println!("start  -> screen={start:?} client={:?}", (start.0 - ox, start.1 - oy));
+            visited.push(start);
+            for (i, d) in seq.split(',').map(|s| s.trim()).enumerate() {
+                let (vk, sc) = match d {
+                    "u" | "up" => (VK_UP, SC_UP),
+                    "d" | "down" => (VK_DOWN, SC_DOWN),
+                    "l" | "left" => (VK_LEFT, SC_LEFT),
+                    "r" | "right" => (VK_RIGHT, SC_RIGHT),
+                    other => return Err(format!("unknown direction {other:?}").into()),
+                };
+                input.press_extended_key(vk, sc)?;
+                std::thread::sleep(Duration::from_millis(280));
+                let c = cursor();
+                let moved = visited.last() != Some(&c);
+                println!(
+                    "{i:2} {d:5} -> screen={c:?} client={:?}{}",
+                    (c.0 - ox, c.1 - oy),
+                    if moved { "" } else { "   (no move — edge of graph)" }
+                );
+                visited.push(c);
+            }
+            // Cluster within 20px so jitter does not inflate the count.
+            let mut clusters: Vec<(i32, i32)> = Vec::new();
+            for p in &visited {
+                if !clusters.iter().any(|c| dist(*c, *p) < 20.0) {
+                    clusters.push(*p);
+                }
+            }
+            println!("\ndistinct hotspots visited ({}):", clusters.len());
+            for c in &clusters {
+                println!("  client=({:4},{:4})", c.0 - ox, c.1 - oy);
+            }
         }
         "watch" => {
             let secs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(8);

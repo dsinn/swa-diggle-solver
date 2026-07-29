@@ -75,6 +75,31 @@ impl PostMessageInput {
         Ok(())
     }
 
+    /// Holds an extended key down for `dur` before releasing it.
+    ///
+    /// Some inputs are gestures, not events. The overworld map pan stores a direction on
+    /// key-down (`overworldview.hotspotDirection`, `:1115-1123`) and clears it on key-up
+    /// (`hotspotDirectionRelease`, `:1125-1133`), integrating it in `core:update` with
+    /// acceleration. Distance travelled is therefore a function of HOLD DURATION, and
+    /// `press_extended_key`'s fixed 60 ms cannot express it.
+    pub fn hold_extended_key(
+        &self,
+        vk: u16,
+        scancode: u16,
+        dur: Duration,
+    ) -> Result<(), crate::Error> {
+        let sc = scancode as isize;
+        const EXTENDED: isize = 0x0100_0000;
+        let down = LPARAM((sc << 16) | 0x0000_0001 | EXTENDED);
+        let up = LPARAM((sc << 16) | (0xC000_0001u32 as isize) | EXTENDED);
+        unsafe {
+            let _ = PostMessageW(self.win.hwnd, WM_KEYDOWN, WPARAM(vk as usize), down);
+            std::thread::sleep(dur);
+            let _ = PostMessageW(self.win.hwnd, WM_KEYUP, WPARAM(vk as usize), up);
+        }
+        Ok(())
+    }
+
     /// Extended keys (arrows, Home/End/Insert/Delete, etc.) require bit 24 of
     /// lParam set on both WM_KEYDOWN and WM_KEYUP; WM_KEYDOWN/UP without it (as
     /// used by `press_key`) is only correct for non-extended keys.

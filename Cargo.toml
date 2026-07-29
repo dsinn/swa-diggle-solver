@@ -21,8 +21,9 @@ windows = { version = "0.58", features = [
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 thiserror = "2"
-# Dev-driver only: lets `diggle shot` emit a viewable PNG. Pure Rust, so it does not
-# threaten the verified single-exe/no-install property.
+# Lets `diggle shot` emit a viewable PNG, and observe::template load the game's own
+# location sprites for matching. Pure Rust, so it does not threaten the verified
+# single-exe/no-install property.
 png = "0.17"
 
 [profile.release]
