@@ -2,7 +2,7 @@ use crate::win::window::GameWindow;
 use std::time::Duration;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, PostMessageW, SetForegroundWindow, WM_KEYDOWN, WM_KEYUP,
+    GetForegroundWindow, PostMessageW, SetForegroundWindow, WM_CHAR, WM_KEYDOWN, WM_KEYUP,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
 };
 
@@ -55,6 +55,24 @@ impl PostMessageInput {
     /// foreground before trusting a click/focus-dependent result.
     pub fn has_foreground(&self) -> bool {
         unsafe { GetForegroundWindow() == self.win.hwnd }
+    }
+
+    /// Types text one character at a time via WM_CHAR.
+    ///
+    /// This is a DIFFERENT path from `press_key`, and the distinction matters:
+    ///   love.keypressed <- SDL_KEYDOWN   <- WM_KEYDOWN (needs a real scancode)
+    ///   love.textinput  <- SDL_TEXTINPUT <- WM_CHAR
+    /// Combat selects tiles through `rpg.textinput` (rpg.lua:801), which is driven by
+    /// love.textinput — so letters must go out as WM_CHAR. Sending them as WM_KEYDOWN
+    /// would fire keypressed and select nothing.
+    pub fn type_text(&self, text: &str) -> Result<(), crate::Error> {
+        for ch in text.chars() {
+            unsafe {
+                let _ = PostMessageW(self.win.hwnd, WM_CHAR, WPARAM(ch as usize), LPARAM(1));
+            }
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        Ok(())
     }
 
     /// Extended keys (arrows, Home/End/Insert/Delete, etc.) require bit 24 of

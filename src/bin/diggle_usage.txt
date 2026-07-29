@@ -1,0 +1,15 @@
+diggle — interactive dev driver. The game STAYS RUNNING between commands.
+
+  diggle launch          spawn the game detached, record pid, wait for its window
+  diggle kill            terminate it
+  diggle where           cursor position, client size, fingerprint hashes
+  diggle shot <name>     capture -> spike-frames-live/<name>.{bmp,png}
+  diggle key <name>      return | space | backspace | up | down | left | right
+  diggle type <text>     letters via WM_CHAR (this is what combat tile selection uses)
+  diggle nav <x> <y>     arrow-navigate toward a point, verified via GetCursorPos
+  diggle watch <secs>    frame-delta trace; read the SHAPE (rise-then-plateau = a
+                         transition, flat jitter = noise). Design v2 §7.
+
+Notes:
+  - Never send `escape`: it maps to goBack-or-options and can strand the run.
+  - Navigation moves the user's REAL cursor. Warn them before using `nav`.
