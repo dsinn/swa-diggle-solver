@@ -79,6 +79,42 @@ fn write_png(frame: &Frame, path: &Path) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+/// Holds an arrow key and measures how far the map CONTENT moved, by crop-and-track.
+///
+/// Frame-to-frame, so the map's time-of-day tint and draw scale cancel out — the same
+/// instrument `diggle selftest` validates at inliers=1.000. Returns the signed displacement.
+fn measure_pan(
+    win: &GameWindow,
+    input: &PostMessageInput,
+    dir: &str,
+    ms: u64,
+) -> Result<(i32, i32), Box<dyn std::error::Error>> {
+    let (vk, sc) = match dir {
+        "up" => (VK_UP, SC_UP),
+        "down" => (VK_DOWN, SC_DOWN),
+        "left" => (VK_LEFT, SC_LEFT),
+        _ => (VK_RIGHT, SC_RIGHT),
+    };
+    let (cw, ch) = win.client_size()?;
+    const PATCH: u32 = 48;
+    let (px, py) = (cw / 2 + 120, ch / 2 - 160);
+    let before = capture_window(win)?;
+    let mut rgba = Vec::with_capacity((PATCH * PATCH * 4) as usize);
+    for dy in 0..PATCH as i32 {
+        for dx in 0..PATCH as i32 {
+            let i = (((py + dy) * before.width + (px + dx)) * 4) as usize;
+            rgba.extend_from_slice(&[before.bgra[i + 2], before.bgra[i + 1], before.bgra[i], 255]);
+        }
+    }
+    let tpl = Template { name: "cal".into(), width: PATCH, height: PATCH, rgba };
+    input.hold_extended_key(vk, sc, Duration::from_millis(ms))?;
+    std::thread::sleep(Duration::from_millis(400));
+    let after = capture_window(win)?;
+    let m = diggle_solver::observe::template::find_at_scale_in(&after, &tpl, 1.0, 1, None)
+        .ok_or("calibration patch not found after pan")?;
+    Ok((m.x - px, m.y - py))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
@@ -321,6 +357,115 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             let exact = m.x == x && m.y == y && m.inliers > 0.999;
             println!("SELFTEST {}", if exact { "PASS" } else { "FAIL" });
+        }
+        "probe" => {
+            // §8c fallback F1: find selectable overworld nodes WITHOUT recognising anything.
+            //
+            // The map is a queryable surface. `Return` at the map hotspot fires
+            // love.mousepressed at the cursor, and mouseIsOverLocation (overworldview.lua:
+            // 1280-1293) hit-tests whatever node sits under the SCREEN CENTRE. Selection is
+            // safe -- it is not travel (:1472-1481). So: pan to an offset, press Return, and
+            // read the outcome off the area-button slot.
+            //
+            // Classification uses NO pre-recorded hashes. The slot region covers both the
+            // 250x100 area-button position (187,918) and the 64x80 showAreaButtonsButton at
+            // (32,918) that appears when nothing is selected, so the three states -- nothing
+            // selected / current location / some other node -- are simply three distinct
+            // hashes, identified by which offsets produce them.
+            let hx: i32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(96);
+            let hy: i32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(96);
+            let step: i32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(32);
+            let (_, win) = attach()?;
+            let (cw, ch) = win.client_size()?;
+            let (ox, oy) = win.client_origin()?;
+            let input = PostMessageInput::new(win);
+
+            // GUARD: panning only happens while the highlight is on the map hotspot.
+            let c = cursor();
+            if (c.0 - ox - cw / 2).abs() > 4 || (c.1 - oy - ch / 2).abs() > 4 {
+                return Err(format!(
+                    "cursor at client ({},{}), not the map hotspot ({},{}). Run `diggle nav {} {}` first.",
+                    c.0 - ox, c.1 - oy, cw / 2, ch / 2, cw / 2, ch / 2
+                ).into());
+            }
+
+            let slot = diggle_solver::win::capture::Region::from_px(0, 860, 320, 975, cw, ch);
+
+            // Self-calibrate direction and rate per axis instead of assuming the signs.
+            // Measured rate is ~0.3 px/ms, but which key moves content which way is exactly
+            // the sort of thing worth measuring once rather than getting silently backwards.
+            let calib_ms = 300u64;
+            let (kx, ky) = (measure_pan(&win, &input, "left", calib_ms)?, measure_pan(&win, &input, "up", calib_ms)?);
+            println!("calibration: hold left {calib_ms}ms -> content d=({:+},{:+})", kx.0, kx.1);
+            println!("calibration: hold up   {calib_ms}ms -> content d=({:+},{:+})", ky.0, ky.1);
+            let rate_x = kx.0 as f64 / calib_ms as f64; // px per ms, signed, for "left"
+            let rate_y = ky.1 as f64 / calib_ms as f64; // px per ms, signed, for "up"
+            if rate_x.abs() < 0.05 || rate_y.abs() < 0.05 {
+                return Err("calibration failed: map did not pan measurably".into());
+            }
+
+            // Pan content by (dx,dy) using whichever key has the right sign.
+            let mut pan = |dx: i32, dy: i32| -> Result<(), Box<dyn std::error::Error>> {
+                if dx != 0 {
+                    let (dir, r) = if (dx as f64) * rate_x > 0.0 { ("left", rate_x) } else { ("right", -rate_x) };
+                    let ms = (dx.abs() as f64 / r.abs()).round() as u64;
+                    let (vk, sc) = if dir == "left" { (VK_LEFT, SC_LEFT) } else { (VK_RIGHT, SC_RIGHT) };
+                    input.hold_extended_key(vk, sc, Duration::from_millis(ms.clamp(30, 4000)))?;
+                }
+                if dy != 0 {
+                    let (dir, r) = if (dy as f64) * rate_y > 0.0 { ("up", rate_y) } else { ("down", -rate_y) };
+                    let ms = (dy.abs() as f64 / r.abs()).round() as u64;
+                    let (vk, sc) = if dir == "up" { (VK_UP, SC_UP) } else { (VK_DOWN, SC_DOWN) };
+                    input.hold_extended_key(vk, sc, Duration::from_millis(ms.clamp(30, 4000)))?;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+                Ok(())
+            };
+
+            println!("\n  probe    offset      slot-hash");
+            let mut seen: Vec<(u64, Vec<(i32, i32)>)> = Vec::new();
+            let mut cur = (0i32, 0i32); // current pan offset applied to content
+            let mut n = 0;
+            let mut ys: Vec<i32> = Vec::new();
+            let mut y = -hy;
+            while y <= hy { ys.push(y); y += step; }
+            for (row, &py) in ys.iter().enumerate() {
+                let mut xs: Vec<i32> = Vec::new();
+                let mut x = -hx;
+                while x <= hx { xs.push(x); x += step; }
+                if row % 2 == 1 { xs.reverse(); } // serpentine: minimise panning
+                for &px in &xs {
+                    // Offset (px,py) means: bring the point at (centre + (px,py)) to centre,
+                    // i.e. move content by (-px,-py) relative to the untouched map.
+                    let want = (-px, -py);
+                    pan(want.0 - cur.0, want.1 - cur.1)?;
+                    cur = want;
+                    input.press_key(VK_RETURN, SC_RETURN)?;
+                    std::thread::sleep(Duration::from_millis(450));
+                    let f = capture_window(&win)?;
+                    let h = f.region_hash(slot);
+                    println!("  {n:5}  ({px:+5},{py:+5})  {h:016x}");
+                    match seen.iter_mut().find(|(hh, _)| *hh == h) {
+                        Some((_, v)) => v.push((px, py)),
+                        None => seen.push((h, vec![(px, py)])),
+                    }
+                    n += 1;
+                }
+            }
+
+            // Return the map to where we started, so the probe leaves no drift behind.
+            pan(-cur.0, -cur.1)?;
+
+            println!("\n{} probes, {} distinct slot states:", n, seen.len());
+            seen.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+            for (h, offs) in &seen {
+                println!("  {h:016x}  x{:3}   e.g. {:?}", offs.len(), &offs[..offs.len().min(6)]);
+            }
+            println!(
+                "\nThe most common state is almost certainly 'nothing selected'. Any state with\n\
+                 few offsets, clustered together, is a NODE — its offsets are where that node\n\
+                 sits relative to screen centre."
+            );
         }
         "pantest" => {
             // Measures how far one held arrow press pans the overworld map.
