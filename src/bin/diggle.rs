@@ -135,7 +135,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (cw, ch) = win.client_size()?;
             let f = capture_window(&win)?;
             println!("pid={pid} client={cw}x{ch}");
-            println!("cursor={:?}", cursor());
+            let (ox, oy) = win.client_origin()?;
+            println!("client_origin={:?} (screen coords of client 0,0)", (ox, oy));
+            let c = cursor();
+            println!("cursor_screen={:?} cursor_client={:?}", c, (c.0 - ox, c.1 - oy));
             println!("fullframe={:016x} nonblack={:.4}", f.region_hash(FULL), f.nonblack_fraction());
             // START_MENU_REGION is meaningful ONLY on the start menu; elsewhere it hashes
             // whatever happens to sit there (empty background on hero select). Use
@@ -208,7 +211,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ty: i32 = args.get(2).ok_or("usage: nav <x> <y>")?.parse()?;
             let (_, win) = attach()?;
             let input = PostMessageInput::new(win);
-            let target = (tx, ty);
+            // Targets are given in CLIENT pixels (that is what the game source yields),
+            // but GetCursorPos reports SCREEN pixels. Convert, or every comparison below
+            // is off by the window's position on the desktop.
+            let target = win.client_to_screen(tx, ty)?;
+            println!("target client=({tx},{ty}) -> screen={target:?}");
             // One press establishes a highlight; without one, Return is a no-op.
             input.press_extended_key(VK_DOWN, SC_DOWN)?;
             std::thread::sleep(Duration::from_millis(300));

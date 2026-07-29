@@ -69,7 +69,8 @@ mod tests {
     }
 }
 
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE, FALSE};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT, TRUE, FALSE};
+use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClientRect, GetWindowThreadProcessId, IsWindowVisible,
 };
@@ -117,5 +118,28 @@ impl GameWindow {
     pub fn button_center(&self, spec: &ButtonSpec) -> Result<(i32, i32), crate::Error> {
         let (w, h) = self.client_size()?;
         Ok(button_center(spec, w, h))
+    }
+
+    /// Screen coordinates of the client area's top-left corner.
+    ///
+    /// Everything we compute from the game source (button centres, hotspots, capture
+    /// regions) is in CLIENT pixels, but `GetCursorPos` — our only oracle for which
+    /// hotspot is highlighted — reports SCREEN pixels. Those two agree only when the
+    /// window happens to sit at the desktop origin. On a multi-monitor desktop with a
+    /// display left of or above the primary, screen coordinates go negative and the
+    /// unconverted comparison silently comes out wrong by hundreds of pixels.
+    pub fn client_origin(&self) -> Result<(i32, i32), crate::Error> {
+        let mut p = POINT::default();
+        unsafe { ClientToScreen(self.hwnd, &mut p) }
+            .ok()
+            .map_err(|e| crate::Error::Win32(e.to_string()))?;
+        Ok((p.x, p.y))
+    }
+
+    /// Converts a client-pixel point to screen pixels, for comparison against
+    /// `GetCursorPos`. See `client_origin`.
+    pub fn client_to_screen(&self, x: i32, y: i32) -> Result<(i32, i32), crate::Error> {
+        let (ox, oy) = self.client_origin()?;
+        Ok((ox + x, oy + y))
     }
 }
