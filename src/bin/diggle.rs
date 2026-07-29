@@ -16,7 +16,7 @@
 //!   diggle watch <secs>      frame-delta trace (the instrument from design v2 §7)
 
 use diggle_solver::config::Config;
-use diggle_solver::win::capture::{capture_window, Frame, FINGERPRINT_REGION};
+use diggle_solver::win::capture::{capture_window, Frame, START_MENU_REGION};
 use diggle_solver::win::input::{
     Input, PostMessageInput, SC_DOWN, SC_LEFT, SC_RETURN, SC_RIGHT, SC_SPACE, SC_UP, VK_DOWN,
     VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
@@ -136,8 +136,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let f = capture_window(&win)?;
             println!("pid={pid} client={cw}x{ch}");
             println!("cursor={:?}", cursor());
-            println!("fingerprint(button-bounds)={:016x}", f.region_hash(FINGERPRINT_REGION));
             println!("fullframe={:016x} nonblack={:.4}", f.region_hash(FULL), f.nonblack_fraction());
+            // START_MENU_REGION is meaningful ONLY on the start menu; elsewhere it hashes
+            // whatever happens to sit there (empty background on hero select). Use
+            // `diggle hash <x0> <y0> <x1> <y1>` to measure a region for THIS screen.
+            println!("start_menu_region={:016x}  <- only meaningful on the start menu",
+                     f.region_hash(START_MENU_REGION));
         }
         "shot" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("shot");
@@ -149,7 +153,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             f.write_bmp(&bmp)?;
             write_png(&f, &png)?;
             println!("wrote {} and {}", bmp.display(), png.display());
-            println!("fingerprint={:016x}", f.region_hash(FINGERPRINT_REGION));
+            println!("fullframe={:016x}", f.region_hash(FULL));
+        }
+        "hash" => {
+            // Choose a screen's fingerprint region BY MEASUREMENT. Reports the hash plus
+            // an idle-stability check, because a region overlapping animation is exactly
+            // how the first FINGERPRINT_REGION went wrong (idle noise floor 0.5228).
+            let n: Vec<i32> = args[1..5.min(args.len())]
+                .iter().filter_map(|a| a.parse().ok()).collect();
+            if n.len() != 4 {
+                return Err("usage: hash <x0> <y0> <x1> <y1>  (client pixels)".into());
+            }
+            let (_, win) = attach()?;
+            let (cw, ch) = win.client_size()?;
+            let r = diggle_solver::win::capture::Region::from_px(n[0], n[1], n[2], n[3], cw, ch);
+            let a = capture_window(&win)?;
+            std::thread::sleep(Duration::from_millis(700));
+            let b = capture_window(&win)?;
+            std::thread::sleep(Duration::from_millis(700));
+            let c = capture_window(&win)?;
+            let h = a.region_hash(r);
+            let stable = h == b.region_hash(r) && h == c.region_hash(r);
+            println!("region px=({},{})-({},{})  normalized={:.4},{:.4},{:.4},{:.4}",
+                     n[0], n[1], n[2], n[3], r.nx, r.ny, r.nw, r.nh);
+            println!("hash={h:016x}");
+            println!("idle noise floor = {:.4} (want 0.0000)", a.diff_fraction(&c, r));
+            println!("stable across 3 samples = {stable}");
         }
         "key" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("");

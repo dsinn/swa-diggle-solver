@@ -31,11 +31,29 @@ pub struct Region {
     pub nh: f64,
 }
 
-/// Bounds of the start menu's Continue + Start buttons, derived from their ButtonSpecs.
-/// Measured idle noise floor 0.0000 across 20 frames; the previous centre-screen region
-/// scored 0.5228 because it overlapped the animated mascot.
-pub const FINGERPRINT_REGION: Region =
+/// Bounds of the START MENU's Continue + Start buttons, derived from their ButtonSpecs.
+/// Measured idle noise floor 0.0000 across 20 frames; a centre-screen region scored
+/// 0.5228 because it overlapped the animated mascot.
+///
+/// There is deliberately NO single global fingerprint region. This one lands on empty
+/// background on the hero-select screen, where it hashes blank gradient and looks
+/// convincingly stable while measuring nothing characteristic of that screen. Every
+/// screen carries its own region, chosen from its own controls. See design v2 §6.1.
+pub const START_MENU_REGION: Region =
     Region { nx: 0.0326, ny: 0.7037, nw: 0.2930, nh: 0.0926 };
+
+impl Region {
+    /// Builds a Region from a pixel rectangle on a frame of the given size, so candidate
+    /// fingerprint regions can be measured against a live screen.
+    pub fn from_px(x0: i32, y0: i32, x1: i32, y1: i32, w: i32, h: i32) -> Region {
+        Region {
+            nx: x0 as f64 / w as f64,
+            ny: y0 as f64 / h as f64,
+            nw: (x1 - x0) as f64 / w as f64,
+            nh: (y1 - y0) as f64 / h as f64,
+        }
+    }
+}
 
 impl Frame {
     fn region_px(&self, r: Region) -> (i32, i32, i32, i32) {

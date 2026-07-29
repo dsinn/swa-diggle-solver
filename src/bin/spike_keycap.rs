@@ -14,7 +14,7 @@
 //!
 //! Run: cargo run --bin spike_keycap -- config.toml
 
-use diggle_solver::win::capture::{capture_window, Region, FINGERPRINT_REGION};
+use diggle_solver::win::capture::{capture_window, Region, START_MENU_REGION};
 use diggle_solver::{config::Config, game::launch::GameProcess, win::window};
 use std::collections::HashSet;
 use std::io::Write;
@@ -150,7 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pre = capture_window(&win)?;
 
     for i in 0..MAX_STEPS {
-        let pre_hash = pre.region_hash(FINGERPRINT_REGION);
+        let pre_hash = pre.region_hash(START_MENU_REGION);
         let nonblack = pre.nonblack_fraction();
         all_hashes.insert(pre_hash);
         nonblack_samples.push(nonblack);
@@ -195,7 +195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Record the final frame's hash too, since the loop only records pre-press hashes.
-    let final_hash = pre.region_hash(FINGERPRINT_REGION);
+    let final_hash = pre.region_hash(START_MENU_REGION);
     all_hashes.insert(final_hash);
     let final_nonblack = pre.nonblack_fraction();
     let final_idx = steps.len();
@@ -269,7 +269,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          - reaction threshold per step: max({BASELINE_MULTIPLE} x baseline, {ABSOLUTE_FLOOR})\n\
          - at least one Return press reacted: {any_reacted}\n\n\
          ## Criterion 3: screens are distinguishable\n\
-         - distinct FINGERPRINT_REGION hashes seen across the run: {}\n\n\
+         - distinct START_MENU_REGION hashes seen across the run: {}\n\n\
          ## Criterion 4: cursor untouched\n\
          - cursor before: ({}, {})\n\
          - cursor after:  ({}, {})\n\
