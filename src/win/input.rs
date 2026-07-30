@@ -1,10 +1,75 @@
 use crate::win::window::GameWindow;
 use std::time::Duration;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, PostMessageW, SetForegroundWindow, WM_CHAR, WM_KEYDOWN, WM_KEYUP,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
 };
+
+/// Moves the real cursor, then injects a real left click **at driver level**.
+///
+/// This is NOT what the click spikes tested. They posted `WM_LBUTTONDOWN`, and SDL does not take
+/// mouse buttons from posted window messages — it reads hardware input — so "posted clicks do not
+/// work" was a true but much narrower finding than "clicking does not work". `SendInput` injects
+/// below the message queue, so SDL sees an ordinary click. It had never been tried here.
+///
+/// The cost is that this genuinely drives the machine's pointer: for the moment it runs, the user
+/// does not have their mouse. That was previously a hard constraint; it is not, because hotspot
+/// navigation already warps the cursor on every arrow press (`utils/input.lua:94-98`).
+///
+/// Coordinates are SCREEN pixels. Button events carry no position — `SendInput` applies them at the
+/// current cursor location — so the warp must land first, which also avoids the virtual-desktop
+/// normalisation that `MOUSEEVENTF_ABSOLUTE` would require on a multi-monitor desktop with negative
+/// coordinates.
+pub fn warp_cursor(x: i32, y: i32) -> Result<(), crate::Error> {
+    unsafe { windows::Win32::UI::WindowsAndMessaging::SetCursorPos(x, y) }
+        .map_err(|e| crate::Error::Win32(e.to_string()))
+}
+
+fn mouse_event(flags: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS) -> INPUT {
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+/// Injects `count` left clicks at the current cursor position.
+///
+/// `count = 2` is how to reach `doubleClickEffect` (`overworldview.lua:1446-1468`), which on a
+/// location that is not the player's own falls through to `core.travelTo` — with no reachability
+/// guard, so only ever aim it at a node the log has just reported as adjacent.
+pub fn inject_left_click(count: usize) -> Result<(), crate::Error> {
+    for i in 0..count {
+        let events = [
+            mouse_event(MOUSEEVENTF_LEFTDOWN),
+            mouse_event(MOUSEEVENTF_LEFTUP),
+        ];
+        let sent = unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) };
+        if sent != events.len() as u32 {
+            return Err(crate::Error::Win32(format!(
+                "SendInput accepted {sent} of {} events",
+                events.len()
+            )));
+        }
+        if i + 1 < count {
+            // Inside the OS double-click time, or the game sees two separate single clicks.
+            std::thread::sleep(Duration::from_millis(60));
+        }
+    }
+    Ok(())
+}
 
 pub const VK_RETURN: u16 = 0x0D;
 pub const SC_RETURN: u16 = 0x1C;

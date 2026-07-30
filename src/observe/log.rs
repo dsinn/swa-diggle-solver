@@ -151,8 +151,14 @@ impl Console {
         unsafe { GetConsoleScreenBufferInfo(h, &mut info) }
             .map_err(|e| crate::Error::Win32(e.to_string()))?;
         let cursor = info.dwCursorPosition;
-        // Mid-line: stop short of the cursor row and re-read it next time.
-        let end = if cursor.X > 0 { cursor.Y } else { cursor.Y + 1 };
+        // NEVER consume the cursor row, even when the cursor is at column 0 and the row therefore
+        // looks finished. That row is where the next `print` will land. Taking it consumed it while
+        // empty, and the header line the game wrote there a moment later was lost for good — which
+        // silently truncated an arrival dump to a headerless fragment and made a SUCCESSFUL travel
+        // report as "no arrival dump within 45 s", twice.
+        //
+        // A row is only complete once the cursor has moved past it.
+        let end = cursor.Y;
 
         if end < self.consumed {
             // Something reset the buffer under us (a `cls`, or LÖVE resizing it). Resync

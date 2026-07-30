@@ -260,6 +260,43 @@ pub fn parse(lines: &[String]) -> Vec<Adjacency> {
     out
 }
 
+/// Stateful wrapper over [`parse`] for callers polling the console.
+///
+/// [`parse`] is correct but stateless, and a dump does not arrive atomically: polling every 400 ms
+/// routinely splits one block across two batches. The half carrying the `Local overworld data:`
+/// header is then discarded as incomplete and the remainder never matches a header, so the whole
+/// dump vanishes. That is exactly how a **successful** travel was reported as "no arrival dump
+/// within 45 s" — the game had printed the arrival, we had read it, and we threw it away.
+///
+/// This keeps the unterminated tail and prepends it to the next batch.
+#[derive(Default)]
+pub struct Reader {
+    pending: Vec<String>,
+}
+
+impl Reader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feeds newly read console lines and returns every dump completed by them.
+    pub fn push(&mut self, lines: &[String]) -> Vec<Adjacency> {
+        self.pending.extend(lines.iter().cloned());
+        let out = parse(&self.pending);
+
+        // Retain from the last unterminated START onward. Everything before it is either parsed or
+        // noise, and dropping it keeps this from growing without bound during a long session.
+        let last_start = self.pending.iter().rposition(|l| l.trim().starts_with(START));
+        let last_end = self.pending.iter().rposition(|l| l.trim() == END);
+        self.pending = match (last_start, last_end) {
+            (Some(s), Some(e)) if s > e => self.pending.split_off(s),
+            (Some(s), None) => self.pending.split_off(s),
+            _ => Vec::new(),
+        };
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +409,34 @@ Local overworld data end";
         let got = parse(&lines(&partial));
         assert_eq!(got.len(), 1, "the unterminated second block must not be returned");
         assert_eq!(got[0].reason, "World loaded");
+    }
+
+    #[test]
+    fn reader_stitches_a_dump_split_across_two_reads() {
+        // The failure this exists for: a real travel arrival was split by a console poll, the
+        // header half was discarded as incomplete, and a SUCCESSFUL travel was reported as
+        // "no arrival dump within 45 s".
+        let mut r = Reader::new();
+        let first = lines("Local overworld data:   Arrived at location  l1  Weedley Copse — level 0 crypt\n    Adjacent connections:");
+        assert!(r.push(&first).is_empty(), "nothing is complete yet");
+
+        let second = lines(
+            "        start   Cottam campfire\n\
+             \x20         posX: 930     posY:   504     connections:    1\n\
+             Local overworld data end",
+        );
+        let got = r.push(&second);
+        assert_eq!(got.len(), 1, "the stitched block must be returned exactly once");
+        assert_eq!(got[0].here_key, "l1");
+        assert_eq!(got[0].nodes.len(), 1);
+        assert_eq!(got[0].nodes[0].key, "start");
+    }
+
+    #[test]
+    fn reader_does_not_return_the_same_dump_twice() {
+        let mut r = Reader::new();
+        assert_eq!(r.push(&lines(LIVE)).len(), 1);
+        assert_eq!(r.push(&lines("")).len(), 0, "a completed dump must not be re-emitted");
     }
 
     #[test]
