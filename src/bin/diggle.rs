@@ -893,9 +893,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(f) => println!("best:   {} scores {} (slice {})", f.word, f.score, f.slice),
                 None => println!("best:   none"),
             }
+            match &out.longest {
+                Some(f) => println!("longest: {} ({} letters, scores {})", f.word, f.word.chars().count(), f.score),
+                None => println!("longest: none"),
+            }
             let threshold = tiles.len() / 2;
             println!(
-                "refresh (longest < {threshold})? {}  -> play {:?}",
+                "refresh (longest < {threshold} letters)? {}  -> play {:?}",
                 out.should_refresh(threshold),
                 out.choice().map(|f| f.word.as_str())
             );

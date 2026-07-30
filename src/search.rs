@@ -15,11 +15,13 @@
 //! anywhere on the board. Wildcard tiles (`"."`, material `wood0`, score 0) substitute for any
 //! missing letter.
 //!
-//! ## Assumption flagged rather than buried
+//! ## Word length
 //!
-//! [`MIN_WORD_LEN`] is 3. I have not found the game's minimum-length check, so this is a guess chosen
-//! to be safe: submitting a rejected word would waste a turn, while skipping valid two-letter words
-//! only costs a little search. Worth verifying against a live fight.
+//! There is **no minimum**: "a" and "I" are ordinary English words and the game accepts them. An
+//! earlier version guessed at a 3-letter floor and silently dropped every one- and two-letter entry,
+//! which both shrank the dictionary and hid legitimate plays. Note a single wood letter scores
+//! `floor(1 * 0.4 + 0.5) = 0`, so short words are usually worthless rather than illegal — the search
+//! rejects them on score, which is the honest reason, not on length.
 
 use crate::observe::board::Tile;
 use crate::score::Scorer;
@@ -28,8 +30,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-/// Shortest word the search will consider. See the module note — an unverified assumption.
-pub const MIN_WORD_LEN: usize = 3;
+/// Shortest word the search will consider. One: the game has no minimum, and "a"/"I" are real words.
+pub const MIN_WORD_LEN: usize = 1;
 
 /// The game's wildcard tile, which takes any letter.
 const WILDCARD: &str = ".";
@@ -209,6 +211,11 @@ pub struct Outcome {
     pub lethal: Option<Found>,
     /// Highest-scoring word seen, for when nothing is lethal.
     pub best: Option<Found>,
+    /// Longest makeable word seen. Tracked separately because the refresh rule is about LENGTH, and
+    /// the highest-scoring word is not necessarily the longest — a short word of gold tiles can
+    /// outscore a long one of wood. Free to collect: the only time it matters is when no lethal word
+    /// was found, and that case already scans the whole dictionary.
+    pub longest: Option<Found>,
     pub words_considered: usize,
 }
 
@@ -225,7 +232,7 @@ impl Outcome {
         if self.lethal.is_some() {
             return false;
         }
-        match &self.best {
+        match &self.longest {
             Some(b) => b.word.chars().count() < threshold,
             // Nothing playable at all is the strongest case for a refresh.
             None => true,
@@ -261,15 +268,17 @@ pub fn race_for_kill(
     let stop = AtomicBool::new(false);
     let lethal: Mutex<Option<Found>> = Mutex::new(None);
     let best: Mutex<Option<Found>> = Mutex::new(None);
+    let longest: Mutex<Option<Found>> = Mutex::new(None);
     let considered = std::sync::atomic::AtomicUsize::new(0);
 
     std::thread::scope(|scope| {
         for (slice, part) in words.chunks(chunk).enumerate() {
-            let (stop, lethal, best, considered, supply) =
-                (&stop, &lethal, &best, &considered, &supply);
+            let (stop, lethal, best, longest, considered, supply) =
+                (&stop, &lethal, &best, &longest, &considered, &supply);
             scope.spawn(move || {
                 let mut seen = 0usize;
                 let mut local_best: Option<Found> = None;
+                let mut local_longest: Option<Found> = None;
                 for word in part {
                     // Checked periodically rather than every word: an atomic load per word would
                     // dominate the loop for no benefit at this granularity.
@@ -295,12 +304,28 @@ pub fn race_for_kill(
                     if local_best.as_ref().map(|b| score > b.score).unwrap_or(true) {
                         local_best = Some(Found { word: word.clone(), score, slice });
                     }
+                    if local_longest
+                        .as_ref()
+                        .map(|b| word.chars().count() > b.word.chars().count())
+                        .unwrap_or(true)
+                    {
+                        local_longest = Some(Found { word: word.clone(), score, slice });
+                    }
                 }
                 considered.fetch_add(seen, Ordering::Relaxed);
                 if let Some(lb) = local_best {
                     let mut b = best.lock().unwrap();
                     if b.as_ref().map(|cur| lb.score > cur.score).unwrap_or(true) {
                         *b = Some(lb);
+                    }
+                }
+                if let Some(ll) = local_longest {
+                    let mut l = longest.lock().unwrap();
+                    if l.as_ref()
+                        .map(|cur| ll.word.chars().count() > cur.word.chars().count())
+                        .unwrap_or(true)
+                    {
+                        *l = Some(ll);
                     }
                 }
             });
@@ -310,6 +335,7 @@ pub fn race_for_kill(
     Outcome {
         lethal: lethal.into_inner().unwrap(),
         best: best.into_inner().unwrap(),
+        longest: longest.into_inner().unwrap(),
         words_considered: considered.into_inner(),
     }
 }
@@ -362,6 +388,7 @@ mod tests {
         let lethal = Outcome {
             lethal: Some(Found { word: "CAT".into(), score: 9, slice: 0 }),
             best: Some(Found { word: "CAT".into(), score: 9, slice: 0 }),
+            longest: Some(Found { word: "CAT".into(), score: 9, slice: 0 }),
             words_considered: 1,
         };
         // A kill ends the exchange, which beats any board-quality judgement.
@@ -370,6 +397,7 @@ mod tests {
         let weak = Outcome {
             lethal: None,
             best: Some(Found { word: "CAT".into(), score: 4, slice: 0 }),
+            longest: Some(Found { word: "CAT".into(), score: 4, slice: 0 }),
             words_considered: 1,
         };
         assert!(weak.should_refresh(8), "3 letters is under the 8 threshold");
@@ -451,6 +479,34 @@ mod tests {
     }
 
     #[test]
+    fn refresh_keys_off_length_not_score() {
+        // A short word of gold tiles can outscore a long one of wood, so `best` is the wrong field
+        // for a rule that is explicitly about length. JAZZ-like cases are exactly why these are
+        // tracked separately.
+        let out = Outcome {
+            lethal: None,
+            best: Some(Found { word: "JAY".into(), score: 20, slice: 0 }),
+            longest: Some(Found { word: "OATMEALS".into(), score: 12, slice: 1 }),
+            words_considered: 10,
+        };
+        assert!(!out.should_refresh(8), "an 8-letter word meets the threshold even if not top-scoring");
+        assert_eq!(out.choice().map(|f| f.word.as_str()), Some("JAY"), "still PLAY the best scorer");
+    }
+
+    #[test]
+    fn one_and_two_letter_words_are_kept() {
+        if !present() {
+            eprintln!("SKIP: game source not present");
+            return;
+        }
+        // The game has no minimum length -- "a" and "I" are ordinary words. An earlier 3-letter floor
+        // silently dropped them.
+        let dict = Dictionary::load(&game_dir()).unwrap();
+        assert!(dict.words().iter().any(|w| w.chars().count() == 1), "no 1-letter words survived");
+        assert!(dict.words().iter().any(|w| w.chars().count() == 2), "no 2-letter words survived");
+    }
+
+    #[test]
     fn finds_a_lethal_word_on_the_real_crypt_board() {
         if !present() {
             eprintln!("SKIP: game source not present");
@@ -511,6 +567,7 @@ mod tests {
         assert!(dict.len() > 100_000, "expected a large word list, got {}", dict.len());
         assert!(dict.words().iter().all(|w| w.chars().all(|c| c.is_ascii_uppercase())));
         assert!(dict.words().iter().all(|w| w.len() >= MIN_WORD_LEN));
+        assert_eq!(MIN_WORD_LEN, 1, "the game enforces no minimum word length");
         // Sorted, which is what makes a contiguous slice an alphabetical range.
         assert!(dict.words().windows(2).all(|w| w[0] <= w[1]));
     }
