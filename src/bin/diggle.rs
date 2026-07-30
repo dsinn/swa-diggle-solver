@@ -14,6 +14,9 @@
 //!   diggle type <text>       letters via WM_CHAR (combat tile selection)
 //!   diggle nav <x> <y>       arrow-navigate toward a point, verified by GetCursorPos
 //!   diggle watch <secs>      frame-delta trace (the instrument from design v2 §7)
+//!   diggle travel [key]      the travel step: read the map from the log, pan the target under
+//!                            the map hotspot, select it, activate Travel, confirm arrival.
+//!                            Defaults to a shrine, else the lowest combat level.
 //!   diggle overworld <secs>  OWNS a whole session: launches with the log channel open,
 //!                            reaches the overworld, and prints every adjacency dump it sees.
 //!                            Cannot be one-shot — LÖVE attaches to its PARENT's console, so
@@ -89,10 +92,195 @@ fn write_png(frame: &Frame, path: &Path) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-/// Holds an arrow key and measures how far the map CONTENT moved, by crop-and-track.
+/// Crops a square of the live frame into a template, for tracking where the map content goes.
 ///
-/// Frame-to-frame, so the map's time-of-day tint and draw scale cancel out — the same
-/// instrument `diggle selftest` validates at inliers=1.000. Returns the signed displacement.
+/// Frame-to-frame matching is what makes the map layer tractable at all: the time-of-day tint and
+/// draw scale cancel out because both frames come from the same session. Matching against the
+/// game's own sprite files does not work (design v2 §6.3).
+fn crop_patch(frame: &Frame, x: i32, y: i32, size: u32) -> Template {
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for dy in 0..size as i32 {
+        for dx in 0..size as i32 {
+            let i = (((y + dy) * frame.width + (x + dx)) * 4) as usize;
+            rgba.extend_from_slice(&[frame.bgra[i + 2], frame.bgra[i + 1], frame.bgra[i], 255]);
+        }
+    }
+    Template { name: "patch".into(), width: size, height: size, rgba }
+}
+
+/// How far the map content has moved since `tpl` was cropped from `(x, y)`, with the match
+/// quality that produced the answer.
+///
+/// `None` means the patch could not be found — it panned off-screen, or the screen changed to
+/// something else. The caller must NOT substitute `(0, 0)`: "did not move" and "could not be
+/// measured" are different facts, and collapsing them turns a broken instrument into an
+/// apparently successful no-op.
+/// Matches below this are rejected outright. A genuine frame-to-frame patch match scores ~1.000;
+/// the readings that produced nonsense in the first travel attempt scored 0.718 and 0.601 and
+/// reported a bogus constant `-192`. The metric was there all along — not checking it is what
+/// turned a self-diagnosing instrument into a silent liar.
+const MIN_INLIERS: f64 = 0.95;
+/// Search window around the expected displacement, in pixels. Bounding the sweep is not only a
+/// speed fix (a full-frame `step=1` search of a 96x96 patch is ~1.6e10 operations and blew a
+/// 5-minute timeout) — it also removes distant periodic false matches from contention.
+const TRACK_RADIUS: i32 = 130;
+
+fn track_patch(
+    win: &GameWindow,
+    tpl: &Template,
+    x: i32,
+    y: i32,
+    expect: (i32, i32),
+) -> Option<((i32, i32), f64, f64)> {
+    let after = capture_window(win).ok()?;
+    let (ex, ey) = (x + expect.0, y + expect.1);
+    let bounds = (
+        ex - TRACK_RADIUS,
+        ey - TRACK_RADIUS,
+        ex + TRACK_RADIUS,
+        ey + TRACK_RADIUS,
+    );
+    let m = diggle_solver::observe::template::find_at_scale_in(&after, tpl, 1.0, 1, Some(bounds))?;
+    if m.inliers < MIN_INLIERS {
+        return None;
+    }
+    Some(((m.x - x, m.y - y), m.inliers, m.error))
+}
+
+const PATCH: u32 = 96;
+
+/// Mean per-channel variance of a patch — a cheap proxy for how distinctive it is.
+fn patch_variance(tpl: &Template) -> f64 {
+    let n = (tpl.rgba.len() / 4) as f64;
+    let mut sum = [0f64; 3];
+    for px in tpl.rgba.chunks_exact(4) {
+        for c in 0..3 {
+            sum[c] += px[c] as f64;
+        }
+    }
+    let mean: Vec<f64> = sum.iter().map(|s| s / n).collect();
+    let mut var = 0f64;
+    for px in tpl.rgba.chunks_exact(4) {
+        for c in 0..3 {
+            var += (px[c] as f64 - mean[c]).powi(2);
+        }
+    }
+    var / (n * 3.0)
+}
+
+/// Coarse-then-fine search, so a wide window is affordable.
+///
+/// A full `step=1` sweep of a 96x96 patch over ±200 px is ~1.5e9 operations per candidate. Step 4
+/// first to localise, then `step=1` in a ±6 window to get the exact offset. Pixel art demands
+/// `step=1` for the FINAL answer (design v2 §6.3), not for finding the neighbourhood.
+fn find_coarse_then_fine(
+    frame: &Frame,
+    tpl: &Template,
+    x: i32,
+    y: i32,
+    radius: i32,
+) -> Option<diggle_solver::observe::template::Match> {
+    let coarse = diggle_solver::observe::template::find_at_scale_in(
+        frame,
+        tpl,
+        1.0,
+        4,
+        Some((x - radius, y - radius, x + radius, y + radius)),
+    )?;
+    diggle_solver::observe::template::find_at_scale_in(
+        frame,
+        tpl,
+        1.0,
+        1,
+        Some((coarse.x - 6, coarse.y - 6, coarse.x + 6, coarse.y + 6)),
+    )
+}
+
+/// Waits until the map stops moving, and returns the settled frame.
+///
+/// The pan does not stop when the key is released — it coasts. Measuring on a fixed 400 ms delay
+/// therefore captured residual motion, and worse, the NEXT command started from a moving map. The
+/// symptom was a `Down` calibration reporting 192 px of horizontal movement left over from the
+/// preceding `Right` hold, which inverted the vertical sign and made the pan loop diverge.
+///
+/// The threshold sits between the two regimes: ambient shimmer and cloud drift move a small
+/// fraction of the frame, a pan moves nearly all of it.
+fn wait_map_still(win: &GameWindow, timeout: Duration) -> Result<Frame, Box<dyn std::error::Error>> {
+    const STILL: f64 = 0.03;
+    let deadline = std::time::Instant::now() + timeout;
+    let mut prev = capture_window(win)?;
+    loop {
+        std::thread::sleep(Duration::from_millis(180));
+        let next = capture_window(win)?;
+        if prev.diff_fraction(&next, FULL) <= STILL || std::time::Instant::now() >= deadline {
+            return Ok(next);
+        }
+        prev = next;
+    }
+}
+
+/// Calibrates a pan axis and chooses the tracking patch in ONE operation, by keeping whichever
+/// candidate actually MOVED.
+///
+/// This replaces a chooser that demanded a patch be stationary between two untouched frames. That
+/// control is backwards: a screen-fixed UI overlay passes it perfectly, while real map content
+/// (animated water, drifting cloud) can fail it. It duly selected a patch at (720,378) — inside the
+/// rectangle `drawHotspotHighlight` paints for the map hotspot (`utils/input.lua:113-127`, roughly
+/// `rect(710, 8, 500, 532)`) — scoring inliers 1.000 with zero movement, and three runs reported
+/// "the map did not pan" while the map panned fine.
+///
+/// The property that matters is **responsiveness**: hold the key, then take the candidate whose
+/// displacement along the axis is largest and confidently matched. Returns the patch (re-cropped
+/// from the post-pan frame), where it now sits, the measured displacement, and the match quality.
+fn calibrate_and_pick(
+    win: &GameWindow,
+    input: &PostMessageInput,
+    cw: i32,
+    ch: i32,
+    vk: u16,
+    sc: u16,
+    ms: u64,
+) -> Result<(Template, i32, i32, (i32, i32), f64), Box<dyn std::error::Error>> {
+    // Start from rest, or the "before" frame is already mid-pan.
+    let a = wait_map_still(win, Duration::from_secs(3))?;
+    let mut candidates: Vec<(f64, i32, i32)> = Vec::new();
+    for gy in 0..5 {
+        for gx in 0..6 {
+            let x = cw / 8 + gx * cw / 8;
+            let y = ch / 10 + gy * ch / 8;
+            if x + PATCH as i32 >= cw || y + PATCH as i32 >= ch {
+                continue;
+            }
+            candidates.push((patch_variance(&crop_patch(&a, x, y, PATCH)), x, y));
+        }
+    }
+    candidates.sort_by(|l, r| r.0.partial_cmp(&l.0).unwrap());
+    candidates.truncate(10);
+
+    input.hold_extended_key(vk, sc, Duration::from_millis(ms))?;
+    let b = wait_map_still(win, Duration::from_secs(3))?;
+
+    let mut best: Option<(i32, Template, i32, i32, (i32, i32), f64)> = None;
+    for (_, x, y) in &candidates {
+        let tpl = crop_patch(&a, *x, *y, PATCH);
+        let Some(m) = find_coarse_then_fine(&b, &tpl, *x, *y, 220) else { continue };
+        if m.inliers < MIN_INLIERS {
+            continue;
+        }
+        let d = (m.x - *x, m.y - *y);
+        let magnitude = d.0.abs().max(d.1.abs());
+        if best.as_ref().map(|(bm, ..)| magnitude > *bm).unwrap_or(true) {
+            best = Some((magnitude, crop_patch(&b, m.x, m.y, PATCH), m.x, m.y, d, m.inliers));
+        }
+    }
+    let Some((_, tpl, nx, ny, d, inl)) = best else {
+        return Err("no candidate patch could be confidently re-found after the pan — the tracker \
+                    cannot measure this screen"
+            .into());
+    };
+    Ok((tpl, nx, ny, d, inl))
+}
+
 fn measure_pan(
     win: &GameWindow,
     input: &PostMessageInput,
@@ -621,6 +809,306 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for c in &clusters {
                 println!("  client=({:4},{:4})", c.0 - ox, c.1 - oy);
             }
+        }
+        "travel" => {
+            // The travel step, end to end: read the map from the log, pan the chosen node under
+            // the map hotspot, select it, then activate Travel.
+            //
+            // Every position here is MEASURED, never dead-reckoned. The log gives node positions
+            // in screen pixels at the moment it printed; anything that pans the map afterwards --
+            // including the arrow press `nav` uses to establish a highlight -- invalidates them.
+            // So each step that could move the map is wrapped in a crop-and-track measurement and
+            // the node positions are corrected by the observed displacement.
+            let want = args.get(1).cloned();
+            let cfg = Config::load(Path::new("config.toml"))?;
+            let mut console = diggle_solver::observe::log::Console::take()?;
+            let mut game = diggle_solver::game::launch::GameProcess::launch(&cfg, &console)?;
+            echo(&console, format!("launched pid {}", game.pid()));
+            let win = game.wait_for_window(Duration::from_secs(20))?;
+            std::thread::sleep(Duration::from_secs(3));
+            let (cw, ch) = win.client_size()?;
+            let input = PostMessageInput::new(win);
+            input.focus();
+            std::thread::sleep(Duration::from_millis(500));
+
+            let mut mirror = diggle_solver::observe::log::LogMirror::create(Path::new(&format!(
+                "{FRAME_DIR}/travel-log.txt"
+            )))?;
+
+            // Reads the channel until a dump arrives, or gives up. Returns the LAST one: if
+            // arrival fired an event the newest dump is the authoritative one.
+            let mut collect = |console: &mut diggle_solver::observe::log::Console,
+                               mirror: &mut diggle_solver::observe::log::LogMirror,
+                               secs: u64|
+             -> Result<Option<diggle_solver::observe::adjacency::Adjacency>, Box<dyn std::error::Error>> {
+                let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+                let mut last = None;
+                while std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(400));
+                    let lines = console.read_new()?;
+                    if lines.is_empty() {
+                        continue;
+                    }
+                    mirror.write(&lines);
+                    if let Some(a) = diggle_solver::observe::adjacency::parse(&lines).pop() {
+                        last = Some(a);
+                        break;
+                    }
+                }
+                Ok(last)
+            };
+
+            // --- reach the overworld ---
+            let nav = diggle_solver::win::nav::to_client_point(&win, &input, 187, 810, 60)?;
+            if !nav.on_target {
+                // Restart shares this row and eulogizes the run (`heroselect.lua:271`).
+                echo(&console, format!("ABORT: highlight at {:?}, not Continue", nav.landed));
+                game.close(Duration::from_secs(15));
+                return Ok(());
+            }
+            echo(&console, format!("nav to Continue: trail {:?}", nav.trail));
+            input.press_key(VK_RETURN, SC_RETURN)?;
+            let Some(map) = collect(&mut console, &mut mirror, 20)? else {
+                // A screenshot, because "no dump" alone cannot distinguish "still on the menu"
+                // from "on the overworld but silent" -- and guessing between those is exactly
+                // how this project has produced invalid verdicts before.
+                let shot = format!("{FRAME_DIR}/travel-no-dump.bmp");
+                if let Ok(f) = capture_window(&win) {
+                    let _ = f.write_bmp(Path::new(&shot));
+                }
+                echo(&console, format!("ABORT: no adjacency dump after Continue; screen saved to {shot}"));
+                game.close(Duration::from_secs(15));
+                return Ok(());
+            };
+            echo(
+                &console,
+                format!("at {} — {}; {} visible neighbour(s), {} hidden",
+                    map.here_key, map.here_heading, map.nodes.len(), map.hidden),
+            );
+
+            // --- choose a target ---
+            // Shrines first (§1 objective), then the lowest combat level, then whatever exists.
+            // `hidden` is reported because a nonzero count means better options may be behind
+            // cloud and this choice is provisional.
+            let target = match &want {
+                Some(k) => map.nodes.iter().find(|n| &n.key == k).cloned(),
+                None => map
+                    .nodes
+                    .iter()
+                    .find(|n| n.type_is("shrine"))
+                    .or_else(|| {
+                        map.nodes.iter().min_by_key(|n| n.level().unwrap_or(u32::MAX))
+                    })
+                    .cloned(),
+            };
+            let Some(target) = target else {
+                echo(&console, format!("ABORT: no target (wanted {want:?})"));
+                game.close(Duration::from_secs(15));
+                return Ok(());
+            };
+            echo(&console, format!("target {} — {} at ({:.1},{:.1})", target.key, target.heading, target.x, target.y));
+            if map.hidden > 0 {
+                echo(&console, format!("NOTE: {} neighbour(s) hidden by cloud — this choice is provisional", map.hidden));
+            }
+
+            // --- get the highlight onto the map hotspot ---
+            // The map hotspot is one big rect (`overworldview.lua:1146-1149`) whose highlight
+            // warps the cursor to the client centre — confirmed empirically, the nav lands on
+            // (960,540) for a 1920x1080 client.
+            //
+            // Reaching it does NOT pan the map: arrow presses only pan once the highlight is
+            // already on the map, and the walk stops the moment it arrives. So the node positions
+            // from the dump above are still valid here. Verified rather than assumed, below.
+            let to_map = diggle_solver::win::nav::to_client_point(&win, &input, cw / 2, ch / 2, 40)?;
+            std::thread::sleep(Duration::from_millis(400));
+            echo(&console, format!(
+                "highlight -> {:?} (map hotspot {:?}, on_target {})\n  trail {:?}",
+                to_map.landed, (cw / 2, ch / 2), to_map.on_target, to_map.trail
+            ));
+            if !to_map.on_target {
+                echo(&console, "ABORT: could not put the highlight on the map hotspot".into());
+                game.close(Duration::from_secs(15));
+                return Ok(());
+            }
+
+            // --- calibrate BOTH axes, then pan by the amount the log implies ---
+            // Which arrow moves content which way is measured, not assumed — and per axis. The
+            // first attempt calibrated x only and assumed y matched the key direction; it does not.
+            // Measured: Right moves content -x AND Down moves content -y, i.e. the keys move the
+            // CAMERA and the content goes the other way. Assuming that symmetry would have worked,
+            // but only by luck, and the run that assumed it diverged instead of converging.
+            //
+            // This doubles as the tracker's positive control: a deliberate hold that produces no
+            // confident, measurable movement means the instrument is unusable, and panning blind
+            // is worse than stopping.
+            // 400 ms, not 250: the two runs whose nav caused zero drift also measured zero
+            // movement from a 250 ms hold, while the run where the map was already panning during
+            // nav measured a clean -75 px. That is consistent with the gesture ramping from rest
+            // (`hotspotAcceleration`, `overworldview.lua:1133-1135`), so give it longer to build.
+            // Kept under TRACK_RADIUS so the patch cannot leave the tracker's search window.
+            let cal_ms = 400u64;
+            let mut rates = [0f64; 2]; // signed px/ms for Right, then for Down
+            // The patch the calibration PROVED responsive, and where it currently sits.
+            let mut tracker: Option<(Template, i32, i32)> = None;
+            for (axis, vk, sc, name) in
+                [(0usize, VK_RIGHT, SC_RIGHT, "Right"), (1, VK_DOWN, SC_DOWN, "Down")]
+            {
+                // A held arrow only pans while the game has the foreground, and this process
+                // allocates a console window that can steal it. Report it, and take it back:
+                // a confident zero-movement reading with the window unfocused would otherwise look
+                // exactly like "the highlight is not on the map".
+                let fg_before = input.has_foreground();
+                if !fg_before {
+                    input.focus();
+                    std::thread::sleep(Duration::from_millis(400));
+                }
+                let (t, nx, ny, d, inl) =
+                    calibrate_and_pick(&win, &input, cw, ch, vk, sc, cal_ms)?;
+                echo(&console, format!(
+                    "  ({name} calibration: foreground before {fg_before}, after {})",
+                    input.has_foreground()
+                ));
+                let along = if axis == 0 { d.0 } else { d.1 };
+                echo(&console, format!(
+                    "calibration: hold {name} {cal_ms}ms -> content moved {d:?} \
+                     (patch now at ({nx},{ny}), inliers {inl:.3})"
+                ));
+                tracker = Some((t, nx, ny));
+                if along.abs() < 20 {
+                    echo(&console, format!(
+                        "ABORT: a {cal_ms} ms {name} hold moved the map <20 px on its axis — the \
+                         highlight may not really be on the map, or the map is at a pan limit"
+                    ));
+                    game.close(Duration::from_secs(15));
+                    return Ok(());
+                }
+                rates[axis] = along as f64 / cal_ms as f64;
+            }
+            // Calibration itself panned the map; the node moved with it.
+            let mut node_at = (
+                target.x as i32 + (rates[0] * cal_ms as f64) as i32,
+                target.y as i32 + (rates[1] * cal_ms as f64) as i32,
+            );
+            echo(&console, format!(
+                "rates: Right {:+.3} px/ms, Down {:+.3} px/ms; node now {:?}",
+                rates[0], rates[1], node_at
+            ));
+
+            let mut ok = false;
+            for attempt in 1..=5 {
+                let (dx, dy) = (cw / 2 - node_at.0, ch / 2 - node_at.1);
+                if dx.abs() <= 14 && dy.abs() <= 14 {
+                    ok = true;
+                    break;
+                }
+                // Reuse the patch the calibration proved responsive, re-cropped where it now sits.
+                // Re-choosing per iteration risks picking a screen-fixed overlay again.
+                let f = wait_map_still(&win, Duration::from_secs(3))?;
+                let (px, py) = tracker.as_ref().map(|(_, x, y)| (*x, *y)).unwrap();
+                let tpl = crop_patch(&f, px, py, PATCH);
+                let mut expect = (0, 0);
+                for (axis, delta, pos, neg) in [
+                    (0usize, dx, (VK_RIGHT, SC_RIGHT), (VK_LEFT, SC_LEFT)),
+                    (1, dy, (VK_DOWN, SC_DOWN), (VK_UP, SC_UP)),
+                ] {
+                    if delta.abs() < 10 {
+                        continue;
+                    }
+                    // Cap each step so the patch cannot pan outside the tracker's search window.
+                    let want = delta.clamp(-TRACK_RADIUS + 20, TRACK_RADIUS - 20);
+                    let rate = rates[axis];
+                    let ms = ((want.abs() as f64 / rate.abs()).round() as u64).clamp(40, 3000);
+                    let (k, s) = if (want as f64) * rate > 0.0 { pos } else { neg };
+                    input.hold_extended_key(k, s, Duration::from_millis(ms))?;
+                    wait_map_still(&win, Duration::from_secs(3))?;
+                    if axis == 0 {
+                        expect.0 = want;
+                    } else {
+                        expect.1 = want;
+                    }
+                }
+                let Some((moved, inl, err)) = track_patch(&win, &tpl, px, py, expect) else {
+                    echo(&console, format!(
+                        "ABORT: no confident match on pan {attempt} (expected {expect:?}) — \
+                         refusing to dead-reckon"
+                    ));
+                    game.close(Duration::from_secs(15));
+                    return Ok(());
+                };
+                node_at = (node_at.0 + moved.0, node_at.1 + moved.1);
+                // Follow the patch to its new home so the next iteration crops it there.
+                tracker = Some((crop_patch(&f, px, py, PATCH), px + moved.0, py + moved.1));
+                echo(&console, format!(
+                    "  pan {attempt}: wanted {:?}, expected {expect:?}, content moved {moved:?}, \
+                     node now {:?} (inliers {inl:.3}, err {err:.1})",
+                    (dx, dy), node_at
+                ));
+            }
+            if !ok {
+                echo(&console, format!("ABORT: node still {:?} from centre", (cw / 2 - node_at.0, ch / 2 - node_at.1)));
+                game.close(Duration::from_secs(15));
+                return Ok(());
+            }
+
+            // --- select it ---
+            // `Return` on the map hotspot synthesizes `love.mousepressed` at the cursor, and
+            // `mouseIsOverLocation` (`:1280-1293`) hit-tests whatever node is under it. Selection
+            // is not travel (`:1472-1481`), so this is safe.
+            let slot = diggle_solver::win::capture::Region::from_px(0, 860, 320, 975, cw, ch);
+            let pre = capture_window(&win)?;
+            input.press_key(VK_RETURN, SC_RETURN)?;
+            std::thread::sleep(Duration::from_millis(600));
+            let post = capture_window(&win)?;
+            // A fair comparison: no pan happened between these two frames, so any change in the
+            // button slot is caused by the selection. This is the invariance the F1 probe got
+            // wrong -- it compared frames taken at DIFFERENT pan offsets, where map and sea
+            // showing around the panel changed the hash on their own.
+            let selected = pre.region_hash(slot) != post.region_hash(slot);
+            echo(&console, format!("Return on the map -> button slot changed: {selected}"));
+            if !selected {
+                echo(&console, "ABORT: nothing was selected — the node was not under the cursor".into());
+                game.close(Duration::from_secs(15));
+                return Ok(());
+            }
+
+            // --- activate Travel ---
+            // Arrows cannot leave the map hotspot: it defines `hotspotDirection`, which consumes
+            // them to pan instead (`utils/input.lua:186-190`). The way out is `goBack`, which the
+            // overworld defines as `backOutOfHotspotMapPan` (`overworld.lua:1407`) -> snap to the
+            // hotspot nearest (0, height) -- the bottom-left button slot.
+            input.press_key(VK_BACK, SC_BACK)?;
+            std::thread::sleep(Duration::from_millis(500));
+            let c = cursor();
+            let (ox, oy) = win.client_origin()?;
+            echo(&console, format!("Backspace -> highlight at client {:?}", (c.0 - ox, c.1 - oy)));
+            let to_travel = diggle_solver::win::nav::to_client_point(&win, &input, 187, 918, 60)?;
+            echo(&console, format!("nav to Travel {:?} on_target {}", to_travel.landed, to_travel.on_target));
+            if !to_travel.on_target {
+                echo(&console, "ABORT: never reached the Travel button; nothing activated".into());
+                game.close(Duration::from_secs(15));
+                return Ok(());
+            }
+            input.press_key(VK_RETURN, SC_RETURN)?;
+
+            // --- confirm arrival from the log ---
+            // Travel is asynchronous (`travelTo` `:1394-1400` only starts a walk) and arrival can
+            // fire an event (`doArriveEvent` `:1425`), so the log is the only trustworthy report
+            // of where we ended up.
+            match collect(&mut console, &mut mirror, 40)? {
+                Some(a) => {
+                    let arrived = a.here_key == target.key;
+                    echo(&console, format!(
+                        "\n[{}] now at {} — {}\nTRAVEL {}: wanted {}, got {}",
+                        a.reason, a.here_key, a.here_heading,
+                        if arrived { "SUCCEEDED" } else { "WENT SOMEWHERE ELSE" },
+                        target.key, a.here_key
+                    ));
+                }
+                None => echo(&console, "no arrival dump within 40 s — travel may not have started".into()),
+            }
+
+            let exited = game.close(Duration::from_secs(15));
+            echo(&console, format!("log mirrored to {FRAME_DIR}/travel-log.txt; exited gracefully: {exited}"));
         }
         "overworld" => {
             // The one command that cannot follow the one-shot pattern. LÖVE attaches to its

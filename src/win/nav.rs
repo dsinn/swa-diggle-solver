@@ -66,6 +66,14 @@ pub fn to_client_point(
     input.press_extended_key(VK_DOWN, SC_DOWN)?;
     std::thread::sleep(SETTLE);
 
+    // Pure greed oscillates. Going for the dominant axis first is right, but when that axis is
+    // blocked the highlight ping-pongs between two hotspots forever and never tries the other
+    // one — observed as (187,38) <-> (1674,38) while the target sat at (960,540), because `dx`
+    // dominated at both ends. So: prefer the dominant axis, and when a press fails to reduce the
+    // distance, take the other axis on the next step instead of repeating the mistake.
+    let mut prefer_secondary = false;
+    let mut prev_dist = i32::MAX;
+
     for _ in 0..MAX_STEPS {
         let c = cursor_screen();
         trail.push((c.0 - ox, c.1 - oy));
@@ -73,7 +81,14 @@ pub fn to_client_point(
         if dx.abs() <= tolerance && dy.abs() <= tolerance {
             break;
         }
-        let (vk, sc) = if dx.abs() >= dy.abs() {
+        let dist = dx.abs() + dy.abs();
+        // No improvement means the axis we just used is blocked in that direction.
+        prefer_secondary = if dist < prev_dist { false } else { !prefer_secondary };
+        prev_dist = dist;
+
+        let horizontal_first = dx.abs() >= dy.abs();
+        let horizontal = if prefer_secondary { !horizontal_first } else { horizontal_first };
+        let (vk, sc) = if horizontal {
             if dx > 0 {
                 (VK_RIGHT, SC_RIGHT)
             } else {
