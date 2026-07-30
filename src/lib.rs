@@ -1,3 +1,4 @@
+pub mod act;
 pub mod config;
 pub mod game;
 pub mod observe;

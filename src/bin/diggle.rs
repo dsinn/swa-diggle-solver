@@ -846,6 +846,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 diggle_solver::game::save::combat_in_progress(&dir)
             );
         }
+        "findpng" => {
+            // Matches a template against a SAVED frame, with no game running. This is the positive
+            // control the live path lacks: if a template cropped byte-identically out of a frame
+            // does not match that frame, the fault is in the matcher, not on screen.
+            let tpl_path = args.get(1).ok_or("usage: findpng <template> <frame.png> [x0 y0 x1 y1]")?;
+            let frame_path = args.get(2).ok_or("usage: findpng <template> <frame.png> [x0 y0 x1 y1]")?;
+            let tpl = Template::load(Path::new(tpl_path))?;
+            // Decode the frame into the same BGRA layout capture_window produces, so this exercises
+            // exactly the comparison the live path does.
+            let dec = png::Decoder::new(std::fs::File::open(frame_path)?);
+            let mut rdr = dec.read_info()?;
+            let mut buf = vec![0; rdr.output_buffer_size()];
+            let info = rdr.next_frame(&mut buf)?;
+            let n = info.color_type.samples();
+            let mut bgra = Vec::with_capacity((info.width * info.height * 4) as usize);
+            for px in buf.chunks_exact(n) {
+                bgra.extend_from_slice(&[px[2], px[1], px[0], 255]);
+            }
+            let frame = Frame { width: info.width as i32, height: info.height as i32, bgra };
+            println!("template {} {}x{}; frame {}x{}", tpl.name, tpl.width, tpl.height, frame.width, frame.height);
+            let bounds = if args.len() >= 7 {
+                let v: Vec<i32> = args[3..7].iter().filter_map(|a| a.parse().ok()).collect();
+                (v.len() == 4).then(|| (v[0], v[1], v[2], v[3]))
+            } else {
+                None
+            };
+            match diggle_solver::observe::template::find_at_scale_in(&frame, &tpl, 1.0, 1, bounds) {
+                Some(m) => println!(
+                    "best at ({},{}) inliers {:.4} error {:.4}  bounds={bounds:?}",
+                    m.x, m.y, m.inliers, m.error
+                ),
+                None => println!("no match at all  bounds={bounds:?}"),
+            }
+        }
         "croppng" => {
             // Measuring a UI bounding box means looking at it. Eyeballing a region off a
             // full-resolution screenshot is how the F1 classifier ended up hashing map and sea

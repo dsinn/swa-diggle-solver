@@ -1,0 +1,50 @@
+Local overworld data:   World loaded    start   Cottam campfire
+    Adjacent connections:
+        l1      Weedley Copse — level 0 crypt
+          posX: 777.81645222258 posY:   486.88382683585 connections:    4
+Local overworld data end
+Local overworld data:   Arrived at location     l1      Weedley Copse — level 0 crypt
+    Adjacent connections:
+        start   Cottam campfire
+          posX: 930     posY:   504     connections:    1
+        l4      Bainton Clump — level 1 forest
+          posX: 627.45695686351 posY:   559.91497699518 connections:    4
+        l10     Ulrome village
+          posX: 601.12682659341 posY:   273.28142961348 connections:    5
+        l7      Greenoak Backwoods campfire
+          posX: 760.12478047943 posY:   154.59800191963 connections:    4
+Local overworld data end
+Lore screen:    You approach the crypt. Clearly there's no way to proceed other than going through.
+Lore screen:    You've done all the prepration you can, even if that was just resting up first.
+Lore screen:    Who knows what horrors lurk within, but you can probably handle it.
+Lore screen:    If it comes to it, you could always reinvigorate yourself by using a long word on a weakened enemy and you've got half a potion.
+Pregame screen:
+Player turn 0 start;    board state = {
+    "O",
+    "Y",
+    "C",
+    "A",
+    "A",
+    "C",
+    "T",
+    "P",
+    "O",
+    "R",
+    "L",
+    "I",
+    "G",
+    "A",
+    "H",
+    "J",
+}
+Player info:
+Player data = {
+    health = 12,
+    armour = 0,
+    statusEffects = {
+        wellRestedCampfire = 1,
+        noLifeLossRun = 1,
+        noHitRun = 1,
+    },
+    maxHealth = 12,
+}
