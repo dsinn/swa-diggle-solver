@@ -846,6 +846,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 diggle_solver::game::save::combat_in_progress(&dir)
             );
         }
+        "solve" => {
+            // Offline: given board letters and enemy health, report what would be played. Lets the
+            // search be exercised without a running game, which is how it gets checked at all.
+            let letters = args.get(1).ok_or("usage: solve <letters> <health> [armour] [threads]")?;
+            let health: i64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
+            let armour: i64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let threads: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
+            let cfg = Config::load(Path::new("config.toml"))?;
+            let tiles: Vec<diggle_solver::observe::board::Tile> = letters
+                .chars()
+                .map(|c| diggle_solver::observe::board::Tile {
+                    letter: c.to_ascii_uppercase().to_string(),
+                    extra: None,
+                })
+                .collect();
+
+            let t0 = std::time::Instant::now();
+            let scorer = diggle_solver::score::Scorer::new(&cfg.game_dir)?;
+            let dict = diggle_solver::search::Dictionary::load(&cfg.game_dir)?;
+            println!("loaded {} words and letter materials in {:?}", dict.len(), t0.elapsed());
+            if !scorer.unknown_materials().is_empty() {
+                println!("WARNING unknown materials: {:?}", scorer.unknown_materials());
+            }
+
+            let need = health + armour;
+            let t1 = std::time::Instant::now();
+            let out = diggle_solver::search::race_for_kill(&dict, &scorer, &tiles, need, threads);
+            let elapsed = t1.elapsed();
+            println!(
+                "board {} ({} tiles), need {need} (health {health} + armour {armour})",
+                letters.to_ascii_uppercase(),
+                tiles.len()
+            );
+            println!(
+                "searched {} of {} words in {:?} across {threads} slices",
+                out.words_considered,
+                dict.len(),
+                elapsed
+            );
+            match &out.lethal {
+                Some(f) => println!("LETHAL: {} scores {} (slice {})", f.word, f.score, f.slice),
+                None => println!("no lethal word found"),
+            }
+            match &out.best {
+                Some(f) => println!("best:   {} scores {} (slice {})", f.word, f.score, f.slice),
+                None => println!("best:   none"),
+            }
+            let threshold = tiles.len() / 2;
+            println!(
+                "refresh (longest < {threshold})? {}  -> play {:?}",
+                out.should_refresh(threshold),
+                out.choice().map(|f| f.word.as_str())
+            );
+        }
         "findpng" => {
             // Matches a template against a SAVED frame, with no game running. This is the positive
             // control the live path lacks: if a template cropped byte-identically out of a frame

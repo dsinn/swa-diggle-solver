@@ -1,8 +1,10 @@
 pub mod act;
 pub mod config;
 pub mod game;
+pub mod lexica;
 pub mod observe;
 pub mod score;
+pub mod search;
 pub mod win;
 
 use std::path::PathBuf;

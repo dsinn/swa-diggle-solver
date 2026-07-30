@@ -64,7 +64,9 @@ pub struct Scorer {
     /// Letter (uppercase) → material name, read from the game's own data file.
     letter_material: HashMap<char, String>,
     material_score: HashMap<String, f64>,
-    unknown: std::cell::RefCell<Vec<String>>,
+    /// Mutex rather than RefCell: the search shares `&Scorer` across threads, and RefCell is
+    /// not Sync. Contention is irrelevant because this only ever records a drift warning.
+    unknown: std::sync::Mutex<Vec<String>>,
 }
 
 impl Scorer {
@@ -94,21 +96,29 @@ impl Scorer {
         Ok(Scorer {
             letter_material,
             material_score: MATERIAL_SCORES.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
-            unknown: std::cell::RefCell::new(Vec::new()),
+            unknown: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    fn note_unknown(&self, what: String) {
+        if let Ok(mut v) = self.unknown.lock() {
+            if !v.contains(&what) {
+                v.push(what);
+            }
+        }
     }
 
     /// Base score of a single letter, before length and tile state.
     pub fn letter_score(&self, letter: char) -> f64 {
         let up = letter.to_ascii_uppercase();
         let Some(material) = self.letter_material.get(&up) else {
-            self.unknown.borrow_mut().push(format!("letter {up}"));
+            self.note_unknown(format!("letter {up}"));
             return 1.0;
         };
         match self.material_score.get(material) {
             Some(s) => *s,
             None => {
-                self.unknown.borrow_mut().push(format!("material {material}"));
+                self.note_unknown(format!("material {material}"));
                 1.0
             }
         }
@@ -154,7 +164,7 @@ impl Scorer {
     /// Should be empty. Non-empty means the game gained a material and every word using it is being
     /// under-rated — drift that is invisible unless something reports it.
     pub fn unknown_materials(&self) -> Vec<String> {
-        let mut v = self.unknown.borrow().clone();
+        let mut v = self.unknown.lock().map(|g| g.clone()).unwrap_or_default();
         v.sort();
         v.dedup();
         v
