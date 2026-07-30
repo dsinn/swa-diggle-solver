@@ -810,6 +810,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  client=({:4},{:4})", c.0 - ox, c.1 - oy);
             }
         }
+        "save" => {
+            // Dumps chosen paths from a save file. Exists so the reader is checked against the
+            // REAL file rather than only against a sample I wrote myself.
+            let which = args.get(1).map(|s| s.as_str()).unwrap_or("mainSaveData");
+            let cfg = Config::load(Path::new("config.toml"))?;
+            let dir = diggle_solver::game::savedir::locate(cfg.save_dir.clone(), true)?;
+            let path = dir.join(which);
+            println!("{}", path.display());
+            let t = diggle_solver::game::save::load(&path)?;
+            println!("top-level keys: {:?}", t.map.keys().collect::<Vec<_>>());
+            for p in [
+                "overworld.playerLocation",
+                "overworld.seed",
+                "rpg.player.turnState",
+                "rpg.player.health",
+                "rpg.player.turnNumber",
+                "rpg.enemy.name",
+                "rpg.enemy.health",
+                "rpg.enemy.armour",
+            ] {
+                match t.path(p) {
+                    Some(v) => println!("  {p} = {v:?}"),
+                    None => println!("  {p} = <absent>"),
+                }
+            }
+            if let Some(tb) = t.table_at("tileboard") {
+                println!("  tileboard: {} letters, columns={:?}", tb.arr.len(),
+                    tb.get("columns").and_then(|c| c.as_table()).map(|c| {
+                        c.arr.iter().filter_map(|v| v.as_int()).collect::<Vec<_>>()
+                    }));
+            }
+            println!(
+                "combat in progress: {}",
+                diggle_solver::game::save::combat_in_progress(&dir)
+            );
+        }
         "croppng" => {
             // Measuring a UI bounding box means looking at it. Eyeballing a region off a
             // full-resolution screenshot is how the F1 classifier ended up hashing map and sea
