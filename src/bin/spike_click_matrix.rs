@@ -39,7 +39,7 @@ use diggle_solver::win::input::{
     VK_RETURN, VK_RIGHT, VK_UP,
 };
 use diggle_solver::win::window::{self, ButtonSpec, GameWindow};
-use diggle_solver::{config::Config, game::launch::GameProcess};
+use diggle_solver::{config::Config, game::launch::PipedGameProcess};
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -131,7 +131,7 @@ fn run_one(cfg: &Config, mc: MatrixConfig) -> Result<ConfigResult, Box<dyn std::
         mc.name, mc.clickthrough_hint, mc.focus_before_click
     ));
 
-    let mut game = GameProcess::launch_with_env(cfg, &env)?;
+    let mut game = PipedGameProcess::launch_with_env(cfg, &env)?;
 
     let win: GameWindow = loop {
         if let Some(w) = window::find_by_pid(game.pid()) {
@@ -249,7 +249,7 @@ fn run_e(cfg: &Config) -> Result<ConfigResult, Box<dyn std::error::Error>> {
     reset_sandbox_save()?;
     notes.push("Config E: keyboard-only (no SDL hint, no SetForegroundWindow).".to_string());
 
-    let mut game = GameProcess::launch_with_env(cfg, &[])?;
+    let mut game = PipedGameProcess::launch_with_env(cfg, &[])?;
 
     let win: GameWindow = loop {
         if let Some(w) = window::find_by_pid(game.pid()) {

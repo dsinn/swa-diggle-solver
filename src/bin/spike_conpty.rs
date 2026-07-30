@@ -240,7 +240,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          Spike 1 established that on a plain pipe this text does not arrive until\n\
          the process exits gracefully. If this spike PASSES, a pseudo-console\n\
          defeats the CRT block-buffering and the log channel is recoverable with\n\
-         no changes to the game: rework GameProcess::launch onto ConPTY (Task 23).\n\n\
+         no changes to the game: rework PipedGameProcess::launch onto ConPTY (Task 23).\n\n\
          If it FAILS, ConPTY does not help. Stop and escalate -- the remaining\n\
          options (modify the game, or scrape its debug console) are the human\n\
          partner's decision.\n",

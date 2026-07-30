@@ -21,7 +21,7 @@ use diggle_solver::observe::settle::{self, sample_noise_floor, wait_for_quiescen
 use diggle_solver::win::capture::Frame;
 use diggle_solver::win::input::{Input, PostMessageInput, SC_RETURN, VK_RETURN};
 use diggle_solver::win::window::{self, ButtonSpec, GameWindow};
-use diggle_solver::{config::Config, game::launch::GameProcess};
+use diggle_solver::{config::Config, game::launch::PipedGameProcess};
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -113,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     reset_sandbox_save()?;
 
-    let mut game = GameProcess::launch(&cfg)?;
+    let mut game = PipedGameProcess::launch(&cfg)?;
 
     let win: GameWindow = loop {
         if let Some(w) = window::find_by_pid(game.pid()) {

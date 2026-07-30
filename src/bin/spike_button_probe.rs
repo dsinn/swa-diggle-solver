@@ -13,7 +13,7 @@
 //! Run: cargo run --bin spike_button_probe -- config.toml
 
 use diggle_solver::config::Config;
-use diggle_solver::game::launch::GameProcess;
+use diggle_solver::game::launch::PipedGameProcess;
 use diggle_solver::observe::settle::{reacted, sample_noise_floor, wait_for_quiescence, FULL};
 use diggle_solver::win::capture::{capture_window, Region};
 use diggle_solver::win::input::{
@@ -55,7 +55,7 @@ fn rect(x0: i32, y0: i32, x1: i32, y1: i32, w: i32, h: i32) -> Region {
 }
 
 struct Session {
-    game: GameProcess,
+    game: PipedGameProcess,
     win: GameWindow,
     input: PostMessageInput,
 }
@@ -72,7 +72,7 @@ fn start_menu(cfg: &Config) -> Result<(Session, f64), Box<dyn std::error::Error>
         let _ = std::fs::remove_file(&p);
     }
 
-    let mut game = GameProcess::launch(cfg)?;
+    let mut game = PipedGameProcess::launch(cfg)?;
     let win = loop {
         if let Some(w) = window::find_by_pid(game.pid()) {
             break w;

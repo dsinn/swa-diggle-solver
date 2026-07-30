@@ -24,7 +24,7 @@ use diggle_solver::win::input::{
     VK_RETURN, VK_RIGHT, VK_UP,
 };
 use diggle_solver::win::window::{self, GameWindow};
-use diggle_solver::{config::Config, game::launch::GameProcess};
+use diggle_solver::{config::Config, game::launch::PipedGameProcess};
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -116,7 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(FRAMES_DIR)?;
     reset_sandbox_save()?;
 
-    let mut game = GameProcess::launch_with_env(&cfg, &[])?;
+    let mut game = PipedGameProcess::launch_with_env(&cfg, &[])?;
 
     let win: GameWindow = loop {
         if let Some(w) = window::find_by_pid(game.pid()) {

@@ -14,6 +14,10 @@
 //!   diggle type <text>       letters via WM_CHAR (combat tile selection)
 //!   diggle nav <x> <y>       arrow-navigate toward a point, verified by GetCursorPos
 //!   diggle watch <secs>      frame-delta trace (the instrument from design v2 §7)
+//!   diggle overworld <secs>  OWNS a whole session: launches with the log channel open,
+//!                            reaches the overworld, and prints every adjacency dump it sees.
+//!                            Cannot be one-shot — LÖVE attaches to its PARENT's console, so
+//!                            the log reader must be the process that launched the game.
 
 use diggle_solver::config::Config;
 use diggle_solver::win::capture::{capture_window, Frame, START_MENU_REGION};
@@ -42,6 +46,12 @@ fn cursor() -> (i32, i32) {
         let _ = GetCursorPos(&mut p);
     }
     (p.x, p.y)
+}
+
+/// Prints to the stdout we had before taking a console. Once `Console::take` runs, `println!`
+/// goes nowhere — allocating a console replaces this process's standard handles.
+fn echo(console: &diggle_solver::observe::log::Console, s: String) {
+    console.echo(&format!("{s}\n"));
 }
 
 fn dist(a: (i32, i32), b: (i32, i32)) -> f64 {
@@ -611,6 +621,107 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for c in &clusters {
                 println!("  client=({:4},{:4})", c.0 - ox, c.1 - oy);
             }
+        }
+        "overworld" => {
+            // The one command that cannot follow the one-shot pattern. LÖVE attaches to its
+            // PARENT's console (`love.cpp:562-628`), so whoever reads the log has to be the
+            // process that launched the game and has to stay alive. That makes the interactive
+            // `launch`/`where`/`shot` workflow and the log channel mutually exclusive: those
+            // attach to a game someone else started and get no log; this owns the whole session.
+            let secs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(30);
+            let cfg = Config::load(Path::new("config.toml"))?;
+
+            // Taking a console replaces our standard handles, so `println!` goes nowhere from
+            // here on. `Console::echo` writes to the stdout we had beforehand.
+            let mut console = diggle_solver::observe::log::Console::take()?;
+
+            let mut game = diggle_solver::game::launch::GameProcess::launch(&cfg, &console)?;
+            echo(&console, format!("launched pid {} — {}", game.pid(), diggle_solver::game::launch::build_command_line(&cfg)));
+            let win = game.wait_for_window(Duration::from_secs(20))?;
+            echo(&console, "window up; settling".into());
+            std::thread::sleep(Duration::from_secs(3));
+
+            let mut mirror = diggle_solver::observe::log::LogMirror::create(Path::new(
+                &format!("{FRAME_DIR}/overworld-log.txt"),
+            ))?;
+
+            // With `mainSaveData` present the game boots to the start menu and prints NOTHING,
+            // so the channel looks dead until something makes it talk. Continue -> world load
+            // -> `verboseAdjacencyData('World loaded')` (`overworldview.lua:1607`).
+            let input = PostMessageInput::new(win);
+            input.focus();
+            std::thread::sleep(Duration::from_millis(500));
+            let nav = diggle_solver::win::nav::to_client_point(&win, &input, 187, 810, 60)?;
+            echo(&console, format!("nav trail {:?}", nav.trail));
+            if nav.on_target {
+                input.press_key(VK_RETURN, SC_RETURN)?;
+                echo(&console, "highlight on Continue — activated".into());
+            } else {
+                // Restart shares this row and eulogizes the run (`heroselect.lua:271`). An
+                // unverified Return here is unrecoverable, so refuse and keep watching: if the
+                // game is already past the menu we will still see dumps.
+                echo(&console, format!(
+                    "REFUSED to press Return: highlight landed at {:?}, not Continue (187,810)",
+                    nav.landed
+                ));
+            }
+
+            let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+            let mut seen = 0usize;
+            while std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(500));
+                let lines = console.read_new()?;
+                if lines.is_empty() {
+                    continue;
+                }
+                mirror.write(&lines);
+                for a in diggle_solver::observe::adjacency::parse(&lines) {
+                    seen += 1;
+                    let mut out = format!(
+                        "\n[{}] at {} — {}\n",
+                        a.reason, a.here_key, a.here_heading
+                    );
+                    if let Some((k, h)) = &a.subworld {
+                        out.push_str(&format!("  in subworld {k} — {h}\n"));
+                    }
+                    for n in &a.nodes {
+                        out.push_str(&format!(
+                            "  {:<8} ({:7.1},{:7.1})  conns {}  {}{}\n",
+                            n.key,
+                            n.x,
+                            n.y,
+                            n.connections,
+                            n.heading,
+                            match n.level() {
+                                Some(l) => format!("   [combat lvl {l}]"),
+                                None => "   [no combat]".into(),
+                            }
+                        ));
+                    }
+                    for e in &a.exits {
+                        out.push_str(&format!(
+                            "  exit     ({:7.1},{:7.1})  -> {} — {}\n",
+                            e.x, e.y, e.to_key, e.to_heading
+                        ));
+                    }
+                    if a.hidden > 0 || a.hidden_exits > 0 {
+                        // Not cosmetic: a nonzero count means the map is withholding options, so
+                        // "no shrine adjacent" is not yet a conclusion (§1).
+                        out.push_str(&format!(
+                            "  {} hidden neighbour(s), {} hidden exit(s) — cloud-covered or not \
+                             yet visible\n",
+                            a.hidden, a.hidden_exits
+                        ));
+                    }
+                    echo(&console, out);
+                }
+            }
+
+            let exited = game.close(Duration::from_secs(15));
+            echo(&console, format!(
+                "\n{seen} dump(s) parsed; log mirrored to {FRAME_DIR}/overworld-log.txt; \
+                 game exited gracefully: {exited}"
+            ));
         }
         "watch" => {
             let secs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(8);

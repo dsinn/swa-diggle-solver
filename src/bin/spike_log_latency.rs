@@ -5,7 +5,7 @@
 //!
 //! Run: cargo run --bin spike_log_latency -- config.toml
 
-use diggle_solver::{config::Config, game::launch::GameProcess};
+use diggle_solver::{config::Config, game::launch::PipedGameProcess};
 use std::io::{BufRead, BufReader, Write};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -24,7 +24,7 @@ struct Arrival {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args().nth(1).expect("usage: spike_log_latency <config.toml>");
     let cfg = Config::load(std::path::Path::new(&path))?;
-    let mut game = GameProcess::launch(&cfg)?;
+    let mut game = PipedGameProcess::launch(&cfg)?;
     let stdout = game.stdout().expect("stdout pipe");
 
     let start = Instant::now();

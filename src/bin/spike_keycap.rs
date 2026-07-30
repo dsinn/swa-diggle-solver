@@ -15,7 +15,7 @@
 //! Run: cargo run --bin spike_keycap -- config.toml
 
 use diggle_solver::win::capture::{capture_window, Region, START_MENU_REGION};
-use diggle_solver::{config::Config, game::launch::GameProcess, win::window};
+use diggle_solver::{config::Config, game::launch::PipedGameProcess, win::window};
 use std::collections::HashSet;
 use std::io::Write;
 use std::time::Duration;
@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     reset_sandbox_save()?;
 
-    let mut game = GameProcess::launch(&cfg)?;
+    let mut game = PipedGameProcess::launch(&cfg)?;
 
     let win = loop {
         if let Some(w) = window::find_by_pid(game.pid()) {

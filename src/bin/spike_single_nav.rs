@@ -12,7 +12,7 @@
 //! Run: cargo run --bin spike_single_nav -- config.toml
 
 use diggle_solver::config::Config;
-use diggle_solver::game::launch::GameProcess;
+use diggle_solver::game::launch::PipedGameProcess;
 use diggle_solver::observe::settle::{sample_noise_floor, wait_for_quiescence, FULL};
 use diggle_solver::win::capture::capture_window;
 use diggle_solver::win::input::{
@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user_cursor = cursor();
     println!("user cursor before anything: {user_cursor:?}");
 
-    let mut game = GameProcess::launch(&cfg)?;
+    let mut game = PipedGameProcess::launch(&cfg)?;
     let win = loop {
         if let Some(w) = window::find_by_pid(game.pid()) {
             break w;
