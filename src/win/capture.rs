@@ -42,6 +42,31 @@ pub struct Region {
 pub const START_MENU_REGION: Region =
     Region { nx: 0.0326, ny: 0.7037, nw: 0.2930, nh: 0.0926 };
 
+/// The bottom-right **progress button** — the wooden plaque with a right-pointing arrow that
+/// advances a cutscene or dialogue. Measured from a live arrival cutscene at 1920x1080:
+/// client (1800,905)-(1910,1015).
+///
+/// Chosen deliberately *inside the plaque face*, well clear of its ornate scroll edge and of the
+/// screen edge that clips the button on the right. The whole box is button material: byte-identical
+/// across three cutscene frames 1.2 s apart while the scene behind it animated. That is the
+/// property the F1 grid probe lacked — it hashed (0,860)-(320,975), which included map and sea
+/// around a panel, so panning alone changed the hash and 15 probes produced 7 phantom states.
+///
+/// **Scope of the verification, stated because it has bitten this project before:** stable within
+/// one cutscene, on one screen, at one resolution. "Stable across three samples in one session" is
+/// not "stable across sessions" (design v2 §6.1) — a heading region passed exactly that bar and
+/// then failed, because the parallax behind it is re-rolled per run. Before relying on this to
+/// identify a *screen*, re-measure it on the other screens that carry the button. For merely
+/// deciding whether the button is PRESENT, prefer template-matching its face: a match tolerates
+/// whatever is behind and around it, where a hash requires the entire box to be invariant.
+pub const PROGRESS_BUTTON_REGION: Region =
+    Region { nx: 0.9375, ny: 0.8380, nw: 0.0573, nh: 0.1019 };
+
+/// Where to click the progress button, in client pixels at 1920x1080: the centre of its visible
+/// face. Not the centre of the *button* — it is clipped by the right screen edge, so a geometric
+/// centre would fall off-screen.
+pub const PROGRESS_BUTTON_CLICK: (i32, i32) = (1855, 960);
+
 impl Region {
     /// Builds a Region from a pixel rectangle on a frame of the given size, so candidate
     /// fingerprint regions can be measured against a live screen.
@@ -123,6 +148,25 @@ impl Frame {
             .filter(|p| p[0] > BLACK_THRESHOLD || p[1] > BLACK_THRESHOLD || p[2] > BLACK_THRESHOLD)
             .count();
         lit as f64 / total as f64
+    }
+
+    /// Writes a PNG. Lives here rather than in a binary so spikes can produce frames that are
+    /// directly viewable — measuring a UI bounding box means looking at it, not guessing at it.
+    pub fn write_png(&self, path: &std::path::Path) -> Result<(), crate::Error> {
+        let file = std::fs::File::create(path)?;
+        let mut enc =
+            png::Encoder::new(std::io::BufWriter::new(file), self.width as u32, self.height as u32);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut writer =
+            enc.write_header().map_err(|e| crate::Error::Win32(e.to_string()))?;
+        // Frame is top-down BGRA; PNG wants RGBA.
+        let mut rgba = Vec::with_capacity(self.bgra.len());
+        for px in self.bgra.chunks_exact(4) {
+            rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
+        }
+        writer.write_image_data(&rgba).map_err(|e| crate::Error::Win32(e.to_string()))?;
+        Ok(())
     }
 
     /// Writes a 32-bit BGRA bottom-up BMP. No image crate needed; opens in any viewer.

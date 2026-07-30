@@ -216,6 +216,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // ---- capture the arrival screen, to MEASURE the progress button rather than guess it ----
+    // Arriving at this crypt plays a cutscene, and the way past it is its "next"/progress button.
+    // A bounding box has to be read off a real frame: the F1 classifier failed precisely because I
+    // chose a region by eye that included map and sea around the panel, so panning alone changed
+    // its hash. Frames are spaced out because a cutscene animates.
+    log.push_str("\n## Arrival screen captures (for measuring the progress button)\n\n");
+    for i in 1..=5 {
+        std::thread::sleep(Duration::from_millis(1200));
+        let f = capture_window(&win)?;
+        let p = format!("spike-frames-live/arrival-{i}.png");
+        if f.write_png(Path::new(&p)).is_ok() {
+            log.push_str(&format!("- `{p}` (nonblack {:.3})\n", f.nonblack_fraction()));
+        }
+    }
+
     let exited = game.close(Duration::from_secs(15));
     log.push_str(&format!("\ngame exited gracefully: {exited}\n"));
     std::fs::File::create(REPORT)?.write_all(log.as_bytes())?;

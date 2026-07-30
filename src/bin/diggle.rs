@@ -810,6 +810,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  client=({:4},{:4})", c.0 - ox, c.1 - oy);
             }
         }
+        "croppng" => {
+            // Measuring a UI bounding box means looking at it. Eyeballing a region off a
+            // full-resolution screenshot is how the F1 classifier ended up hashing map and sea
+            // around a panel; cropping the candidate and viewing it proves what is inside.
+            let (inp, outp) = (args.get(1).ok_or("usage: croppng <in> <out> <x0> <y0> <x1> <y1>")?,
+                               args.get(2).ok_or("usage: croppng <in> <out> <x0> <y0> <x1> <y1>")?);
+            let n: Vec<u32> = args[3..7].iter().map(|a| a.parse().unwrap()).collect();
+            let (x0, y0, x1, y1) = (n[0], n[1], n[2], n[3]);
+            let decoder = png::Decoder::new(std::fs::File::open(inp)?);
+            let mut reader = decoder.read_info()?;
+            let mut buf = vec![0; reader.output_buffer_size()];
+            let info = reader.next_frame(&mut buf)?;
+            let (w, ch_count) = (info.width, info.color_type.samples());
+            let (cw2, chh) = (x1 - x0, y1 - y0);
+            let mut out = Vec::with_capacity((cw2 * chh * 4) as usize);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = ((y * w + x) as usize) * ch_count;
+                    out.extend_from_slice(&[buf[i], buf[i + 1], buf[i + 2], 255]);
+                }
+            }
+            let file = std::fs::File::create(outp)?;
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), cw2, chh);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header()?.write_image_data(&out)?;
+            println!("cropped ({x0},{y0})-({x1},{y1}) = {cw2}x{chh} -> {outp}");
+        }
         "travel" => {
             // The travel step, end to end: read the map from the log, pan the chosen node under
             // the map hotspot, select it, then activate Travel.
