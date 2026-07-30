@@ -2,6 +2,7 @@ pub mod act;
 pub mod config;
 pub mod game;
 pub mod observe;
+pub mod score;
 pub mod win;
 
 use std::path::PathBuf;
