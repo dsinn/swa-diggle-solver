@@ -130,31 +130,36 @@ impl Value {
     }
 }
 
-fn convert(v: mlua::Value) -> Result<Value, crate::Error> {
+fn convert(v: mlua::Value, lenient: bool) -> Result<Value, crate::Error> {
     Ok(match v {
         mlua::Value::Nil => Value::Nil,
         mlua::Value::Boolean(b) => Value::Bool(b),
         mlua::Value::Integer(i) => Value::Int(i),
         mlua::Value::Number(n) => Value::Num(n),
         mlua::Value::String(s) => Value::Str(s.to_str()?.to_owned()),
-        mlua::Value::Table(t) => Value::Table(convert_table(t)?),
+        mlua::Value::Table(t) => Value::Table(convert_table(t, lenient)?),
         // Functions, userdata and threads cannot appear in a data-only save. Treating them as Nil
-        // rather than erroring would hide a save that is not what we think it is.
+        // rather than erroring would hide a save that is not what we think it is. Game *modules*
+        // are a different matter — see [`parse_module`] — so they pass `lenient`.
         other => {
-            return Err(crate::Error::Config(format!(
-                "save contains a non-data value: {:?}",
-                other.type_name()
-            )))
+            if lenient {
+                Value::Nil
+            } else {
+                return Err(crate::Error::Config(format!(
+                    "save contains a non-data value: {:?}",
+                    other.type_name()
+                )));
+            }
         }
     })
 }
 
-fn convert_table(t: mlua::Table) -> Result<Table, crate::Error> {
+fn convert_table(t: mlua::Table, lenient: bool) -> Result<Table, crate::Error> {
     let mut out = Table::default();
     // The sequence part first, so `arr` keeps save order. `pairs` order is unspecified in Lua, and
     // the tileboard's letters are positional — reading them out of order would scramble the board.
     for item in t.clone().sequence_values::<mlua::Value>() {
-        out.arr.push(convert(item?)?);
+        out.arr.push(convert(item?, lenient)?);
     }
     let len = out.arr.len() as i64;
     for pair in t.pairs::<mlua::Value, mlua::Value>() {
@@ -163,13 +168,13 @@ fn convert_table(t: mlua::Table) -> Result<Table, crate::Error> {
             // Already captured by the sequence walk above.
             mlua::Value::Integer(i) if i >= 1 && i <= len => {}
             mlua::Value::Integer(i) => {
-                out.map.insert(i.to_string(), convert(v)?);
+                out.map.insert(i.to_string(), convert(v, lenient)?);
             }
             mlua::Value::String(s) => {
-                out.map.insert(s.to_str()?.to_owned(), convert(v)?);
+                out.map.insert(s.to_str()?.to_owned(), convert(v, lenient)?);
             }
             mlua::Value::Number(n) => {
-                out.map.insert(n.to_string(), convert(v)?);
+                out.map.insert(n.to_string(), convert(v, lenient)?);
             }
             _ => {}
         }
@@ -177,18 +182,51 @@ fn convert_table(t: mlua::Table) -> Result<Table, crate::Error> {
     Ok(out)
 }
 
-/// Parses save-file *source*. Separated from [`load`] so it is testable without a save on disk.
-pub fn parse(source: &str) -> Result<Table, crate::Error> {
+fn eval(source: &str, lenient: bool) -> Result<Table, crate::Error> {
     // No stdlib: a data file has no business calling anything.
     let lua = Lua::new_with(StdLib::NONE, LuaOptions::default())
         .map_err(|e| crate::Error::Config(format!("lua init: {e}")))?;
     let value: mlua::Value = lua.load(source).eval()?;
-    match convert(value)? {
+    match convert(value, lenient)? {
         Value::Table(t) => Ok(t),
         other => Err(crate::Error::Config(format!(
-            "save did not return a table, got {other:?}"
+            "source did not return a table, got {other:?}"
         ))),
     }
+}
+
+/// Parses save-file *source*. Separated from [`load`] so it is testable without a save on disk.
+pub fn parse(source: &str) -> Result<Table, crate::Error> {
+    eval(source, false)
+}
+
+/// Parses a **game source module** that is data with a thin dressing of code.
+///
+/// Several of the game's data tables are not quite pure data: `items/boardshapes.lua` opens with
+/// `local utils = require'utils.items'` and sprinkles `purchaseFunction = get'give'.passive` through
+/// the entries. The numbers we want — board size, corner coordinates — sit in the same literal.
+///
+/// Two accommodations, and no more than two:
+///
+/// - `require` is shimmed to a stub whose fields are functions returning empty tables, so the
+///   dressing evaluates to nothing instead of erroring. It reads no files.
+/// - Function values convert to [`Value::Nil`] rather than failing, because in a module they are
+///   expected. [`parse`] stays strict, so a *save* containing a function is still an error.
+///
+/// The stdlib is still absent, so a module cannot reach `io` or `os` any more than a save can.
+pub fn parse_module(source: &str) -> Result<Table, crate::Error> {
+    // The stub has to survive being indexed *and then called* — `get'class'.exclude{...}`
+    // (`items/boardshapes.lua:41`) does both — so every field of a stub is another stub function.
+    // A metatable is the only way to say that without enumerating the component names, which would
+    // break the next time the game adds one.
+    const SHIM: &str = "\
+local __meta = {}
+local function __stub() return setmetatable({}, __meta) end
+__meta.__index = function() return __stub end
+__meta.__call = function() return __stub() end
+local function require(name) return __stub() end
+";
+    eval(&format!("{SHIM}{source}"), true)
 }
 
 /// Reads and parses a save file.

@@ -10,10 +10,12 @@
 //!
 //! ## What makes a word playable
 //!
-//! Just having the letters. Adjacency is **not** required: `cache.isAdjacent`
-//! (`wordboard.lua:270`) is consumed only for drawing (`tileboard.lua:2033`), so a word may use tiles
-//! anywhere on the board. Wildcard tiles (`"."`, material `wood0`, score 0) substitute for any
-//! missing letter.
+//! Not "does the board hold these letters" but "does typing this word work" — see [`crate::typist`].
+//! The game's `textinput` is a specific greedy consumer that decides which tile each character
+//! takes, and that choice sets both the tile state that scores the word and the corner count that
+//! `resistCornerless` scales it by. Adjacency is not required unless the player carries
+//! `wordRequirementAdjacent` gear, which [`Modifiers::from_save`] refuses to search under rather
+//! than quietly assuming away.
 //!
 //! ## Word length
 //!
@@ -23,18 +25,17 @@
 //! `floor(1 * 0.4 + 0.5) = 0`, so short words are usually worthless rather than illegal — the search
 //! rejects them on score, which is the honest reason, not on length.
 
+use crate::geometry::Geometry;
 use crate::observe::board::Tile;
 use crate::score::Scorer;
-use std::collections::HashMap;
+use crate::typist::Typist;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 /// Shortest word the search will consider. One: the game has no minimum, and "a"/"I" are real words.
 pub const MIN_WORD_LEN: usize = 1;
-
-/// The game's wildcard tile, which takes any letter.
-const WILDCARD: &str = ".";
 
 pub struct Dictionary {
     /// Uppercased, A-Z only, in file order — which is roughly alphabetical, so a contiguous slice is
@@ -91,107 +92,68 @@ impl Dictionary {
     }
 }
 
-/// What the board can supply.
+/// Everything about the enemy that changes what a word is worth.
 ///
-/// **Tiles are not letters.** A tile's `letter` may be a 2- or 3-character **ligature**
-/// (`tileboard.lua:1512-1515` matches `word:sub(i,i+1)` and `word:sub(i,i+2)`), and a ligature cannot
-/// be split — a `TH` tile supplies `T` and `H` only together and only where the word has them
-/// adjacent. An earlier version of this took `letter.chars().next()`, which would have counted a `TH`
-/// tile as a bare `T` and happily "found" words it could never play.
-///
-/// So availability is a segmentation problem, not a multiset comparison: the word must be cuttable
-/// into available tile strings, each tile used at most once.
-#[derive(Debug, Clone, Default)]
-pub struct Supply {
-    /// Uppercased tile strings, one per selectable tile. Multi-character entries are ligatures.
-    tiles: Vec<String>,
-    wildcards: usize,
+/// Assembled from `combatSaveData` once per turn. The two members are opposite in character:
+/// `excluded` throws words away, `resist_cornerless` changes what the survivors score.
+pub struct Modifiers {
+    /// Words from a lexicon this enemy resists or is immune to. `nerf * 0` is a zero-damage turn, so
+    /// these are dropped outright rather than scored down (see [`crate::lexica`]).
+    pub excluded: HashSet<String>,
+    /// `resistCornerless` (`utils/words.lua:238-240`): the score is scaled by
+    /// `cornersUsed / cornerCount`. Zero corners means zero damage.
+    pub resist_cornerless: bool,
+    /// Reasons the search should not be trusted. Non-empty means a score here is a guess.
+    pub problems: Vec<String>,
 }
 
-impl Supply {
-    /// Builds the supply from the board, excluding unselectable tiles.
-    pub fn from_tiles(tiles: &[Tile]) -> Self {
-        let mut s = Supply::default();
-        for t in tiles.iter().filter(|t| t.selectable()) {
-            if t.letter == WILDCARD {
-                s.wildcards += 1;
-            } else {
-                s.tiles.push(t.letter.to_ascii_uppercase());
-            }
-        }
-        s
-    }
-
-    /// Longest tile string in the supply, which bounds the segmentation search.
-    fn max_tile_len(&self) -> usize {
-        self.tiles.iter().map(|t| t.len()).max().unwrap_or(1)
-    }
-
-    /// Can this word be formed? Returns the tile indices consumed, in word order.
+impl Modifiers {
+    /// Reads the enemy's statuses and the board's shape out of a save table.
     ///
-    /// Tries the **longest** match at each position first, mirroring the game's greedy absorption of
-    /// ligature tiles (`getUnselectedLegalTileWithLetter`, `tileboard.lua:2266`). That ordering matters
-    /// beyond mere availability: which tiles get consumed determines the score once tile state such as
-    /// burn is involved.
-    pub fn segment(&self, word: &str) -> Option<Vec<usize>> {
-        let w = word.to_ascii_uppercase();
-        let bytes = w.as_bytes();
-        let mut used = vec![false; self.tiles.len()];
-        let mut wild_left = self.wildcards;
-        let mut chosen = Vec::with_capacity(w.len());
-        if self.walk(bytes, 0, &mut used, &mut wild_left, &mut chosen) {
-            Some(chosen)
-        } else {
-            None
+    /// `tile_count` is the board dump's length, used to check the derived shape fits.
+    pub fn from_save(
+        game_dir: &Path,
+        save: &crate::game::save::Table,
+        tile_count: usize,
+    ) -> Result<(Self, Geometry), crate::Error> {
+        let statuses = crate::lexica::Lexica::statuses_from_save(save);
+        let lexica = crate::lexica::Lexica::load(game_dir)?;
+        let resolved = Geometry::from_save(game_dir, save, tile_count);
+
+        let mut problems = resolved.problems.clone();
+        problems.extend(lexica.problems().iter().cloned());
+        problems.extend(lexica.unmodelled(&statuses));
+        if resolved.geometry.adjacency_required {
+            // Every pick would be confined to the 3x3 around the last one. Searching as if the whole
+            // board were reachable would produce words that cannot be typed at all.
+            problems.push("wordRequirementAdjacent gear is not modelled".into());
         }
+
+        Ok((
+            Modifiers {
+                excluded: lexica.excluded_words(&statuses),
+                resist_cornerless: statuses.contains_key("resistCornerless"),
+                problems,
+            },
+            resolved.geometry,
+        ))
     }
 
-    fn walk(
-        &self,
-        word: &[u8],
-        at: usize,
-        used: &mut Vec<bool>,
-        wild_left: &mut usize,
-        chosen: &mut Vec<usize>,
-    ) -> bool {
-        if at == word.len() {
-            return true;
-        }
-        let remaining = word.len() - at;
-        // Longest first, so ligatures are preferred exactly as the game prefers them.
-        let longest = self.max_tile_len().min(remaining);
-        for len in (1..=longest).rev() {
-            let piece = &word[at..at + len];
-            for i in 0..self.tiles.len() {
-                if used[i] || self.tiles[i].len() != len || self.tiles[i].as_bytes() != piece {
-                    continue;
-                }
-                used[i] = true;
-                chosen.push(i);
-                if self.walk(word, at + len, used, wild_left, chosen) {
-                    return true;
-                }
-                chosen.pop();
-                used[i] = false;
-            }
-        }
-        // A wildcard covers exactly one character.
-        if *wild_left > 0 {
-            *wild_left -= 1;
-            // usize::MAX marks a wildcard rather than a real tile index.
-            chosen.push(usize::MAX);
-            if self.walk(word, at + 1, used, wild_left, chosen) {
-                return true;
-            }
-            chosen.pop();
-            *wild_left += 1;
-        }
-        false
+    /// A modifier set for an ordinary enemy on an ordinary board.
+    pub fn none() -> Self {
+        Modifiers { excluded: HashSet::new(), resist_cornerless: false, problems: Vec::new() }
     }
 
-    /// Convenience predicate.
-    pub fn can_make(&self, word: &str) -> bool {
-        self.segment(word).is_some()
+    /// The `mult * nerf` a word earns, given how many corners it used.
+    ///
+    /// `getWordBonusModifier` only ever multiplies, so an enemy without `resistCornerless` gets a
+    /// flat 1. Bonuses above 1 are deliberately not claimed: we never want to call a word lethal
+    /// because of a bonus we mis-read.
+    pub fn modifier(&self, corners_used: usize, corner_count: usize) -> f64 {
+        if !self.resist_cornerless || corner_count == 0 {
+            return 1.0;
+        }
+        corners_used as f64 / corner_count as f64
     }
 }
 
@@ -257,10 +219,13 @@ pub fn race_for_kill(
     dict: &Dictionary,
     scorer: &Scorer,
     tiles: &[Tile],
+    geometry: &Geometry,
+    mods: &Modifiers,
     need: i64,
     threads: usize,
 ) -> Outcome {
-    let supply = Supply::from_tiles(tiles);
+    let typist = Typist::new(tiles, geometry);
+    let corner_count = geometry.corner_count();
     let words = dict.words();
     let threads = threads.max(1).min(words.len().max(1));
     let chunk = words.len().div_ceil(threads);
@@ -273,8 +238,8 @@ pub fn race_for_kill(
 
     std::thread::scope(|scope| {
         for (slice, part) in words.chunks(chunk).enumerate() {
-            let (stop, lethal, best, longest, considered, supply) =
-                (&stop, &lethal, &best, &longest, &considered, &supply);
+            let (stop, lethal, best, longest, considered, typist, mods) =
+                (&stop, &lethal, &best, &longest, &considered, &typist, mods);
             scope.spawn(move || {
                 let mut seen = 0usize;
                 let mut local_best: Option<Found> = None;
@@ -286,10 +251,19 @@ pub fn race_for_kill(
                         break;
                     }
                     seen += 1;
-                    if !supply.can_make(word) {
+                    if mods.excluded.contains(word) {
                         continue;
                     }
-                    let score = scorer.score_word(word);
+                    // Not "are the letters there" but "does typing this work", which also tells us
+                    // exactly which tiles it eats -- and so what it is worth.
+                    let Some(typed) = typist.type_word(word) else { continue };
+                    let consumed: Vec<Tile> =
+                        typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
+                    let score = scorer.score_typed(
+                        &consumed,
+                        word.chars().count(),
+                        mods.modifier(typed.corners_used, corner_count),
+                    );
                     if score >= need {
                         let found = Found { word: word.clone(), score, slice };
                         let mut l = lethal.lock().unwrap();
@@ -362,25 +336,8 @@ mod tests {
         plain("OYCAACTPORLIGAHJ")
     }
 
-    #[test]
-    fn supply_respects_letter_counts() {
-        let s = Supply::from_tiles(&plain("AB"));
-        assert!(s.can_make("AB"));
-        assert!(!s.can_make("ABB"), "only one B is on the board");
-        assert!(!s.can_make("ABC"));
-    }
-
-    #[test]
-    fn unselectable_tiles_are_not_available() {
-        // An unselectable tile cannot form part of a word, so counting it would produce words that
-        // cannot actually be played.
-        let mut tiles = plain("AB");
-        let mut extra = crate::game::save::Table::default();
-        extra.map.insert("unselectable".into(), crate::game::save::Value::Int(2));
-        tiles[1].extra = Some(extra);
-        let s = Supply::from_tiles(&tiles);
-        assert!(s.can_make("AAA") == false);
-        assert!(!s.can_make("AB"), "B is unselectable");
+    fn race(scorer: &Scorer, dict: &Dictionary, tiles: &[Tile], mods: &Modifiers, need: i64) -> Outcome {
+        race_for_kill(dict, scorer, tiles, &Geometry::default(), mods, need, 8)
     }
 
     #[test]
@@ -408,77 +365,6 @@ mod tests {
     }
 
     #[test]
-    fn a_ligature_tile_cannot_be_split() {
-        // The user's catch: a tile may hold 2-3 letters that cannot be separated. Counting a "TH"
-        // tile as a bare "T" would find words the board cannot play.
-        let tiles = vec![
-            Tile { letter: "TH".into(), extra: None },
-            Tile { letter: "E".into(), extra: None },
-            Tile { letter: "N".into(), extra: None },
-        ];
-        let s = Supply::from_tiles(&tiles);
-        assert!(s.can_make("THEN"), "TH + E + N");
-        assert!(!s.can_make("TEN"), "the T is locked inside the TH ligature");
-        assert!(!s.can_make("NET"), "same, and the H has nowhere to go");
-        assert!(!s.can_make("HEN"), "H is not separately available either");
-    }
-
-    #[test]
-    fn a_ligature_is_preferred_over_single_tiles() {
-        // Longest-match-first mirrors the game's greedy absorption
-        // (`getUnselectedLegalTileWithLetter`). Which tiles are consumed decides the score once tile
-        // state such as burn is in play, so the ORDER is not merely cosmetic.
-        let tiles = vec![
-            Tile { letter: "TH".into(), extra: None },
-            Tile { letter: "T".into(), extra: None },
-            Tile { letter: "H".into(), extra: None },
-            Tile { letter: "E".into(), extra: None },
-        ];
-        let s = Supply::from_tiles(&tiles);
-        let seg = s.segment("THE").expect("THE is makeable");
-        assert_eq!(seg, vec![0, 3], "took the TH ligature, not T + H");
-    }
-
-    #[test]
-    fn a_three_letter_ligature_works() {
-        let tiles = vec![
-            Tile { letter: "ING".into(), extra: None },
-            Tile { letter: "S".into(), extra: None },
-            Tile { letter: "K".into(), extra: None },
-        ];
-        let s = Supply::from_tiles(&tiles);
-        // The ligature can sit anywhere in the word, as long as its letters are contiguous.
-        assert!(s.can_make("KINGS"), "K + ING + S");
-        assert!(s.can_make("SKING"), "S + K + ING");
-        // But its letters are never available individually.
-        assert!(!s.can_make("SINK"), "I and N exist only inside ING");
-        assert!(!s.can_make("GIN"), "GIN would need ING split and reordered");
-    }
-
-    #[test]
-    fn backtracking_finds_a_valid_cut_when_the_greedy_one_fails() {
-        // Greedy alone is not enough: taking "AB" first leaves nothing for the second A, so the
-        // search must back off to the single tiles.
-        let tiles = vec![
-            Tile { letter: "AB".into(), extra: None },
-            Tile { letter: "A".into(), extra: None },
-            Tile { letter: "B".into(), extra: None },
-            Tile { letter: "A".into(), extra: None },
-        ];
-        let s = Supply::from_tiles(&tiles);
-        assert!(s.can_make("ABA"), "AB + A, or A + B + A");
-        // Greedy would take AB then AB again; only one AB tile exists, so it must fall back.
-        assert!(s.can_make("ABAB"), "AB + A + B");
-    }
-
-    #[test]
-    fn wildcards_still_cover_a_single_missing_letter() {
-        let s = Supply::from_tiles(&plain("AB."));
-        assert!(s.can_make("ABC"), "the wildcard supplies C");
-        assert!(!s.can_make("ABCD"), "one wildcard cannot cover two missing letters");
-    }
-
-    #[test]
     fn refresh_keys_off_length_not_score() {
         // A short word of gold tiles can outscore a long one of wood, so `best` is the wrong field
         // for a rule that is explicitly about length. JAZZ-like cases are exactly why these are
@@ -491,6 +377,181 @@ mod tests {
         };
         assert!(!out.should_refresh(8), "an 8-letter word meets the threshold even if not top-scoring");
         assert_eq!(out.choice().map(|f| f.word.as_str()), Some("JAY"), "still PLAY the best scorer");
+    }
+
+    #[test]
+    fn a_corner_resistant_enemy_takes_no_damage_from_a_corner_free_word() {
+        if !present() {
+            eprintln!("SKIP: game source not present");
+            return;
+        }
+        // The failure the corner model exists to prevent. The skeleton shield boss carries
+        // `resistCornerless` (`rpg/enemies/skeletons.lua:251`), and against it a word that touches no
+        // corner does LITERALLY nothing -- nerf = 0/4. Reporting such a word as lethal would waste a
+        // turn against a boss and could lose the run.
+        let dict = Dictionary::load(&game_dir()).unwrap();
+        let scorer = Scorer::new(&game_dir()).unwrap();
+        let board = crypt_board();
+        let geom = Geometry::default();
+
+        let mut cornerless = Modifiers::none();
+        cornerless.resist_cornerless = true;
+
+        let out = race(&scorer, &dict, &board, &cornerless, 3);
+        let played = out.choice().expect("something must be playable").word.clone();
+        let typed = Typist::new(&board, &geom).type_word(&played).unwrap();
+        assert!(
+            typed.corners_used > 0,
+            "{played} uses no corner, so it would do zero damage to this enemy"
+        );
+    }
+
+    #[test]
+    fn the_corner_nerf_changes_what_is_worth_playing() {
+        if !present() {
+            eprintln!("SKIP: game source not present");
+            return;
+        }
+        // Same board, same enemy health, different answer -- which is the whole point. If the nerf
+        // made no difference to the search, it would not be modelled, merely stored.
+        let dict = Dictionary::load(&game_dir()).unwrap();
+        let scorer = Scorer::new(&game_dir()).unwrap();
+        let board = crypt_board();
+
+        let mut cornerless = Modifiers::none();
+        cornerless.resist_cornerless = true;
+
+        // High enough that the search exhausts and reports its true best under each rule.
+        let plain_best = race(&scorer, &dict, &board, &Modifiers::none(), 100_000).best.unwrap();
+        let nerfed_best = race(&scorer, &dict, &board, &cornerless, 100_000).best.unwrap();
+        assert!(
+            nerfed_best.score < plain_best.score,
+            "the nerf can only reduce: {} vs {}",
+            nerfed_best.score,
+            plain_best.score
+        );
+    }
+
+    #[test]
+    fn a_full_corner_sweep_is_not_nerfed_at_all() {
+        // nerf = 4/4 = 1. The nerf must be a fraction of the corners USED, not a flat penalty --
+        // otherwise a word that sweeps every corner would still be docked.
+        let mut m = Modifiers::none();
+        m.resist_cornerless = true;
+        assert_eq!(m.modifier(4, 4), 1.0);
+        assert_eq!(m.modifier(2, 4), 0.5);
+        assert_eq!(m.modifier(0, 4), 0.0, "no corners means no damage");
+        // And an enemy without the status is never scaled.
+        assert_eq!(Modifiers::none().modifier(0, 4), 1.0);
+    }
+
+    #[test]
+    fn the_halfling_can_never_reach_more_than_half_the_corners() {
+        if !present() {
+            eprintln!("SKIP: game source not present");
+            return;
+        }
+        // `shortCharacter` -- "Can only reach the bottom 3 rows" -- sets tileboardUnselectableRow4
+        // through Row10 (`items/classpassives.lua:25-33`). On the default board that locks row 4,
+        // which holds the corners (1,4) and (4,4).
+        //
+        // The denominator does NOT shrink to match: `tileboard.getCornerCount` is `#corners`
+        // (`tileboard.lua:117-120`) and never consults the locks. So against a corner-resistant enemy
+        // a halfling is capped at 2/4 -- HALF DAMAGE, permanently, with no word able to do better.
+        // That is a fact about the game, not about this code, and the search must reproduce it
+        // rather than quietly assume the corners it can see are all the corners there are.
+        let save = crate::game::save::parse(
+            r#"return { passives = {}, rpg = { player = { gearFlags = {
+                tileboardUnselectableRow4 = 1, tileboardUnselectableRow5 = 1,
+            } } } }"#,
+        )
+        .unwrap();
+        let (_, geometry) = Modifiers::from_save(&game_dir(), &save, 16).unwrap();
+        assert_eq!(geometry.corner_count(), 4, "the denominator ignores the locks");
+
+        let reachable = geometry
+            .corner_indices()
+            .into_iter()
+            .filter(|&i| geometry.slot_selectable(i))
+            .count();
+        assert_eq!(reachable, 2, "only the row-1 corners are left");
+
+        // And the search reflects it: the best word cannot exceed the half-damage ceiling.
+        let dict = Dictionary::load(&game_dir()).unwrap();
+        let scorer = Scorer::new(&game_dir()).unwrap();
+        let board = crypt_board();
+        let mut cornerless = Modifiers::none();
+        cornerless.resist_cornerless = true;
+
+        let best = race_for_kill(&dict, &scorer, &board, &geometry, &cornerless, 100_000, 8)
+            .best
+            .expect("something is playable");
+        let typed = Typist::new(&board, &geometry).type_word(&best.word).unwrap();
+        assert!(typed.corners_used <= 2, "{} used {} corners", best.word, typed.corners_used);
+        assert!(cornerless.modifier(typed.corners_used, geometry.corner_count()) <= 0.5);
+    }
+
+    #[test]
+    fn a_locked_row_is_not_the_same_as_a_smaller_board() {
+        if !present() {
+            eprintln!("SKIP: game source not present");
+            return;
+        }
+        // The tiles in a locked row are still ON the board -- they are dumped, they count toward
+        // totalTileCount, they just cannot be selected. Treating the halfling's board as 4x3 would
+        // shift every subsequent tile's position by one and put the corners on the wrong letters.
+        let save = crate::game::save::parse(
+            r#"return { passives = {}, rpg = { player = { gearFlags = {
+                tileboardUnselectableRow4 = 1,
+            } } } }"#,
+        )
+        .unwrap();
+        let (mods, geometry) = Modifiers::from_save(&game_dir(), &save, 16).unwrap();
+        assert!(mods.problems.is_empty(), "a 16-tile dump still fits: {:?}", mods.problems);
+        assert_eq!(geometry.total_tiles(), 16);
+        assert_eq!(geometry.position(3), Some((1, 4)), "the locked tile keeps its place");
+    }
+
+    #[test]
+    fn the_real_crypt_enemy_needs_no_modifiers() {
+        if !present() {
+            eprintln!("SKIP: game source not present");
+            return;
+        }
+        // The captured fight, read the way the live loop will read it. If this ever starts reporting
+        // problems, the measured board that every other test is built on is no longer understood.
+        let save = crate::game::save::load(Path::new("tests/fixtures/combatSaveData-crypt-l0.lua"))
+            .expect("fixture loads");
+        let (mods, geometry) = Modifiers::from_save(&game_dir(), &save, 16).unwrap();
+        assert!(mods.problems.is_empty(), "problems: {:?}", mods.problems);
+        assert!(!mods.resist_cornerless, "Amorphous does not resist corners");
+        assert!(mods.excluded.is_empty(), "no lexicon immunity");
+        assert_eq!(geometry, Geometry::default());
+    }
+
+    #[test]
+    fn an_immune_lexicon_removes_its_words_from_the_race() {
+        if !present() {
+            eprintln!("SKIP: game source not present");
+            return;
+        }
+        // `nerf * 0` is a zero-damage turn, so an immune enemy's lexicon must not be searched at all.
+        // This wires `crate::lexica` into the race, which previously computed exclusions nobody read.
+        let save = crate::game::save::parse(
+            r#"return { passives = {}, rpg = { enemy = { statusEffects = { lexiconBonusBone = 0 } } } }"#,
+        )
+        .unwrap();
+        let (mods, _) = Modifiers::from_save(&game_dir(), &save, 16).unwrap();
+        assert!(mods.excluded.contains("AITCHBONE"), "a bone word must be excluded");
+
+        let dict = Dictionary::load(&game_dir()).unwrap();
+        let scorer = Scorer::new(&game_dir()).unwrap();
+        // A board that spells a bone word and little else.
+        let board = plain("AITCHBONE");
+        let out = race(&scorer, &dict, &board, &mods, 100_000);
+        if let Some(best) = &out.best {
+            assert_ne!(best.word, "AITCHBONE", "an immune word must never be chosen");
+        }
     }
 
     #[test]
@@ -515,12 +576,17 @@ mod tests {
         let dict = Dictionary::load(&game_dir()).unwrap();
         let scorer = Scorer::new(&game_dir()).unwrap();
         // The real fight: "Amorphous", 3 health, armour absent.
-        let out = race_for_kill(&dict, &scorer, &crypt_board(), 3, 8);
+        let out = race(&scorer, &dict, &crypt_board(), &Modifiers::none(), 3);
         assert!(!out.should_refresh(8), "a lethal word means no refresh");
         let found = out.lethal.clone().expect("a 3-health enemy must be killable from this board");
         assert!(found.score >= 3);
-        let supply = Supply::from_tiles(&crypt_board());
-        assert!(supply.can_make(&found.word), "{} is not makeable", found.word);
+        let board = crypt_board();
+        let geom = Geometry::default();
+        assert!(
+            Typist::new(&board, &geom).type_word(&found.word).is_some(),
+            "{} cannot actually be typed",
+            found.word
+        );
     }
 
     #[test]
@@ -531,7 +597,7 @@ mod tests {
         }
         let dict = Dictionary::load(&game_dir()).unwrap();
         let scorer = Scorer::new(&game_dir()).unwrap();
-        let out = race_for_kill(&dict, &scorer, &crypt_board(), 3, 8);
+        let out = race(&scorer, &dict, &crypt_board(), &Modifiers::none(), 3);
         // The whole point of racing: a trivially killable enemy must not cost a full dictionary scan.
         assert!(
             out.words_considered < dict.len(),
@@ -550,7 +616,7 @@ mod tests {
         let dict = Dictionary::load(&game_dir()).unwrap();
         let scorer = Scorer::new(&game_dir()).unwrap();
         // Absurd health, so the search must exhaust and fall back rather than reporting nothing.
-        let out = race_for_kill(&dict, &scorer, &crypt_board(), 100_000, 8);
+        let out = race(&scorer, &dict, &crypt_board(), &Modifiers::none(), 100_000);
         assert!(out.lethal.is_none());
         let best = out.best.expect("must still report the best word it found");
         assert!(best.score > 0);

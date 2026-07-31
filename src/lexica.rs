@@ -146,25 +146,27 @@ impl Lexica {
         out
     }
 
-    /// Enemy statuses we do not model at all.
+    /// Enemy statuses that change a word's score and that nothing here accounts for.
     ///
-    /// `resistCornerless` (`utils/words.lua:238-240`) scales the score by the fraction of corner tiles
-    /// used, which can be zero — and we do not track tile positions. Any status here means our score is
-    /// an upper bound, not a guarantee, so lethality should not be trusted without a margin.
+    /// Currently empty by construction: the only non-lexicon score status in the game is
+    /// `resistCornerless`, and [`crate::search::Modifiers`] now models it from the board geometry.
+    /// The function stays because the list is a property of the game, not of us — a new status
+    /// belongs here the day it appears, and an empty return should mean "checked", not "never
+    /// looked".
     pub fn unmodelled(&self, statuses: &HashMap<String, f64>) -> Vec<String> {
         let known: HashSet<&str> = self.status_keys().into_iter().collect();
         let mut out: Vec<String> = statuses
             .keys()
-            .filter(|k| !known.contains(k.as_str()) && Self::affects_score(k))
+            .filter(|k| !known.contains(k.as_str()) && Self::affects_score_unmodelled(k))
             .cloned()
             .collect();
         out.sort();
         out
     }
 
-    /// Statuses known to change a word's score other than through a lexicon.
-    fn affects_score(key: &str) -> bool {
-        matches!(key, "resistCornerless")
+    /// Statuses that change a word's score other than through a lexicon, and that we do not model.
+    fn affects_score_unmodelled(_key: &str) -> bool {
+        false
     }
 }
 
@@ -253,15 +255,16 @@ mod tests {
     }
 
     #[test]
-    fn resist_cornerless_is_reported_as_unmodelled() {
+    fn resist_cornerless_is_no_longer_unmodelled() {
         if !present() {
             eprintln!("SKIP: game source not present");
             return;
         }
-        // Not a lexicon: it scales by corner-tile usage and can reach zero. We do not track tile
-        // positions, so it must be surfaced rather than quietly ignored.
+        // It used to be reported here, because we could not tell which tiles a word would take.
+        // `crate::typist` now simulates the game's own selection, so the corner fraction is computed
+        // rather than admitted to -- see `crate::search::Modifiers::modifier`.
         let lx = Lexica::load(&game_dir()).unwrap();
-        let statuses = HashMap::from([("resistCornerless".to_string(), 1.0)]);
-        assert_eq!(lx.unmodelled(&statuses), vec!["resistCornerless".to_string()]);
+        let statuses = HashMap::from([("resistCornerless".to_string(), -1.0)]);
+        assert!(lx.unmodelled(&statuses).is_empty());
     }
 }

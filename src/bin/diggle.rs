@@ -870,9 +870,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("WARNING unknown materials: {:?}", scorer.unknown_materials());
             }
 
+            // Offline, so there is no save to read. The board SHAPE cannot be inferred from the tile
+            // count -- `diamond16Board`, `tall16Board` and the default 4x4 all hold sixteen tiles and
+            // put their corners in different places, and hexagonal boards have six corners rather
+            // than four. So `--board <passiveKey>` names the shape, and it is always printed.
+            let board_passive = args
+                .iter()
+                .position(|a| a == "--board")
+                .and_then(|i| args.get(i + 1))
+                .cloned();
+            let resolved = match &board_passive {
+                Some(key) => {
+                    diggle_solver::geometry::Geometry::for_passive(&cfg.game_dir, key, tiles.len())
+                }
+                None => diggle_solver::geometry::Geometry::for_passive(
+                    &cfg.game_dir,
+                    "__none__",
+                    tiles.len(),
+                ),
+            };
+            let geometry = resolved.geometry;
+            for p in &resolved.problems {
+                println!("WARNING geometry: {p}");
+            }
+            println!(
+                "board shape: {} ({} columns of {:?}), {} corners at dump indices {:?}",
+                board_passive.as_deref().unwrap_or("default 4x4"),
+                geometry.rows_per_col.len(),
+                geometry.rows_per_col,
+                geometry.corner_count(),
+                geometry.corner_indices()
+            );
+
+            let mut mods = diggle_solver::search::Modifiers::none();
+            mods.resist_cornerless = args.iter().any(|a| a == "--cornerless");
+            if mods.resist_cornerless {
+                println!(
+                    "resistCornerless: score scaled by cornersUsed/{}",
+                    geometry.corner_count()
+                );
+            }
+
             let need = health + armour;
             let t1 = std::time::Instant::now();
-            let out = diggle_solver::search::race_for_kill(&dict, &scorer, &tiles, need, threads);
+            let out = diggle_solver::search::race_for_kill(
+                &dict, &scorer, &tiles, &geometry, &mods, need, threads,
+            );
             let elapsed = t1.elapsed();
             println!(
                 "board {} ({} tiles), need {need} (health {health} + armour {armour})",
