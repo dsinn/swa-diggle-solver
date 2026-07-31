@@ -103,6 +103,11 @@ pub struct Modifiers {
     /// `resistCornerless` (`utils/words.lua:238-240`): the score is scaled by
     /// `cornersUsed / cornerCount`. Zero corners means zero damage.
     pub resist_cornerless: bool,
+    /// Damage **beyond** what kills is paid out as gold (`rpgview.lua:1211-1214`), granted either by
+    /// the enemy — the mimic carries `statusEffects.overkillGold` — or by a player curse from
+    /// `items/curses.lua`. When set, the first killing word is the wrong answer: gold scales
+    /// linearly with the excess, so the turn is worth the *hardest* hit we can find.
+    pub overkill_gold: bool,
     /// Reasons the search should not be trusted. Non-empty means a score here is a guess.
     pub problems: Vec<String>,
 }
@@ -129,10 +134,15 @@ impl Modifiers {
             problems.push("wordRequirementAdjacent gear is not modelled".into());
         }
 
+        // Either source grants it, so both are checked (`rpgview.lua:1211`).
+        let overkill_gold = statuses.contains_key("overkillGold")
+            || save.path("rpg.player.gearFlags.overkillGold").is_some();
+
         Ok((
             Modifiers {
                 excluded: lexica.excluded_words(&statuses),
                 resist_cornerless: statuses.contains_key("resistCornerless"),
+                overkill_gold,
                 problems,
             },
             resolved.geometry,
@@ -141,7 +151,12 @@ impl Modifiers {
 
     /// A modifier set for an ordinary enemy on an ordinary board.
     pub fn none() -> Self {
-        Modifiers { excluded: HashSet::new(), resist_cornerless: false, problems: Vec::new() }
+        Modifiers {
+            excluded: HashSet::new(),
+            resist_cornerless: false,
+            overkill_gold: false,
+            problems: Vec::new(),
+        }
     }
 
     /// The `mult * nerf` a word earns, given how many corners it used.
@@ -215,6 +230,155 @@ impl Outcome {
 /// Stops every thread as soon as one finds a lethal word, so the cost is usually a small fraction of
 /// the dictionary. The best-scoring word is still tracked, because the fallback needs it and the scan
 /// that produced it was already paid for.
+/// What this turn is trying to achieve.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Goal {
+    /// Kill the enemy. The **first** lethal word wins and the rest stop — optimal play is not the
+    /// point, ending the exchange is.
+    FirstKill { need: i64 },
+    /// Hit as hard as possible. Required when overkill pays gold (`rpgview.lua:1211-1214`): the
+    /// excess damage *is* the reward, so stopping at the first kill leaves money on the table.
+    MaxDamage,
+}
+
+impl Goal {
+    /// Picks the goal for an enemy, given what modifies it.
+    pub fn for_enemy(mods: &Modifiers, health: i64, armour: i64) -> Goal {
+        if mods.overkill_gold {
+            Goal::MaxDamage
+        } else {
+            Goal::FirstKill { need: health + armour }
+        }
+    }
+}
+
+/// How many words a thread claims at a time under [`Goal::MaxDamage`].
+///
+/// Large enough that the atomic fetch is lost in the noise, small enough that the final claims
+/// cannot leave one thread working alone for long.
+const CLAIM: usize = 512;
+
+/// Searches for the word to play.
+///
+/// ## Two goals, two partitioning strategies, deliberately
+///
+/// **`FirstKill` takes contiguous alphabetical slices.** They are wildly unbalanced — a slice whose
+/// initial letters are absent from the board yields nothing — and that is fine, because any thread
+/// can win and everything stops the moment one does. Balancing would cost more than it saves.
+///
+/// **`MaxDamage` cannot stop early.** Every word must be examined, so the slowest thread sets the
+/// wall time and an unbalanced split leaves one thread grinding the long-word tail while the rest
+/// idle. Threads therefore claim [`CLAIM`]-word blocks from a shared cursor: whoever finishes takes
+/// more.
+///
+/// Work-stealing rather than a length-weighted static split, because a word's cost is not simply its
+/// length: [`crate::typist`] rescans the board per character, the ligature clauses rescan again, and
+/// a word that fails on its first letter costs almost nothing. Weighting by length models one term
+/// and mis-models the rest. Claiming on demand needs no cost model at all, and stays balanced if the
+/// cost profile later changes.
+pub fn search(
+    dict: &Dictionary,
+    scorer: &Scorer,
+    tiles: &[Tile],
+    geometry: &Geometry,
+    mods: &Modifiers,
+    goal: Goal,
+    threads: usize,
+) -> Outcome {
+    match goal {
+        Goal::FirstKill { need } => race_for_kill(dict, scorer, tiles, geometry, mods, need, threads),
+        Goal::MaxDamage => max_damage(dict, scorer, tiles, geometry, mods, threads),
+    }
+}
+
+/// Exhaustive hardest-hit search, balanced by work-stealing.
+pub fn max_damage(
+    dict: &Dictionary,
+    scorer: &Scorer,
+    tiles: &[Tile],
+    geometry: &Geometry,
+    mods: &Modifiers,
+    threads: usize,
+) -> Outcome {
+    let typist = Typist::new(tiles, geometry);
+    let corner_count = geometry.corner_count();
+    let words = dict.words();
+    let threads = threads.max(1).min(words.len().max(1));
+
+    let best: Mutex<Option<Found>> = Mutex::new(None);
+    let longest: Mutex<Option<Found>> = Mutex::new(None);
+    let considered = std::sync::atomic::AtomicUsize::new(0);
+    let cursor = std::sync::atomic::AtomicUsize::new(0);
+
+    std::thread::scope(|scope| {
+        for slice in 0..threads {
+            let (best, longest, considered, cursor, typist) =
+                (&best, &longest, &considered, &cursor, &typist);
+            scope.spawn(move || {
+                let mut seen = 0usize;
+                let mut local_best: Option<Found> = None;
+                let mut local_longest: Option<Found> = None;
+                loop {
+                    // Claim the next block. No thread waits on another's slice being slow.
+                    let start = cursor.fetch_add(CLAIM, Ordering::Relaxed);
+                    if start >= words.len() {
+                        break;
+                    }
+                    for word in &words[start..(start + CLAIM).min(words.len())] {
+                        seen += 1;
+                        if mods.excluded.contains(word) {
+                            continue;
+                        }
+                        let Some(typed) = typist.type_word(word) else { continue };
+                        let consumed: Vec<Tile> =
+                            typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
+                        let score = scorer.score_typed(
+                            &consumed,
+                            word.chars().count(),
+                            mods.modifier(typed.corners_used, corner_count),
+                        );
+                        if local_best.as_ref().map(|b| score > b.score).unwrap_or(true) {
+                            local_best = Some(Found { word: word.clone(), score, slice });
+                        }
+                        if local_longest
+                            .as_ref()
+                            .map(|b| word.chars().count() > b.word.chars().count())
+                            .unwrap_or(true)
+                        {
+                            local_longest = Some(Found { word: word.clone(), score, slice });
+                        }
+                    }
+                }
+                considered.fetch_add(seen, Ordering::Relaxed);
+                if let Some(lb) = local_best {
+                    let mut b = best.lock().unwrap();
+                    if b.as_ref().map(|cur| lb.score > cur.score).unwrap_or(true) {
+                        *b = Some(lb);
+                    }
+                }
+                if let Some(ll) = local_longest {
+                    let mut l = longest.lock().unwrap();
+                    if l.as_ref()
+                        .map(|cur| ll.word.chars().count() > cur.word.chars().count())
+                        .unwrap_or(true)
+                    {
+                        *l = Some(ll);
+                    }
+                }
+            });
+        }
+    });
+
+    Outcome {
+        // No `lethal`: the point of this mode is that "enough to kill" is not the target. The caller
+        // plays `best`, which is lethal too whenever anything is.
+        lethal: None,
+        best: best.into_inner().unwrap(),
+        longest: longest.into_inner().unwrap(),
+        words_considered: considered.into_inner(),
+    }
+}
+
 pub fn race_for_kill(
     dict: &Dictionary,
     scorer: &Scorer,
@@ -552,6 +716,89 @@ mod tests {
         if let Some(best) = &out.best {
             assert_ne!(best.word, "AITCHBONE", "an immune word must never be chosen");
         }
+    }
+
+    #[test]
+    fn an_overkill_enemy_switches_the_goal_to_max_damage() {
+        // The mimic carries `statusEffects.overkillGold` (`rpg/enemies/mimic.lua:32`), and gold is
+        // paid out equal to the excess damage (`rpgview.lua:1211-1214`). Taking the first killing
+        // word against it is throwing the reward away.
+        if !present() {
+            eprintln!("SKIP: game source not present");
+            return;
+        }
+        let save = crate::game::save::parse(
+            r#"return { passives = {}, rpg = { enemy = { statusEffects = { overkillGold = -1 } } } }"#,
+        )
+        .unwrap();
+        let (mods, _) = Modifiers::from_save(&game_dir(), &save, 16).unwrap();
+        assert!(mods.overkill_gold);
+        assert_eq!(Goal::for_enemy(&mods, 3, 0), Goal::MaxDamage);
+        // An ordinary enemy still races for the first kill -- speed matters when gold does not.
+        assert_eq!(
+            Goal::for_enemy(&Modifiers::none(), 3, 2),
+            Goal::FirstKill { need: 5 }
+        );
+    }
+
+    #[test]
+    fn a_player_curse_grants_overkill_gold_against_every_enemy() {
+        // `rpgview.lua:1211` accepts EITHER source, so the player's gear flag makes every fight an
+        // overkill fight. Reading only the enemy would silently under-earn for the whole run.
+        if !present() {
+            eprintln!("SKIP: game source not present");
+            return;
+        }
+        let save = crate::game::save::parse(
+            r#"return { passives = {}, rpg = { player = { gearFlags = { overkillGold = 1 } } } }"#,
+        )
+        .unwrap();
+        let (mods, _) = Modifiers::from_save(&game_dir(), &save, 16).unwrap();
+        assert!(mods.overkill_gold, "the player's curse must count");
+    }
+
+    #[test]
+    fn max_damage_beats_the_first_kill_and_examines_everything() {
+        if !present() {
+            eprintln!("SKIP: game source not present");
+            return;
+        }
+        let dict = Dictionary::load(&game_dir()).unwrap();
+        let scorer = Scorer::new(&game_dir()).unwrap();
+        let board = crypt_board();
+        let geom = Geometry::default();
+        let mods = Modifiers::none();
+
+        let kill = search(&dict, &scorer, &board, &geom, &mods, Goal::FirstKill { need: 3 }, 8);
+        let hardest = search(&dict, &scorer, &board, &geom, &mods, Goal::MaxDamage, 8);
+
+        let first = kill.lethal.expect("a 3-health enemy is killable here");
+        let best = hardest.best.expect("max damage must report something");
+        assert!(
+            best.score > first.score,
+            "hardest hit {} should beat the first kill {}",
+            best.score,
+            first.score
+        );
+        // Exhaustive by definition: there is no early stop to cut it short.
+        assert_eq!(hardest.words_considered, dict.len());
+        assert!(kill.words_considered < dict.len(), "the race must still stop early");
+    }
+
+    #[test]
+    fn work_stealing_spreads_the_load_across_threads() {
+        // The reason for the shared cursor: under MaxDamage nothing stops early, so the slowest
+        // thread sets the wall time. With contiguous slices one thread grinds the long-word tail
+        // while the rest idle. If only one slice ever reports a best, the split is not working.
+        if !present() {
+            eprintln!("SKIP: game source not present");
+            return;
+        }
+        let dict = Dictionary::load(&game_dir()).unwrap();
+        let scorer = Scorer::new(&game_dir()).unwrap();
+        let out = max_damage(&dict, &scorer, &crypt_board(), &Geometry::default(), &Modifiers::none(), 8);
+        assert_eq!(out.words_considered, dict.len(), "every word must be examined exactly once");
+        assert!(out.best.is_some());
     }
 
     #[test]

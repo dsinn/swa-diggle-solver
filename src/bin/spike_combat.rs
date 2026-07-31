@@ -38,7 +38,7 @@ use diggle_solver::game::save::{self, Table};
 use diggle_solver::geometry::Geometry;
 use diggle_solver::observe::board as boardparse;
 use diggle_solver::observe::log::{Console, LogMirror};
-use diggle_solver::search::{self, Dictionary, Modifiers};
+use diggle_solver::search::{self, Dictionary, Goal, Modifiers};
 use diggle_solver::win::capture::capture_window;
 use diggle_solver::win::input::{Input, PostMessageInput, SC_SPACE, VK_SPACE};
 use diggle_solver::win::window::{ButtonSpec, GameWindow};
@@ -132,6 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut turns = 0usize;
     let mut fingerprinted = false;
+    let mut finished = false;
     let mut reached_rewards = false;
     let deadline = Instant::now() + Duration::from_secs(300);
 
@@ -180,8 +181,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     log.push_str(&format!("  WARNING {p}\n"));
                 }
 
-                let need = health + armour;
-                let out = search::race_for_kill(&dict, &scorer, &tiles, &geom, &mods, need, 8);
+                // Overkill pays gold against a mimic or under a player curse, and the excess IS
+                // the reward -- so that fight wants the hardest hit, not the quickest kill.
+                let goal = Goal::for_enemy(&mods, health, armour);
+                let out = search::search(&dict, &scorer, &tiles, &geom, &mods, goal, 8);
                 let letters: String = tiles.iter().map(|t| t.letter.as_str()).collect();
                 let Some(found) = out.choice().cloned() else {
                     log.push_str(&format!("turn {turns}: nothing playable on {letters}\n"));
@@ -259,6 +262,89 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::thread::sleep(Duration::from_millis(300));
                 }
             }
+        }
+    }
+
+    // ---- reward selection ----
+    // `ui/itemselection.lua:415-428` prints one line per item as
+    //   <tab>key<tab>name<tab>x<tab>y
+    // with x/y already in client pixels. Conhost expands the tabs, so the coordinates are recovered
+    // as the last two integers on the line rather than by column.
+    if reached_rewards {
+        std::thread::sleep(Duration::from_millis(400));
+        pump(&mut console, &mut mirror, &mut lines);
+
+        let mut offers: Vec<(String, i32, i32)> = Vec::new();
+        let mut in_block = false;
+        for l in &lines {
+            if l.contains("Item selection:") {
+                in_block = true;
+                offers.clear();
+                continue;
+            }
+            if !in_block {
+                continue;
+            }
+            let nums: Vec<i32> =
+                l.split_whitespace().filter_map(|w| w.parse::<i32>().ok()).collect();
+            let key = l.split_whitespace().next().unwrap_or("").to_string();
+            if nums.len() >= 2 && !key.is_empty() {
+                let (x, y) = (nums[nums.len() - 2], nums[nums.len() - 1]);
+                offers.push((key, x, y));
+            } else if !l.trim().is_empty() && nums.is_empty() {
+                in_block = false; // the block ended
+            }
+        }
+        log.push_str(&format!("\noffered {} rewards: {offers:?}\n", offers.len()));
+
+        if offers.is_empty() {
+            log.push_str("no reward coordinates parsed -- not clicking blind\n");
+        } else {
+            // The screen animates in. Stillness is the right gate here (unlike the tile board,
+            // where an empty board is also still) because the items are already present -- we are
+            // waiting for them to stop moving, not to arrive.
+            let (cw, ch) = win.client_size()?;
+            let band = (0, (ch / 2 - 160).max(0), cw, 320.min(ch));
+            let mut quiet = 0;
+            let settle = Instant::now() + Duration::from_secs(8);
+            let mut prev: Option<Vec<u8>> = None;
+            while Instant::now() < settle && quiet < 4 {
+                std::thread::sleep(Duration::from_millis(60));
+                let f = diggle_solver::win::capture::capture_client_rect(
+                    &win, band.0, band.1, band.2, band.3,
+                )?;
+                let still = prev
+                    .as_ref()
+                    .map(|p| {
+                        let diff = p
+                            .iter()
+                            .zip(&f.bgra)
+                            .filter(|(a, b)| a.abs_diff(**b) > 8)
+                            .count();
+                        diff * 1000 < f.bgra.len()
+                    })
+                    .unwrap_or(false);
+                quiet = if still { quiet + 1 } else { 0 };
+                prev = Some(f.bgra);
+            }
+            log.push_str(&format!("reward screen settled: {}\n", quiet >= 4));
+
+            // MVP: any reward will do. Seeded from the clock so repeated runs do not always take
+            // the same one, which would hide a click that only works on one position.
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as usize)
+                .unwrap_or(0);
+            let pick = nanos % offers.len();
+            let (ref key, ix, iy) = offers[pick];
+            let (sx, sy) = win.client_to_screen(ix, iy)?;
+            log.push_str(&format!("picking **{key}** at ({ix},{iy})\n"));
+            diggle_solver::win::input::click_at(sx, sy)?;
+            std::thread::sleep(Duration::from_secs(2));
+            if let Ok(f) = capture_window(&win) {
+                let _ = f.write_png(Path::new(&format!("{FRAMES}/reward-picked.png")));
+            }
+            pump(&mut console, &mut mirror, &mut lines);
         }
     }
 
