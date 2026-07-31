@@ -1,4 +1,5 @@
 pub mod act;
+pub mod combat;
 pub mod config;
 pub mod game;
 pub mod geometry;
