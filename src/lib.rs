@@ -2,10 +2,12 @@ pub mod act;
 pub mod config;
 pub mod game;
 pub mod geometry;
+pub mod layout;
 pub mod lexica;
 pub mod observe;
 pub mod score;
 pub mod search;
+pub mod tables;
 pub mod typist;
 pub mod win;
 

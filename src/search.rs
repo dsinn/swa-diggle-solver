@@ -118,7 +118,7 @@ impl Modifiers {
     ) -> Result<(Self, Geometry), crate::Error> {
         let statuses = crate::lexica::Lexica::statuses_from_save(save);
         let lexica = crate::lexica::Lexica::load(game_dir)?;
-        let resolved = Geometry::from_save(game_dir, save, tile_count);
+        let resolved = Geometry::from_save(save, tile_count);
 
         let mut problems = resolved.problems.clone();
         problems.extend(lexica.problems().iter().cloned());

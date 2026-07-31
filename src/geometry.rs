@@ -19,19 +19,30 @@
 //! game derives it (`tileboard.lua:70-90`): default 4×4, overridden by the **first** passive that
 //! carries `boardData`. Guessing from the count would be a coin flip on a corner-nerf fight.
 
-use crate::game::save::{parse_module, Table, Value};
+use crate::game::save::Table;
 use std::collections::BTreeSet;
-use std::path::Path;
 
 /// Default board: 4 columns of 4 (`tileboard.lua:71-72`), corners in the order the game lists them
 /// (`tileboard.lua:64-69`) — that order is the tie-break the typist uses, so it is preserved.
 const DEFAULT_CORNERS: [(usize, usize); 4] = [(1, 1), (4, 1), (1, 4), (4, 4)];
+
+/// Tile edge length in game units (`tileboard.lua:51`). Everything on the board is a multiple of it.
+pub const TILE_SIZE: f64 = 118.0;
+/// The board object's frame above and below the tiles (`tileboard.lua:48-49`).
+pub const HEADING_DEPTH: f64 = 79.0;
+pub const FOOTER_DEPTH: f64 = 79.0;
 
 /// The board's shape and which slots are locked.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Geometry {
     /// Tile count per column, in dump order.
     pub rows_per_col: Vec<usize>,
+    /// The board's nominal height in tiles — `boardSize[2]`, which is NOT `rows_per_col.max()` on a
+    /// hexagonal board. It sets the drawn height, so it is needed to place tiles on screen.
+    pub tiles_y: usize,
+    /// Vertical offset per column in game units (`tileboard.lua:96-98`). Non-zero only on hexagonal
+    /// boards, where short columns are centred rather than bottom-aligned.
+    pub col_y_offsets: Vec<f64>,
     /// Corner coordinates as 1-based `(col, row)`, in the game's own order.
     pub corners: Vec<(usize, usize)>,
     /// Rows locked by `tileboardUnselectableRow<N>` gear flags (`tileboard.lua:409-412`).
@@ -48,6 +59,8 @@ impl Default for Geometry {
     fn default() -> Self {
         Geometry {
             rows_per_col: vec![4; 4],
+            tiles_y: 4,
+            col_y_offsets: vec![0.0; 4],
             corners: DEFAULT_CORNERS.to_vec(),
             locked_rows: BTreeSet::new(),
             locked_cols: BTreeSet::new(),
@@ -117,10 +130,10 @@ impl Geometry {
     ///
     /// Goes through [`Geometry::from_save`] rather than around it, so the offline path cannot drift
     /// from the one the live loop uses.
-    pub fn for_passive(game_dir: &Path, passive: &str, tile_count: usize) -> Resolved {
+    pub fn for_passive(passive: &str, tile_count: usize) -> Resolved {
         let save = crate::game::save::parse(&format!("return {{ passives = {{ {passive:?} }} }}"))
             .expect("a literal table always parses");
-        Geometry::from_save(game_dir, &save, tile_count)
+        Geometry::from_save(&save, tile_count)
     }
 
     /// Derives the geometry from a `combatSaveData` table, the way `generateTileboardData` does.
@@ -128,7 +141,7 @@ impl Geometry {
     /// `tile_count` is the length of the board dump, used only as a check: a shape that does not
     /// account for exactly that many tiles is reported rather than used, because a wrong shape puts
     /// the corners on the wrong letters and that is worse than admitting ignorance.
-    pub fn from_save(game_dir: &Path, save: &Table, tile_count: usize) -> Resolved {
+    pub fn from_save(save: &Table, tile_count: usize) -> Resolved {
         let mut problems = Vec::new();
         let mut geometry = Geometry::default();
 
@@ -137,24 +150,13 @@ impl Geometry {
             .map(|t| t.arr.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
 
-        if !passives.is_empty() {
-            match board_shapes(game_dir) {
-                Ok(shapes) => {
-                    // `tileboard.lua:74-89` takes the FIRST passive with boardData and breaks.
-                    for key in &passives {
-                        if let Some(shape) = shapes.table_at(key).and_then(|i| i.table_at("boardData"))
-                        {
-                            match shape_to_geometry(shape) {
-                                Some(g) => geometry = g,
-                                None => problems.push(format!(
-                                    "passive {key} has boardData this cannot read"
-                                )),
-                            }
-                            break;
-                        }
-                    }
-                }
-                Err(e) => problems.push(format!("could not read items/boardshapes.lua: {e}")),
+        // `tileboard.lua:74-89` takes the FIRST passive with boardData and breaks. Read from the
+        // baked table, not from the game file: this runs every combat turn and must not depend on
+        // evaluating Lua. `crate::tables` carries a test that the baked copy still matches source.
+        for key in &passives {
+            if let Some(shape) = crate::tables::shape(key) {
+                geometry = shape_to_geometry(shape);
+                break;
             }
         }
 
@@ -190,61 +192,41 @@ fn parse_index(s: &str) -> Option<usize> {
     s.parse().ok()
 }
 
-fn board_shapes(game_dir: &Path) -> Result<Table, crate::Error> {
-    let src = std::fs::read_to_string(game_dir.join("items/boardshapes.lua"))?;
-    parse_module(&src)
-}
-
-/// Reads one `boardData` entry into a geometry, mirroring `tileboard.lua:76-105`.
-fn shape_to_geometry(shape: &Table) -> Option<Geometry> {
-    let size = shape.table_at("boardSize")?;
-    let cols = size.arr.first()?.as_int()? as usize;
-    let rows = size.arr.get(1)?.as_int()? as usize;
-    if cols == 0 || rows == 0 {
-        return None;
-    }
-
-    let hexagonal = matches!(shape.get("hexagonal"), Some(Value::Bool(true)));
-    let middle = shape
-        .int_at("middleCol")
-        .map(|m| m as usize)
-        // `math.floor((tilesX-1)/2+1)`
-        .unwrap_or((cols - 1) / 2 + 1);
-
-    // `colTileCounts[i] = boardItemData.colTileCounts[i] or baseColTileCount`, where the hexagonal
-    // base narrows by distance from the middle column (`tileboard.lua:92-103`).
-    let explicit = shape.table_at("colTileCounts");
+/// Turns a baked shape into a geometry, mirroring `tileboard.lua:76-105`.
+fn shape_to_geometry(shape: &crate::tables::Shape) -> Geometry {
+    let (cols, rows) = (shape.cols, shape.rows);
+    let hexagonal = shape.hexagonal;
+    // `math.floor((tilesX-1)/2+1)` when the file omits middleCol; 0 is the baked "omitted" marker.
+    let middle = if shape.middle_col == 0 { (cols - 1) / 2 + 1 } else { shape.middle_col };
+    let explicit = shape.col_tile_counts;
     let mut rows_per_col = Vec::with_capacity(cols);
+    let mut col_y_offsets = Vec::with_capacity(cols);
     for i in 1..=cols {
-        let given = explicit.and_then(|t| t.arr.get(i - 1)).and_then(|v| v.as_int());
+        let given = explicit.get(i - 1).copied();
         let base = if hexagonal {
             rows.saturating_sub(middle.abs_diff(i))
         } else {
             rows
         };
-        rows_per_col.push(given.map(|n| n as usize).unwrap_or(base));
+        rows_per_col.push(given.unwrap_or(base));
+        // `d` is measured against the COMPUTED base, not the override: `colTileCounts` can shorten a
+        // column without moving it (`tileboard.lua:92-98`).
+        col_y_offsets.push(if hexagonal {
+            (rows - base) as f64 * TILE_SIZE * 0.5
+        } else {
+            0.0
+        });
     }
 
-    let corners = shape
-        .table_at("corners")?
-        .arr
-        .iter()
-        .filter_map(|v| {
-            let t = v.as_table()?;
-            Some((t.arr.first()?.as_int()? as usize, t.arr.get(1)?.as_int()? as usize))
-        })
-        .collect::<Vec<_>>();
-    if corners.is_empty() {
-        return None;
-    }
-
-    Some(Geometry {
+    Geometry {
         rows_per_col,
-        corners,
+        tiles_y: rows,
+        col_y_offsets,
+        corners: shape.corners.to_vec(),
         locked_rows: BTreeSet::new(),
         locked_cols: BTreeSet::new(),
         adjacency_required: false,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -305,7 +287,7 @@ mod tests {
             "tests/fixtures/combatSaveData-crypt-l0.lua",
         ))
         .expect("fixture loads");
-        let r = Geometry::from_save(&game_dir(), &save, 16);
+        let r = Geometry::from_save(&save, 16);
         assert!(r.problems.is_empty(), "problems: {:?}", r.problems);
         assert_eq!(r.geometry, Geometry::default());
     }
@@ -319,7 +301,7 @@ mod tests {
         // `stoutCharacter` is the 5x3 board (`items/boardshapes.lua:12-27`). Its corners are at
         // column 5, which does not even exist on the default board.
         let save = crate::game::save::parse(r#"return { passives = { "stoutCharacter" } }"#).unwrap();
-        let r = Geometry::from_save(&game_dir(), &save, 15);
+        let r = Geometry::from_save(&save, 15);
         assert!(r.problems.is_empty(), "problems: {:?}", r.problems);
         assert_eq!(r.geometry.rows_per_col, vec![3, 3, 3, 3, 3]);
         assert_eq!(r.geometry.corners, vec![(1, 1), (5, 1), (1, 3), (5, 3)]);
@@ -328,24 +310,12 @@ mod tests {
 
     #[test]
     fn a_hexagonal_board_has_ragged_columns() {
-        if !present() {
-            eprintln!("SKIP: game source not present");
-            return;
-        }
         // A 5x4 hexagonal board with colTileCounts {3,3,4,3,3} holds sixteen tiles -- exactly as
         // many as the default 4x4. The count alone cannot tell them apart, which is why the shape
-        // is derived from the passive rather than guessed.
-        let shapes = board_shapes(&game_dir()).unwrap();
-        let hex = shapes
-            .map
-            .values()
-            .filter_map(|v| v.as_table()?.table_at("boardData"))
-            .find(|b| {
-                b.table_at("colTileCounts").map(|c| c.arr.len() == 5).unwrap_or(false)
-                    && matches!(b.get("hexagonal"), Some(Value::Bool(true)))
-            })
-            .expect("a hexagonal 5-column board exists");
-        let g = shape_to_geometry(hex).expect("readable");
+        // comes from the passive rather than a guess. Read from the baked table, since that is what
+        // the runtime uses; `crate::tables` is where it is checked against the game.
+        let hex = crate::tables::shape("hench").expect("hench is baked");
+        let g = shape_to_geometry(hex);
         assert_eq!(g.rows_per_col, vec![3, 3, 4, 3, 3]);
         assert_eq!(g.total_tiles(), 16, "same tile count as the default board");
         assert_ne!(g.corner_indices(), Geometry::default().corner_indices());
@@ -364,13 +334,13 @@ mod tests {
         // number would be wrong about the column heights.
         let sixteens = ["diamond16Board", "tall16Board"];
         for key in sixteens {
-            let r = Geometry::for_passive(&game_dir(), key, 16);
+            let r = Geometry::for_passive(key, 16);
             assert!(r.problems.is_empty(), "{key}: {:?}", r.problems);
             assert_eq!(r.geometry.total_tiles(), 16, "{key} should hold 16 tiles");
         }
         let default = Geometry::default();
         for key in sixteens {
-            let g = Geometry::for_passive(&game_dir(), key, 16).geometry;
+            let g = Geometry::for_passive(key, 16).geometry;
             assert_ne!(g.corner_indices(), default.corner_indices(), "{key} corners must differ");
         }
     }
@@ -384,7 +354,7 @@ mod tests {
         // The `resistCornerless` nerf is `used / cornerCount`, so a hardcoded 4 would mis-scale
         // every word on a hexagonal board -- reporting 4/4 = full damage for a word that used four
         // of six corners and actually does two thirds.
-        let hex5 = Geometry::for_passive(&game_dir(), "hex5", 19).geometry;
+        let hex5 = Geometry::for_passive("hex5", 19).geometry;
         assert_eq!(hex5.corner_count(), 6, "hexagonal boards have six corners");
         assert_eq!(Geometry::default().corner_count(), 4);
     }
@@ -398,7 +368,7 @@ mod tests {
         // Silently accepting a mismatch would place corners on the wrong letters, and a corner nerf
         // computed from wrong corners is worse than no corner model at all.
         let save = crate::game::save::parse(r#"return { passives = {} }"#).unwrap();
-        let r = Geometry::from_save(&game_dir(), &save, 20);
+        let r = Geometry::from_save(&save, 20);
         assert!(!r.problems.is_empty(), "a 20-tile dump does not fit a 4x4 board");
     }
 
@@ -416,7 +386,7 @@ mod tests {
             } } } }"#,
         )
         .unwrap();
-        let r = Geometry::from_save(&game_dir(), &save, 16);
+        let r = Geometry::from_save(&save, 16);
         assert!(r.geometry.locked_rows.contains(&2));
         assert!(r.geometry.locked_cols.contains(&3));
         assert!(r.geometry.adjacency_required, "must be surfaced, it is not modelled");
