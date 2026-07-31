@@ -195,6 +195,88 @@ impl Frame {
     }
 }
 
+/// A rectangle of the game's client area, read **off the screen** rather than re-rendered.
+///
+/// ## Why this exists
+///
+/// [`capture_window`] uses `PrintWindow(PW_RENDERFULLCONTENT)`, which asks the window to draw its
+/// entire contents into our DC. That is what makes it work on an occluded or background window — and
+/// it is also a full extra render the game pays for. Measured at **25 ms**, and the user observed
+/// the game visibly dropping frames while the click spikes ran. We were stealing them.
+///
+/// A `BitBlt` from the screen DC copies pixels that have *already* been drawn: no second render, and
+/// only the requested rectangle moves. For the combat loop — which reads a ~472×472 board out of a
+/// 1920×1080 window, once per word — that is ~18× fewer pixels on top of not forcing a redraw.
+///
+/// **The trade is real:** this reads the actual screen, so anything covering the window is captured
+/// instead of the game. It is only valid with the game in the foreground and unobscured, which the
+/// combat loop already requires for `SendInput` to reach it. When in doubt, use [`capture_window`].
+///
+/// `x`/`y` are client coordinates; the returned frame's origin is that point, so callers offset
+/// their own coordinates by it.
+pub fn capture_client_rect(
+    win: &GameWindow,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+) -> Result<Frame, crate::Error> {
+    if w <= 0 || h <= 0 {
+        return Err(crate::Error::Win32(format!("capture rect has no extent: {w}x{h}")));
+    }
+    let (sx, sy) = win.client_to_screen(x, y)?;
+    unsafe {
+        let screen_dc = GetDC(HWND(std::ptr::null_mut()));
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        let bmp: HBITMAP = CreateCompatibleBitmap(screen_dc, w, h);
+        let old = SelectObject(mem_dc, bmp);
+
+        let blitted = windows::Win32::Graphics::Gdi::BitBlt(
+            mem_dc,
+            0,
+            0,
+            w,
+            h,
+            screen_dc,
+            sx,
+            sy,
+            windows::Win32::Graphics::Gdi::SRCCOPY,
+        )
+        .is_ok();
+
+        let mut info = BITMAPINFO::default();
+        info.bmiHeader = BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        };
+        let mut bgra = vec![0u8; (w * h * 4) as usize];
+        let scanned = GetDIBits(
+            mem_dc,
+            bmp,
+            0,
+            h as u32,
+            Some(bgra.as_mut_ptr() as *mut _),
+            &mut info,
+            DIB_RGB_COLORS,
+        );
+
+        SelectObject(mem_dc, old);
+        let _ = DeleteObject(bmp);
+        let _ = DeleteDC(mem_dc);
+        ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
+
+        if !blitted || scanned == 0 {
+            return Err(crate::Error::Win32("BitBlt capture failed".into()));
+        }
+        Ok(Frame { width: w, height: h, bgra })
+    }
+}
+
 pub fn capture_window(win: &GameWindow) -> Result<Frame, crate::Error> {
     let (w, h) = win.client_size()?;
     if w <= 0 || h <= 0 {

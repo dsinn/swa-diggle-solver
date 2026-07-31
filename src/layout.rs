@@ -74,6 +74,29 @@ pub fn tile_centres(g: &Geometry, client_w: i32, client_h: i32) -> Vec<(i32, i32
     out
 }
 
+/// The client rectangle enclosing every tile, as `(x, y, w, h)`.
+///
+/// This is what makes a cheap capture possible: the combat loop only ever needs to know which tiles
+/// are selected, so it can `BitBlt` this rectangle instead of re-rendering the whole window. On the
+/// default board at 1080p that is ~590×590 against 1920×1080 — under a sixth of the pixels.
+///
+/// Derived from the tile centres rather than from the board's nominal size, so a hexagonal board's
+/// raised short columns are enclosed correctly. Clamped to the client area.
+pub fn board_rect(g: &Geometry, client_w: i32, client_h: i32) -> (i32, i32, i32, i32) {
+    let centres = tile_centres(g, client_w, client_h);
+    if centres.is_empty() {
+        return (0, 0, client_w, client_h);
+    }
+    let r = tile_radius(client_w, client_h).ceil() as i32;
+    let x0 = centres.iter().map(|c| c.0).min().unwrap() - r;
+    let x1 = centres.iter().map(|c| c.0).max().unwrap() + r;
+    let y0 = centres.iter().map(|c| c.1).min().unwrap() - r;
+    let y1 = centres.iter().map(|c| c.1).max().unwrap() + r;
+    let x0 = x0.max(0);
+    let y0 = y0.max(0);
+    (x0, y0, (x1.min(client_w) - x0).max(1), (y1.min(client_h) - y0).max(1))
+}
+
 /// Half the on-screen width of a tile — the radius within which a click still lands on it.
 ///
 /// Useful as a tolerance: a mapping that is off by less than this still clicks the right tile, and
@@ -129,6 +152,31 @@ mod tests {
         let half = tile_centres(&Geometry::default(), 960, 540);
         assert!(((960.0 - full[0].0 as f64) / 2.0 - (480.0 - half[0].0 as f64)).abs() < 1.0);
         assert!(((1080.0 - full[0].1 as f64) / 2.0 - (540.0 - half[0].1 as f64)).abs() < 1.0);
+    }
+
+    #[test]
+    fn the_board_rect_encloses_every_tile_and_is_much_smaller_than_the_window() {
+        // The rectangle the cheap capture reads. It must cover every tile -- a tile outside it is a
+        // tile whose selection we cannot see -- while being small enough to be worth doing.
+        let g = Geometry::default();
+        let (x, y, w, h) = board_rect(&g, 1920, 1080);
+        let r = tile_radius(1920, 1080) as i32;
+        for (cx, cy) in tile_centres(&g, 1920, 1080) {
+            assert!(cx - r >= x && cx + r <= x + w, "tile x {cx} outside {x}..{}", x + w);
+            assert!(cy - r >= y && cy + r <= y + h, "tile y {cy} outside {y}..{}", y + h);
+        }
+        let ratio = (w * h) as f64 / (1920.0 * 1080.0);
+        assert!(ratio < 0.2, "board rect is {:.1}% of the window", ratio * 100.0);
+    }
+
+    #[test]
+    fn the_board_rect_stays_inside_the_client_area() {
+        // A rect that runs off the window would make BitBlt read the desktop behind it.
+        for (w, h) in [(1920, 1080), (1280, 720), (800, 600)] {
+            let (x, y, rw, rh) = board_rect(&Geometry::default(), w, h);
+            assert!(x >= 0 && y >= 0, "{w}x{h}: origin ({x},{y})");
+            assert!(x + rw <= w && y + rh <= h, "{w}x{h}: rect {rw}x{rh} at ({x},{y})");
+        }
     }
 
     #[test]
