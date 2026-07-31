@@ -22,7 +22,7 @@ use diggle_solver::config::Config;
 use diggle_solver::game::save;
 use diggle_solver::layout;
 use diggle_solver::observe::log::Console;
-use diggle_solver::win::capture::{capture_window, Frame};
+use diggle_solver::win::capture::{capture_client_rect, capture_window, Frame};
 use diggle_solver::win::input::{inject_left_click, warp_cursor};
 use std::io::Write;
 use std::path::Path;
@@ -119,7 +119,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::hint::black_box(tile_luma(&frame, x, y, radius));
         }
     }
-    let all_tiles_us = t.elapsed().as_secs_f64() * 10_000.0 / 1000.0;
+    // 100 passes over the whole board -> microseconds per pass.
+    let all_tiles_us = t.elapsed().as_secs_f64() * 1_000_000.0 / 100.0;
 
     log.push_str(&format!(
         "## Costs\n\n\
@@ -147,6 +148,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     };
 
+    let (bx, by, bw, bh) = layout::board_rect(&geom, cw, ch);
+    log.push_str(&format!(
+        "
+Latency polled with the CHEAP capture ({bw}x{bh} BitBlt), so the floor is ~4 ms rather          than the ~25 ms `PrintWindow` imposed on the earlier run.
+
+"
+    ));
     let mut latencies = Vec::new();
     let sample: Vec<usize> = (0..centres.len()).step_by(3).collect();
     for &i in &sample {
@@ -157,7 +165,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for phase in ["select", "deselect"] {
             park()?;
             std::thread::sleep(Duration::from_millis(200));
-            let before = tile_luma(&capture_window(&win)?, cx, cy, radius);
+            let before =
+                tile_luma(&capture_client_rect(&win, bx, by, bw, bh)?, cx - bx, cy - by, radius);
 
             warp_cursor(sx, sy)?;
             let t0 = Instant::now();
@@ -165,8 +174,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut seen = None;
             while t0.elapsed() < PATIENCE {
-                let f = capture_window(&win)?;
-                if (tile_luma(&f, cx, cy, radius) - before).abs() > CHANGED {
+                let f = capture_client_rect(&win, bx, by, bw, bh)?;
+                if (tile_luma(&f, cx - bx, cy - by, radius) - before).abs() > CHANGED {
                     seen = Some(t0.elapsed());
                     break;
                 }
