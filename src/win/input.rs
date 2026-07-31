@@ -3,7 +3,8 @@ use std::time::Duration;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
+    KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, PostMessageW, SetForegroundWindow, WM_CHAR, WM_KEYDOWN, WM_KEYUP,
@@ -86,6 +87,58 @@ fn mouse_event(flags: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_F
             },
         },
     }
+}
+
+/// Moves and clicks in **one** `SendInput` batch, at absolute screen coordinates.
+///
+/// `warp_cursor` then `inject_left_click` is two separate trips through the input system, and the
+/// click carries no position — it lands wherever the cursor has got to. That is a race, and the only
+/// defence was a sleep between them. Batching move-down-up into a single `SendInput` makes the
+/// ordering the operating system's problem: the events are delivered in sequence, so the click
+/// cannot overtake the move, and no sleep is needed at all.
+///
+/// Coordinates are normalized against the **virtual desktop**, which is what makes this safe on a
+/// multi-monitor setup where secondary displays sit at negative coordinates.
+pub fn click_at(x: i32, y: i32) -> Result<(), crate::Error> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
+    let (vx, vy, vw, vh) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    };
+    if vw <= 1 || vh <= 1 {
+        return Err(crate::Error::Win32("virtual desktop has no extent".into()));
+    }
+    // The -1 matters: the absolute range is 0..=65535 inclusive, so dividing by the raw width puts
+    // the last pixel column just past the end.
+    let nx = ((x - vx) as f64 * 65535.0 / (vw - 1) as f64).round() as i32;
+    let ny = ((y - vy) as f64 * 65535.0 / (vh - 1) as f64).round() as i32;
+
+    let event = |flags, dx, dy| INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT { dx, dy, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+        },
+    };
+    let events = [
+        event(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny),
+        event(MOUSEEVENTF_LEFTDOWN, 0, 0),
+        event(MOUSEEVENTF_LEFTUP, 0, 0),
+    ];
+    let sent = unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) };
+    if sent != events.len() as u32 {
+        return Err(crate::Error::Win32(format!(
+            "SendInput accepted {sent} of {} events",
+            events.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Injects `count` left clicks at the current cursor position.
