@@ -328,7 +328,7 @@ mod tests {
     }
 
     fn plain(letters: &str) -> Vec<Tile> {
-        letters.chars().map(|c| Tile { letter: c.to_string(), extra: None }).collect()
+        letters.chars().map(|c| Tile::plain(&c.to_string())).collect()
     }
 
     /// The actual level-0 crypt board, from `tests/fixtures/combatSaveData-crypt-l0.lua`.

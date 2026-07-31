@@ -856,9 +856,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let cfg = Config::load(Path::new("config.toml"))?;
             let tiles: Vec<diggle_solver::observe::board::Tile> = letters
                 .chars()
-                .map(|c| diggle_solver::observe::board::Tile {
-                    letter: c.to_ascii_uppercase().to_string(),
-                    extra: None,
+                .map(|c| {
+                    diggle_solver::observe::board::Tile::plain(&c.to_ascii_uppercase().to_string())
                 })
                 .collect();
 

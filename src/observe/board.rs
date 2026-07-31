@@ -28,16 +28,81 @@
 
 use crate::game::save::{parse, Table, Value};
 
+/// A tile's state, parsed out of the dump's open-ended `extra` bag.
+///
+/// A tile is **not** just a letter, and increasingly less so as a run goes on: gear upgrades a
+/// tile's material (wood → bronze → silver → gold), enemies downgrade it, fire sets `burn`, and the
+/// carbon-paper item accumulates a per-use penalty. All of that rides in `extra`, and all of it
+/// changes what the tile is worth. Parsing it once into named fields — rather than reaching into the
+/// table with string keys from three different modules — is what lets the scorer read a tile's
+/// *quality* instead of guessing it from the letter.
+///
+/// `unmodelled` is the point of doing this at all. `extra` is whatever the game decided to write, so
+/// a key we do not consume is a silent gap in the score. Naming the leftovers turns "we ignored
+/// something" from invisible into reportable.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Quality {
+    /// `extra.bg` — the material, when the tile has been upgraded or downgraded away from the one
+    /// its letter implies. Absent means "whatever `letterMaterials` says".
+    pub material: Option<String>,
+    /// `extra.border` — an independent overlay with its own score, blended 0.75/0.25 with the
+    /// material (`utils/tiles.lua:78-82`).
+    pub border: Option<String>,
+    /// `extra.ligature` — an effect name on a real tile (`ash`), or a letter-class pattern on a
+    /// wildcard (`[AEIOU]`). The two uses are distinguished by the tile's letter, not by this field.
+    pub ligature: Option<String>,
+    /// Burning tiles score zero (`utils/tiles.lua:56-57`).
+    pub burn: Option<i64>,
+    /// Carbon paper: `scoreMult * 0.9^carbon`, a penalty that grows with each use.
+    pub carbon: Option<i64>,
+    /// Locked by the tile itself rather than by a row or column rule.
+    pub unselectable: bool,
+    /// Keys in `extra` that nothing here reads. Non-empty means a tile is carrying state that may
+    /// change its score, and we are scoring it as if it were not.
+    pub unmodelled: Vec<String>,
+}
+
+/// Keys we deliberately read, plus those known to carry no scoring weight.
+///
+/// `destroy` and `bg2`/`fg` style keys are presentation or scheduling, not score. Listing them
+/// explicitly means a genuinely new key still shows up in [`Quality::unmodelled`].
+const HANDLED: &[&str] =
+    &["bg", "border", "ligature", "burn", "carbon", "unselectable", "destroy", "itemSource", "itemModifier"];
+
+impl Quality {
+    pub fn from_extra(extra: &Table) -> Self {
+        Quality {
+            material: extra.str_at("bg").map(str::to_string),
+            border: extra.str_at("border").map(str::to_string),
+            ligature: extra.str_at("ligature").map(str::to_string),
+            burn: extra.int_at("burn"),
+            carbon: extra.int_at("carbon"),
+            unselectable: extra.path("unselectable").is_some(),
+            unmodelled: extra
+                .map
+                .keys()
+                .filter(|k| !HANDLED.contains(&k.as_str()))
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
 /// One tile as the board reports it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tile {
     pub letter: String,
-    /// Present only for special tiles, which the game writes as `{letter, extra}`
-    /// (`tileboard.lua:2447`). Carries `burn`, `unselectable`, `ligature`, `destroy`.
-    pub extra: Option<Table>,
+    /// Parsed once, at dump time. Special tiles are written `{letter, extra}`
+    /// (`tileboard.lua:2447`); a plain tile is a bare string and gets the default.
+    pub quality: Quality,
 }
 
 impl Tile {
+    /// An ordinary tile with no state — the overwhelmingly common case.
+    pub fn plain(letter: &str) -> Self {
+        Tile { letter: letter.to_string(), quality: Quality::default() }
+    }
+
     /// A wildcard tile. The game stores these as `"."` (`tileboard.lua:406` treats `.` as selectable
     /// alongside letters), and a wildcard takes a typed letter directly.
     pub fn is_wildcard(&self) -> bool {
@@ -45,15 +110,12 @@ impl Tile {
     }
 
     pub fn burn(&self) -> Option<i64> {
-        self.extra.as_ref()?.int_at("burn")
+        self.quality.burn
     }
 
     /// Unselectable tiles cannot form part of a word, so they must be excluded before searching.
     pub fn selectable(&self) -> bool {
-        match &self.extra {
-            Some(e) => e.path("unselectable").is_none(),
-            None => true,
-        }
+        !self.quality.unselectable
     }
 }
 
@@ -82,6 +144,21 @@ impl BoardDump {
     pub fn available_letters(&self) -> Vec<&str> {
         self.tiles.iter().filter(|t| t.selectable()).map(|t| t.letter.as_str()).collect()
     }
+
+    /// Tile state present on this board that nothing models, as `letter: key` pairs.
+    ///
+    /// Must be checked before trusting a score. A tile carrying an unread key is being scored as if
+    /// that key were not there, which is the quiet kind of wrong.
+    pub fn unmodelled(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .tiles
+            .iter()
+            .flat_map(|t| t.quality.unmodelled.iter().map(|k| format!("{}: {k}", t.letter)))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
 }
 
 const MARKER: &str = "board state = {";
@@ -91,12 +168,17 @@ fn tiles_from(table: &Table) -> Vec<Tile> {
         .arr
         .iter()
         .filter_map(|v| match v {
-            Value::Str(s) => Some(Tile { letter: s.clone(), extra: None }),
+            Value::Str(s) => Some(Tile::plain(s)),
             // Special tiles are `{letter, extra}`.
             Value::Table(t) => {
                 let letter = t.arr.first()?.as_str()?.to_string();
-                let extra = t.arr.get(1).and_then(|v| v.as_table()).cloned();
-                Some(Tile { letter, extra })
+                let quality = t
+                    .arr
+                    .get(1)
+                    .and_then(|v| v.as_table())
+                    .map(Quality::from_extra)
+                    .unwrap_or_default();
+                Some(Tile { letter, quality })
             }
             _ => None,
         })
@@ -187,7 +269,8 @@ mod tests {
     fn every_tile_on_a_plain_board_is_selectable() {
         let b = &parse_dumps(&lines(REAL))[0];
         assert_eq!(b.available_letters().len(), 16);
-        assert!(b.tiles.iter().all(|t| t.extra.is_none()));
+        assert!(b.tiles.iter().all(|t| t.quality == Quality::default()));
+        assert!(b.unmodelled().is_empty(), "no unread tile state: {:?}", b.unmodelled());
     }
 
     #[test]
@@ -207,6 +290,34 @@ mod tests {
         assert!(b.tiles[1].selectable(), "burning tiles can still be used");
         assert!(!b.tiles[2].selectable(), "unselectable tiles must be excluded");
         assert_eq!(b.available_letters(), ["A", "B"]);
+    }
+
+    #[test]
+    fn tile_quality_is_parsed_into_named_fields() {
+        // Gear upgrades a tile's material and enemies downgrade it, so a tile is a letter PLUS a
+        // quality. Reading `bg` and `border` off the dump is what lets an upgraded tile score as the
+        // gold it now is rather than as the wood its letter implies.
+        let text = "Player turn 1 start;\tboard state = {\n\
+                    \x20   { \"E\", { bg = \"gold\", border = \"silver\", carbon = 2 } },\n\
+                    }";
+        let q = &parse_dumps(&lines(text))[0].tiles[0].quality;
+        assert_eq!(q.material.as_deref(), Some("gold"));
+        assert_eq!(q.border.as_deref(), Some("silver"));
+        assert_eq!(q.carbon, Some(2));
+        assert!(q.unmodelled.is_empty());
+    }
+
+    #[test]
+    fn tile_state_nothing_reads_is_reported() {
+        // `extra` is an open bag -- the game writes whatever the tile carries. A key we do not
+        // consume is a silent gap in the score, so the leftovers are named. This is the check that
+        // turns "the game gained a mechanic" from invisible into a line of output.
+        let text = "Player turn 1 start;\tboard state = {\n\
+                    \x20   { \"E\", { frozen = 3 } },\n\
+                    }";
+        let b = &parse_dumps(&lines(text))[0];
+        assert_eq!(b.tiles[0].quality.unmodelled, ["frozen"]);
+        assert_eq!(b.unmodelled(), ["E: frozen"]);
     }
 
     #[test]

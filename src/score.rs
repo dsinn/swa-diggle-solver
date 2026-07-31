@@ -134,9 +134,8 @@ impl Scorer {
 
     /// One tile's contribution, following `tiles.score` (`utils/tiles.lua:45-95`).
     pub fn tile_score(&self, tile: &Tile) -> f64 {
-        let bg = tile.extra.as_ref().and_then(|e| e.str_at("bg"));
         // `materials[tile.extra.bg] or default` -- only `default` carries getScore/getMaterial.
-        let bg_material = bg.and_then(|b| {
+        let bg_material = tile.quality.material.as_deref().and_then(|b| {
             let m = self.materials.get(b);
             if m.is_none() {
                 self.note_unknown(format!("material {b}"));
@@ -162,7 +161,7 @@ impl Scorer {
         if tile.burn().is_some() {
             score_mult = 0.0;
         }
-        if let Some(carbon) = tile.extra.as_ref().and_then(|e| e.int_at("carbon")) {
+        if let Some(carbon) = tile.quality.carbon {
             score_mult *= 0.9f64.powi(carbon as i32);
         }
         if score_mult == 0.0 {
@@ -175,27 +174,20 @@ impl Scorer {
             None => Some(self.letter_score(&tile.letter)),
         };
 
-        let border_score = tile
-            .extra
-            .as_ref()
-            .and_then(|e| e.str_at("border"))
-            .and_then(|b| match self.borders.get(b) {
-                Some(s) => *s,
-                None => {
-                    self.note_unknown(format!("border {b}"));
-                    None
-                }
-            });
+        let border_score = tile.quality.border.as_deref().and_then(|b| match self.borders.get(b) {
+            Some(s) => *s,
+            None => {
+                self.note_unknown(format!("border {b}"));
+                None
+            }
+        });
 
         let mut score = match (material_score, border_score) {
             (Some(m), Some(b)) => m * MAT_BORDER_RATIO + b * (1.0 - MAT_BORDER_RATIO),
             (m, b) => m.unwrap_or(1.0) + b.unwrap_or(0.0),
         };
-        if let Some(add) = tile
-            .extra
-            .as_ref()
-            .and_then(|e| e.str_at("ligature"))
-            .and_then(|l| self.ligature_bonus.get(l))
+        if let Some(add) =
+            tile.quality.ligature.as_deref().and_then(|l| self.ligature_bonus.get(l))
         {
             score += add;
         }
@@ -208,7 +200,7 @@ impl Scorer {
     /// because it knows which tiles the word will actually consume.
     pub fn score_word(&self, word: &str) -> i64 {
         let tiles: Vec<Tile> =
-            word.chars().map(|c| Tile { letter: c.to_string(), extra: None }).collect();
+            word.chars().map(|c| Tile::plain(&c.to_string())).collect();
         self.score_typed(&tiles, word.chars().count(), 1.0)
     }
 
@@ -336,6 +328,7 @@ fn read_lua_dir(dir: std::path::PathBuf) -> Result<Vec<(String, Table)>, crate::
 mod tests {
     use super::*;
     use crate::game::save::Value;
+    use crate::observe::board::Quality;
     use std::path::PathBuf;
 
     fn game_dir() -> PathBuf {
@@ -352,13 +345,17 @@ mod tests {
     }
 
     fn tile(letter: &str) -> Tile {
-        Tile { letter: letter.into(), extra: None }
+        Tile::plain(letter)
     }
 
-    fn with(letter: &str, key: &str, value: Value) -> Tile {
+    /// Builds a tile through the same `extra` parsing the live dump goes through, so the tests
+    /// exercise the parser rather than hand-setting fields it might not populate.
+    fn with(letter: &str, pairs: &[(&str, Value)]) -> Tile {
         let mut extra = Table::default();
-        extra.map.insert(key.into(), value);
-        Tile { letter: letter.into(), extra: Some(extra) }
+        for (k, v) in pairs {
+            extra.map.insert((*k).into(), v.clone());
+        }
+        Tile { letter: letter.into(), quality: Quality::from_extra(&extra) }
     }
 
     #[test]
@@ -434,7 +431,7 @@ mod tests {
     fn a_burning_tile_contributes_nothing() {
         // `utils/tiles.lua:56-57` zeroes scoreMult for a burning tile.
         let Some(s) = scorer() else { return };
-        let tiles = [tile("J"), with("J", "burn", Value::Int(3))];
+        let tiles = [tile("J"), with("J", &[("burn", Value::Int(3))])];
         // J(30) + burning J(0) = 30; length 2 -> 0.6; 18.0; floor(18.5) = 18.
         assert_eq!(s.score_typed(&tiles, 2, 1.0), 18);
         assert!(s.score_typed(&tiles, 2, 1.0) < s.score_typed(&[tile("J"), tile("J")], 2, 1.0));
@@ -445,9 +442,9 @@ mod tests {
         // With `extra.bg` set, `rawMaterial` is that material and its `getScore` is absent, so the
         // letter's premium does not apply -- a gold-backed J scores 10, not 30.
         let Some(s) = scorer() else { return };
-        assert_eq!(s.tile_score(&with("J", "bg", Value::Str("gold".into()))), 10.0);
+        assert_eq!(s.tile_score(&with("J", &[("bg", Value::Str("gold".into()))])), 10.0);
         assert_eq!(s.tile_score(&tile("J")), 30.0, "without bg, the letter entry wins");
-        assert_eq!(s.tile_score(&with("E", "bg", Value::Str("gold".into()))), 10.0);
+        assert_eq!(s.tile_score(&with("E", &[("bg", Value::Str("gold".into()))])), 10.0);
     }
 
     #[test]
@@ -456,10 +453,7 @@ mod tests {
         // tile has no border at all and takes the additive branch, which is why plain letters score
         // exactly their material.
         let Some(s) = scorer() else { return };
-        let mut extra = Table::default();
-        extra.map.insert("bg".into(), Value::Str("wood".into()));
-        extra.map.insert("border".into(), Value::Str("gold".into()));
-        let t = Tile { letter: "E".into(), extra: Some(extra) };
+        let t = with("E", &[("bg", Value::Str("wood".into())), ("border", Value::Str("gold".into()))]);
         // wood(1)*0.75 + gold border(10)*0.25 = 3.25
         assert!((s.tile_score(&t) - 3.25).abs() < 1e-9, "got {}", s.tile_score(&t));
     }
@@ -469,10 +463,7 @@ mod tests {
         // `rpg/effects/border/iron.lua` declares no score, so it takes the additive branch and adds
         // nothing. This is also why plain tiles -- which carry no border key -- score cleanly.
         let Some(s) = scorer() else { return };
-        let mut extra = Table::default();
-        extra.map.insert("bg".into(), Value::Str("wood".into()));
-        extra.map.insert("border".into(), Value::Str("iron".into()));
-        let t = Tile { letter: "E".into(), extra: Some(extra) };
+        let t = with("E", &[("bg", Value::Str("wood".into())), ("border", Value::Str("iron".into()))]);
         assert_eq!(s.tile_score(&t), 1.0);
     }
 

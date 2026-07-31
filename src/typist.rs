@@ -211,9 +211,9 @@ impl<'a> Typist<'a> {
             self.candidate(i, selected)
                 && self.letters[i] == WILDCARD
                 && self.tiles[i]
-                    .extra
-                    .as_ref()
-                    .and_then(|e| e.str_at("ligature"))
+                    .quality
+                    .ligature
+                    .as_deref()
                     .map(|p| pattern_admits(p, c))
                     .unwrap_or(false)
         })
@@ -223,7 +223,7 @@ impl<'a> Typist<'a> {
         (0..self.tiles.len()).find(|&i| {
             self.candidate(i, selected)
                 && self.letters[i] == WILDCARD
-                && self.tiles[i].extra.as_ref().and_then(|e| e.str_at("ligature")).is_none()
+                && self.tiles[i].quality.ligature.is_none()
         })
     }
 
@@ -258,13 +258,20 @@ fn pattern_admits(pattern: &str, c: u8) -> bool {
 mod tests {
     use super::*;
     use crate::game::save::{Table, Value};
+    use crate::observe::board::Quality;
 
     fn plain(letters: &str) -> Vec<Tile> {
-        letters.chars().map(|c| Tile { letter: c.to_string(), extra: None }).collect()
+        letters.chars().map(|c| Tile::plain(&c.to_string())).collect()
     }
 
     fn tiles_of(strings: &[&str]) -> Vec<Tile> {
-        strings.iter().map(|s| Tile { letter: s.to_string(), extra: None }).collect()
+        strings.iter().map(|s| Tile::plain(s)).collect()
+    }
+
+    fn special(letter: &str, key: &str, value: Value) -> Tile {
+        let mut extra = Table::default();
+        extra.map.insert(key.into(), value);
+        Tile { letter: letter.into(), quality: Quality::from_extra(&extra) }
     }
 
     /// A geometry with one column, so dump order is the only order and corners are trivial.
@@ -382,9 +389,7 @@ mod tests {
     #[test]
     fn an_unselectable_tile_is_not_available() {
         let mut t = plain("AB");
-        let mut extra = Table::default();
-        extra.map.insert("unselectable".into(), Value::Int(2));
-        t[1].extra = Some(extra);
+        t[1] = special("B", "unselectable", Value::Int(2));
         let g = strip(2);
         assert_eq!(typed(&t, &g, "AB"), None, "B is unselectable");
         assert_eq!(typed(&t, &g, "A"), Some(vec![0]));
@@ -412,9 +417,7 @@ mod tests {
         // `getUnselectedLegalRestrictedWildcardOfLetter` matches the typed letter against
         // `extra.ligature`, and the game's patterns are classes like `[AEIOU]`.
         let mut t = tiles_of(&["B", "."]);
-        let mut extra = Table::default();
-        extra.map.insert("ligature".into(), Value::Str("[AEIOU]".into()));
-        t[1].extra = Some(extra);
+        t[1] = special(".", "ligature", Value::Str("[AEIOU]".into()));
         let g = strip(2);
         assert_eq!(typed(&t, &g, "BE"), Some(vec![0, 1]), "E is in the class");
         assert_eq!(typed(&t, &g, "BZ"), None, "Z is not, and there is no plain wildcard");
