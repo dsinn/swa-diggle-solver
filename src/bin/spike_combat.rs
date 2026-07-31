@@ -160,11 +160,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     fingerprinted = true;
                 }
-                let (fx, fy) = win.button_center(&FINISH)?;
-                let (sx, sy) = win.client_to_screen(fx, fy)?;
-                log.push_str(&format!("WaitPhase confirmed -> clicking Finish at ({fx},{fy})\n"));
-                diggle_solver::win::input::click_at(sx, sy)?;
-                std::thread::sleep(Duration::from_secs(2));
+                // Click Finish exactly ONCE. The save still reads WaitPhase on the next poll --
+                // the screen has not torn down yet -- so an unguarded branch fires again. It was
+                // harmless here only because the second click landed on nothing; once the reward
+                // screen is up, that same coordinate is over the item row.
+                if !finished {
+                    let (fx, fy) = win.button_center(&FINISH)?;
+                    let (sx, sy) = win.client_to_screen(fx, fy)?;
+                    log.push_str(&format!(
+                        "WaitPhase confirmed -> clicking Finish at ({fx},{fy})\n"
+                    ));
+                    diggle_solver::win::input::click_at(sx, sy)?;
+                    finished = true;
+                }
+                std::thread::sleep(Duration::from_millis(500));
             }
             "PlayerTurn" => {
                 turns += 1;
