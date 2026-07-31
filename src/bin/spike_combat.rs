@@ -134,7 +134,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fingerprinted = false;
     let mut finished = false;
     let mut reached_rewards = false;
-    let deadline = Instant::now() + Duration::from_secs(300);
+    // Deliberately shorter than any harness timeout that will wrap this. A spike killed from
+    // outside never writes its report, and the stale one left on disk then reads as the current
+    // result -- which is exactly how a 200s kill got misdiagnosed as a game hang.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    // Bail early if nothing is happening rather than burning the whole budget on a stuck screen.
+    let mut last_change = Instant::now();
+    let mut last_state = String::new();
 
     while Instant::now() < deadline && turns < MAX_TURNS && !reached_rewards {
         pump(&mut console, &mut mirror, &mut lines);
@@ -147,6 +153,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         };
         let state = cs.str_at("rpg.player.turnState").unwrap_or("").to_string();
+        if state != last_state {
+            last_state = state.clone();
+            last_change = Instant::now();
+        } else if last_change.elapsed() > Duration::from_secs(45) {
+            log.push_str(&format!(
+                "STALLED: {state:?} for 45s with no progress -- capturing and stopping
+"
+            ));
+            if let Ok(f) = capture_window(&win) {
+                let _ = f.write_png(Path::new(&format!("{FRAMES}/combat-stalled.png")));
+            }
+            break;
+        }
 
         match state.as_str() {
             "WaitPhase" | "SmokebombWaitPhase" => {
@@ -274,6 +293,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if Instant::now() >= deadline {
+        log.push_str("
+STOPPED: hit the spike's own 120s deadline
+");
+    }
+
     // ---- reward selection ----
     // `ui/itemselection.lua:415-428` prints one line per item as
     //   <tab>key<tab>name<tab>x<tab>y
@@ -348,8 +373,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (ref key, ix, iy) = offers[pick];
             let (sx, sy) = win.client_to_screen(ix, iy)?;
             log.push_str(&format!("picking **{key}** at ({ix},{iy})\n"));
+
+            // Verify at the ITEM, not at the Confirm button. Confirm draws the selected reward's
+            // icon into its own background (`getIcon`, `ui/itemselection.lua:276`), so it has one
+            // appearance per item and a template match would fail on every item it had not seen.
+            // The item's own tile changes on selection, which is the instrument already proven on
+            // the tile board.
+            let probe = (ix - 90, iy - 90, 180, 180);
+            let before = diggle_solver::win::capture::capture_client_rect(
+                &win, probe.0, probe.1, probe.2, probe.3,
+            )
+            .map(|f| diggle_solver::combat::luma(&f, probe.2 / 2, probe.3 / 2, 60))?;
             diggle_solver::win::input::click_at(sx, sy)?;
-            std::thread::sleep(Duration::from_secs(2));
+            std::thread::sleep(Duration::from_millis(600));
+            let after = diggle_solver::win::capture::capture_client_rect(
+                &win, probe.0, probe.1, probe.2, probe.3,
+            )
+            .map(|f| diggle_solver::combat::luma(&f, probe.2 / 2, probe.3 / 2, 60))?;
+            let picked = (after - before).abs() > diggle_solver::combat::CHANGED;
+            log.push_str(&format!(
+                "  item luma {before:.1} -> {after:.1}, selected: **{picked}**\n"
+            ));
+
+            if picked {
+                // Confirm with Space, not a click: the button declares
+                // `userFunctionName = 'affirmative'` (`:280`) and `activeIf = selection` (`:274`),
+                // so Space only does anything once something IS selected -- the guard is the game's.
+                keys.focus();
+                std::thread::sleep(Duration::from_millis(300));
+                keys.press_key(VK_SPACE, SC_SPACE)?;
+                log.push_str("  confirmed with Space\n");
+                std::thread::sleep(Duration::from_secs(3));
+            } else {
+                log.push_str("  NOT confirming: the click did not select anything\n");
+            }
             if let Ok(f) = capture_window(&win) {
                 let _ = f.write_png(Path::new(&format!("{FRAMES}/reward-picked.png")));
             }
