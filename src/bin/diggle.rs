@@ -880,13 +880,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .cloned();
             let resolved = match &board_passive {
                 Some(key) => {
-                    diggle_solver::geometry::Geometry::for_passive(&cfg.game_dir, key, tiles.len())
+                    diggle_solver::geometry::Geometry::for_passive(key, tiles.len())
                 }
-                None => diggle_solver::geometry::Geometry::for_passive(
-                    &cfg.game_dir,
-                    "__none__",
-                    tiles.len(),
-                ),
+                None => diggle_solver::geometry::Geometry::for_passive("__none__", tiles.len()),
             };
             let geometry = resolved.geometry;
             for p in &resolved.problems {
