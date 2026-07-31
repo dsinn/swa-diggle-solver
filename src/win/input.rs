@@ -2,7 +2,8 @@ use crate::win::window::GameWindow;
 use std::time::Duration;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, PostMessageW, SetForegroundWindow, WM_CHAR, WM_KEYDOWN, WM_KEYUP,
@@ -27,6 +28,48 @@ use windows::Win32::UI::WindowsAndMessaging::{
 pub fn warp_cursor(x: i32, y: i32) -> Result<(), crate::Error> {
     unsafe { windows::Win32::UI::WindowsAndMessaging::SetCursorPos(x, y) }
         .map_err(|e| crate::Error::Win32(e.to_string()))
+}
+
+/// Types text at **driver level**, as `SendInput` unicode events.
+///
+/// The same distinction that made clicking work applies here. `PostMessageInput::type_text` posts
+/// `WM_CHAR` into the window's queue, which is the analogue of the posted mouse clicks SDL ignored.
+/// `KEYEVENTF_UNICODE` goes in below the queue, so SDL raises a genuine `SDL_TEXTINPUT` and the
+/// game's `rpg.textinput` (`rpg.lua:801`) sees it — which is the only path that selects tiles.
+///
+/// Letters must NOT go out as key events: `love.keypressed` drives menu actions, not tile selection.
+///
+/// The delay between characters is deliberate. Selection is stateful — each character consults the
+/// tiles already chosen (the ligature clauses at `rpg.lua:816-838`) — so the game must process one
+/// character before the next arrives.
+pub fn type_text_injected(text: &str, per_char: Duration) -> Result<(), crate::Error> {
+    for ch in text.chars() {
+        let mut units = [0u16; 2];
+        for &unit in ch.encode_utf16(&mut units).iter() {
+            let key = |flags| INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0),
+                        wScan: unit,
+                        dwFlags: flags,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            };
+            let events = [key(KEYEVENTF_UNICODE), key(KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)];
+            let sent = unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) };
+            if sent != events.len() as u32 {
+                return Err(crate::Error::Win32(format!(
+                    "SendInput accepted {sent} of {} key events for {ch:?}",
+                    events.len()
+                )));
+            }
+        }
+        std::thread::sleep(per_char);
+    }
+    Ok(())
 }
 
 fn mouse_event(flags: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS) -> INPUT {

@@ -105,6 +105,16 @@ impl Lexica {
         self.lexicons.iter().map(|l| l.status_key.as_str()).collect()
     }
 
+    /// Is this word in **any** lexicon, regardless of the enemy?
+    ///
+    /// For measurement, not play. Comparing our score to the game's requires a word no lexicon can
+    /// touch: a bonus we do not model would inflate the game's answer, and we would read our own
+    /// blind spot as a scoring error.
+    pub fn contains_anywhere(&self, word: &str) -> bool {
+        let up = word.to_ascii_uppercase();
+        self.lexicons.iter().any(|l| l.words.contains(&up))
+    }
+
     /// Words to exclude from the search, given the enemy's status effects.
     ///
     /// Excludes any word belonging to a lexicon whose status value is `<= 1` — resist or immune.
