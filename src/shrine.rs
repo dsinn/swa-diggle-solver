@@ -103,6 +103,17 @@
 //!    why it only becomes reachable once Consecrate has gone away. `showPrayButton` additionally
 //!    wants `areaUnused(key)`, so praying is lost if the area has been used first.
 //!
+//! Two conditions on step 4 shape the whole run, and neither is guessable from the map:
+//!
+//! - **`hell ~= 0`.** `showConsecrateButton` (`:93-96`) reduces to
+//!   `(hell ~= 0 and not consecrated) or areaHasBeenUsed(key)`, so consecrating is essentially
+//!   impossible until the anomaly has been opened. Doing shrines "first" is not a strategy, it is a
+//!   dead end — which is why [`crate::overworld::Goal::Shrine`] ranks below opening it.
+//! - **`majorShrine`.** Consecrate never appears at a minor shrine at all. Those offer only `Pray`,
+//!   which `showPrayButton` allows for a non-major shrine whatever the `hell` value. Nothing in
+//!   `AreaHeading` distinguishes the two, so the live sequence has to try Consecrate and fall back
+//!   to Pray rather than decide in advance.
+//!
 //! Both right-hand buttons resolve to roughly (1732, 972) at 1920x1080 — adjacent to the combat
 //! `Finish` slot, and worth aiming carefully.
 //!

@@ -153,7 +153,12 @@ pub enum Goal {
     OpenTheAnomaly,
     /// Health is down and somewhere nearby can restore it.
     Rest,
-    /// A shrine we have not consecrated. Worth a detour in its own right.
+    /// A shrine we have not consecrated.
+    ///
+    /// Ranked below [`Goal::OpenTheAnomaly`] because consecrating is *impossible* until the anomaly
+    /// is open — `showConsecrateButton` requires `hell ~= 0` (`shrine.lua:93-96`). Once it is open,
+    /// corruption resets areas to incomplete, so a shrine needing a fight only earns a detour if it
+    /// already lies on the route; one that is merely awaiting a `Visit` stays cheap.
     Shrine,
     /// Somewhere unseen, to grow the map toward one of the above.
     Explore,
@@ -341,25 +346,15 @@ impl WorldMap {
             }
         }
 
-        // Shrines are worth going out of the way for, and worth doing BEFORE the anomaly opens:
-        // `hell ~= 0` changes a shrine's variant (`overworld/locations/shrine.lua:46-52`) and the
-        // portal starts drawing beams at it, so a shrine left until afterwards is a shrine met on
-        // worse terms. Consecrating one means clearing its combat first and then `Visit`
-        // (`:61-72`), which the loop reaches naturally: the trip stops at the fight on the way in.
-        if let Some(p) = self
-            .places
-            .values()
-            .filter(|p| p.key != here && !p.avoid && p.type_is("shrine") && !p.consecrated)
-            .min_by_key(|p| dist_or_far(&self.distances(here), &p.key))
-        {
-            return Some(Plan { target: p.key.clone(), reason: Goal::Shrine });
-        }
 
-        // Opening the anomaly comes AFTER shrines, deliberately. It is the objective, but it is
-        // also a one-way door: once `hell ~= 0` the world is on different terms, and any shrine
-        // still outstanding is met on worse ones. Only worth aiming at while the trigger is unspent
-        // — `anomaly_available` is `None` before any save has been read, and an unknown flag is
-        // treated as still available, since a wasted trip is cheaper than stranding the run.
+        // Opening the anomaly comes BEFORE shrines, and not only because it is the objective:
+        // **consecration is impossible until it is open.** `showConsecrateButton`
+        // (`shrine.lua:93-96`) needs `hell ~= 0`, so a run that saved its shrines for first would
+        // arrive at every one of them unable to finish it.
+        //
+        // Only worth aiming at while the trigger is unspent — `anomaly_available` is `None` before
+        // any save has been read, and an unknown flag is treated as still available, since a wasted
+        // trip is cheaper than stranding the run.
         if self.anomaly_available().unwrap_or(true) {
             let mut candidates: Vec<&Place> = self
                 .places
@@ -379,6 +374,44 @@ impl WorldMap {
             }
         }
 
+        // Shrines are worth going out of the way for, once the anomaly has opened and made
+        // consecrating them possible at all. Getting one done means clearing its combat and then
+        // `Visit` (`overworld/locations/shrine.lua:61-72`), which the loop reaches naturally: the
+        // trip stops at the fight on the way in.
+        //
+        // Corruption changes the price of one, and we do not have to predict where it lands.
+        // `hellCheck` (`overworld/locations/hellportal.lua:16-23`) is a radius about the world
+        // ORIGIN — not about the anomaly — with a perlin-noise boundary, widening as the `hell`
+        // value grows. What matters is the consequence: `setHellValue` (`:169-175`) calls
+        // `setAreaIncomplete` on everything the radius swallows. A corrupted shrine is therefore an
+        // **incomplete** one, and that is already in `completedAreas`.
+        //
+        // So the test is not "is it corrupted" but "does it still need a fight". A complete shrine
+        // only wants `Visit` and stays worth a detour. An incomplete one costs a fight, and once the
+        // anomaly is open that is a fight we no longer need — so it qualifies only if it already
+        // lies on the shortest known route, where we are walking through it regardless.
+        //
+        // The empty-route case is *restrictive*: anomaly open but not yet found means no shrine
+        // needing a fight is worth it, because the job is to find the anomaly.
+        let route = if self.anomaly_available().unwrap_or(true) {
+            None
+        } else {
+            Some(self.anomaly_route().unwrap_or_default())
+        };
+        let dist = self.distances(here);
+        if let Some(p) = self
+            .places
+            .values()
+            .filter(|p| p.key != here && !p.avoid && p.type_is("shrine") && !p.consecrated)
+            .filter(|p| match &route {
+                // Needs no fight, or is already underfoot.
+                Some(r) => p.completed || r.contains(&p.key),
+                None => true,
+            })
+            .min_by_key(|p| dist_or_far(&dist, &p.key))
+        {
+            return Some(Plan { target: p.key.clone(), reason: Goal::Shrine });
+        }
         // Nothing qualifying is known yet, so grow the map. Unvisited places first — standing on one
         // is what produces a dump — and among those prefer the ones still hiding neighbours.
         let mut frontier: Vec<&Place> =
@@ -450,6 +483,47 @@ impl WorldMap {
             a.avoid.cmp(&b.avoid).then(a.visited.cmp(&b.visited)).then(a.key.cmp(&b.key))
         });
         options.first().map(|p| Hop { step: p.key.clone(), plan })
+    }
+
+    /// The shortest known route to the open anomaly, or `None` while it is still shut.
+    ///
+    /// `None` means "detour freely" — before the anomaly opens there is no corruption to avoid and
+    /// nothing to hurry toward. `Some(route)` restricts side trips to what is already underfoot.
+    fn anomaly_route(&self) -> Option<Vec<String>> {
+        let here = self.here.as_deref()?;
+        let target = self.places.values().find(|p| p.type_is("anomaly") && !p.completed)?;
+        self.route(here, &target.key)
+    }
+
+    /// Every step of a shortest known path from `from` to `to`, inclusive of `to`.
+    fn route(&self, from: &str, to: &str) -> Option<Vec<String>> {
+        let mut came: BTreeMap<String, String> = BTreeMap::new();
+        let mut seen: BTreeSet<&str> = [from].into_iter().collect();
+        let mut queue: std::collections::VecDeque<&str> = [from].into();
+        while let Some(key) = queue.pop_front() {
+            if key == to {
+                let mut path = vec![to.to_string()];
+                let mut cur = to.to_string();
+                while let Some(prev) = came.get(&cur) {
+                    if prev == from {
+                        break;
+                    }
+                    path.push(prev.clone());
+                    cur = prev.clone();
+                }
+                path.reverse();
+                return Some(path);
+            }
+            if let Some(p) = self.places.get(key) {
+                for n in &p.neighbours {
+                    if seen.insert(n.as_str()) {
+                        came.insert(n.clone(), key.to_string());
+                        queue.push_back(n.as_str());
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Hops from `from` to every place reachable through known edges.
@@ -886,16 +960,71 @@ mod tests {
     }
 
     #[test]
-    fn shrines_come_before_opening_the_anomaly() {
-        // `hell ~= 0` changes a shrine's variant and the portal beams at it, so a shrine left until
-        // after the trigger is met on worse terms.
+    fn once_the_anomaly_is_open_only_shrines_already_underfoot_are_worth_it() {
+        // A corrupted shrine has to be fought through again, and corruption is invisible in the
+        // heading -- so after the door opens we stop detouring and take only what is on the way.
+        // here — detour(shrine) is a dead end; here — mid(shrine) — rift is the route.
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "here",
+            "camp",
+            vec![node("detour", "Faraway shrine"), node("mid", "Midway shrine")],
+        ));
+        m.fold(&dump("mid", "Midway shrine", vec![node("here", "camp"), node("rift", "The Rift anomaly")]));
+        m.here = Some("here".into());
+
+        // Open: the anomaly is the goal, and the route runs through `mid` but not `detour`.
+        m.hell = Some(1);
+        assert_eq!(m.next_target().unwrap().reason, Goal::Anomaly);
+        let route = m.anomaly_route().unwrap();
+        assert!(route.contains(&"mid".to_string()), "route: {route:?}");
+        assert!(!route.contains(&"detour".to_string()), "the dead-end shrine is not on the way");
+
+        // And no shrine is proposed as a destination while it is open: `Anomaly` outranks `Shrine`,
+        // so an on-route shrine is something we walk *through*, not something we set out for. Doing
+        // it is therefore an arrival-time decision, not a routing one.
+        m.entry("rift").completed = true;
+        assert_ne!(
+            m.next_target().unwrap().reason,
+            Goal::Shrine,
+            "with the anomaly open, shrines stop being destinations"
+        );
+    }
+
+    #[test]
+    fn with_the_anomaly_open_a_shrine_needing_a_fight_is_skipped_but_a_finished_one_is_not() {
+        // Corruption resets an area to incomplete (`hellportal.lua:169-175`), so "corrupted" and
+        // "needs a fight" are the same question, and `completedAreas` answers it. A shrine that
+        // only wants `Visit` is still cheap.
+        let mut m = WorldMap::new();
+        let mut d = dump("here", "camp", vec![node("s1", "Faraway shrine"), node("l2", "Quiet Glade meadow")]);
+        d.hidden = 1;
+        m.fold(&d);
+        m.hell = Some(1);
+        // Incomplete and off-route: a fight we no longer need.
+        assert_ne!(m.next_target().unwrap().reason, Goal::Shrine);
+        // Same shrine, already cleared: only a Visit stands between us and consecrating it.
+        m.entry("s1").completed = true;
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Shrine);
+        assert_eq!(plan.target, "s1");
+    }
+
+    #[test]
+    fn opening_the_anomaly_comes_before_shrines() {
+        // Not merely a priority call: `showConsecrateButton` needs `hell ~= 0`
+        // (`shrine.lua:93-96`), so a run that did shrines first would reach each one unable to
+        // finish it.
         let mut m = WorldMap::new();
         m.fold(&dump(
             "here",
             "camp",
             vec![node("shrine2", "Gransmoor shrine"), node("l39", "Eight Timberland — level 4 forest")],
         ));
-        assert_eq!(m.next_target().unwrap().reason, Goal::Shrine);
+        m.hell = Some(0);
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::OpenTheAnomaly);
+        assert_eq!(plan.target, "l39");
     }
 
     #[test]
