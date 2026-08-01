@@ -473,7 +473,13 @@ impl WorldMap {
             let mut sites: Vec<(&Place, crate::rest::Site)> = self
                 .places
                 .values()
-                .filter(|p| p.key != here && !p.avoid)
+                // A corrupted village is not a rest stop. Corruption swaps a location's type for its
+                // `corruptType` and puts the place under attack, so the inn is behind
+                // `underAttackAreaButtons` or gone entirely to `destroyedAreaButtons`
+                // (`overworld/generators/village.lua:371-395`) — and the heading still ends in
+                // "village", so nothing else here would notice. Met live as
+                // `Ulrome — level 6 village [corrupted]`.
+                .filter(|p| p.key != here && !p.avoid && !p.corrupted)
                 .filter_map(|p| crate::rest::site(&p.heading).map(|s| (p, s)))
                 .filter(|(p, s)| crate::rest::can_rest_at(*s, self.gold, self.fuel, !p.used))
                 .collect();
@@ -1173,6 +1179,18 @@ mod tests {
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Rest);
         assert_eq!(plan.target, "start", "the campfire, not the village");
+    }
+
+    #[test]
+    fn a_corrupted_village_is_not_a_rest_stop() {
+        // Met live: `Ulrome — level 6 village [corrupted]`. The heading still says "village", so
+        // without the corruption check the run walks to an inn that is under attack or destroyed.
+        let mut m = hurt_at_l1();
+        m.entry("start").used = true; // the campfire is spent, so only the village is left
+        m.gold = 50;
+        assert_eq!(m.next_target().unwrap().target, "l10");
+        m.entry("l10").corrupted = true;
+        assert_ne!(m.next_target().unwrap().reason, Goal::Rest, "its inn is overrun");
     }
 
     #[test]

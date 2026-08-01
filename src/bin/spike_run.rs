@@ -345,7 +345,21 @@ fn drive(
                 pregame = r.feed.seen_since(mark, "Pregame screen:");
             }
             if !pregame {
-                return Stop::Failed(format!("no pregame at {here}"));
+                // No pregame does not mean failure. `getLocationButtons` tests `typeData.subworld`
+                // BEFORE `basicCombatZone` (`overworldview.lua:462-467`), so on a forest or a
+                // village that button ENTERED the place instead of starting a fight -- and their
+                // headings (`Eight Timberland — level 4 forest`, `Ulrome — level 6 village`) read
+                // exactly like fights. Record what we just learned and let the next iteration deal
+                // with being inside; failing here left the run standing in a village.
+                r.pump();
+                if let Some(container) = r.map.inside().map(|s| s.to_string()) {
+                    r.log.push_str(&format!(
+                        "  no pregame — that button entered `{container}`, which is a subworld
+"
+                    ));
+                    continue;
+                }
+                return Stop::Failed(format!("no pregame and no subworld at {here}"));
             }
             r.keys.focus();
             std::thread::sleep(Duration::from_millis(400));
