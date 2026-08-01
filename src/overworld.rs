@@ -406,11 +406,27 @@ impl WorldMap {
             self.entry(&a.here_key).neighbours.insert(n.key.clone());
         }
 
-        // Exits lead OUT of the subworld, so what they name belongs to the parent world, not here.
-        for e in &a.exits {
-            let place = self.entry(&e.to_key);
-            if place.heading.is_empty() {
-                place.heading = e.to_heading.clone();
+        // Exits lead OUT of the subworld, so what they name belongs to the parent world, not here —
+        // and each one is a **surface edge**, `container <-> to_key`, which is the only place we ever
+        // learn the container's neighbourhood.
+        //
+        // Dropping those edges was expensive. Standing inside Ulrome the game names all five of its
+        // overworld neighbours (`overworldview.lua:1040-1047`), and we kept only their headings. So
+        // `distances(target)` could reach exactly one of them — the one an earlier surface dump had
+        // happened to mention — and ranking exits by distance degenerated into "leave the way you
+        // came", every time, regardless of where the anomaly was.
+        //
+        // Entering a subworld is otherwise a blind spot: we travel onto the container and go straight
+        // inside, so no surface dump is ever taken standing on it. This is the substitute, and it
+        // arrives for free.
+        if let Some((container, _)) = a.subworld.as_ref() {
+            for e in &a.exits {
+                let place = self.entry(&e.to_key);
+                if place.heading.is_empty() {
+                    place.heading = e.to_heading.clone();
+                }
+                place.neighbours.insert(container.clone());
+                self.entry(container).neighbours.insert(e.to_key.clone());
             }
         }
     }
@@ -729,14 +745,18 @@ impl WorldMap {
                 .min_by_key(|e| dist_or_far(&dist, &e.to_key))
             {
                 // Retreating through the entrance is only right when it is genuinely the way on —
-                // backtracking to an inn, say. What made a live run turn straight back out of Ulrome
-                // was subtler: l19 was the *only* exit whose distance we knew, because every other
-                // neighbour was unexplored and therefore scored infinite. Known-but-backward beat
-                // unknown-but-forward every time.
+                // backtracking to an inn, say.
                 //
-                // So when the winner is the way we came in, prefer an exit into somewhere we have
-                // never been. An unvisited node is not a worse bet than the room we just left; it is
-                // an unmeasured one, and the whole point of being here is to get somewhere new.
+                // The root cause of a live run turning straight back out of Ulrome was upstream of
+                // here, in `fold`: the container's exit edges were being thrown away, so `distances`
+                // could reach exactly one exit and "nearest" meant "the only one we had". That is
+                // fixed, and this is no longer what saves that case.
+                //
+                // It stays because the degenerate case is real whenever the target is not reachable
+                // through *any* exit yet -- which is the normal state, since heading for the anomaly
+                // means heading for a node we have never stood on. Preference must not collapse onto
+                // already-visited ground: an unvisited exit is not a worse bet than the room we just
+                // left, it is an unmeasured one, and unmeasured is the entire point of exploring.
                 if Some(&best.to_key) == entrance.as_ref() {
                     if let Some(onward) = exits.iter().find(|e| {
                         Some(&e.to_key) != entrance.as_ref()
@@ -978,6 +998,35 @@ mod tests {
 
     fn exit(to: &str) -> Exit {
         Exit { x: 0.0, y: 0.0, to_key: to.into(), to_heading: format!("{to} heading") }
+    }
+
+    #[test]
+    fn a_subworlds_exits_are_its_containers_overworld_edges() {
+        // The only place the container's neighbourhood is ever learned. We travel onto a village and
+        // step straight inside, so no surface dump is taken standing on it.
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post", vec![],
+            vec![exit("l7"), exit("l1"), exit("l18"), exit("l4"), exit("l19")]));
+        let l10 = m.get("l10").expect("container");
+        for k in ["l7", "l1", "l18", "l4", "l19"] {
+            assert!(l10.neighbours.contains(k), "l10 should know it borders {k}");
+            assert!(m.get(k).unwrap().neighbours.contains("l10"), "{k} should know it borders l10");
+        }
+    }
+
+    #[test]
+    fn exit_edges_make_a_route_through_the_village_visible() {
+        // With the edges kept, a target beyond an unentered exit becomes reachable, so ranking by
+        // distance means something. Without them every exit but the entrance scored infinite and the
+        // village was a revolving door.
+        let mut m = WorldMap::new();
+        m.fold(&dump("l19", "Gipsyville crypt", vec![node("l10", "Ulrome — level 6 village")]));
+        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post", vec![],
+            vec![exit("l19"), exit("l7")]));
+        // l19 -> l10 -> l7 is now a path, so l7 is two hops from where we entered rather than absent.
+        let d = m.distances("l7");
+        assert_eq!(d.get("l10"), Some(&1));
+        assert_eq!(d.get("l19"), Some(&2));
     }
 
     #[test]
