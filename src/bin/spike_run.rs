@@ -35,11 +35,12 @@
 use diggle_solver::config::Config;
 use diggle_solver::fight::{Fight, Outcome};
 use diggle_solver::observe::adjacency::{self, Adjacency};
+use diggle_solver::observe::affirm;
 use diggle_solver::observe::event;
 use diggle_solver::observe::feed::Feed;
 use diggle_solver::observe::log::{Console, LogMirror};
 use diggle_solver::overworld::{Goal, WorldMap};
-use diggle_solver::win::input::{click_at, warp_cursor, Input, PostMessageInput, SC_SPACE, VK_SPACE};
+use diggle_solver::win::input::{click_at_in, warp_cursor, Input, PostMessageInput, SC_SPACE, VK_SPACE};
 use diggle_solver::win::window::GameWindow;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -78,14 +79,25 @@ struct Run<'a> {
     latest: Option<Adjacency>,
     save_dir: PathBuf,
     log: String,
-    /// How many `Lore screen:` announcements we have answered.
+    /// The game's own `right-*.png` artwork, for reading the affirmative slot off the screen.
     ///
-    /// Counted rather than marked. The lines arrive while some earlier action is pumping, so a mark
-    /// taken at the top of the next iteration is already past them — that is how a run sat at a
-    /// village gate whose text was sitting in the buffer. And they come in runs: entering Ulrome
-    /// printed two at once, each needing its own dismissal, so "have I seen one since X" cannot
-    /// answer "how many are left".
-    lore_done: usize,
+    /// This replaced a tally of `Lore screen:` console lines. The tally could only ever answer "how
+    /// many text screens were constructed", when what a press needs to know is "is a live control on
+    /// the screen right now" — and it was open-loop, so our count and the game's reality could only
+    /// drift. See [`diggle_solver::observe::affirm`].
+    affirm: affirm::ButtonArt,
+    /// Feed line index of the last `Event:` block we acted on.
+    ///
+    /// Identity, not a tally. The previous design read `feed.since(mark)` with the mark taken at the
+    /// top of the loop, which threw away any event announced during the *previous* iteration's pump
+    /// — and that is precisely when they arrive, because clearing the text screen in front of the
+    /// event is what causes the event to announce itself. Proof from a live log: the two
+    /// `Lore screen:` lines and the `Event:` line landed at 119-121, all before the next mark.
+    ///
+    /// Keying on the block's position makes the read idempotent and self-resyncing: a newer event
+    /// has a larger index, the same event has the same index, and nothing has to stay in step with a
+    /// count that can drift.
+    answered_event: Option<usize>,
 }
 
 impl Run<'_> {
@@ -116,11 +128,11 @@ impl Run<'_> {
     /// against a visible Combat button. `Screen pan finished` (`:1255`) is the signal.
     fn recentre(&mut self) -> Option<Adjacency> {
         let (ex, ey) = self.win.client_to_screen(EMPTY_MAP.0, EMPTY_MAP.1).ok()?;
-        let _ = click_at(ex, ey);
+        let _ = click_at_in(self.win, ex, ey);
         std::thread::sleep(Duration::from_millis(500));
         self.pump();
         let (lx, ly) = self.win.client_to_screen(LOCATE_ME.0, LOCATE_ME.1).ok()?;
-        let _ = click_at(lx, ly);
+        let _ = click_at_in(self.win, lx, ly);
         self.park();
         let by = Instant::now() + Duration::from_secs(12);
         while Instant::now() < by {
@@ -139,7 +151,7 @@ impl Run<'_> {
     fn click_area_button(&mut self, what: &str) -> Result<bool, Box<dyn std::error::Error>> {
         let before = diggle_solver::win::capture::capture_window(self.win)?;
         let (bx, by) = self.win.client_to_screen(AREA_BUTTON.0, AREA_BUTTON.1)?;
-        click_at(bx, by)?;
+        click_at_in(self.win, bx, by)?;
         self.park();
         std::thread::sleep(Duration::from_millis(1000));
         self.pump();
@@ -149,41 +161,83 @@ impl Run<'_> {
         Ok(moved > 0.05)
     }
 
-    /// Dismisses a lore screen if one is up.
+    /// Reads the affirmative slot in the bottom-right corner.
+    fn affirmative(&self) -> affirm::Reading {
+        match diggle_solver::win::capture::capture_window(self.win) {
+            Ok(f) => self.affirm.read(&f, &affirm::LORE_AFFIRMATIVE),
+            Err(_) => affirm::Reading { state: affirm::State::Absent, score: 0.0, margin: 0.0 },
+        }
+    }
+
+    /// Clears a text screen that is gating everything behind it, if one is up.
     ///
-    /// The text comes **before** the options. Entering a corrupted village shows a lore screen
-    /// first, and while it is up the event's choices do not exist yet — so `parse_events` finds
-    /// nothing, the map is not on screen, and everything downstream stalls. A live run sat at a
-    /// village gate for exactly this reason.
+    /// Text comes **before** options: while a lore screen is up, the event's choices do not exist
+    /// yet, so `parse_events` finds nothing, the map is not on screen, and everything downstream
+    /// stalls. A live run sat at a village gate for exactly this reason.
     ///
-    /// Dismissed with Space rather than a click: the button declares
-    /// `userFunctionName = 'affirmative'` (`ui/lorescreen.lua:46-50`), which is read rather than
-    /// assumed, and its position varies with whether it carries text.
-    fn dismiss_lore(&mut self) -> bool {
-        let seen = self.feed.lines().iter().filter(|l| l.contains("Lore screen:")).count();
-        if seen <= self.lore_done {
+    /// The loop is read → act → **re-read**, which is the shape every input in this project should
+    /// have. The exit condition is the control no longer being pressable, observed rather than
+    /// assumed, so a press swallowed by a fade costs one more iteration instead of stranding the run.
+    /// Text screens also arrive in runs — entering Ulrome printed two at once — and that needs no
+    /// special handling here: the next read simply finds the next one.
+    ///
+    /// Space rather than a click, because the button declares `userFunctionName = 'affirmative'`
+    /// (`ui/lorescreen.lua:49`) and `space = 'affirmative'` (`utils/defaultbinds/keyboard.lua:13`).
+    /// Reading the binding beats assuming a coordinate, and this button's position moves with
+    /// whether it carries a label.
+    fn clear_text_screen(&mut self) -> bool {
+        let first = self.affirmative();
+        // Logged even when there is nothing to do. A gate that has never been calibrated against a
+        // live screen must show its score for the negative case too, or `Absent` is
+        // indistinguishable from a threshold set too high.
+        self.log.push_str(&format!(
+            "  affirmative slot: {:?} (score {:.2}, margin {:.2})\n",
+            first.state, first.score, first.margin
+        ));
+        if !first.state.is_ready() {
             return false;
         }
-        let _ = diggle_solver::observe::settle::wait_for_quiescence(self.win, 0.02, Duration::from_secs(8));
-        for _ in 0..4 {
-            let Ok(before) = diggle_solver::win::capture::capture_window(self.win) else { break };
+        for attempt in 1..=6 {
+            // Not for the *button* — that is already known live — but for the screen behind it. A
+            // press during a transition is dropped silently.
+            let _ =
+                diggle_solver::observe::settle::wait_for_quiescence(self.win, 0.02, Duration::from_secs(8));
             self.keys.focus();
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(Duration::from_millis(150));
             let _ = self.keys.press_key(VK_SPACE, SC_SPACE);
-            std::thread::sleep(Duration::from_millis(900));
+            std::thread::sleep(Duration::from_millis(700));
             self.pump();
-            let Ok(after) = diggle_solver::win::capture::capture_window(self.win) else { break };
-            if before.diff_fraction(&after, diggle_solver::observe::settle::FULL) > 0.05 {
-                break;
+            let now = self.affirmative();
+            if !now.state.is_ready() {
+                self.log.push_str(&format!("  cleared after {attempt} press(es)\n"));
+                return true;
             }
+            self.log.push_str(&format!(
+                "  press {attempt} did not take (still {:?}, score {:.2})\n",
+                now.state, now.score
+            ));
         }
-        self.log.push_str("  dismissed a lore screen\n");
+        // Reported, not swallowed: still-ready after six presses means the reading and the binding
+        // disagree, and that is worth seeing in the log rather than looping forever.
+        self.log.push_str("  affirmative still live after 6 presses — giving up on it\n");
         true
     }
 
-    /// Answers an arrival event, if one is up. Returns its title.
-    fn handle_event(&mut self, mark: usize) -> Option<String> {
-        let ev = event::parse_events(self.feed.since(mark)).pop()?;
+    /// Answers an arrival event, if an unanswered one has been announced. Returns its title.
+    ///
+    /// Scans the whole feed rather than a window. See [`Run::answered_event`] for why the window was
+    /// wrong; the short version is that the event announces itself while we are busy dismissing the
+    /// text screen in front of it, so any window opened afterwards is already too late.
+    fn handle_event(&mut self) -> Option<String> {
+        let at = self.feed.lines().iter().rposition(|l| l.starts_with("Event:"))?;
+        if self.answered_event == Some(at) {
+            return None;
+        }
+        let tail: Vec<String> = self.feed.lines()[at..].to_vec();
+        // Recorded before acting, not after: a click that half-lands must not leave us free to
+        // answer the same event again on the next pass.
+        self.answered_event = Some(at);
+        let ev = event::parse_events(&tail).pop()?;
         self.log.push_str(&format!("  event **{}**: {:?}\n", ev.title,
             ev.choices.iter().map(|c| c.text.clone()).collect::<Vec<_>>()));
         // Never `choices[0]`: a corrupted village can put "Kill him" first.
@@ -198,7 +252,7 @@ impl Run<'_> {
         if let Ok((cx, cy)) = self.win.client_to_screen(c.x, c.y) {
             for _ in 0..4 {
                 let before = diggle_solver::win::capture::capture_window(self.win).ok()?;
-                let _ = click_at(cx, cy);
+                let _ = click_at_in(self.win, cx, cy);
                 self.park();
                 std::thread::sleep(Duration::from_millis(900));
                 self.pump();
@@ -223,6 +277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let console = Console::take()?;
     let mirror = LogMirror::create(Path::new("spike-run-raw.log"))?;
+    let launched = Instant::now();
     let mut game = diggle_solver::game::launch::GameProcess::launch(&cfg, &console)?;
     let win = game.wait_for_window(Duration::from_secs(20))?;
     std::thread::sleep(Duration::from_secs(3));
@@ -236,10 +291,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         latest: None,
         save_dir: save_dir.clone(),
         log: String::from("# Spike: the run\n\n"),
-        lore_done: 0,
+        affirm: affirm::ButtonArt::load(Path::new(&cfg.game_dir), "right")?,
+        answered_event: None,
     };
 
-    if diggle_solver::act::click_when_ready(&win, &diggle_solver::act::CONTINUE, Duration::from_secs(30)).is_err() {
+    // Timed because the startup felt slow and nobody could say which part was slow. `wait_for_window`
+    // returns as soon as the HWND exists, the fixed 3 s after it is a guess, and `click_when_ready`
+    // polls `locate` every 400 ms — three candidates, and guessing between them is how this project
+    // wastes afternoons.
+    let menu_at = Instant::now();
+    let found = diggle_solver::act::click_when_ready(
+        &win, &diggle_solver::act::CONTINUE, Duration::from_secs(30),
+    );
+    r.log.push_str(&format!(
+        "launch->window+3s {:?}, Continue found and clicked after a further {:?}\n",
+        launched.elapsed() - menu_at.duration_since(launched),
+        menu_at.elapsed()
+    ));
+    if found.is_err() {
         r.log.push_str("ABORT: no Continue\n");
         return finish(&mut game, &r.log);
     }
@@ -310,22 +379,48 @@ fn drive(
         // clicking the map does nothing and `recentre` times out with "no pan dump". Entering a
         // subworld raises one immediately, which is how a live run got stuck at a village gate it
         // had just walked through. Answer it first, then look at the map.
-        let mark = r.feed.mark();
         r.pump();
-        // Text first, then options: a lore screen hides the event's choices behind it.
-        if r.dismiss_lore() {
-            r.log.push_str(&format!("{step}. cleared text before looking at the map
-"));
-            continue;
-        }
-        if let Some(title) = r.handle_event(mark) {
-            r.log.push_str(&format!("{step}. answered `{title}` before looking at the map
-"));
-            continue;
+        // Text, then options, then whatever the choice raises next.
+        //
+        // Looped here rather than by falling back to the outer loop, because these chain: a choice
+        // commonly leads to another lore screen, so a village gate can be text, text, choice, text
+        // before the map is reachable. Re-entering the outer loop for each would spend a quarter of
+        // the run's twenty steps standing still — and the step budget exists to stop *wandering*,
+        // not to ration reading.
+        //
+        // Order matters: text gates options. While a lore screen is up the choices do not exist yet,
+        // so `parse_events` would find nothing and the map would not be on screen either.
+        for _ in 0..10 {
+            if r.clear_text_screen() {
+                r.log.push_str(&format!("{step}. cleared a text screen\n"));
+                continue;
+            }
+            match r.handle_event() {
+                Some(title) => r.log.push_str(&format!("{step}. answered `{title}`\n")),
+                None => break,
+            }
         }
 
-        let Some(fresh) = r.recentre() else {
-            return Stop::Failed("no pan dump after locate-me".into());
+        // Locate-me is an overworld control and does not work in a subworld — confirmed live. It is
+        // also unnecessary there: the dump fires on every *arrival* (`overworldview.lua:1442`), and
+        // inside a subworld we arrive every hop, so the coordinates are already as fresh as they get.
+        //
+        // The catch is that staleness is silent. An animated pan announces itself when
+        // `offsetTransition` completes (`:1253-1255`), but a mouse **drag** writes `xoffset` directly
+        // with no transition and no dump (`:1256-1259`) — so a dragged map invalidates every
+        // coordinate we hold without saying so. Hence: act on a dump immediately, never hold one
+        // across an action, and verify what the click did.
+        let inside_now = r.map.inside().is_some();
+        let fresh = if inside_now {
+            match r.latest.clone() {
+                Some(a) => a,
+                None => return Stop::Failed("inside a subworld with no dump to work from".into()),
+            }
+        } else {
+            match r.recentre() {
+                Some(a) => a,
+                None => return Stop::Failed("no pan dump after locate-me".into()),
+            }
         };
         let here = r.map.here().unwrap_or("?").to_string();
         let place = r.map.get(&here).cloned();
@@ -337,24 +432,47 @@ fn drive(
             return Stop::AtShrine(here);
         }
 
-        // Inside a subworld we cannot navigate: leave by the exit that gets us nearest the target.
-        // Nothing here knows how to cross a forest, and standing in one is the worst place to be.
+        // Inside a subworld: walk to the exit rather than reaching for it.
+        //
+        // A `Fight` verdict deliberately falls through to the combat handling below, because it is
+        // not a detour — `canTravelToDirect` refuses to move off an incomplete node, so clearing the
+        // one underfoot is the only legal move available.
+        let mut crossing = None;
         if let Some(container) = r.map.inside().map(|s| s.to_string()) {
-            let Some(want) = r.map.exit_toward(&fresh.exits) else {
-                return Stop::Failed(format!("inside {container} with no exit in this dump"));
+            match r.map.cross_toward(&fresh.exits) {
+                Some(diggle_solver::overworld::Crossing::Fight { at }) => r.log.push_str(&format!(
+                    "{step}. inside `{container}` — `{at}` must be cleared before we can leave it\n"
+                )),
+                Some(mv) => crossing = Some((container, mv)),
+                None => return Stop::Failed(format!("inside {container} with no crossing plan")),
+            }
+        }
+        if let Some((container, mv)) = crossing {
+            use diggle_solver::overworld::Crossing;
+            let (what, at) = match &mv {
+                Crossing::Leave { to } => {
+                    match fresh.exits.iter().find(|e| &e.to_key == to) {
+                        Some(e) => (format!("leaving `{container}` for `{to}`"), (e.x, e.y)),
+                        None => return Stop::Failed(format!("exit to {to} not on screen")),
+                    }
+                }
+                Crossing::Step { to, toward } | Crossing::Explore { to, toward } => {
+                    match fresh.nodes.iter().find(|n| &n.key == to) {
+                        Some(n) => (format!("crossing `{container}` toward `{toward}` via `{to}`"), (n.x, n.y)),
+                        None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
+                    }
+                }
+                Crossing::Fight { .. } => unreachable!("handled above"),
             };
-            let Some(e) = fresh.exits.iter().find(|e| e.to_key == want).cloned() else {
-                return Stop::Failed(format!("exit to {want} not on screen"));
-            };
-            r.log.push_str(&format!("{step}. inside `{container}` — leaving toward `{want}`\n"));
-            let Ok((ex, ey)) = r.win.client_to_screen(e.x as i32, e.y as i32) else {
+            r.log.push_str(&format!("{step}. {what}\n"));
+            let Ok((ax, ay)) = r.win.client_to_screen(at.0 as i32, at.1 as i32) else {
                 return Stop::Failed("coordinate conversion failed".into());
             };
-            let _ = click_at(ex, ey);
+            let _ = click_at_in(r.win, ax, ay);
             std::thread::sleep(Duration::from_millis(900));
             r.pump();
-            if !matches!(r.click_area_button("Travel (exit)"), Ok(true)) {
-                return Stop::Failed(format!("could not take the exit toward {want}"));
+            if !matches!(r.click_area_button("Travel (subworld)"), Ok(true)) {
+                return Stop::Failed(format!("could not take the step: {what}"));
             }
             std::thread::sleep(Duration::from_secs(3));
             r.pump();
@@ -474,7 +592,7 @@ fn drive(
         let Ok((sx, sy)) = r.win.client_to_screen(target.x as i32, target.y as i32) else {
             return Stop::Failed("coordinate conversion failed".into());
         };
-        let _ = click_at(sx, sy);
+        let _ = click_at_in(r.win, sx, sy);
         std::thread::sleep(Duration::from_millis(900));
         r.pump();
         let Ok(after) = diggle_solver::win::capture::capture_window(r.win) else {
@@ -490,13 +608,16 @@ fn drive(
         }
         r.park();
 
-        let mark = r.feed.mark();
         let by = Instant::now() + Duration::from_secs(60);
         let mut arrived = false;
         while Instant::now() < by && !arrived {
             std::thread::sleep(Duration::from_millis(300));
             r.pump();
-            r.handle_event(mark);
+            // Text before options here too. Arrival is detected from an adjacency dump, and a lore
+            // screen holds that dump back — so without this the loop would spin out its full 60 s
+            // waiting for a map that cannot be drawn until the text is gone.
+            r.clear_text_screen();
+            r.handle_event();
             arrived = r.map.here().map(|h| h != here).unwrap_or(false);
         }
         if !arrived {
@@ -513,9 +634,24 @@ fn drive(
     Stop::Exhausted
 }
 
+/// Writes the report and, unless asked not to, closes the game.
+///
+/// `DIGGLE_KEEP_OPEN=1` leaves it running on the screen that stopped the run. A stall is a *visual*
+/// fact — which controls are drawn, whether anything is still animating — and closing the game
+/// destroys the only copy of that evidence, forcing a fresh 15-minute run to see it again. It also
+/// lets a human look at the failure directly, which has been faster than any instrument here.
+///
+/// Note this leaves the save unflushed: `mainSaveData` is written on screen *exit*, so a checkpoint
+/// taken while the game is still up records the last screen the player left, not the current one.
 fn finish(
     game: &mut diggle_solver::game::launch::GameProcess, log: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("DIGGLE_KEEP_OPEN").as_deref() == Ok("1") {
+        std::fs::File::create(REPORT)?.write_all(log.as_bytes())?;
+        println!("{log}");
+        println!("\n-- game left running (DIGGLE_KEEP_OPEN=1); close it before any checkpoint --");
+        return Ok(());
+    }
     game.close(Duration::from_secs(15));
     std::fs::File::create(REPORT)?.write_all(log.as_bytes())?;
     println!("{log}");
