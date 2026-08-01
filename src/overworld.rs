@@ -61,6 +61,18 @@ pub struct Place {
     /// `<key>_consecrated` in `areaFlags`, which is exactly what `isConsecrated` reads
     /// (`overworldview.lua:319`). Only meaningful on a shrine.
     pub consecrated: bool,
+    /// Has corruption ever reset this area to incomplete?
+    ///
+    /// From `<key>_first_corrupt_time`, which `setAreaIncomplete` stamps with the activity counter
+    /// and never overwrites (`overworldview.lua:191-192`). This is what separates the two ways a
+    /// place can be incomplete: **never fought** (no flag — an ordinary fight) from **corrupted**
+    /// (flag present — reset by the spreading hell radius, and a nastier fight for it).
+    ///
+    /// Not a perfect oracle. `setAreaIncomplete` is also called twice during world generation
+    /// "just in case" (`utils/world.lua:1222`, `:1237`), so a false positive is possible; every
+    /// other caller is corruption — `setHellValue` (`hellportal.lua:173`), the `hellOpens` sequence
+    /// (`utils/events.lua:43,66,96`), and the subworld propagation downstream of them.
+    pub corrupted: bool,
     /// `<key>_used` in `areaFlags` — the flag `areaHasBeenUsed` reads
     /// (`overworldview.lua:215-218`). For a campfire this is the difference between a free rest and
     /// a wasted walk.
@@ -289,6 +301,17 @@ impl WorldMap {
             for k in used {
                 self.entry(&k).used = true;
             }
+            // `<key>_first_corrupt_time`. The `_shop` variant has a different suffix and so does
+            // not match, which is what we want — it says nothing about the area itself.
+            let corrupted: Vec<String> = flags
+                .map
+                .keys()
+                .filter_map(|k| k.strip_suffix("_first_corrupt_time"))
+                .map(|s| s.to_string())
+                .collect();
+            for k in corrupted {
+                self.entry(&k).corrupted = true;
+            }
             let consecrated: Vec<String> = flags
                 .map
                 .keys()
@@ -379,35 +402,28 @@ impl WorldMap {
         // `Visit` (`overworld/locations/shrine.lua:61-72`), which the loop reaches naturally: the
         // trip stops at the fight on the way in.
         //
-        // Corruption changes the price of one, and we do not have to predict where it lands.
-        // `hellCheck` (`overworld/locations/hellportal.lua:16-23`) is a radius about the world
-        // ORIGIN — not about the anomaly — with a perlin-noise boundary, widening as the `hell`
-        // value grows. What matters is the consequence: `setHellValue` (`:169-175`) calls
-        // `setAreaIncomplete` on everything the radius swallows. A corrupted shrine is therefore an
-        // **incomplete** one, and that is already in `completedAreas`.
+        // Corruption changes the price of one, and "incomplete" is too blunt a proxy for it. A
+        // shrine we revealed but never fought — perhaps far from the hell radius entirely — is
+        // incomplete and perfectly ordinary; a corrupted one was complete until the radius reached
+        // it. Both need a fight; only the second is the fight we want to avoid.
         //
-        // So the test is not "is it corrupted" but "does it still need a fight". A complete shrine
-        // only wants `Visit` and stays worth a detour. An incomplete one costs a fight, and once the
-        // anomaly is open that is a fight we no longer need — so it qualifies only if it already
-        // lies on the shortest known route, where we are walking through it regardless.
+        // [`Place::corrupted`] tells them apart from the save, so no prediction is needed.
+        // `hellCheck` (`overworld/locations/hellportal.lua:16-23`) is in any case a radius about the
+        // world ORIGIN with a perlin boundary — not about the anomaly — so predicting it would mean
+        // mirroring the noise field as well as the geometry.
         //
-        // The empty-route case is *restrictive*: anomaly open but not yet found means no shrine
-        // needing a fight is worth it, because the job is to find the anomaly.
-        let route = if self.anomaly_available().unwrap_or(true) {
-            None
-        } else {
-            Some(self.anomaly_route().unwrap_or_default())
-        };
+        // Note what this does NOT do. "Take a corrupted shrine if it is on the direct path to the
+        // anomaly" cannot be expressed here: while the anomaly is open and unfinished
+        // [`Goal::Anomaly`] outranks this branch, and once it is finished there is no path left. So
+        // a corrupted shrine is never a *destination* — passing through one is judged on arrival,
+        // by [`WorldMap::worth_consecrating_here`].
+        let anomaly_open = !self.anomaly_available().unwrap_or(true);
         let dist = self.distances(here);
         if let Some(p) = self
             .places
             .values()
             .filter(|p| p.key != here && !p.avoid && p.type_is("shrine") && !p.consecrated)
-            .filter(|p| match &route {
-                // Needs no fight, or is already underfoot.
-                Some(r) => p.completed || r.contains(&p.key),
-                None => true,
-            })
+            .filter(|p| !(anomaly_open && p.corrupted))
             .min_by_key(|p| dist_or_far(&dist, &p.key))
         {
             return Some(Plan { target: p.key.clone(), reason: Goal::Shrine });
@@ -483,6 +499,29 @@ impl WorldMap {
             a.avoid.cmp(&b.avoid).then(a.visited.cmp(&b.visited)).then(a.key.cmp(&b.key))
         });
         options.first().map(|p| Hop { step: p.key.clone(), plan })
+    }
+
+    /// Standing here, is this shrine worth consecrating before moving on?
+    ///
+    /// This is where "unless it is on the shortest direct path to the anomaly" actually lives.
+    /// Routing cannot honour that clause — see the note in [`WorldMap::next_target`] — so it is
+    /// asked on arrival instead, when the cost is only the shrine itself and not a detour.
+    ///
+    /// An uncorrupted shrine is always worth it. A corrupted one costs a fight, and earns it only
+    /// when we are walking through anyway.
+    pub fn worth_consecrating_here(&self, key: &str) -> bool {
+        let Some(p) = self.places.get(key) else { return false };
+        if !p.type_is("shrine") || p.consecrated {
+            return false;
+        }
+        // Consecrating needs the anomaly open at all (`shrine.lua:93-96`).
+        if self.anomaly_available().unwrap_or(true) {
+            return false;
+        }
+        if !p.corrupted {
+            return true;
+        }
+        self.anomaly_route().map(|r| r.contains(&key.to_string())).unwrap_or(false)
     }
 
     /// The shortest known route to the open anomaly, or `None` while it is still shut.
@@ -980,34 +1019,36 @@ mod tests {
         assert!(route.contains(&"mid".to_string()), "route: {route:?}");
         assert!(!route.contains(&"detour".to_string()), "the dead-end shrine is not on the way");
 
-        // And no shrine is proposed as a destination while it is open: `Anomaly` outranks `Shrine`,
-        // so an on-route shrine is something we walk *through*, not something we set out for. Doing
-        // it is therefore an arrival-time decision, not a routing one.
-        m.entry("rift").completed = true;
-        assert_ne!(
-            m.next_target().unwrap().reason,
-            Goal::Shrine,
-            "with the anomaly open, shrines stop being destinations"
-        );
+        // "Unless it is on the shortest direct path" is an ARRIVAL question, because `Anomaly`
+        // outranks `Shrine` for as long as the anomaly is unfinished. Both shrines corrupted:
+        // the one on the route earns its fight, the dead end does not.
+        m.entry("mid").corrupted = true;
+        m.entry("detour").corrupted = true;
+        assert!(m.worth_consecrating_here("mid"), "we are walking through it regardless");
+        assert!(!m.worth_consecrating_here("detour"), "a corrupted dead end is not worth the fight");
+
+        // And a corrupted shrine is never a destination while the anomaly is open.
+        assert_ne!(m.next_target().unwrap().reason, Goal::Shrine);
     }
 
     #[test]
-    fn with_the_anomaly_open_a_shrine_needing_a_fight_is_skipped_but_a_finished_one_is_not() {
-        // Corruption resets an area to incomplete (`hellportal.lua:169-175`), so "corrupted" and
-        // "needs a fight" are the same question, and `completedAreas` answers it. A shrine that
-        // only wants `Visit` is still cheap.
+    fn a_corrupted_shrine_is_skipped_where_a_merely_unfought_one_is_not() {
+        // The distinction "incomplete" cannot make: a shrine revealed far from the hell radius and
+        // never fought is an ordinary detour, while one the radius reset is the fight to avoid.
         let mut m = WorldMap::new();
         let mut d = dump("here", "camp", vec![node("s1", "Faraway shrine"), node("l2", "Quiet Glade meadow")]);
         d.hidden = 1;
         m.fold(&d);
         m.hell = Some(1);
-        // Incomplete and off-route: a fight we no longer need.
-        assert_ne!(m.next_target().unwrap().reason, Goal::Shrine);
-        // Same shrine, already cleared: only a Visit stands between us and consecrating it.
-        m.entry("s1").completed = true;
+
+        // Unfought but uncorrupted, and off-route: still worth going for.
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Shrine);
         assert_eq!(plan.target, "s1");
+
+        // Same shrine, once corruption has reset it: now a fight we no longer need.
+        m.entry("s1").corrupted = true;
+        assert_ne!(m.next_target().unwrap().reason, Goal::Shrine);
     }
 
     #[test]
@@ -1034,15 +1075,29 @@ mod tests {
                 overworld = {
                     playerLocation = "l19",
                     completedAreas = {},
-                    areaFlags = { hell = 0, shrine2_consecrated = true },
+                    areaFlags = {
+                        hell = 0,
+                        shrine2_consecrated = true,
+                        shrine9_first_corrupt_time = 0.42,
+                        shrine9_first_corrupt_time_shop = 3,
+                    },
                 },
             }"#,
         )
         .unwrap();
         let mut m = WorldMap::new();
-        m.fold(&dump("l19", "a crypt", vec![node("shrine2", "Gransmoor shrine")]));
+        m.fold(&dump(
+            "l19",
+            "a crypt",
+            vec![node("shrine2", "Gransmoor shrine"), node("shrine9", "Blighted shrine")],
+        ));
         m.apply_save(&save);
         assert!(m.get("shrine2").unwrap().consecrated);
+        assert!(!m.get("shrine2").unwrap().corrupted);
+        // `_first_corrupt_time` marks the reset; the `_shop` variant is a different suffix and must
+        // not be mistaken for a location key of its own.
+        assert!(m.get("shrine9").unwrap().corrupted);
+        assert!(m.get("shrine9_first_corrupt_time").is_none(), "no phantom place from the shop flag");
     }
 
     #[test]
