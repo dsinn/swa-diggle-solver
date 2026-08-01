@@ -237,10 +237,13 @@ impl Run<'_> {
             return false;
         }
         for attempt in 1..=6 {
-            // Not for the *button* — that is already known live — but for the screen behind it. A
-            // press during a transition is dropped silently.
+            // Short, because this is now insurance rather than the mechanism. The old 8 s cap was
+            // sized for a design that pressed once and hoped; a lore screen animates its text in, so
+            // it routinely ran the full wait and made entering a village feel hung. Read-act-re-read
+            // already handles a press swallowed by a transition — it costs one more iteration of
+            // about a second, which is cheaper than waiting eight up front, every time.
             let _ =
-                diggle_solver::observe::settle::wait_for_quiescence(self.win, 0.02, Duration::from_secs(8));
+                diggle_solver::observe::settle::wait_for_quiescence(self.win, 0.02, Duration::from_secs(2));
             self.keys.focus();
             std::thread::sleep(Duration::from_millis(150));
             let _ = self.keys.press_key(VK_SPACE, SC_SPACE);
@@ -320,6 +323,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut game = diggle_solver::game::launch::GameProcess::launch(&cfg, &console)?;
     let win = game.wait_for_window(Duration::from_secs(20))?;
     std::thread::sleep(Duration::from_secs(3));
+    let window_at = Instant::now();
 
     let mut r = Run {
         win: &win,
@@ -343,8 +347,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &win, &diggle_solver::act::CONTINUE, Duration::from_secs(30),
     );
     r.log.push_str(&format!(
-        "launch->window+3s {:?}, Continue found and clicked after a further {:?}\n",
-        launched.elapsed() - menu_at.duration_since(launched),
+        "launch->window+3s {:?}, then Continue took {:?}\n",
+        window_at.duration_since(launched),
         menu_at.elapsed()
     ));
     if found.is_err() {
