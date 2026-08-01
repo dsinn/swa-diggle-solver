@@ -11,6 +11,7 @@ pub mod overworld;
 pub mod score;
 pub mod rest;
 pub mod rested;
+pub mod flee;
 pub mod search;
 pub mod shrine;
 pub mod subworld;
