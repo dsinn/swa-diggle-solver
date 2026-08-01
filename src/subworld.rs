@@ -70,9 +70,14 @@
 ///    [`crate::overworld::WorldMap::exit_toward`] already picks it.
 /// 3. **Fight what is in the way.** Many nodes in a corrupted village carry combat, and it shows as
 ///    a button once we have landed on the node.
-/// 4. **Free the inn.** Clearing the corruption off a village's `store_inn` makes it usable, so a
-///    corrupted village is a rest stop we unlock rather than one we write off. Routing already
-///    treats `completed` as the release.
+/// 4. **Free the inn** — *assumed, not verified.* The working belief is that clearing the corruption
+///    off a village's `store_inn` makes it usable again, so a corrupted village is a rest stop to
+///    unlock rather than write off, and routing already treats `completed` as the release. No run
+///    has demonstrated it: the MVP is to reach the anomaly *quickly* — shrines included — so nothing
+///    has yet had reason to clear a corrupted village and then sleep there. It is cheap to believe
+///    and cheap to correct: being wrong costs one wasted detour, and the shape it would fail in is
+///    `destroyedAreaButtons` (`overworld/generators/village.lua:393-395`) replacing the button set
+///    outright, leaving nothing to rest at however thoroughly the place is cleared.
 ///
 /// What is missing is a *nested goal*: while inside, the objective is "reach this exit", not the
 /// overworld target. Routing currently aims outside, finds no path, and falls through to leaving.

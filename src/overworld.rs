@@ -480,8 +480,14 @@ impl WorldMap {
                 // "village", which is why nothing else here notices. Met live as
                 // `Ulrome — level 6 village [corrupted]`.
                 //
-                // Clearing it frees it, so `completed` is the release: an uncorrupted site, or a
-                // corrupted one we have already fought through, both serve.
+                // **ASSUMED, NOT VERIFIED.** We take it that clearing the corruption frees the inn,
+                // so `completed` is the release and a corrupted site we have fought through serves
+                // like any other. Nothing has tested it: the MVP is to reach the anomaly *quickly*,
+                // shrines included, so no run has yet had reason to clear a corrupted village and
+                // then sleep in it. If an inn stays destroyed once corruption has had it —
+                // `destroyedAreaButtons` replaces the button set outright
+                // (`overworld/generators/village.lua:393-395`) — this filter is wrong and corrupted
+                // villages go back to being written off.
                 .filter(|p| p.key != here && !p.avoid && (!p.corrupted || p.completed))
                 .filter_map(|p| crate::rest::site(&p.heading).map(|s| (p, s)))
                 .filter(|(p, s)| crate::rest::can_rest_at(*s, self.gold, self.fuel, !p.used))
