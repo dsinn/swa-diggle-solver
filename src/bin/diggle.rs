@@ -441,6 +441,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             PostMessageInput::new(win).type_text(&text)?;
             println!("typed {text:?}");
         }
+        // One click, in client pixels, with a before/after frame diff. The point is to answer
+        // "did that land?" for a single coordinate without spending a whole run to find out —
+        // which is how a stale-by-35px map went undiagnosed through three runs.
+        "click" => {
+            let cx: i32 = args.get(1).ok_or("usage: click <x> <y>")?.parse()?;
+            let cy: i32 = args.get(2).ok_or("usage: click <x> <y>")?.parse()?;
+            let (_, win) = attach()?;
+            let (sx, sy) = win.client_to_screen(cx, cy)?;
+            let before = diggle_solver::win::capture::capture_window(&win)?;
+            // Guarded: refuses unless the game is the window under that point, so a click can
+            // never be delivered to whatever else is on the desktop.
+            diggle_solver::win::input::click_at_in(&win, sx, sy)?;
+            std::thread::sleep(Duration::from_millis(900));
+            let after = diggle_solver::win::capture::capture_window(&win)?;
+            let moved = before.diff_fraction(&after, diggle_solver::observe::settle::FULL);
+            println!("clicked client=({cx},{cy}) screen=({sx},{sy}); screen moved {moved:.4}");
+        }
         "nav" => {
             let tx: i32 = args.get(1).ok_or("usage: nav <x> <y>")?.parse()?;
             let ty: i32 = args.get(2).ok_or("usage: nav <x> <y>")?.parse()?;
