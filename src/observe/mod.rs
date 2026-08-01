@@ -1,4 +1,5 @@
 pub mod adjacency;
+pub mod affirm;
 pub mod board;
 pub mod event;
 pub mod feed;
