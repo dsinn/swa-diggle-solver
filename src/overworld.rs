@@ -73,6 +73,10 @@ pub struct Place {
     /// other caller is corruption — `setHellValue` (`hellportal.lua:173`), the `hellOpens` sequence
     /// (`utils/events.lua:43,66,96`), and the subworld propagation downstream of them.
     pub corrupted: bool,
+    /// Completed **while corrupt**: `completedAreas[key..'_corrupt']` (`overworldview.lua:172`).
+    ///
+    /// On the anomaly this is the run's whole objective.
+    pub completed_corrupt: bool,
     /// `<key>_used` in `areaFlags` — the flag `areaHasBeenUsed` reads
     /// (`overworldview.lua:215-218`). For a campfire this is the difference between a free rest and
     /// a wasted walk.
@@ -148,6 +152,35 @@ pub struct Plan {
     pub reason: Goal,
 }
 
+/// Where the anomaly is, once it opens: the node we started on.
+///
+/// Not a guess and not something to go looking for. `overworld/generators/world.lua:492-507` runs
+/// when `areaFlag'hell' ~= 0` and does, in as many words:
+///
+/// ```lua
+/// locationData.start.corrupt = true
+/// locationData.start.type = 'portal'
+/// locationData.start.level = 8
+/// ```
+///
+/// So the portal *is* `start`, promoted in place — which is also why the objective was always
+/// `areaIsComplete'start_corrupt'`: beating the anomaly means completing the corrupted `start`.
+/// It is reached by a path we have necessarily already walked, since the run began there.
+///
+/// **A prior, not a law.** That is one generator; other worlds and start situations need not put
+/// the portal there. [`WorldMap::anomaly`] prefers a seen `anomaly` heading over this whenever it
+/// has one.
+pub const ANOMALY_KEY: &str = "start";
+
+/// `completedAreas` entry that means the anomaly has been beaten — the run's whole objective.
+///
+/// `setAreaComplete` writes `completedAreas[key..'_corrupt'] = loc.corrupt or nil`
+/// (`overworldview.lua:172`), so finishing the corrupted `start` sets exactly this.
+/// Kept as documentation of the game's own check rather than used directly: we read the
+/// `_corrupt` suffix generically into [`Place::completed_corrupt`], so the objective is asked of
+/// whichever node turns out to be the portal.
+pub const ANOMALY_BEATEN_KEY: &str = "start_corrupt";
+
 /// Hops to `key`, or [`usize::MAX`] when no known route reaches it — so unreachable places sort
 /// last rather than first.
 fn dist_or_far(dist: &BTreeMap<String, usize>, key: &str) -> usize {
@@ -203,6 +236,51 @@ impl WorldMap {
 
     pub fn places(&self) -> impl Iterator<Item = &Place> {
         self.places.values()
+    }
+
+    /// The anomaly, if it is open and still standing.
+    ///
+    /// Evidence first, prior second, and the order matters:
+    ///
+    /// 1. **A heading that says `anomaly`** is proof. `hellportal` has `typeName = 'anomaly'`, so a
+    ///    dump naming it settles the question wherever the portal ended up.
+    /// 2. **Otherwise [`ANOMALY_KEY`]**, but only as an assumption. Promoting `start` to the portal
+    ///    is what `overworld/generators/world.lua:492-507` does — that is *one* generator, and other
+    ///    worlds and start situations need not place it there. Preferring the key outright would
+    ///    send the run to a node that is merely where it began.
+    ///
+    /// The prior is still worth having: it is right for the default world, and it is available the
+    /// instant the anomaly opens, long before a dump shows the portal's new heading. Being wrong
+    /// costs a wasted trip, and the heading corrects it as soon as one is seen.
+    ///
+    /// [`WorldMap::anomaly_is_assumed`] says which of the two answered.
+    pub fn anomaly(&self) -> Option<&Place> {
+        if self.anomaly_available().unwrap_or(true) || self.anomaly_beaten() {
+            return None;
+        }
+        self.places
+            .values()
+            .find(|p| p.type_is("anomaly") && !p.completed)
+            .or_else(|| self.places.get(ANOMALY_KEY))
+    }
+
+    /// True when [`WorldMap::anomaly`] is going on the `start` prior rather than a seen heading.
+    ///
+    /// Worth surfacing: a caller that arrives and finds no portal should stop trusting it and
+    /// explore, rather than keep walking back to the same node.
+    pub fn anomaly_is_assumed(&self) -> bool {
+        self.anomaly().is_some_and(|p| !p.type_is("anomaly"))
+    }
+
+    /// Has the run's objective been met?
+    ///
+    /// Completing the portal *while corrupt* is what sets it, which is why the game's own check is
+    /// `areaIsComplete'start_corrupt'`. Asked of whichever node is the portal, so it does not depend
+    /// on the `start` prior being right.
+    pub fn anomaly_beaten(&self) -> bool {
+        self.places
+            .values()
+            .any(|p| p.completed_corrupt && (p.key == ANOMALY_KEY || p.type_is("anomaly")))
     }
 
     /// Has the anomaly already opened? `None` when no save has been read yet.
@@ -280,8 +358,19 @@ impl WorldMap {
     /// would let routing propose it as unexplored.
     pub fn apply_save(&mut self, save: &crate::game::save::Table) {
         if let Some(t) = save.table_at("overworld.completedAreas") {
+            // Not every key here is a location. `setAreaComplete` also writes `<key>_corrupt` for a
+            // corrupt area (`overworldview.lua:172`), and `setAreaIncomplete` manages
+            // `<key>_path_to_<k>` entries for subworld exits (`:201`). Folding those in as places
+            // invented destinations that routing would then try to walk to — `start_corrupt` showed
+            // up as an unvisited frontier and became the plan.
             for key in t.map.keys() {
-                self.entry(key).completed = true;
+                if let Some(base) = key.strip_suffix("_corrupt") {
+                    self.entry(base).completed_corrupt = true;
+                } else if key.contains("_path_to_") {
+                    continue;
+                } else {
+                    self.entry(key).completed = true;
+                }
             }
         }
         if let Some(flags) = save.table_at("overworld.areaFlags") {
@@ -350,7 +439,7 @@ impl WorldMap {
     pub fn next_target(&self) -> Option<Plan> {
         let here = self.here.as_deref().unwrap_or("");
 
-        if let Some(p) = self.places.values().find(|p| p.type_is("anomaly") && !p.completed) {
+        if let Some(p) = self.anomaly() {
             return Some(Plan { target: p.key.clone(), reason: Goal::Anomaly });
         }
 
@@ -534,7 +623,7 @@ impl WorldMap {
     /// nothing to hurry toward. `Some(route)` restricts side trips to what is already underfoot.
     fn anomaly_route(&self) -> Option<Vec<String>> {
         let here = self.here.as_deref()?;
-        let target = self.places.values().find(|p| p.type_is("anomaly") && !p.completed)?;
+        let target = self.anomaly()?;
         self.route(here, &target.key)
     }
 
@@ -750,10 +839,49 @@ mod tests {
     #[test]
     fn once_the_anomaly_has_opened_the_trigger_is_no_longer_a_goal() {
         let mut m = WorldMap::new();
+        // Standing on `start`, which the anomaly promoted to the portal under us.
         m.fold(&dump("start", "camp", vec![node("l4", "Grim Barrow — level 4 crypt")]));
         m.hell = Some(0.1); // the anomaly already opened
         let plan = m.next_target().unwrap();
-        assert_eq!(plan.reason, Goal::Explore, "chasing a spent trigger wastes the run");
+        assert_ne!(plan.reason, Goal::OpenTheAnomaly, "chasing a spent trigger wastes the run");
+    }
+
+    #[test]
+    fn the_anomaly_is_known_before_any_dump_names_it() {
+        // `start` is promoted to the portal in place, so once `hell` is nonzero we know where to go
+        // without exploring for it -- and after corruption, `start` is usually "(unheaded)" in our
+        // map because we only heard of it through save flags.
+        let mut m = WorldMap::new();
+        m.fold(&dump("l39", "Eight Timberland — level 4 forest", vec![node("l29", "Rookdale — level 3 crypt")]));
+        m.entry("start").corrupted = true;
+        m.hell = Some(0.1);
+        assert_eq!(m.anomaly().map(|p| p.key.as_str()), Some("start"));
+        assert!(m.anomaly_is_assumed(), "no heading has confirmed it yet");
+        assert_eq!(m.next_target().unwrap().reason, Goal::Anomaly);
+    }
+
+    #[test]
+    fn a_seen_anomaly_heading_beats_the_start_prior() {
+        // The portal is not always `start` -- that is one generator's doing. Wherever a dump names
+        // an `anomaly`, that is the answer and the prior must not override it.
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("start", "Cottam campfire"), node("rift", "The Maw anomaly")]));
+        m.hell = Some(0.1);
+        assert_eq!(m.anomaly().map(|p| p.key.as_str()), Some("rift"));
+        assert!(!m.anomaly_is_assumed(), "a heading confirmed it");
+    }
+
+    #[test]
+    fn beating_the_anomaly_ends_the_search_for_it() {
+        // The objective flag is `start_corrupt`, written by `setAreaComplete` for a corrupt area.
+        let mut m = WorldMap::new();
+        m.fold(&dump("l39", "a forest", vec![]));
+        m.hell = Some(0.1);
+        m.entry("start");
+        assert!(m.anomaly().is_some());
+        m.entry(ANOMALY_KEY).completed_corrupt = true;
+        assert!(m.anomaly_beaten());
+        assert!(m.anomaly().is_none(), "nothing left to go and fight");
     }
 
     #[test]
@@ -764,9 +892,12 @@ mod tests {
             "camp",
             vec![node("l4", "Grim Barrow — level 4 crypt"), node("hp", "The Rift anomaly")],
         ));
+        // There is no portal to go to until the anomaly is actually open.
+        assert!(m.anomaly().is_none());
+        m.hell = Some(0.1);
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Anomaly);
-        assert_eq!(plan.target, "hp");
+        assert_eq!(plan.target, "hp", "a named portal beats the `start` prior");
     }
 
     #[test]
@@ -981,6 +1112,7 @@ mod tests {
         // Health is worth a detour, but not at the cost of the objective.
         let mut m = hurt_at_l1();
         m.fold(&dump("l1", "Weedley Copse crypt", vec![node("hp", "The Rift anomaly")]));
+        m.hell = Some(0.1);
         assert_eq!(m.next_target().unwrap().reason, Goal::Anomaly);
     }
 
@@ -1173,7 +1305,8 @@ mod tests {
         m.fold(&b);
         m.here = Some("l1".into());
         m.hell = Some(0.1);
-        // Everything is visited, nothing hides neighbours, the anomaly is spent: no target.
+        m.entry(ANOMALY_KEY).completed_corrupt = true;
+        // Everything is visited, nothing hides neighbours, the anomaly is beaten: no target.
         assert_eq!(m.next_target(), None, "walking on would be pointless, and saying so is the answer");
     }
 }
