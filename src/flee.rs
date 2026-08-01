@@ -219,3 +219,44 @@ mod tests {
         assert_eq!(Nerve::from_status("bleed"), None);
     }
 }
+
+/// Should we prefer scaring this enemy off over killing it?
+///
+/// Yes whenever it can be frightened and is human. A cultist carries
+/// `onDeathFlags = {'Murder', 'Bleeds'}` (`rpg/enemies/humans.lua:58`) — killing one is recorded as
+/// murder, and it is avoidable, because the same enemy carries `fear`. The point is not squeamishness
+/// about a fight we would win; it is that the kill has a cost the flee does not, and the flee is
+/// also cheaper in damage and denies the enemy its attack.
+///
+/// The target is then the FIRST answer leaving it under the threshold and **still alive** — which is
+/// what [`choose_to_scare`] picks, since it requires `damage < health`.
+pub fn prefer_scaring(e: Enemy, human: bool) -> bool {
+    human && e.nerve.is_some()
+}
+
+#[cfg(test)]
+mod human_tests {
+    use super::*;
+
+    #[test]
+    fn a_human_that_can_be_feared_is_scared_not_killed() {
+        let cultist = Enemy { health: 12, max_health: 12, nerve: Some(Nerve::Fear) };
+        assert!(prefer_scaring(cultist, true));
+        // A skeleton with the same status is not a murder, so scaring is merely an option.
+        assert!(!prefer_scaring(cultist, false));
+        // A human with no nerve has to be killed; there is nothing else on offer.
+        assert!(!prefer_scaring(Enemy { nerve: None, ..cultist }, true));
+    }
+
+    #[test]
+    fn the_chosen_answer_leaves_a_cultist_alive_and_under_half() {
+        let cultist = Enemy { health: 12, max_health: 12, nerve: Some(Nerve::Fear) };
+        // 12 kills, 6 leaves it on 6 which is NOT under half, 7 leaves it on 5 which is.
+        let damages = [12, 6, 7, 9];
+        let i = choose_to_scare(&damages, cultist).unwrap();
+        assert_eq!(damages[i], 7, "first answer that is enough and not lethal");
+        let left = cultist.health - damages[i];
+        assert!(left > 0, "still alive");
+        assert!(Nerve::Fear.would_leave(left, cultist.max_health), "and under the threshold");
+    }
+}
