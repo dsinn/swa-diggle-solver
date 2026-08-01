@@ -163,7 +163,12 @@ impl BoardDump {
 
 const MARKER: &str = "board state = {";
 
-fn tiles_from(table: &Table) -> Vec<Tile> {
+/// Tiles from a `tileboard` array, in either form the serializer emits.
+///
+/// A tile is a bare `"W"` or a structured `{ "W", { bg = "wood" } }`. Both the console dump and
+/// `combatSaveData` use this same shape, which is why this is public: `fight.rs` had its own copy
+/// that did `filter_map(as_str)` and silently dropped every structured tile.
+pub fn tiles_from(table: &Table) -> Vec<Tile> {
     table
         .arr
         .iter()

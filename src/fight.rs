@@ -350,15 +350,24 @@ impl Fight<'_> {
 }
 
 /// Tiles as the combat save records them.
+/// The board from `combatSaveData`.
+///
+/// Shares [`crate::observe::board::tiles_from`] with the console reader, because the two formats are
+/// the same and the copy here did not know it. It did `filter_map(as_str)`, which silently dropped
+/// every structured tile -- `{ "W", { bg = "wood" } }` -- shortening the board and shifting every
+/// index after it.
+///
+/// A live fight showed the whole failure in one line. Sixteen tiles became fifteen, the solver chose
+/// indices [4, 10, 2, 6, 12, 13, 8, 1, 14, 0] meaning NATURALITY on its shortened board, and the
+/// game read those same indices against the real board and answered
+/// `YDIWYRIYAW  not recognised`. Nothing was submitted, the board never changed, and the fight
+/// stalled replaying the same word.
+///
+/// The dropped quality mattered too: a wood or gold tile scored as an ordinary letter, so even a
+/// board that happened to parse to the right length would have been mis-scored.
 fn tiles_of(save: &Table) -> Vec<crate::observe::board::Tile> {
     save.table_at("tileboard")
-        .map(|t| {
-            t.arr
-                .iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| crate::observe::board::Tile::plain(s))
-                .collect()
-        })
+        .map(crate::observe::board::tiles_from)
         .unwrap_or_default()
 }
 
@@ -423,5 +432,35 @@ mod tests {
     fn an_announcement_with_no_rows_yields_nothing() {
         let lines = vec!["Item selection:".to_string()];
         assert!(reward_offers(&lines).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tileboard_tests {
+    use super::*;
+    use crate::game::save::parse;
+
+    /// The save form of the board that stalled a village inn fight.
+    ///
+    /// The first tile is structured; the reader used to drop it, shortening a 16-tile board to 15
+    /// and shifting every index after it by one.
+    #[test]
+    fn a_structured_tile_in_the_save_is_kept_with_its_material() {
+        let save = parse(
+            "return {\n\
+             \x20 tileboard = {\n\
+             \x20   { \"W\", { bg = \"wood\" } },\n\
+             \x20   \"Y\", \"I\", \"T\",\n\
+             \x20 },\n\
+             }\n",
+        )
+        .expect("parses");
+        let tiles = tiles_of(&save);
+        assert_eq!(tiles.len(), 4, "the wood tile counts toward the board");
+        assert_eq!(tiles[0].letter, "W");
+        assert_eq!(tiles[0].quality.material.as_deref(), Some("wood"));
+        // Index 1 must still be Y. When the wood tile was dropped this was I, and every later index
+        // was wrong by one -- which is how NATURALITY was submitted as YDIWYRIYAW.
+        assert_eq!(tiles[1].letter, "Y");
     }
 }
