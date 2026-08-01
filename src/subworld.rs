@@ -57,6 +57,27 @@
 //! everywhere, and screen coordinates are already re-read from each dump. Being conservative here is
 //! free, and being wrong would strand a run.
 
+/// Crossing one, which is not yet implemented.
+///
+/// Required rather than optional: villages gate resting and forests sit on the path. The shape,
+/// from the user, and the parts already in hand:
+///
+/// 1. **Answer the entry dialogue.** The first option is the right one here — the violent options a
+///    corrupted village can offer are out of reach with current gear, and
+///    [`crate::observe::event::Event::safe_choice`] refuses them regardless.
+/// 2. **Cross from the entry to the exit that leads where we are going.** Each exit serves exactly
+///    one overworld neighbour and the dump names it, so this is a choice, not a search —
+///    [`crate::overworld::WorldMap::exit_toward`] already picks it.
+/// 3. **Fight what is in the way.** Many nodes in a corrupted village carry combat, and it shows as
+///    a button once we have landed on the node.
+/// 4. **Free the inn.** Clearing the corruption off a village's `store_inn` makes it usable, so a
+///    corrupted village is a rest stop we unlock rather than one we write off. Routing already
+///    treats `completed` as the release.
+///
+/// What is missing is a *nested goal*: while inside, the objective is "reach this exit", not the
+/// overworld target. Routing currently aims outside, finds no path, and falls through to leaving.
+pub mod crossing {}
+
 /// What holds where we are standing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rules {

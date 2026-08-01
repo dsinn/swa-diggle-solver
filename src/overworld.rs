@@ -473,13 +473,16 @@ impl WorldMap {
             let mut sites: Vec<(&Place, crate::rest::Site)> = self
                 .places
                 .values()
-                // A corrupted village is not a rest stop. Corruption swaps a location's type for its
-                // `corruptType` and puts the place under attack, so the inn is behind
-                // `underAttackAreaButtons` or gone entirely to `destroyedAreaButtons`
-                // (`overworld/generators/village.lua:371-395`) — and the heading still ends in
-                // "village", so nothing else here would notice. Met live as
+                // A corrupted rest stop is locked, not lost. Corruption swaps a location's type for
+                // its `corruptType` and puts the place under attack, so the inn sits behind
+                // `underAttackAreaButtons` or `destroyedAreaButtons`
+                // (`overworld/generators/village.lua:371-395`) — while the heading still ends in
+                // "village", which is why nothing else here notices. Met live as
                 // `Ulrome — level 6 village [corrupted]`.
-                .filter(|p| p.key != here && !p.avoid && !p.corrupted)
+                //
+                // Clearing it frees it, so `completed` is the release: an uncorrupted site, or a
+                // corrupted one we have already fought through, both serve.
+                .filter(|p| p.key != here && !p.avoid && (!p.corrupted || p.completed))
                 .filter_map(|p| crate::rest::site(&p.heading).map(|s| (p, s)))
                 .filter(|(p, s)| crate::rest::can_rest_at(*s, self.gold, self.fuel, !p.used))
                 .collect();
@@ -1191,6 +1194,12 @@ mod tests {
         assert_eq!(m.next_target().unwrap().target, "l10");
         m.entry("l10").corrupted = true;
         assert_ne!(m.next_target().unwrap().reason, Goal::Rest, "its inn is overrun");
+
+        // Locked, not lost: fighting the corruption out frees the inn again.
+        m.entry("l10").completed = true;
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Rest);
+        assert_eq!(plan.target, "l10", "a freed inn is a rest stop again");
     }
 
     #[test]
