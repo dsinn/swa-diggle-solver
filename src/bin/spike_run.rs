@@ -527,11 +527,30 @@ fn drive(
             let _ = click_at_in(r.win, ax, ay);
             std::thread::sleep(Duration::from_millis(900));
             r.pump();
-            if !matches!(r.click_area_button("Travel (subworld)"), Ok(true)) {
-                return Stop::Failed(format!("could not take the step: {what}"));
+            let _ = r.click_area_button("Travel (subworld)");
+            // Arrival, not pixels.
+            //
+            // A frame diff over one second called a *successful* move a failure: travel begins with
+            // a walk animation that barely changes the screen in that window, so the verdict was
+            // 0.002 while the player was in fact walking to the well. The run then reported the
+            // village as uncrossable while standing somewhere new.
+            //
+            // `here` changing is the game's own statement that we moved, and the overworld path has
+            // always used it. Text is cleared inside the wait because arrival raises lore and events,
+            // and those hold back the dump that would tell us we arrived.
+            let by = Instant::now() + Duration::from_secs(30);
+            let mut arrived = false;
+            while Instant::now() < by && !arrived {
+                std::thread::sleep(Duration::from_millis(300));
+                r.pump();
+                r.clear_text_screen();
+                r.handle_event();
+                arrived = r.map.here().map(|h| h != here).unwrap_or(false);
             }
-            std::thread::sleep(Duration::from_secs(3));
-            r.pump();
+            if !arrived {
+                return Stop::Failed(format!("no arrival after: {what}"));
+            }
+            r.log.push_str(&format!("  arrived at `{}`\n", r.map.here().unwrap_or("?")));
             continue;
         }
 
@@ -571,11 +590,18 @@ fn drive(
                 if is_anomaly { "**THE ANOMALY** " } else { "" },
                 p.heading
             ));
+            // Marked BEFORE the click, because `click_area_button` pumps: it sleeps a second and
+            // drains the console to measure the screen. The pregame announces itself inside that
+            // window, so a mark taken afterwards is already past its own answer.
+            //
+            // This is the third place the same mistake appeared — the lore counter, the event
+            // window, and here. A mark is only meaningful if nothing between it and the read can
+            // consume the feed, and almost every helper here consumes the feed.
+            let mark = r.feed.mark();
             if !matches!(r.click_area_button("Combat"), Ok(true)) {
                 return Stop::Failed(format!("Combat did not open at {here}"));
             }
             // The pregame announces itself; Space there is `Start`.
-            let mark = r.feed.mark();
             let by = Instant::now() + Duration::from_secs(30);
             let mut pregame = false;
             while Instant::now() < by && !pregame {
