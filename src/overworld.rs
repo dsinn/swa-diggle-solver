@@ -81,6 +81,16 @@ pub struct Place {
     /// (`overworldview.lua:215-218`). For a campfire this is the difference between a free rest and
     /// a wasted walk.
     pub used: bool,
+    /// This node is a subworld **container** — a forest, a village — not a place we fight on.
+    ///
+    /// Learned by evidence, never by type name. `getLocationButtons` checks `typeData.subworld`
+    /// *before* `basicCombatZone` (`overworldview.lua:462-467`), so a forest's lone area button
+    /// enters the subworld even though its heading carries a level. A live run read
+    /// `Eight Timberland — level 4 forest` as a fight, clicked, and walked into the forest.
+    ///
+    /// Set when a dump reports us inside a subworld whose parent is this key. Mirroring the game's
+    /// type table would be the other way to know, and it is exactly the drift this project avoids.
+    pub subworld_container: bool,
     /// A lost woods we have already been swallowed by, and will not enter again.
     ///
     /// Set from the `lost_woods_known_*` save flags — see [`crate::subworld::LOST_WOODS_KNOWN`].
@@ -318,6 +328,17 @@ impl WorldMap {
     pub fn fold(&mut self, a: &Adjacency) {
         let parent = a.subworld.as_ref().map(|(k, _)| k.clone());
         self.here = Some(a.here_key.clone());
+
+        // Being inside a subworld names its container, which is the only reliable way we learn that
+        // a node is one. Its heading will not say so — `Eight Timberland — level 4 forest` reads
+        // exactly like a fight.
+        if let Some((key, heading)) = a.subworld.as_ref() {
+            let p = self.entry(key);
+            p.subworld_container = true;
+            if p.heading.is_empty() {
+                p.heading = heading.clone();
+            }
+        }
 
         {
             let here = self.entry(&a.here_key);
@@ -594,6 +615,66 @@ impl WorldMap {
         options.first().map(|p| Hop { step: p.key.clone(), plan })
     }
 
+    /// Is a single step from `from` to `to` legal?
+    ///
+    /// `canTravelToDirect` (`overworldview.lua:1316-1321`) requires **one of the two** endpoints to
+    /// be complete:
+    ///
+    /// ```lua
+    /// and (core.areaOrExitToComplete(location1.key, location2.key)
+    ///      or core.areaOrExitToComplete(location2.key, location1.key))
+    /// ```
+    ///
+    /// So an unfinished fight blocks going *onward*, never going *back* — the node behind us is
+    /// complete by definition, since we came through it. A live run missed this and fought a node
+    /// it only had to walk away from: it asked "am I standing on a fight?" before asking "where am
+    /// I going?", and answered the first question in isolation.
+    ///
+    /// Secret nodes have a further `_revealed` condition we cannot see; being wrong there costs a
+    /// refused move, and the game is still the authority.
+    ///
+    /// **Advisory, not a filter.** It is deliberately not used to prune routes: `areaOrExitToComplete`
+    /// carries an exit notion this does not model, and a node we have merely never heard of reads as
+    /// incomplete — so pruning on it removed every route in a map that had not been walked yet. It
+    /// answers one question only: *must* we fight where we stand, or can we simply leave?
+    pub fn can_step(&self, from: &str, to: &str) -> bool {
+        let done = |k: &str| self.places.get(k).map(|p| p.completed).unwrap_or(false);
+        done(from) || done(to)
+    }
+
+    /// Are we currently inside a subworld, and if so which one?
+    pub fn inside(&self) -> Option<&str> {
+        let here = self.here.as_deref()?;
+        self.places.get(here)?.parent.as_deref()
+    }
+
+    /// Which overworld node to leave a subworld toward.
+    ///
+    /// Each exit leads to exactly one neighbour of the container, and the dump names it
+    /// (`Exit::to_key`, from `overworldview.lua:1041-1047`) — so leaving is a choice of destination,
+    /// not a search. Picks the exit that lands nearest the current target; failing that, any exit,
+    /// because being inside a subworld we cannot navigate is worse than being anywhere outside it.
+    ///
+    /// Returns the key to head for. The caller matches it against the exits in a **current** dump,
+    /// since exit positions expire with every pan like everything else.
+    pub fn exit_toward(&self, exits: &[crate::observe::adjacency::Exit]) -> Option<String> {
+        if exits.is_empty() {
+            return None;
+        }
+        let target = self.next_target().map(|p| p.target);
+        if let Some(target) = target {
+            let dist = self.distances(&target);
+            if let Some(best) = exits
+                .iter()
+                .filter(|e| dist.contains_key(&e.to_key))
+                .min_by_key(|e| dist_or_far(&dist, &e.to_key))
+            {
+                return Some(best.to_key.clone());
+            }
+        }
+        exits.first().map(|e| e.to_key.clone())
+    }
+
     /// Standing here, is this shrine worth consecrating before moving on?
     ///
     /// This is where "unless it is on the shortest direct path to the anomaly" actually lives.
@@ -808,6 +889,39 @@ mod tests {
         assert_eq!(m.get("f1").unwrap().parent.as_deref(), Some("forest"));
         assert!(!m.get("f1").unwrap().triggers_anomaly());
         assert!(!m.get("f2").unwrap().triggers_anomaly(), "neighbours are in the same subworld");
+    }
+
+    #[test]
+    fn a_container_is_learned_from_being_inside_it_not_from_its_heading() {
+        // The live blunder: `Eight Timberland — level 4 forest` reads exactly like a fight, and
+        // clicking its area button entered the forest instead of starting one.
+        let mut m = WorldMap::new();
+        m.fold(&dump("l39", "Eight Timberland — level 4 forest", vec![]));
+        assert!(!m.get("l39").unwrap().subworld_container, "nothing has told us yet");
+        assert!(m.get("l39").unwrap().has_combat(), "and the heading is no help");
+
+        let mut inside = dump("l39sub8", "Eight Timberland crossroads", vec![]);
+        inside.subworld = Some(("l39".into(), "Eight Timberland — level 4 forest".into()));
+        m.fold(&inside);
+        assert!(m.get("l39").unwrap().subworld_container);
+        assert_eq!(m.inside(), Some("l39"));
+    }
+
+    #[test]
+    fn leaving_a_subworld_picks_the_exit_nearest_the_target() {
+        use crate::observe::adjacency::Exit;
+        let mut m = WorldMap::new();
+        // Outside: goal — near — container, and a far dead end.
+        m.fold(&dump("near", "a road", vec![node("goal", "Grim Barrow — level 4 crypt"), node("cave", "a forest")]));
+        m.fold(&dump("far", "elsewhere", vec![node("cave", "a forest")]));
+        let mut inside = dump("cavesub1", "a clearing", vec![]);
+        inside.subworld = Some(("cave".into(), "a forest".into()));
+        inside.exits = vec![
+            Exit { x: 0.0, y: 0.0, to_key: "far".into(), to_heading: "elsewhere".into() },
+            Exit { x: 0.0, y: 0.0, to_key: "near".into(), to_heading: "a road".into() },
+        ];
+        m.fold(&inside);
+        assert_eq!(m.exit_toward(&inside.exits).as_deref(), Some("near"), "the exit that gets us closer");
     }
 
     #[test]
