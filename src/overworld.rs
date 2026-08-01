@@ -197,6 +197,35 @@ fn dist_or_far(dist: &BTreeMap<String, usize>, key: &str) -> usize {
     dist.get(key).copied().unwrap_or(usize::MAX)
 }
 
+/// The key of the road node inside `parent` that leads out to `to`.
+///
+/// Built the same way the game builds it (`overworldview.lua:1043`), so it needs no lookup and works
+/// for exits we have not yet seen.
+pub fn exit_node_key(parent: &str, to: &str) -> String {
+    format!("{parent}_path_to_{to}")
+}
+
+/// Does this heading use the combat form, `<name> — level <n> <type>`?
+///
+/// The em-dash is the marker (`overworldview.lua:388-389`), which is why the console codepage
+/// matters — see [`crate::observe::log`].
+fn heading_has_combat(heading: &str) -> bool {
+    heading.contains("— level ")
+}
+
+/// What to do next while crossing a subworld toward its exit.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Crossing {
+    /// The node underfoot has an unfinished fight, so nothing else is legal yet.
+    Fight { at: String },
+    /// Move to this adjacent node, which is on the known route to `toward`.
+    Step { to: String, toward: String },
+    /// No route is known yet. Move here to learn more of the interior.
+    Explore { to: String, toward: String },
+    /// Standing on the exit road: leave for this overworld node.
+    Leave { to: String },
+}
+
 /// One move: the adjacent node to travel to, and the plan it serves.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hop {
@@ -690,6 +719,64 @@ impl WorldMap {
         exits.first().map(|e| e.to_key.clone())
     }
 
+    /// One move toward getting out of the subworld we are standing in.
+    ///
+    /// [`WorldMap::exit_toward`] answers *which* exit; this answers what to do next about reaching
+    /// it, which is a different question and the one a live run got wrong. It clicked the exit
+    /// directly and the screen moved 0.015 — because an exit several nodes away cannot simply be
+    /// travelled to.
+    ///
+    /// Two rules from the game make crossing a walk rather than a jump:
+    ///
+    /// - `canTravelToDirect` (`overworldview.lua:1316-1321`) needs **one endpoint complete**. Inside
+    ///   a corrupted subworld `setHellValue` has reset everything to incomplete, so until the node
+    ///   under our feet is cleared there is no legal move off it at all. That is the mechanism behind
+    ///   "you can't walk past a combat node".
+    /// - Exits are only printed while visible (`:1044`), so the set of exits is what we can see now,
+    ///   not the full list.
+    ///
+    /// The exit's own key is derivable rather than guessable: the dump builds it as
+    /// `parent.key..'_path_to_'..k` (`:1043`), which is why the player location reads
+    /// `l10_path_to_l19` while standing on one.
+    pub fn cross_toward(&self, exits: &[crate::observe::adjacency::Exit]) -> Option<Crossing> {
+        let parent = self.inside()?.to_string();
+        let here = self.here.as_deref()?.to_string();
+        let leaving_to = self.exit_toward(exits)?;
+        let exit_key = exit_node_key(&parent, &leaving_to);
+
+        // Already standing on the road out.
+        if here == exit_key {
+            return Some(Crossing::Leave { to: leaving_to });
+        }
+        // Nothing may be stepped off until it is complete, so an unfinished fight here is not a
+        // detour — it is the only legal move.
+        if self.blocks_departure(&here) {
+            return Some(Crossing::Fight { at: here });
+        }
+        if let Some(step) = self.first_step_toward(&here, &exit_key, false) {
+            return Some(Crossing::Step { to: step, toward: exit_key });
+        }
+        // No known route. Fog means the interior is learned a hop at a time, so an unknown route is
+        // the normal early state rather than an error — walk into the dark, preferring somewhere we
+        // have not been so the walk cannot cycle.
+        let place = self.places.get(&here)?;
+        let unseen = place
+            .neighbours
+            .iter()
+            .filter(|n| !self.places.get(*n).map(|p| p.visited).unwrap_or(false))
+            .min_by(|a, b| a.cmp(b));
+        let step = unseen.or_else(|| place.neighbours.iter().min())?.clone();
+        Some(Crossing::Explore { to: step, toward: exit_key })
+    }
+
+    /// Does an unfinished fight on this node forbid stepping off it?
+    fn blocks_departure(&self, key: &str) -> bool {
+        self.places
+            .get(key)
+            .map(|p| !p.completed && heading_has_combat(&p.heading))
+            .unwrap_or(false)
+    }
+
     /// Standing here, is this shrine worth consecrating before moving on?
     ///
     /// This is where "unless it is on the shortest direct path to the anomaly" actually lives.
@@ -841,6 +928,90 @@ mod tests {
             exits: Vec::new(),
             hidden_exits: 0,
         }
+    }
+
+    /// A dump taken inside `parent`, with the exits the game would have printed.
+    fn inside_dump(parent: &str, here: &str, heading: &str, nodes: Vec<Node>, exits: Vec<Exit>) -> Adjacency {
+        Adjacency {
+            subworld: Some((parent.into(), "Ulrome — level 6 village".into())),
+            exits,
+            ..dump(here, heading, nodes)
+        }
+    }
+
+    fn exit(to: &str) -> Exit {
+        Exit { x: 0.0, y: 0.0, to_key: to.into(), to_heading: format!("{to} heading") }
+    }
+
+    #[test]
+    fn the_exit_road_key_is_built_the_way_the_game_builds_it() {
+        // `parent.key..'_path_to_'..k` (overworldview.lua:1043). Live confirmation: standing on one
+        // reported the player location as exactly this.
+        assert_eq!(exit_node_key("l10", "l19"), "l10_path_to_l19");
+    }
+
+    #[test]
+    fn an_unfinished_fight_underfoot_is_the_only_legal_move() {
+        // `canTravelToDirect` needs one endpoint complete, and corruption reset everything to
+        // incomplete — so a fight here is not a detour we chose, it is the only thing available.
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump(
+            "l10",
+            "l10sub6",
+            "Ulrome guard post — level 4 crypt",
+            vec![node("l10sub7", "Ulrome east guard post")],
+            vec![exit("l19")],
+        ));
+        assert_eq!(m.cross_toward(&[exit("l19")]), Some(Crossing::Fight { at: "l10sub6".into() }));
+    }
+
+    #[test]
+    fn a_cleared_node_steps_toward_the_exit_one_hop_at_a_time() {
+        let mut m = WorldMap::new();
+        // Learn the interior: sub6 -> sub7 -> the road out.
+        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post",
+            vec![node("l10sub7", "Ulrome east guard post")], vec![exit("l19")]));
+        m.fold(&inside_dump("l10", "l10sub7", "Ulrome east guard post",
+            vec![node("l10sub6", "Ulrome guard post"), node("l10_path_to_l19", "Road to Gipsyville")],
+            vec![exit("l19")]));
+        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post",
+            vec![node("l10sub7", "Ulrome east guard post")], vec![exit("l19")]));
+        // Not a jump to the exit — the neighbour on the way to it. Clicking the exit itself is what
+        // moved the screen 0.015 and stalled a live run.
+        assert_eq!(
+            m.cross_toward(&[exit("l19")]),
+            Some(Crossing::Step { to: "l10sub7".into(), toward: "l10_path_to_l19".into() })
+        );
+    }
+
+    #[test]
+    fn standing_on_the_road_out_means_leave() {
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump("l10", "l10_path_to_l19", "Road to Gipsyville crypt",
+            vec![node("l10sub7", "Ulrome east guard post")], vec![exit("l19")]));
+        assert_eq!(m.cross_toward(&[exit("l19")]), Some(Crossing::Leave { to: "l19".into() }));
+    }
+
+    #[test]
+    fn an_unknown_interior_is_explored_rather_than_refused() {
+        // The normal early state: fog reveals one hop, so on arrival there is no route to anywhere.
+        // Refusing here is what left a run standing in a village with nothing to do.
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post",
+            vec![node("l10sub7", "Ulrome east guard post")], vec![exit("l19")]));
+        assert_eq!(
+            m.cross_toward(&[exit("l19")]),
+            Some(Crossing::Explore { to: "l10sub7".into(), toward: "l10_path_to_l19".into() })
+        );
+    }
+
+    #[test]
+    fn crossing_says_nothing_on_the_surface() {
+        // `inside()` is None out here, and a Crossing plan would send the run walking into exits
+        // that do not exist.
+        let mut m = WorldMap::new();
+        m.fold(&dump("l19", "Gipsyville crypt", vec![node("l10", "Ulrome — level 6 village")]));
+        assert_eq!(m.cross_toward(&[exit("l19")]), None);
     }
 
     #[test]
