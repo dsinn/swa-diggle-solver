@@ -8,6 +8,7 @@ pub mod lexica;
 pub mod observe;
 pub mod score;
 pub mod search;
+pub mod shrine;
 pub mod tables;
 pub mod typist;
 pub mod win;
