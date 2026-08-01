@@ -55,7 +55,13 @@ const LOCATE_ME: (i32, i32) = (32, 918);
 /// the right ones before it is clicked.
 const AREA_BUTTON: (i32, i32) = (187, 918);
 const EMPTY_MAP: (i32, i32) = (1750, 160);
-const NEUTRAL: (i32, i32) = (300, 300);
+/// Where the cursor is parked so it cannot hover something we are about to fingerprint.
+///
+/// Deliberately clear of the view's hotspot rectangle, `{0, 0, 300, height*0.8}`
+/// (`overworldview.lua:1146`). The old value was (300, 300) — sitting exactly on that rectangle's
+/// right edge, next door to a function named `backOutOfHotspotMapPan`. Parking on the boundary of a
+/// region whose handler pans the map is not somewhere to leave a cursor for seconds at a time.
+const NEUTRAL: (i32, i32) = (760, 240);
 const MAX_STEPS: usize = 20;
 
 #[derive(Debug)]
@@ -159,6 +165,39 @@ impl Run<'_> {
         let moved = before.diff_fraction(&after, diggle_solver::observe::settle::FULL);
         self.log.push_str(&format!("  clicked {what}: screen moved {moved:.3}\n"));
         Ok(moved > 0.05)
+    }
+
+    /// The most recent dump whose coordinates have stopped moving.
+    ///
+    /// Arrival prints the dump *while the camera is still panning* — every hop produces a pair,
+    /// `Arrived at location` and then `Screen pan finished`, and only the second has settled
+    /// coordinates. Using the first is what put a click 42 px short of the Ulrome well: the node was
+    /// chosen correctly, `Travel` was genuinely available, and the click selected nothing because the
+    /// map had kept moving after the numbers were printed.
+    ///
+    /// `recentre` has always waited for `reason.contains("pan")`, which is why the overworld never
+    /// showed this. Inside a subworld there is no locate-me to force the pan, so we wait for the one
+    /// the arrival already started.
+    ///
+    /// Returns `None` rather than falling back to the arrival dump. A stale coordinate does not fail
+    /// loudly — it clicks empty ground and reports that nothing happened, which is three runs'
+    /// evidence that guessing here is worse than stopping.
+    fn settled_dump(&mut self, within: Duration) -> Option<Adjacency> {
+        let by = Instant::now() + within;
+        loop {
+            self.pump();
+            if let Some(a) = self.latest.as_ref().filter(|a| a.reason.contains("pan")) {
+                return Some(a.clone());
+            }
+            if Instant::now() >= by {
+                let reason = self.latest.as_ref().map(|a| a.reason.clone()).unwrap_or_default();
+                self.log.push_str(&format!(
+                    "  no settled dump within {within:?}; newest is `{reason}`\n"
+                ));
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 
     /// Reads the affirmative slot in the bottom-right corner.
@@ -412,9 +451,9 @@ fn drive(
         // across an action, and verify what the click did.
         let inside_now = r.map.inside().is_some();
         let fresh = if inside_now {
-            match r.latest.clone() {
+            match r.settled_dump(Duration::from_secs(8)) {
                 Some(a) => a,
-                None => return Stop::Failed("inside a subworld with no dump to work from".into()),
+                None => return Stop::Failed("inside a subworld with no settled dump".into()),
             }
         } else {
             match r.recentre() {
@@ -465,6 +504,19 @@ fn drive(
                 Crossing::Fight { .. } => unreachable!("handled above"),
             };
             r.log.push_str(&format!("{step}. {what}\n"));
+            // A node can be adjacent and still be somewhere we must not click. The dump reports
+            // positions in screen space regardless of visibility, so an exit can sit off-screen or
+            // under the HUD — and clicking one at (213, 18) opened the character screen, after which
+            // the area-button coordinate meant `Stats` and the run spent its whole budget there.
+            if let Ok((cw, ch)) = r.win.client_size() {
+                if let Some(chrome) = diggle_solver::observe::hud::chrome_at(at.0 as i32, at.1 as i32, cw, ch) {
+                    return Stop::Failed(format!(
+                        "{what}: its position ({:.0}, {:.0}) is {chrome}, not map — \
+                         reaching it needs selection by graph, not by pixel",
+                        at.0, at.1
+                    ));
+                }
+            }
             let Ok((ax, ay)) = r.win.client_to_screen(at.0 as i32, at.1 as i32) else {
                 return Stop::Failed("coordinate conversion failed".into());
             };
