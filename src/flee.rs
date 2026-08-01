@@ -33,10 +33,25 @@
 //! ```
 //!
 //! Completion is not cosmetic for us: `canTravelToDirect` refuses to step off an incomplete node
-//! (`overworldview.lua:1316-1321`), which is exactly what pins a run inside a corrupted village. So
-//! scaring something off can, in the wrong scenario, cost the ability to move on. `fleeingCountsForCompletion`
-//! is not something we can read from outside, so the caller decides whether a skip is acceptable
-//! here, and the default is the cautious one.
+//! (`overworldview.lua:1316-1321`), which is exactly what pins a run inside a corrupted village.
+//!
+//! **In a corrupted village this does not block us** — a ruling from the game's author, and the
+//! source agrees for ordinary attackers. Defending completes a node by `kills` exhausting that
+//! node's share of the attackers (`overworld/generators/village.lua:40-52`); `completionFlag` is not
+//! consulted on that path at all.
+//!
+//! The one place it *is* consulted is the boss entry:
+//!
+//! ```lua
+//! if runSaveData.rpg.player.newFlags.completionFlag and ...completionFlag>=1 then
+//!     attackData[location.key..'_boss']=nil
+//! end
+//! ```
+//!
+//! and `village.lua` never sets `fleeingCountsForCompletion`, so a *boss* frightened off would not
+//! clear its entry and the node would stay incomplete. Ordinary attackers are safe to scare;
+//! something holding a `_boss` slot should be killed. We cannot see that flag from outside, so the
+//! caller carries the choice.
 
 /// Which quitting rule an enemy is under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
