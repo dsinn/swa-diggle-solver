@@ -174,7 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ev.choices.iter().map(|c| &c.text).collect::<Vec<_>>()));
             seen_event = Some(ev.title.clone());
             // A single forced Continue -- `world_evil.lua:26-29`.
-            if let Some(c) = ev.choices.first() {
+            if let Some(c) = ev.continue_choice().or_else(|| ev.safe_choice()) {
                 // `onActive` announces the screen at the START of its transition, so the first
                 // attempt clicked into a screen that was still fading in and the button — visibly
                 // present the whole time — never took it. Same shape as the pan: an announcement

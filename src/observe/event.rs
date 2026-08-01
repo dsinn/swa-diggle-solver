@@ -67,6 +67,33 @@ impl Event {
     pub fn is_forced(&self) -> bool {
         self.choices.len() == 1
     }
+
+    /// The first choice that does no harm, which is the one to take by default.
+    ///
+    /// Taking `choices[0]` blindly is not safe. Some events — corrupted villages especially — offer
+    /// attacking or killing a villager, and under the right conditions that option comes **first**.
+    /// It is not recoverable by restoring a checkpoint if nobody notices, and it changes the run's
+    /// karma and the world around it.
+    ///
+    /// The screening is by text, which is a blunt instrument in the safe direction: refusing a
+    /// harmless option costs us an event, while taking a harmful one cannot be undone. If nothing
+    /// survives, the caller is expected to leave the event alone rather than guess.
+    pub fn safe_choice(&self) -> Option<&Choice> {
+        self.choices.iter().find(|c| !harmful(&c.text))
+    }
+}
+
+/// Does this option's text describe harming someone?
+///
+/// Deliberately over-broad. A false positive means an event goes unanswered and gets reported; a
+/// false negative means the run murders a villager.
+pub fn harmful(text: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "kill", "murder", "slay", "attack", "strike", "stab", "shoot", "execute", "behead",
+        "sacrifice", "rob", "steal", "loot", "burn", "betray", "threaten", "extort",
+    ];
+    let t = text.to_ascii_lowercase();
+    WORDS.iter().any(|w| t.split(|c: char| !c.is_ascii_alphabetic()).any(|word| word == *w))
 }
 
 const START: &str = "Event:";
@@ -194,6 +221,59 @@ Choices = {
         assert!(!e.is_forced());
         assert_eq!(e.continue_choice(), None, "neither option is a plain continue");
         assert_eq!(e.choices[1].y, 907);
+    }
+
+    #[test]
+    fn the_villager_is_never_the_first_resort() {
+        // A corrupted village can offer violence, and under the right conditions it comes FIRST --
+        // which is precisely what taking `choices[0]` would have done.
+        let src = r#"Event:  A frightened villager
+He begs for help.
+Choices = {
+    {
+        text = "Kill him",
+        posX = 960,
+        posY = 745,
+    },
+    {
+        text = "Help him",
+        posX = 960,
+        posY = 907,
+    },
+}
+"#;
+        let e = &parse_events(&lines(src))[0];
+        assert_eq!(e.choices[0].text, "Kill him", "the harmful option really is first");
+        assert_eq!(e.safe_choice().map(|c| c.text.as_str()), Some("Help him"));
+    }
+
+    #[test]
+    fn screening_is_blunt_in_the_safe_direction() {
+        assert!(harmful("Attack the guard"));
+        assert!(harmful("Rob them"));
+        assert!(harmful("Kill him"));
+        // Substrings must not trigger it -- "skill" is not "kill", and refusing every option would
+        // leave the run unable to answer anything.
+        assert!(!harmful("Test your skill"));
+        assert!(!harmful("Continue"));
+        assert!(!harmful("Pay 50 gold"));
+    }
+
+    #[test]
+    fn an_event_offering_only_harm_is_left_alone() {
+        let src = r#"Event:  Ambush
+No good options.
+Choices = {
+    {
+        text = "Attack",
+        posX = 960,
+        posY = 745,
+    },
+}
+"#;
+        let e = &parse_events(&lines(src))[0];
+        assert!(e.is_forced());
+        assert_eq!(e.safe_choice(), None, "forced does not mean acceptable");
     }
 
     #[test]

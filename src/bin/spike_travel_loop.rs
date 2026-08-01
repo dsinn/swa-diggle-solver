@@ -273,7 +273,8 @@ fn run(
             let mark = s.lines.len().saturating_sub(60);
             s.pump();
             if let Some(ev) = event::parse_events(&s.lines[mark..]).pop() {
-                let pick = if ev.is_forced() { ev.choices.first().cloned() } else { ev.continue_choice().cloned() };
+                // Never `choices[0]`: a corrupted village can put "Kill him" first.
+        let pick = ev.continue_choice().or_else(|| ev.safe_choice()).cloned();
                 match pick {
                     Some(c) => {
                         if let Ok((cx, cy)) = win.client_to_screen(c.x, c.y) {

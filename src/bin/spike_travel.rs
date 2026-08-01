@@ -281,7 +281,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
                 // Only act when there is no decision to make. A highwayman's pay-or-refuse is a
                 // policy question this spike has no business answering.
-                let pick = if ev.is_forced() { ev.choices.first() } else { ev.continue_choice() };
+                // Never `choices[0]`: "forced" is not the same as safe -- a lone option can be the
+                // robbery itself, and a corrupted village can put "Kill him" first.
+                let pick = ev.continue_choice().or_else(|| ev.safe_choice());
                 match pick {
                     Some(c) => {
                         let (cx, cy) = win.client_to_screen(c.x, c.y)?;

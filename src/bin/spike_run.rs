@@ -144,7 +144,8 @@ impl Run<'_> {
         let ev = event::parse_events(self.feed.since(mark)).pop()?;
         self.log.push_str(&format!("  event **{}**: {:?}\n", ev.title,
             ev.choices.iter().map(|c| c.text.clone()).collect::<Vec<_>>()));
-        let pick = if ev.is_forced() { ev.choices.first().cloned() } else { ev.continue_choice().cloned() };
+        // Never `choices[0]`: a corrupted village can put "Kill him" first.
+        let pick = ev.continue_choice().or_else(|| ev.safe_choice()).cloned();
         let Some(c) = pick else {
             self.log.push_str("  left alone: more than one real choice\n");
             return Some(ev.title);
