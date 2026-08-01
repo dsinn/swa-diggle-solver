@@ -106,6 +106,13 @@ pub struct Plan {
     pub reason: Goal,
 }
 
+/// One move: the adjacent node to travel to, and the plan it serves.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hop {
+    pub step: String,
+    pub plan: Plan,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Goal {
     /// The anomaly is open and this is it. Everything else can wait.
@@ -256,6 +263,72 @@ impl WorldMap {
                 .then(a.key.cmp(&b.key))
         });
         frontier.first().map(|p| Plan { target: p.key.clone(), reason: Goal::Explore })
+    }
+
+    /// The single adjacent node to step to next, and the plan it serves.
+    ///
+    /// Travel is taken one hop at a time rather than by naming a distant destination, because the
+    /// destination may not be selectable. Under `thickFog` — the lost woods — `isCloudCovered`
+    /// (`overworldview.lua:696-699`) reduces to "am I standing there, or is it adjacent to me right
+    /// now", ignoring the persistent `_explored` flags entirely. Nothing further out can be picked,
+    /// so multi-hop `Travel` is simply unavailable there and a router that assumed it would stall.
+    ///
+    /// The hop is chosen by breadth-first search over the edges **we** have recorded. That is not
+    /// re-implementing the game's pathfinder: it only decides which neighbour points the right way,
+    /// and the game still refuses the move if it disagrees.
+    ///
+    /// Falls back to any adjacent frontier when the target is not reachable through known edges —
+    /// which is the normal case early on, when the way there simply has not been mapped yet.
+    pub fn next_hop(&self) -> Option<Hop> {
+        let here = self.here.as_deref()?;
+        let plan = self.next_target()?;
+        if let Some(step) = self.first_step_toward(here, &plan.target) {
+            return Some(Hop { step, plan });
+        }
+        // No known route. Step to an adjacent frontier instead: mapping outward is what will
+        // eventually connect us to the target.
+        //
+        // The plan is carried through unchanged. Replacing it with the frontier node would make the
+        // goal follow the footsteps — every hop would re-derive a nearby target and the run would
+        // wander instead of working toward the trigger.
+        let me = self.places.get(here)?;
+        let mut options: Vec<&Place> =
+            me.neighbours.iter().filter_map(|k| self.places.get(k)).filter(|p| p.is_frontier()).collect();
+        options.sort_by(|a, b| a.visited.cmp(&b.visited).then(a.key.cmp(&b.key)));
+        options.first().map(|p| Hop { step: p.key.clone(), plan })
+    }
+
+    /// First move on a shortest known path from `from` to `to`, or `None` if we know of no route.
+    fn first_step_toward(&self, from: &str, to: &str) -> Option<String> {
+        if from == to {
+            return None;
+        }
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        seen.insert(from);
+        // Each queue entry carries the first step that led to it, which is all we need back.
+        let mut queue: std::collections::VecDeque<(&str, String)> = self
+            .places
+            .get(from)?
+            .neighbours
+            .iter()
+            .map(|n| (n.as_str(), n.clone()))
+            .collect();
+        for (k, _) in queue.iter() {
+            seen.insert(k);
+        }
+        while let Some((key, first)) = queue.pop_front() {
+            if key == to {
+                return Some(first);
+            }
+            if let Some(p) = self.places.get(key) {
+                for n in &p.neighbours {
+                    if seen.insert(n.as_str()) {
+                        queue.push_back((n.as_str(), first.clone()));
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn entry(&mut self, key: &str) -> &mut Place {
@@ -424,6 +497,50 @@ mod tests {
         m.fold(&a);
         // Standing on the only trigger node, the plan must not be to travel to it.
         assert_ne!(m.next_target().map(|p| p.target), Some("l4".into()));
+    }
+
+    #[test]
+    fn a_hop_steps_toward_a_distant_target_rather_than_naming_it() {
+        // start — l1 — l4(level 4). Standing at start, the move is to l1, but the PLAN is still
+        // the trigger node: under thick fog we could not select l4 at all, and even elsewhere it
+        // may be off-screen.
+        let mut m = WorldMap::new();
+        m.fold(&dump("start", "camp", vec![node("l1", "a crypt — level 0 crypt")]));
+        m.fold(&dump(
+            "l1",
+            "a crypt — level 0 crypt",
+            vec![node("start", "camp"), node("l4", "Grim Barrow — level 4 crypt")],
+        ));
+        m.here = Some("start".into());
+        let hop = m.next_hop().unwrap();
+        assert_eq!(hop.step, "l1", "step to the neighbour on the way");
+        assert_eq!(hop.plan.target, "l4");
+        assert_eq!(hop.plan.reason, Goal::OpenTheAnomaly);
+    }
+
+    #[test]
+    fn an_adjacent_target_is_stepped_to_directly() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("start", "camp", vec![node("l4", "Grim Barrow — level 4 crypt")]));
+        let hop = m.next_hop().unwrap();
+        assert_eq!(hop.step, "l4");
+        assert_eq!(hop.plan.target, "l4");
+    }
+
+    #[test]
+    fn with_no_known_route_we_step_to_an_adjacent_frontier() {
+        // The target was heard about from somewhere else and no path to it is mapped. Standing
+        // still would be the wrong answer; stepping outward is what mends the gap.
+        let mut m = WorldMap::new();
+        m.fold(&dump("far", "elsewhere", vec![node("l4", "Grim Barrow — level 4 crypt")]));
+        let mut here = dump("start", "camp", vec![node("l2", "Quiet Glade meadow")]);
+        here.hidden = 1;
+        m.fold(&here);
+        m.here = Some("start".into());
+        let hop = m.next_hop().unwrap();
+        assert_eq!(hop.plan.target, "l4", "the goal is unchanged");
+        assert_eq!(hop.step, "l2", "but the move is the only way onward we know");
+        assert_eq!(hop.plan.reason, Goal::OpenTheAnomaly);
     }
 
     #[test]
