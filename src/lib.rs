@@ -10,6 +10,7 @@ pub mod overworld;
 pub mod score;
 pub mod search;
 pub mod shrine;
+pub mod subworld;
 pub mod tables;
 pub mod typist;
 pub mod win;

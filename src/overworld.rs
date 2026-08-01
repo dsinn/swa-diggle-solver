@@ -74,13 +74,17 @@ impl Place {
 
     /// Would arriving here open the anomaly?
     ///
-    /// `overworld/events/arrived/world_evil.lua:15-21` requires a node with **no parent** (not
-    /// inside a subworld), with combat, of level **> 3**. The remaining conditions in that check —
-    /// `node_has_no_followups`, the `hell` flag, and a heretic/blood-curse exclusion — are not
-    /// properties of the node's heading, so they are answered by [`WorldMap::anomaly_available`]
-    /// and by the run itself rather than guessed at here.
+    /// Delegated to [`crate::subworld`], which owns what a parent node implies. The remaining
+    /// conditions in the event's check — `node_has_no_followups`, the `hell` flag, and a
+    /// heretic/blood-curse exclusion — are not properties of a heading, so they are answered by
+    /// [`WorldMap::anomaly_available`] and by the run itself.
     pub fn triggers_anomaly(&self) -> bool {
-        self.parent.is_none() && self.level().unwrap_or(0) > 3
+        crate::subworld::triggers_anomaly(self.parent.as_deref(), self.level())
+    }
+
+    /// The rules in force where this place sits.
+    pub fn rules(&self) -> crate::subworld::Rules {
+        crate::subworld::Rules::for_parent(self.parent.as_deref())
     }
 
     /// Somewhere the map might still open up: unvisited, or visited with neighbours we never saw.
@@ -268,14 +272,15 @@ impl WorldMap {
     /// The single adjacent node to step to next, and the plan it serves.
     ///
     /// Travel is taken one hop at a time rather than by naming a distant destination, because the
-    /// destination may not be selectable. Under `thickFog` — the lost woods — `isCloudCovered`
-    /// (`overworldview.lua:696-699`) reduces to "am I standing there, or is it adjacent to me right
-    /// now", ignoring the persistent `_explored` flags entirely. Nothing further out can be picked,
-    /// so multi-hop `Travel` is simply unavailable there and a router that assumed it would stall.
+    /// destination may not be selectable — see [`crate::subworld::Rules::multi_hop_travel`], which
+    /// is false wherever the map does not accumulate. Moving one hop is correct everywhere, so it
+    /// is what we always do.
     ///
-    /// The hop is chosen by breadth-first search over the edges **we** have recorded. That is not
-    /// re-implementing the game's pathfinder: it only decides which neighbour points the right way,
-    /// and the game still refuses the move if it disagrees.
+    /// The hop is chosen by breadth-first search over the edges **we** have recorded, which stay
+    /// valid even where the layout is re-rolled
+    /// ([`crate::subworld::Rules::edges_survive_reentry`]). That is not re-implementing the game's
+    /// pathfinder: it only decides which neighbour points the right way, and the game still refuses
+    /// the move if it disagrees.
     ///
     /// Falls back to any adjacent frontier when the target is not reachable through known edges —
     /// which is the normal case early on, when the way there simply has not been mapped yet.
@@ -502,8 +507,8 @@ mod tests {
     #[test]
     fn a_hop_steps_toward_a_distant_target_rather_than_naming_it() {
         // start — l1 — l4(level 4). Standing at start, the move is to l1, but the PLAN is still
-        // the trigger node: under thick fog we could not select l4 at all, and even elsewhere it
-        // may be off-screen.
+        // the trigger node: where the map does not accumulate we could not select l4 at all, and
+        // even elsewhere it may be off-screen.
         let mut m = WorldMap::new();
         m.fold(&dump("start", "camp", vec![node("l1", "a crypt — level 0 crypt")]));
         m.fold(&dump(
