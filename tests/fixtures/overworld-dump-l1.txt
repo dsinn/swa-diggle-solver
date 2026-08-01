@@ -1,0 +1,11 @@
+Local overworld data:   World loaded    l1      Weedley Copse — level 0 crypt
+    Adjacent connections:
+        l4      Bainton Clump — level 1 forest
+          posX: 657.45695686351 posY:   589.91497699518 connections:    4
+        start   Cottam campfire
+          posX: 960     posY:   534     connections:    1
+        l10     Ulrome village
+          posX: 631.12682659341 posY:   303.28142961348 connections:    5
+        l7      Greenoak Backwoods campfire
+          posX: 790.12478047943 posY:   184.59800191963 connections:    4
+Local overworld data end

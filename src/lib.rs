@@ -6,6 +6,7 @@ pub mod geometry;
 pub mod layout;
 pub mod lexica;
 pub mod observe;
+pub mod overworld;
 pub mod score;
 pub mod search;
 pub mod shrine;
