@@ -39,6 +39,57 @@
 //! Bucket *count* is deliberately only a tie-break. It is the best-performing greedy heuristic in the
 //! literature, but it saturates at 3^L: with 16,274 candidates against 2,187 patterns every sane
 //! guess fills every bucket and the score goes constant. That is precisely the opening position here.
+//!
+//! Measured over every word in every band by `shrine_selfplay` — results and the two fixes that got
+//! it there are in that binary's header. Zero puzzles exceed the game's budget; slowest turn 30 ms.
+//!
+//! ## Hard mode is gear, and weaker than Wordle's
+//!
+//! `shrineSubmitHard` (`shrineview.lua:236-255`) is a **gear flag**, not a property of the shrine —
+//! it only applies when the player is carrying the item. Two rules, both checked against the
+//! *immediately previous* guess (`submitions[#submitions-1]`) rather than the whole history:
+//! revealed letter counts must be retained (`min(answerCount, prevCount) <= thisCount`), and greens
+//! must stay in place.
+//!
+//! A violation is **rejected, not penalised**: `bad` skips the entire submit branch, so no guess is
+//! consumed and the shrine merely shakes and taunts (`shrineview.lua:277-281`). It is therefore a
+//! filter on the guess pool whose worst case is one wasted round trip.
+//!
+//! **Not implemented.** Because it looks back only one guess, it is strictly weaker than the Wordle
+//! rule, so anything legal under Wordle hard mode is legal here — the loophole is real but cheaper
+//! to ignore than to model. If it is ever implemented, it belongs in [`Solver::pool`] as a filter,
+//! not as a different policy.
+//!
+//! ## Gear that reveals letters
+//!
+//! Also not modelled, and also information we are simply leaving on the table:
+//!
+//! - `shrine<X>Known` (`shrineview.lua:93-101`) pre-reveals whether letter X is in the answer. With
+//!   `i` nil, `updateButtonsForletter` resolves to yellow-if-present, else grey.
+//! - `shrineLeastCommonWrongConsonantKnown` (`102-114`) reveals N *absent* consonants, walking the
+//!   fixed list `qjxzvwkfbhgmpdcltnrs`.
+//!
+//! Both are real constraints on the candidate set, readable from gear rather than off the screen.
+//! Ignoring them costs guesses, never correctness.
+//!
+//! ## Staleness is the failure mode that matters
+//!
+//! The lists are baked, and baked lists rot when the game's lexica change. A stale *answer* list
+//! fails silently and totally: the true word gets eliminated and the shrine becomes unwinnable with
+//! no error anywhere. That is why lists arrive through [`WordSource`] rather than being read from
+//! the constants directly. Deferred past the MVP, in increasing order of effort:
+//!
+//! 1. record a checksum of each source lexicon beside the baked data and verify it at startup when
+//!    the game source is reachable, so staleness is *loud*;
+//! 2. regenerate through `gen_shrine_data`, making a game update a one-command refresh;
+//! 3. read `utils/lexica/shrine*.lua` and `utils/dictionary.lua` directly as a fallback when the
+//!    baked data is absent or fails its checksum.
+//!
+//! ## Still to do, live
+//!
+//! Reading the word length and the difficulty band off the screen. Length is the column count and
+//! costs nothing to get right. The band may not be readable without the seed — if so [`Band::Wild`]
+//! is the safe default, and it clears the budget at every length.
 
 use std::collections::HashMap;
 

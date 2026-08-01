@@ -10,9 +10,44 @@
 //!
 //! The opening guess is computed once per configuration and reused, which is both a large speedup
 //! and the honest model of how it will run live: the opener depends only on the word list, so it is
-//! precomputed rather than re-derived at every shrine.
+//! precomputed rather than re-derived at every shrine. It is derived here rather than read from
+//! `shrine::OPENERS`, and disagreement is reported — this run is what regenerates that table, so
+//! consulting it would let the constant confirm itself.
 //!
 //! Touches no game files and drives no input.
+//!
+//! ## Result, v52.3 — 71,268 puzzles, zero failures
+//!
+//! | L | budget | easy | hard | wild | opener (wild) |
+//! |---|---|---|---|---|---|
+//! | 4 | 8 | 3.954 | 4.389 | 4.568 | `lare` |
+//! | 5 | 6 | 3.340 | 3.822 | 3.917 | `raise` |
+//! | 6 | 6 | 3.040 | 3.475 | 3.528 | `tanier` |
+//! | 7 | 6 | 2.815 | 3.148 | 3.199 | `saltier` |
+//!
+//! Means, over every word in the band. Worst case never exceeds the budget. Slowest single turn
+//! measured at 30 ms. Longer words come out *easier* — 3^7 patterns collapse a candidate set far
+//! faster than 3^4 — and the L=5 opener derived independently as `raise`, one of the literature's
+//! known-good openers, which is a free positive control.
+//!
+//! ## Getting to zero took two fixes, both found here rather than foreseen
+//!
+//! 1. First run failed on `coved`, `wowed`, `zagging` — all one-letter clusters. The cause was the
+//!    *prefilter*, not the score: ranking probes by how much of the live set their letters cover
+//!    promotes words containing `owed` against the `_owed` family, which are exactly the letters
+//!    that cannot separate them. Fixed by scoring the full pool below `EXACT_POOL_MAX` candidates.
+//! 2. `faded` survived that. `shrine_separate` showed no legal guess separates its five-candidate
+//!    endgame *at all*, so the exact search was right to decline and the fix had to come earlier.
+//!    Searching from larger sets worked but cost 35 s on one puzzle; the expense is depth, not
+//!    breadth, hence `ENDGAME_DEPTH`.
+//!
+//! ## Not run
+//!
+//! The published-Wordle control — self-play against the real 2,315 / 12,972 lists, expecting a
+//! 3.43–3.47 mean — needs word lists this repo does not ship. The duplicate-letter rules are pinned
+//! instead to `shrineview.lua:164-175` by hand-worked unit tests, which is the more direct check.
+//! The Wordle control would add independent confirmation and is worth running if `feedback` is ever
+//! touched.
 
 use diggle_solver::shrine::{feedback, max_guesses, solved, Baked, Band, Solver};
 use std::sync::atomic::{AtomicUsize, Ordering};
