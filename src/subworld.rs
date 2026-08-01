@@ -114,6 +114,23 @@ impl Rules {
     }
 }
 
+/// Prefix of the save flag written once a lost woods has swallowed the player.
+///
+/// `overworld/events/arrived/lost_woods.lua:25` does
+/// `setAreaFlag('lost_woods_known_'..location.key, 1)` on the way in, so `mainSaveData`'s
+/// `areaFlags` ends up naming the **exact location key** of every lost woods we have met.
+///
+/// This is the identification channel to use, and the only reliable one. Headings cannot do it: the
+/// same `lost woods` text covers both the fogged original and `corrupt_lost_woods`, which has both
+/// hostile flags false. A flag, by contrast, is set by the very event that proves the place is what
+/// we think it is.
+pub const LOST_WOODS_KNOWN: &str = "lost_woods_known_";
+
+/// The location key a `lost_woods_known_*` flag names, if the flag is one.
+pub fn lost_woods_key(flag: &str) -> Option<&str> {
+    flag.strip_prefix(LOST_WOODS_KNOWN).filter(|k| !k.is_empty())
+}
+
 /// Does arriving at a node with this parent and level open the anomaly?
 ///
 /// The level test is `> 3`, not `== 4` — `overworld/events/arrived/world_evil.lua:18` reads

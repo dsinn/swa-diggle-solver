@@ -55,6 +55,11 @@ pub struct Place {
     pub visited: bool,
     /// From `mainSaveData.overworld.completedAreas`.
     pub completed: bool,
+    /// A lost woods we have already been swallowed by, and will not enter again.
+    ///
+    /// Set from the `lost_woods_known_*` save flags — see [`crate::subworld::LOST_WOODS_KNOWN`].
+    /// Routing treats these as walls and only passes through one if there is no other way at all.
+    pub avoid: bool,
 }
 
 impl Place {
@@ -208,6 +213,18 @@ impl WorldMap {
                 self.entry(key).completed = true;
             }
         }
+        if let Some(flags) = save.table_at("overworld.areaFlags") {
+            // Every lost woods we have already been lost in names itself here. Once is enough.
+            let keys: Vec<String> = flags
+                .map
+                .keys()
+                .filter_map(|k| crate::subworld::lost_woods_key(k))
+                .map(|s| s.to_string())
+                .collect();
+            for k in keys {
+                self.entry(&k).avoid = true;
+            }
+        }
         self.hell = save
             .table_at("overworld.areaFlags")
             .and_then(|f| f.get("hell"))
@@ -241,7 +258,7 @@ impl WorldMap {
             let mut candidates: Vec<&Place> = self
                 .places
                 .values()
-                .filter(|p| p.key != here && p.triggers_anomaly())
+                .filter(|p| p.key != here && p.triggers_anomaly() && !p.avoid)
                 .collect();
             // Any qualifying node does; prefer one we have not cleared, then take the lowest level
             // for a predictable arrival, then by key so the choice is stable across runs.
@@ -259,7 +276,7 @@ impl WorldMap {
         // Nothing qualifying is known yet, so grow the map. Unvisited places first — standing on one
         // is what produces a dump — and among those prefer the ones still hiding neighbours.
         let mut frontier: Vec<&Place> =
-            self.places.values().filter(|p| p.key != here && p.is_frontier()).collect();
+            self.places.values().filter(|p| p.key != here && p.is_frontier() && !p.avoid).collect();
         frontier.sort_by(|a, b| {
             a.visited
                 .cmp(&b.visited)
@@ -287,7 +304,14 @@ impl WorldMap {
     pub fn next_hop(&self) -> Option<Hop> {
         let here = self.here.as_deref()?;
         let plan = self.next_target()?;
-        if let Some(step) = self.first_step_toward(here, &plan.target) {
+        // Two passes. The first refuses to route through a lost woods we have already escaped, even
+        // if that means a much longer way round. The second allows it, and exists only so that a
+        // world where every route passes through one leaves us moving rather than stuck — being
+        // swallowed again is bad, standing still forever is worse.
+        if let Some(step) = self.first_step_toward(here, &plan.target, true) {
+            return Some(Hop { step, plan });
+        }
+        if let Some(step) = self.first_step_toward(here, &plan.target, false) {
             return Some(Hop { step, plan });
         }
         // No known route. Step to an adjacent frontier instead: mapping outward is what will
@@ -297,25 +321,36 @@ impl WorldMap {
         // goal follow the footsteps — every hop would re-derive a nearby target and the run would
         // wander instead of working toward the trigger.
         let me = self.places.get(here)?;
-        let mut options: Vec<&Place> =
-            me.neighbours.iter().filter_map(|k| self.places.get(k)).filter(|p| p.is_frontier()).collect();
-        options.sort_by(|a, b| a.visited.cmp(&b.visited).then(a.key.cmp(&b.key)));
+        let mut options: Vec<&Place> = me
+            .neighbours
+            .iter()
+            .filter_map(|k| self.places.get(k))
+            .filter(|p| p.is_frontier())
+            .collect();
+        // Avoided places sort last rather than out, so they remain a last resort.
+        options.sort_by(|a, b| {
+            a.avoid.cmp(&b.avoid).then(a.visited.cmp(&b.visited)).then(a.key.cmp(&b.key))
+        });
         options.first().map(|p| Hop { step: p.key.clone(), plan })
     }
 
     /// First move on a shortest known path from `from` to `to`, or `None` if we know of no route.
-    fn first_step_toward(&self, from: &str, to: &str) -> Option<String> {
+    ///
+    /// With `shun`, places marked [`Place::avoid`] are treated as walls.
+    fn first_step_toward(&self, from: &str, to: &str, shun: bool) -> Option<String> {
         if from == to {
             return None;
         }
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         seen.insert(from);
         // Each queue entry carries the first step that led to it, which is all we need back.
+        let blocked = |k: &str| shun && self.places.get(k).map(|p| p.avoid).unwrap_or(false) && k != to;
         let mut queue: std::collections::VecDeque<(&str, String)> = self
             .places
             .get(from)?
             .neighbours
             .iter()
+            .filter(|n| !blocked(n))
             .map(|n| (n.as_str(), n.clone()))
             .collect();
         for (k, _) in queue.iter() {
@@ -327,7 +362,7 @@ impl WorldMap {
             }
             if let Some(p) = self.places.get(key) {
                 for n in &p.neighbours {
-                    if seen.insert(n.as_str()) {
+                    if !blocked(n) && seen.insert(n.as_str()) {
                         queue.push_back((n.as_str(), first.clone()));
                     }
                 }
@@ -546,6 +581,71 @@ mod tests {
         assert_eq!(hop.plan.target, "l4", "the goal is unchanged");
         assert_eq!(hop.step, "l2", "but the move is the only way onward we know");
         assert_eq!(hop.plan.reason, Goal::OpenTheAnomaly);
+    }
+
+    /// start branches two ways to the goal: a short way through `woods`, a long way round.
+    fn two_routes() -> WorldMap {
+        let mut m = WorldMap::new();
+        m.fold(&dump("start", "camp", vec![node("woods", "Mistwood forest"), node("a", "a meadow")]));
+        m.fold(&dump("woods", "Mistwood forest", vec![node("start", "camp"), node("goal", "Grim Barrow — level 4 crypt")]));
+        m.fold(&dump("a", "a meadow", vec![node("start", "camp"), node("b", "b meadow")]));
+        m.fold(&dump("b", "b meadow", vec![node("a", "a meadow"), node("goal", "Grim Barrow — level 4 crypt")]));
+        m.here = Some("start".into());
+        m
+    }
+
+    #[test]
+    fn a_known_lost_woods_is_routed_around_even_though_it_is_shorter() {
+        let mut m = two_routes();
+        // Before we know better, the short way through the woods wins.
+        assert_eq!(m.next_hop().unwrap().step, "woods");
+        m.entry("woods").avoid = true;
+        let hop = m.next_hop().unwrap();
+        assert_eq!(hop.step, "a", "go the long way rather than back into the woods");
+        assert_eq!(hop.plan.target, "goal", "the goal is unchanged");
+    }
+
+    #[test]
+    fn a_lost_woods_is_still_used_when_it_is_the_only_way() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("start", "camp", vec![node("woods", "Mistwood forest")]));
+        m.fold(&dump("woods", "Mistwood forest", vec![node("start", "camp"), node("goal", "Grim Barrow — level 4 crypt")]));
+        m.here = Some("start".into());
+        m.entry("woods").avoid = true;
+        // Being swallowed again is bad; standing still forever is worse.
+        assert_eq!(m.next_hop().unwrap().step, "woods");
+    }
+
+    #[test]
+    fn an_avoided_place_is_never_chosen_as_a_destination() {
+        let mut m = WorldMap::new();
+        let mut d = dump("start", "camp", vec![node("woods", "Mistwood forest"), node("a", "a meadow")]);
+        d.hidden = 0;
+        m.fold(&d);
+        m.entry("woods").avoid = true;
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.target, "a", "exploring INTO a known lost woods is never the plan");
+    }
+
+    #[test]
+    fn the_save_flags_name_which_places_to_avoid() {
+        // `overworld/events/arrived/lost_woods.lua:25` writes lost_woods_known_<key> on the way in.
+        let save = crate::game::save::parse(
+            r#"return {
+                overworld = {
+                    playerLocation = "start",
+                    completedAreas = { start = true },
+                    areaFlags = { hell = 0, lost_woods_known_l4 = 1, l7_explored = 0 },
+                },
+            }"#,
+        )
+        .unwrap();
+        let mut m = WorldMap::new();
+        m.fold(&dump("start", "camp", vec![node("l4", "Mistwood forest"), node("l7", "a village")]));
+        m.apply_save(&save);
+        assert!(m.get("l4").unwrap().avoid, "l4 swallowed us once");
+        assert!(!m.get("l7").unwrap().avoid, "an _explored flag is not a lost woods");
+        assert_eq!(m.anomaly_available(), Some(true));
     }
 
     #[test]
