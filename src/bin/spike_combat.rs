@@ -169,8 +169,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match state.as_str() {
             "WaitPhase" | "SmokebombWaitPhase" => {
-                // The only moment Finish and Fight on! both render. Capture before clicking.
+                // The only moment Finish and Fight on! both render. Capture before clicking, and
+                // with the cursor moved away: the game draws a hover highlight under the pointer
+                // (`ui.elements.hotspot`), so a fingerprint taken with the cursor on the button
+                // records the hovered appearance and will not match the resting one later.
                 if !fingerprinted {
+                    park(&win);
+                    std::thread::sleep(Duration::from_millis(250));
                     if let Ok(f) = capture_window(&win) {
                         let _ = f.write_png(Path::new(&format!("{FRAMES}/waitphase-buttons.png")));
                         log.push_str(&format!(
@@ -179,18 +184,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     fingerprinted = true;
                 }
-                // Click Finish exactly ONCE. The save still reads WaitPhase on the next poll --
-                // the screen has not torn down yet -- so an unguarded branch fires again. It was
-                // harmless here only because the second click landed on nothing; once the reward
-                // screen is up, that same coordinate is over the item row.
+
+                // Clicking once and hoping was the bug that stalled this spike for 45 s. The
+                // previous fix (`505a418`) stopped an unguarded branch from re-clicking on every
+                // poll, but replaced it with a latch that never retried -- so a click that landed
+                // before the button was live was never repeated, and the loop sat in WaitPhase
+                // until the stall detector fired.
+                //
+                // `activeIf` for Finish is just `stateIs'WaitPhase'` (`rpg.lua:564`), but that is
+                // the LIVE state, while ours comes from `combatSaveData` on disk. The two are not
+                // simultaneous. So: settle first, then click, then VERIFY, and only retry if the
+                // state genuinely did not move -- the same click-and-confirm pattern already proven
+                // on the tile board.
                 if !finished {
+                    // Let the walk / defeat animation finish before clicking into a moving screen.
+                    let _ = diggle_solver::observe::settle::wait_for_quiescence(
+                        &win,
+                        0.02,
+                        Duration::from_secs(6),
+                    );
                     let (fx, fy) = win.button_center(&FINISH)?;
                     let (sx, sy) = win.client_to_screen(fx, fy)?;
-                    log.push_str(&format!(
-                        "WaitPhase confirmed -> clicking Finish at ({fx},{fy})\n"
-                    ));
-                    diggle_solver::win::input::click_at(sx, sy)?;
-                    finished = true;
+                    for attempt in 1..=3 {
+                        log.push_str(&format!(
+                            "WaitPhase confirmed -> clicking Finish at ({fx},{fy}), attempt {attempt}\n"
+                        ));
+                        diggle_solver::win::input::click_at(sx, sy)?;
+                        park(&win);
+
+                        // Finish does `rpgview.setState'EndingPhase'` (`rpg.lua:570`), so a click
+                        // that took shows up either as a turnState that is no longer WaitPhase or,
+                        // sooner, as the reward screen announcing itself. The console signal is
+                        // checked FIRST because it has no save-flush delay -- re-clicking this
+                        // coordinate once the reward screen is up would land on the item row.
+                        let until = Instant::now() + Duration::from_secs(4);
+                        let mut moved = false;
+                        while Instant::now() < until && !moved {
+                            std::thread::sleep(Duration::from_millis(250));
+                            pump(&mut console, &mut mirror, &mut lines);
+                            if lines.iter().any(|l| l.contains("Item selection:")) {
+                                moved = true;
+                                break;
+                            }
+                            if let Ok(now) = save::load(&combat_path) {
+                                let s = now.str_at("rpg.player.turnState").unwrap_or("");
+                                if s != state {
+                                    moved = true;
+                                }
+                            }
+                        }
+                        if moved {
+                            log.push_str("  Finish took effect\n");
+                            finished = true;
+                            break;
+                        }
+                        log.push_str("  no state change; the button was not live yet\n");
+                    }
+                    if !finished {
+                        log.push_str("  **Finish did not take after 3 attempts**\n");
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
@@ -385,6 +437,11 @@ STOPPED: hit the spike's own 120s deadline
             )
             .map(|f| diggle_solver::combat::luma(&f, probe.2 / 2, probe.3 / 2, 60))?;
             diggle_solver::win::input::click_at(sx, sy)?;
+            // Park before measuring, or the hover highlight the game draws under the pointer is
+            // itself enough to clear the threshold -- and we would read "selected" from a click
+            // that only moved the mouse there. Selection persists once made, so leaving the item
+            // is safe and is what makes this test mean anything.
+            park(&win);
             std::thread::sleep(Duration::from_millis(600));
             let after = diggle_solver::win::capture::capture_client_rect(
                 &win, probe.0, probe.1, probe.2, probe.3,
@@ -403,7 +460,78 @@ STOPPED: hit the spike's own 120s deadline
                 std::thread::sleep(Duration::from_millis(300));
                 keys.press_key(VK_SPACE, SC_SPACE)?;
                 log.push_str("  confirmed with Space\n");
-                std::thread::sleep(Duration::from_secs(3));
+
+                // Two independent proofs, neither of them a screenshot.
+                //
+                // `viewPostgameAndReturn` (`overworld.lua:1131-1154`) grants the item, then does
+                // `setActiveMode(postgame)` and
+                // `assert(love.filesystem.remove('combatSaveData'))`. So a confirmed reward both
+                // announces "Postgame screen:" (`ui/postgame.lua:59`) and deletes the combat save,
+                // and the deletion is asserted -- the game would crash rather than half-do it.
+                //
+                // Deliberately NOT waiting for the overworld's adjacency dump: `overworldview.lua`
+                // has no `onActive` hook, so returning to the map prints nothing. That block only
+                // fires on pan-finish (`:1255`), arrival (`:1442`) or world-load (`:1607`), and
+                // waiting for it here would time out on a perfectly successful run.
+                // Watch the CONSOLE only, and do not touch `combatSaveData` while the game is
+                // deleting it.
+                //
+                // MEASURED, not reasoned: `viewPostgameAndReturn` deletes the file in the same
+                // breath as it opens the postgame, under an `assert` (`overworld.lua:1154`).
+                // Polling `combat_path.exists()` every 250 ms across that window made
+                // `love.filesystem.remove` fail and crashed the game with "Failed to clean dungeon
+                // run save data"; dropping the poll fixed it, same save, same fight. Note this
+                // contradicts the obvious theory -- Rust opens with FILE_SHARE_DELETE, so the read
+                // "should" not have blocked anything. The mechanism is still unexplained, so treat
+                // the rule as empirical: our instruments must not touch a file the game is about
+                // to remove. The console says what happened sooner anyway.
+                let deadline = Instant::now() + Duration::from_secs(20);
+                let mut postgame = None;
+                while Instant::now() < deadline && postgame.is_none() {
+                    std::thread::sleep(Duration::from_millis(250));
+                    pump(&mut console, &mut mirror, &mut lines);
+                    postgame =
+                        lines.iter().rev().find(|l| l.contains("Postgame screen:")).cloned();
+                }
+                // Only once the dust has settled, and as a single query rather than a poll.
+                std::thread::sleep(Duration::from_millis(750));
+                let save_gone = !combat_path.exists();
+                match &postgame {
+                    // The second field is `isEulogy` -- non-empty means the run ended in death, so
+                    // this is not a reward to carry forward but the end of the run.
+                    Some(l) => log.push_str(&format!("  **postgame reached**: `{}`\n", l.trim())),
+                    None => log.push_str("  **no Postgame screen within 20 s**\n"),
+                }
+                log.push_str(&format!("  combatSaveData deleted: **{save_gone}**\n"));
+
+                // Postgame's Continue is `affirmative` -> `goBack()` -> `setActiveMode(backMode)`,
+                // guarded by `activeIf = backMode` (`ui/postgame.lua:52,68-73`). That returns us to
+                // whatever we came from -- the overworld, or a subworld like a forest or mausoleum.
+                if postgame.is_some() {
+                    // Only lines printed AFTER this point can say anything about where we ended up;
+                    // the postgame announcement is already in `lines` and would answer for itself.
+                    let mark = lines.len();
+                    keys.focus();
+                    std::thread::sleep(Duration::from_millis(300));
+                    keys.press_key(VK_SPACE, SC_SPACE)?;
+                    std::thread::sleep(Duration::from_secs(2));
+                    pump(&mut console, &mut mirror, &mut lines);
+                    let after: Vec<&String> = lines[mark..].iter().collect();
+                    // Nothing announces the map, so the honest check is negative: no screen has
+                    // announced itself since Continue. Any adjacency dump is a bonus -- it only
+                    // appears if the return happened to finish a pan.
+                    let announced: Vec<&&String> = after
+                        .iter()
+                        .filter(|l| l.contains("screen:") || l.contains("Item selection:"))
+                        .collect();
+                    let dump = after.iter().any(|l| l.contains("Local overworld data:"));
+                    log.push_str(&format!(
+                        "  pressed Continue; {} lines since, screens announced: {:?}, \
+                         adjacency dump: {dump}\n",
+                        after.len(),
+                        announced
+                    ));
+                }
             } else {
                 log.push_str("  NOT confirming: the click did not select anything\n");
             }
