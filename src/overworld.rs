@@ -55,6 +55,10 @@ pub struct Place {
     pub visited: bool,
     /// From `mainSaveData.overworld.completedAreas`.
     pub completed: bool,
+    /// `<key>_used` in `areaFlags` — the flag `areaHasBeenUsed` reads
+    /// (`overworldview.lua:215-218`). For a campfire this is the difference between a free rest and
+    /// a wasted walk.
+    pub used: bool,
     /// A lost woods we have already been swallowed by, and will not enter again.
     ///
     /// Set from the `lost_woods_known_*` save flags — see [`crate::subworld::LOST_WOODS_KNOWN`].
@@ -255,6 +259,16 @@ impl WorldMap {
             for k in keys {
                 self.entry(&k).avoid = true;
             }
+            // `<key>_used`, which for a campfire decides whether resting there is free or futile.
+            let used: Vec<String> = flags
+                .map
+                .keys()
+                .filter_map(|k| k.strip_suffix("_used"))
+                .map(|s| s.to_string())
+                .collect();
+            for k in used {
+                self.entry(&k).used = true;
+            }
         }
         self.hell = save
             .table_at("overworld.areaFlags")
@@ -315,12 +329,9 @@ impl WorldMap {
                 .values()
                 .filter(|p| p.key != here && !p.avoid)
                 .filter_map(|p| crate::rest::site(&p.heading).map(|s| (p, s)))
-                .filter(|(_, s)| crate::rest::can_rest_at(*s, self.gold))
+                .filter(|(p, s)| crate::rest::can_rest_at(*s, self.gold, self.fuel, !p.used))
                 .collect();
-            let fuel = self.fuel;
-            sites.sort_by(|(pa, sa), (pb, sb)| {
-                sb.rank(fuel).cmp(&sa.rank(fuel)).then(pa.key.cmp(&pb.key))
-            });
+            sites.sort_by(|(pa, sa), (pb, sb)| sb.rank().cmp(&sa.rank()).then(pa.key.cmp(&pb.key)));
             if let Some((p, _)) = sites.first() {
                 return Some(Plan { target: p.key.clone(), reason: Goal::Rest });
             }
@@ -724,6 +735,32 @@ mod tests {
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Rest);
         assert_eq!(plan.target, "start", "the campfire, not the village");
+    }
+
+    #[test]
+    fn a_used_campfire_is_skipped_for_the_inn_when_we_carry_no_fuel() {
+        // The real island: `start_used = true`. Walking there with no firewood restores nothing, so
+        // the ten gold at Ulrome is the honest choice.
+        let mut m = hurt_at_l1();
+        m.entry("start").used = true;
+        m.gold = 50;
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Rest);
+        assert_eq!(plan.target, "l10", "a used campfire without fuel is a wasted walk");
+
+        // Firewood puts it back on the table, and it outranks paying.
+        m.fuel = 2;
+        assert_eq!(m.next_target().unwrap().target, "start");
+    }
+
+    #[test]
+    fn with_nothing_usable_resting_is_not_a_plan_at_all() {
+        let mut m = hurt_at_l1();
+        m.entry("start").used = true;
+        m.gold = 0;
+        // Used campfire, no fuel, no gold: better to get on with exploring than walk somewhere
+        // that will turn us away.
+        assert_ne!(m.next_target().unwrap().reason, Goal::Rest);
     }
 
     #[test]

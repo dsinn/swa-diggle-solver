@@ -101,15 +101,11 @@ pub enum Site {
 }
 
 impl Site {
-    /// Higher is better, given the fuel we carry.
-    ///
-    /// A campfire always beats an inn — no subworld to enter, no subnode to cross, no gold — but
-    /// **carrying fuel widens the gap rather than creating it**. Without fuel a campfire works only
-    /// while its area is unused, which we cannot see; with fuel it works regardless, so the trip is
-    /// a certainty rather than a gamble and there is no reason to spend ten gold at an inn.
-    pub fn rank(self, fuel: i64) -> u8 {
+    /// Higher is better. A campfire beats an inn — no subworld to enter, no subnode to cross, no
+    /// gold — and this is a plain preference because [`can_rest_at`] has already ruled out the
+    /// campfires we could not actually use.
+    pub fn rank(self) -> u8 {
         match self {
-            Site::Campfire if fuel > 0 => 3,
             Site::Campfire => 2,
             Site::Inn => 1,
         }
@@ -170,13 +166,19 @@ pub fn fuel_from_save(save: &crate::game::save::Table) -> i64 {
 /// ```
 ///
 /// So an inn is a straight gold check, while a campfire is free only while the area is **unused**
-/// and costs firewood thereafter. We cannot see `areaUnused` or the fuel count from outside, so a
-/// campfire is treated as available and the walk is occasionally wasted — the cheap failure, since
-/// the alternative is never using the free option at all. `restInsomnia` gear blocks resting
-/// outright (`:45`) and is likewise invisible to us.
-pub fn can_rest_at(site: Site, gold: i64) -> bool {
+/// and wants fuel thereafter. Both halves are knowable from the save, so neither is a gamble:
+/// `areaHasBeenUsed(name)` is exactly `areaFlag(name..'_used')` (`overworldview.lua:215-218`), and
+/// those flags live in `mainSaveData.overworld.areaFlags`, while fuel is counted by [`fuel_count`].
+///
+/// Never walk to a campfire hoping. Without fuel, a campfire we have already used restores nothing,
+/// and the trip is spent for it — the real save has `start_used = true`, so the nearest campfire on
+/// the current island is exactly that case. Go only when we carry fuel, or when the flag says for
+/// certain it is untouched.
+///
+/// `restInsomnia` gear blocks resting outright (`:45`) and is the one part we genuinely cannot see.
+pub fn can_rest_at(site: Site, gold: i64, fuel: i64, area_unused: bool) -> bool {
     match site {
-        Site::Campfire => true,
+        Site::Campfire => fuel > 0 || area_unused,
         Site::Inn => gold >= INN_COST,
     }
 }
@@ -212,9 +214,7 @@ mod tests {
     #[test]
     fn a_campfire_outranks_a_village() {
         // Free and immediate, against ten gold and a walk across a subworld.
-        assert!(
-            site("Cottam campfire").unwrap().rank(0) > site("Ulrome village").unwrap().rank(0)
-        );
+        assert!(site("Cottam campfire").unwrap().rank() > site("Ulrome village").unwrap().rank());
         // Real headings from the captured dump.
         assert_eq!(site("Greenoak Backwoods campfire"), Some(Site::Campfire));
         assert_eq!(site("Ulrome village"), Some(Site::Inn));
@@ -226,18 +226,26 @@ mod tests {
     fn an_inn_is_useless_without_ten_gold() {
         // `getCanRest` is a flat `getPlayerGold() >= 10`, so walking to a village with nine gold
         // buys a wasted trip and no health.
-        assert!(!can_rest_at(Site::Inn, 9));
-        assert!(can_rest_at(Site::Inn, 10));
-        assert!(can_rest_at(Site::Inn, 107));
-        // A campfire never asks for gold.
-        assert!(can_rest_at(Site::Campfire, 0));
+        assert!(!can_rest_at(Site::Inn, 9, 0, true));
+        assert!(can_rest_at(Site::Inn, 10, 0, false));
+        assert!(can_rest_at(Site::Inn, 107, 0, false));
     }
 
     #[test]
-    fn firewood_makes_a_campfire_beat_the_inn_outright() {
-        // With fuel the campfire works whatever the area's state, so paying ten gold is pure waste.
-        assert!(Site::Campfire.rank(3) > Site::Campfire.rank(0));
-        assert!(Site::Campfire.rank(0) > Site::Inn.rank(0), "still preferred without fuel");
+    fn a_used_campfire_is_worthless_without_fuel() {
+        // The case that would otherwise send us walking on spec. `start_used = true` in the real
+        // save, so this is the nearest campfire on the current island.
+        assert!(!can_rest_at(Site::Campfire, 999, 0, false));
+        // Either knowing it is untouched, or carrying fuel, makes it a certainty.
+        assert!(can_rest_at(Site::Campfire, 0, 0, true), "known unlit-and-unused is enough");
+        assert!(can_rest_at(Site::Campfire, 0, 3, false), "so is firewood");
+    }
+
+    #[test]
+    fn a_usable_campfire_always_beats_paying() {
+        // Ranking is a plain preference now that `can_rest_at` has already discarded the campfires
+        // we could not use. Whenever both survive that filter, the free one wins.
+        assert!(Site::Campfire.rank() > Site::Inn.rank());
     }
 
     #[test]
