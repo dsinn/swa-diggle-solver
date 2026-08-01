@@ -153,6 +153,12 @@ pub struct WorldMap {
     gold: i64,
     /// Campfire fuel carried, which makes a campfire usable even at a used area.
     fuel: i64,
+    /// The surface node we were standing on when we entered the subworld we are in.
+    ///
+    /// `None` on the surface. Its one job is to let [`WorldMap::exit_toward`] recognise the entrance,
+    /// because leaving a village by the door you came in is a retreat, and nothing visible inside
+    /// distinguishes that road from any other.
+    entered_from: Option<String>,
 }
 
 /// Where to head, and why. The reason is carried so a route can be explained rather than just taken.
@@ -356,6 +362,14 @@ impl WorldMap {
     /// dump taken *at* a node can speak to those.
     pub fn fold(&mut self, a: &Adjacency) {
         let parent = a.subworld.as_ref().map(|(k, _)| k.clone());
+        // Crossing into a subworld: remember the surface node we came from, because leaving by the
+        // same exit is a retreat. Recorded here rather than derived later — once inside, nothing on
+        // screen distinguishes the entrance road from any other exit.
+        if a.subworld.is_some() && self.inside().is_none() {
+            self.entered_from = self.here.clone();
+        } else if a.subworld.is_none() {
+            self.entered_from = None;
+        }
         self.here = Some(a.here_key.clone());
 
         // Being inside a subworld names its container, which is the only reliable way we learn that
@@ -705,6 +719,7 @@ impl WorldMap {
         if exits.is_empty() {
             return None;
         }
+        let entrance = self.entered_from.clone();
         let target = self.next_target().map(|p| p.target);
         if let Some(target) = target {
             let dist = self.distances(&target);
@@ -713,10 +728,32 @@ impl WorldMap {
                 .filter(|e| dist.contains_key(&e.to_key))
                 .min_by_key(|e| dist_or_far(&dist, &e.to_key))
             {
+                // Retreating through the entrance is only right when it is genuinely the way on —
+                // backtracking to an inn, say. What made a live run turn straight back out of Ulrome
+                // was subtler: l19 was the *only* exit whose distance we knew, because every other
+                // neighbour was unexplored and therefore scored infinite. Known-but-backward beat
+                // unknown-but-forward every time.
+                //
+                // So when the winner is the way we came in, prefer an exit into somewhere we have
+                // never been. An unvisited node is not a worse bet than the room we just left; it is
+                // an unmeasured one, and the whole point of being here is to get somewhere new.
+                if Some(&best.to_key) == entrance.as_ref() {
+                    if let Some(onward) = exits.iter().find(|e| {
+                        Some(&e.to_key) != entrance.as_ref()
+                            && !self.places.get(&e.to_key).map(|p| p.visited).unwrap_or(false)
+                    }) {
+                        return Some(onward.to_key.clone());
+                    }
+                }
                 return Some(best.to_key.clone());
             }
         }
-        exits.first().map(|e| e.to_key.clone())
+        // No target, or none of the exits lead anywhere we can measure: still prefer not to retreat.
+        exits
+            .iter()
+            .find(|e| Some(&e.to_key) != entrance.as_ref())
+            .or_else(|| exits.first())
+            .map(|e| e.to_key.clone())
     }
 
     /// One move toward getting out of the subworld we are standing in.
@@ -941,6 +978,42 @@ mod tests {
 
     fn exit(to: &str) -> Exit {
         Exit { x: 0.0, y: 0.0, to_key: to.into(), to_heading: format!("{to} heading") }
+    }
+
+    #[test]
+    fn leaving_by_the_door_we_came_in_is_a_last_resort() {
+        // The Ulrome case. We walk l19 -> l10 and enter; inside, l19 is the only exit whose distance
+        // to anything is known, because every other neighbour is unexplored. Scoring unknown as
+        // infinite made the run turn straight back out of the village it had just entered.
+        let mut m = WorldMap::new();
+        m.fold(&dump("l19", "Gipsyville crypt", vec![node("l10", "Ulrome — level 6 village")]));
+        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post",
+            vec![node("l10_path_to_l19", "Road to Gipsyville crypt")], vec![exit("l19")]));
+        // Offered the entrance and one unexplored way on, take the unexplored one.
+        let chosen = m.exit_toward(&[exit("l19"), exit("l7")]);
+        assert_eq!(chosen, Some("l7".into()), "should head somewhere new, not back out");
+    }
+
+    #[test]
+    fn the_entrance_is_still_taken_when_it_is_the_only_way_out() {
+        // A dead-end subworld, or a deliberate backtrack. Refusing to retreat must not mean refusing
+        // to move.
+        let mut m = WorldMap::new();
+        m.fold(&dump("l19", "Gipsyville crypt", vec![node("l10", "Ulrome — level 6 village")]));
+        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post",
+            vec![node("l10_path_to_l19", "Road to Gipsyville crypt")], vec![exit("l19")]));
+        assert_eq!(m.exit_toward(&[exit("l19")]), Some("l19".into()));
+    }
+
+    #[test]
+    fn the_entrance_is_forgotten_on_the_way_out() {
+        // Otherwise a stale entrance would go on biasing exit choice in the *next* subworld.
+        let mut m = WorldMap::new();
+        m.fold(&dump("l19", "Gipsyville crypt", vec![node("l10", "Ulrome — level 6 village")]));
+        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post", vec![], vec![exit("l19")]));
+        assert_eq!(m.entered_from.as_deref(), Some("l19"));
+        m.fold(&dump("l7", "Greenoak Backwoods campfire", vec![]));
+        assert_eq!(m.entered_from, None);
     }
 
     #[test]
