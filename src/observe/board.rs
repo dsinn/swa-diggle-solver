@@ -337,3 +337,75 @@ mod tests {
         assert!(REAL.contains("Local overworld data:"));
     }
 }
+
+#[cfg(test)]
+mod wood_tile_tests {
+    use super::*;
+
+    /// The multi-line form the serializer actually emits for a tile with properties.
+    ///
+    /// Live capture from a village inn fight. Every earlier test used the single-line form, so a
+    /// structured tile spanning lines was never exercised — and dropping one shifts every index
+    /// after it, which is how a run submitted `YDIWYRIYAW` while intending `NATURALITY`.
+    #[test]
+    fn a_multiline_structured_tile_is_not_dropped() {
+        let dump = "Player turn 0 start;\tboard state = {\n\
+            \x20   {\n\
+            \x20       \"W\",\n\
+            \x20       {\n\
+            \x20           bg = \"wood\",\n\
+            \x20       },\n\
+            \x20   },\n\
+            \x20   \"Y\",\n\
+            \x20   \"I\",\n\
+            \x20   \"T\",\n\
+            }\n";
+        let lines: Vec<String> = dump.lines().map(str::to_string).collect();
+        let dumps = parse_dumps(&lines);
+        assert_eq!(dumps.len(), 1, "one complete board");
+        let tiles = &dumps[0].tiles;
+        assert_eq!(tiles.len(), 4, "the wood tile counts");
+        assert_eq!(tiles[0].letter, "W");
+        assert_eq!(tiles[0].quality.material.as_deref(), Some("wood"));
+        assert_eq!(tiles[1].letter, "Y");
+    }
+}
+
+#[cfg(test)]
+mod live_wood_board {
+    use super::*;
+
+    /// The exact console lines from a village inn fight, byte for byte.
+    #[test]
+    fn the_live_board_keeps_all_sixteen_tiles() {
+        let lines: Vec<String> = vec![
+            "Player turn 0 start;    board state = {".to_string(),
+            "    {".to_string(),
+            "        \"W\",".to_string(),
+            "        {".to_string(),
+            "            bg = \"wood\",".to_string(),
+            "        },".to_string(),
+            "    },".to_string(),
+            "    \"Y\",".to_string(),
+            "    \"I\",".to_string(),
+            "    \"T\",".to_string(),
+            "    \"Y\",".to_string(),
+            "    \"N\",".to_string(),
+            "    \"W\",".to_string(),
+            "    \"U\",".to_string(),
+            "    \"I\",".to_string(),
+            "    \"L\",".to_string(),
+            "    \"D\",".to_string(),
+            "    \"A\",".to_string(),
+            "    \"Y\",".to_string(),
+            "    \"R\",".to_string(),
+            "    \"A\",".to_string(),
+            "    \"T\",".to_string(),
+            "}".to_string(),
+        ];
+        let dumps = parse_dumps(&lines);
+        assert_eq!(dumps.len(), 1, "one complete board");
+        let letters: String = dumps[0].tiles.iter().map(|t| t.letter.clone()).collect();
+        assert_eq!(letters, "WYITYNWUILDAYRAT", "the wood tile must not be dropped");
+    }
+}
