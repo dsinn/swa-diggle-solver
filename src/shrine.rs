@@ -85,11 +85,33 @@
 //! 3. read `utils/lexica/shrine*.lua` and `utils/dictionary.lua` directly as a fallback when the
 //!    baked data is absent or fails its checksum.
 //!
+//! ## Getting to a shrine, and finishing it
+//!
+//! Solving the word is the middle of a five-step sequence, not the whole of it. All of it is
+//! button-driven and none of it is announced, so each step is confirmed by what appears next.
+//!
+//! 1. **Clear its combat.** A shrine node carries two area buttons in the same slot,
+//!    `Combat` while `currentAreaIsNotcomplete` and `Visit` once complete
+//!    (`overworld/locations/shrine.lua:61-73`). There are two of them, so `insertAreaButtons` gives
+//!    neither `affirmative` — they must be clicked, at the usual (0, 0.85)+0.75 slot.
+//! 2. **Visit**, which opens the shrine screen.
+//! 3. **Solve**, which is what this module is for. `shrineView.hasWon()` gates everything after.
+//! 4. **Consecrate** — `button('Consecrate', 1.0, 0.9, {xOffset = -0.75})` (`shrine.lua:241`),
+//!    calling `overworldview.consecrate`, which sets `<key>_consecrated` and bumps `shrineKarma`
+//!    (`overworldview.lua:321-327`). That flag is how [`crate::overworld`] knows the shrine is done.
+//! 5. **Pray** — `button('Pray', 1.0, 0.9, {xOffset = -0.75})` (`:296`), the **same slot**, which is
+//!    why it only becomes reachable once Consecrate has gone away. `showPrayButton` additionally
+//!    wants `areaUnused(key)`, so praying is lost if the area has been used first.
+//!
+//! Both right-hand buttons resolve to roughly (1732, 972) at 1920x1080 — adjacent to the combat
+//! `Finish` slot, and worth aiming carefully.
+//!
 //! ## Still to do, live
 //!
-//! Reading the word length and the difficulty band off the screen. Length is the column count and
-//! costs nothing to get right. The band may not be readable without the seed — if so [`Band::Wild`]
-//! is the safe default, and it clears the budget at every length.
+//! None of the above has been run, and the solver has never seen a real shrine screen. Reading the
+//! grid needs the word length (the column count) and the colours; the difficulty band may not be
+//! readable without the seed, in which case [`Band::Wild`] is the safe default and still clears the
+//! budget at every length.
 
 use std::collections::HashMap;
 

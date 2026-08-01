@@ -58,6 +58,9 @@ pub struct Place {
     pub visited: bool,
     /// From `mainSaveData.overworld.completedAreas`.
     pub completed: bool,
+    /// `<key>_consecrated` in `areaFlags`, which is exactly what `isConsecrated` reads
+    /// (`overworldview.lua:319`). Only meaningful on a shrine.
+    pub consecrated: bool,
     /// `<key>_used` in `areaFlags` — the flag `areaHasBeenUsed` reads
     /// (`overworldview.lua:215-218`). For a campfire this is the difference between a free rest and
     /// a wasted walk.
@@ -129,6 +132,12 @@ pub struct Plan {
     pub reason: Goal,
 }
 
+/// Hops to `key`, or [`usize::MAX`] when no known route reaches it — so unreachable places sort
+/// last rather than first.
+fn dist_or_far(dist: &BTreeMap<String, usize>, key: &str) -> usize {
+    dist.get(key).copied().unwrap_or(usize::MAX)
+}
+
 /// One move: the adjacent node to travel to, and the plan it serves.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hop {
@@ -144,6 +153,8 @@ pub enum Goal {
     OpenTheAnomaly,
     /// Health is down and somewhere nearby can restore it.
     Rest,
+    /// A shrine we have not consecrated. Worth a detour in its own right.
+    Shrine,
     /// Somewhere unseen, to grow the map toward one of the above.
     Explore,
 }
@@ -273,6 +284,15 @@ impl WorldMap {
             for k in used {
                 self.entry(&k).used = true;
             }
+            let consecrated: Vec<String> = flags
+                .map
+                .keys()
+                .filter_map(|k| k.strip_suffix("_consecrated"))
+                .map(|s| s.to_string())
+                .collect();
+            for k in consecrated {
+                self.entry(&k).consecrated = true;
+            }
         }
         self.hell = save
             .table_at("overworld.areaFlags")
@@ -302,27 +322,7 @@ impl WorldMap {
             return Some(Plan { target: p.key.clone(), reason: Goal::Anomaly });
         }
 
-        // Only worth aiming at while the trigger is unspent. `anomaly_available` is `None` before
-        // any save has been read, and an unknown flag is treated as still available: the cost of
-        // going there needlessly is a wasted trip, while skipping it could strand the run.
-        if self.anomaly_available().unwrap_or(true) {
-            let mut candidates: Vec<&Place> = self
-                .places
-                .values()
-                .filter(|p| p.key != here && p.triggers_anomaly() && !p.avoid)
-                .collect();
-            // Any qualifying node does; prefer one we have not cleared, then take the lowest level
-            // for a predictable arrival, then by key so the choice is stable across runs.
-            candidates.sort_by(|a, b| {
-                a.completed
-                    .cmp(&b.completed)
-                    .then(a.level().cmp(&b.level()))
-                    .then(a.key.cmp(&b.key))
-            });
-            if let Some(p) = candidates.first() {
-                return Some(Plan { target: p.key.clone(), reason: Goal::OpenTheAnomaly });
-            }
-        }
+
 
         // Health before exploration: walking into the next fight hurt is how a run ends. Ranked by
         // site — a campfire costs nothing and needs no subworld — then by whether we can actually
@@ -338,6 +338,44 @@ impl WorldMap {
             sites.sort_by(|(pa, sa), (pb, sb)| sb.rank().cmp(&sa.rank()).then(pa.key.cmp(&pb.key)));
             if let Some((p, _)) = sites.first() {
                 return Some(Plan { target: p.key.clone(), reason: Goal::Rest });
+            }
+        }
+
+        // Shrines are worth going out of the way for, and worth doing BEFORE the anomaly opens:
+        // `hell ~= 0` changes a shrine's variant (`overworld/locations/shrine.lua:46-52`) and the
+        // portal starts drawing beams at it, so a shrine left until afterwards is a shrine met on
+        // worse terms. Consecrating one means clearing its combat first and then `Visit`
+        // (`:61-72`), which the loop reaches naturally: the trip stops at the fight on the way in.
+        if let Some(p) = self
+            .places
+            .values()
+            .filter(|p| p.key != here && !p.avoid && p.type_is("shrine") && !p.consecrated)
+            .min_by_key(|p| dist_or_far(&self.distances(here), &p.key))
+        {
+            return Some(Plan { target: p.key.clone(), reason: Goal::Shrine });
+        }
+
+        // Opening the anomaly comes AFTER shrines, deliberately. It is the objective, but it is
+        // also a one-way door: once `hell ~= 0` the world is on different terms, and any shrine
+        // still outstanding is met on worse ones. Only worth aiming at while the trigger is unspent
+        // — `anomaly_available` is `None` before any save has been read, and an unknown flag is
+        // treated as still available, since a wasted trip is cheaper than stranding the run.
+        if self.anomaly_available().unwrap_or(true) {
+            let mut candidates: Vec<&Place> = self
+                .places
+                .values()
+                .filter(|p| p.key != here && p.triggers_anomaly() && !p.avoid)
+                .collect();
+            // Any qualifying node does; prefer one we have not cleared, then the lowest level for a
+            // predictable arrival, then by key so the choice is stable across runs.
+            candidates.sort_by(|a, b| {
+                a.completed
+                    .cmp(&b.completed)
+                    .then(a.level().cmp(&b.level()))
+                    .then(a.key.cmp(&b.key))
+            });
+            if let Some(p) = candidates.first() {
+                return Some(Plan { target: p.key.clone(), reason: Goal::OpenTheAnomaly });
             }
         }
 
@@ -827,6 +865,55 @@ mod tests {
         let mut m = hurt_at_l1();
         m.fold(&dump("l1", "Weedley Copse crypt", vec![node("hp", "The Rift anomaly")]));
         assert_eq!(m.next_target().unwrap().reason, Goal::Anomaly);
+    }
+
+    #[test]
+    fn an_unconsecrated_shrine_is_worth_the_detour() {
+        // Real heading from the captured island.
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "l19",
+            "Gipsyville — level 2 crypt",
+            vec![node("shrine2", "Gransmoor shrine"), node("l29", "Rookdale — level 3 crypt")],
+        ));
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Shrine);
+        assert_eq!(plan.target, "shrine2");
+
+        // Once consecrated it stops pulling us off course.
+        m.entry("shrine2").consecrated = true;
+        assert_ne!(m.next_target().unwrap().reason, Goal::Shrine);
+    }
+
+    #[test]
+    fn shrines_come_before_opening_the_anomaly() {
+        // `hell ~= 0` changes a shrine's variant and the portal beams at it, so a shrine left until
+        // after the trigger is met on worse terms.
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "here",
+            "camp",
+            vec![node("shrine2", "Gransmoor shrine"), node("l39", "Eight Timberland — level 4 forest")],
+        ));
+        assert_eq!(m.next_target().unwrap().reason, Goal::Shrine);
+    }
+
+    #[test]
+    fn the_consecrated_flag_comes_out_of_the_save() {
+        let save = crate::game::save::parse(
+            r#"return {
+                overworld = {
+                    playerLocation = "l19",
+                    completedAreas = {},
+                    areaFlags = { hell = 0, shrine2_consecrated = true },
+                },
+            }"#,
+        )
+        .unwrap();
+        let mut m = WorldMap::new();
+        m.fold(&dump("l19", "a crypt", vec![node("shrine2", "Gransmoor shrine")]));
+        m.apply_save(&save);
+        assert!(m.get("shrine2").unwrap().consecrated);
     }
 
     #[test]
