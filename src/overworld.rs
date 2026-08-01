@@ -46,6 +46,9 @@ pub struct Place {
     pub heading: String,
     /// Neighbours we have seen named. Never includes hidden ones.
     pub neighbours: BTreeSet<String>,
+    /// How many locations this one connects to, as the dump reports it. A dead end is 1, and a
+    /// well-connected node is more likely to open the map up.
+    pub connections: u32,
     /// How many neighbours the game refused to describe, from the dump taken **at** this node.
     /// `None` until we have stood here — a neighbour's dump cannot tell us this.
     pub hidden: Option<usize>,
@@ -221,6 +224,7 @@ impl WorldMap {
             let p = parent.clone();
             let place = self.entry(&n.key);
             place.heading = n.heading.clone();
+            place.connections = n.connections;
             if place.parent.is_none() {
                 place.parent = p;
             }
@@ -341,9 +345,21 @@ impl WorldMap {
         // is what produces a dump — and among those prefer the ones still hiding neighbours.
         let mut frontier: Vec<&Place> =
             self.places.values().filter(|p| p.key != here && p.is_frontier() && !p.avoid).collect();
+        // Order matters, and a live run showed why. From l10 with l1 and l18 both adjacent and both
+        // unvisited, sorting by key chose `l1` — already **completed**, so it revealed nothing — and
+        // the run then had to walk back through l10 to reach l18. Two of three hops wasted, on an
+        // objective that is explicitly about speed.
+        //
+        // So: unvisited first, then nearest, then whatever has most left to give — an uncompleted
+        // node over a finished one, and a better-connected node over a dead end.
+        let far = usize::MAX;
+        let dist = self.distances(here);
         frontier.sort_by(|a, b| {
             a.visited
                 .cmp(&b.visited)
+                .then(dist.get(&a.key).unwrap_or(&far).cmp(dist.get(&b.key).unwrap_or(&far)))
+                .then(a.completed.cmp(&b.completed))
+                .then(b.connections.cmp(&a.connections))
                 .then(b.hidden.unwrap_or(0).cmp(&a.hidden.unwrap_or(0)))
                 .then(a.key.cmp(&b.key))
         });
@@ -396,6 +412,28 @@ impl WorldMap {
             a.avoid.cmp(&b.avoid).then(a.visited.cmp(&b.visited)).then(a.key.cmp(&b.key))
         });
         options.first().map(|p| Hop { step: p.key.clone(), plan })
+    }
+
+    /// Hops from `from` to every place reachable through known edges.
+    ///
+    /// Used to prefer the nearest frontier. Avoided places are still traversed here — this measures
+    /// how far away things are, and [`WorldMap::next_hop`] is where the shunning happens.
+    fn distances(&self, from: &str) -> BTreeMap<String, usize> {
+        let mut out = BTreeMap::new();
+        out.insert(from.to_string(), 0usize);
+        let mut queue: std::collections::VecDeque<String> = [from.to_string()].into();
+        while let Some(key) = queue.pop_front() {
+            let d = out[&key];
+            if let Some(p) = self.places.get(&key) {
+                for n in &p.neighbours {
+                    if !out.contains_key(n) {
+                        out.insert(n.clone(), d + 1);
+                        queue.push_back(n.clone());
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// First move on a shortest known path from `from` to `to`, or `None` if we know of no route.
@@ -789,6 +827,34 @@ mod tests {
         let mut m = hurt_at_l1();
         m.fold(&dump("l1", "Weedley Copse crypt", vec![node("hp", "The Rift anomaly")]));
         assert_eq!(m.next_target().unwrap().reason, Goal::Anomaly);
+    }
+
+    #[test]
+    fn exploration_prefers_the_nearer_frontier() {
+        // Both candidates unvisited, so the comparison is purely distance: `near` is one hop,
+        // `far` is two, behind an already-exhausted `through`.
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("near", "a meadow"), node("through", "b meadow")]));
+        let mut done = dump("through", "b meadow", vec![node("here", "camp"), node("far", "c meadow")]);
+        done.hidden = 0;
+        m.fold(&done);
+        m.here = Some("here".into());
+        assert_eq!(m.next_target().unwrap().target, "near", "one hop beats two");
+    }
+
+    #[test]
+    fn a_completed_neighbour_loses_to_an_unfinished_one_at_the_same_distance() {
+        // The live misstep: from l10, both l1 and l18 were adjacent and unvisited, but l1 was
+        // already completed and had nothing to reveal. Sorting by key took it, and the run walked
+        // back through l10 to reach l18 -- two hops wasted.
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "l10",
+            "Ulrome village",
+            vec![node("l1", "Weedley Copse crypt"), node("l18", "Stanningholme — level 2 crypt")],
+        ));
+        m.entry("l1").completed = true;
+        assert_eq!(m.next_target().unwrap().target, "l18", "a finished node reveals nothing");
     }
 
     #[test]
