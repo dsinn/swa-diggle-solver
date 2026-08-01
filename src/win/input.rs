@@ -173,6 +173,16 @@ pub const VK_SPACE: u16 = 0x20;
 pub const SC_SPACE: u16 = 0x39;
 // Arrow keys are "extended" keys: bit 24 of lParam must be set on both
 // WM_KEYDOWN and WM_KEYUP (see PostMessageInput::press_extended_key).
+/// Bound to `backOptions` (`utils/defaultbinds/keyboard.lua:9`), so it is `goBack()` where a screen
+/// defines one and the **options menu** otherwise.
+///
+/// Normally not to be sent: on a screen with no `goBack` it opens options, and a run that does not
+/// know it is in there will keep pressing at a map that is no longer on screen. It exists for one
+/// deliberate use — reaching the options menu's `Menu` button to get back to the main menu, which
+/// is the game's own way of skipping the anomaly cinematic. Send it only where the next click is
+/// already decided.
+pub const VK_ESCAPE: u16 = 0x1B;
+pub const SC_ESCAPE: u16 = 0x01;
 pub const VK_UP: u16 = 0x26;
 pub const SC_UP: u16 = 0x48;
 pub const VK_DOWN: u16 = 0x28;

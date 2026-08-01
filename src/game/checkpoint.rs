@@ -125,7 +125,9 @@ pub fn describe(dir: &Path) -> String {
         .map(|c| c.map.len())
         .unwrap_or(0);
     // `hell` is the anomaly gate: nonzero means it has already opened and the trigger is spent.
-    let hell = t.table_at("overworld.areaFlags").and_then(|f| f.get("hell").and_then(|v| v.as_int()));
+    // Read as a FLOAT — `hellOpens` sets it to 0.1, and `as_int` reports that as absent, which had
+    // this printing `hell=unset` for a world whose anomaly was wide open.
+    let hell = t.table_at("overworld.areaFlags").and_then(|f| f.get("hell").and_then(|v| v.as_f64()));
     let mid_fight = dir.join("combatSaveData").is_file();
     format!(
         "at {loc}, {completed} areas complete, hell={}, {}",

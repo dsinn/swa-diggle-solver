@@ -127,7 +127,11 @@ pub struct WorldMap {
     /// Where the last dump said we were.
     here: Option<String>,
     /// `areaFlags.hell` — zero means the anomaly has not opened and the trigger is still live.
-    hell: Option<i64>,
+    /// A **float**, and that matters: `hellOpens` sets it to `0.1`
+    /// (`utils/events.lua:39`, `setHellValue(0.1)`) and it grows from there. Read as an integer it
+    /// parses as nothing at all, `anomaly_available` falls back to "still available", and the run
+    /// sets off to trigger an anomaly that is already open.
+    hell: Option<f64>,
     /// Set when a node cost us [`crate::rest::REST_THRESHOLD`] or more health, cleared once we are
     /// topped up. Held on the map because the decision is "where to go next", which is its job.
     wants_rest: bool,
@@ -203,7 +207,7 @@ impl WorldMap {
 
     /// Has the anomaly already opened? `None` when no save has been read yet.
     pub fn anomaly_available(&self) -> Option<bool> {
-        self.hell.map(|h| h == 0)
+        self.hell.map(|h| h == 0.0)
     }
 
     /// Records what a node cost us, and whether that is worth a detour to heal.
@@ -325,7 +329,7 @@ impl WorldMap {
         self.hell = save
             .table_at("overworld.areaFlags")
             .and_then(|f| f.get("hell"))
-            .and_then(|v| v.as_int());
+            .and_then(|v| v.as_f64());
         if let Some(loc) = save.str_at("overworld.playerLocation") {
             self.here.get_or_insert_with(|| loc.to_string());
         }
@@ -747,7 +751,7 @@ mod tests {
     fn once_the_anomaly_has_opened_the_trigger_is_no_longer_a_goal() {
         let mut m = WorldMap::new();
         m.fold(&dump("start", "camp", vec![node("l4", "Grim Barrow — level 4 crypt")]));
-        m.hell = Some(1); // the anomaly already opened
+        m.hell = Some(0.1); // the anomaly already opened
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Explore, "chasing a spent trigger wastes the run");
     }
@@ -1013,7 +1017,7 @@ mod tests {
         m.here = Some("here".into());
 
         // Open: the anomaly is the goal, and the route runs through `mid` but not `detour`.
-        m.hell = Some(1);
+        m.hell = Some(0.1);
         assert_eq!(m.next_target().unwrap().reason, Goal::Anomaly);
         let route = m.anomaly_route().unwrap();
         assert!(route.contains(&"mid".to_string()), "route: {route:?}");
@@ -1039,7 +1043,7 @@ mod tests {
         let mut d = dump("here", "camp", vec![node("s1", "Faraway shrine"), node("l2", "Quiet Glade meadow")]);
         d.hidden = 1;
         m.fold(&d);
-        m.hell = Some(1);
+        m.hell = Some(0.1);
 
         // Unfought but uncorrupted, and off-route: still worth going for.
         let plan = m.next_target().unwrap();
@@ -1062,7 +1066,7 @@ mod tests {
             "camp",
             vec![node("shrine2", "Gransmoor shrine"), node("l39", "Eight Timberland — level 4 forest")],
         ));
-        m.hell = Some(0);
+        m.hell = Some(0.0);
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::OpenTheAnomaly);
         assert_eq!(plan.target, "l39");
@@ -1168,7 +1172,7 @@ mod tests {
         b.hidden = 0;
         m.fold(&b);
         m.here = Some("l1".into());
-        m.hell = Some(1);
+        m.hell = Some(0.1);
         // Everything is visited, nothing hides neighbours, the anomaly is spent: no target.
         assert_eq!(m.next_target(), None, "walking on would be pointless, and saying so is the answer");
     }

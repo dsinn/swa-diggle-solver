@@ -41,6 +41,15 @@ impl Feed {
         &self.lines
     }
 
+    /// The console itself, which launching a game needs a reference to.
+    ///
+    /// A session can outlive one game process — the anomaly skip closes the game mid-cinematic and
+    /// relaunches it — and the console must survive that, or the second launch has nothing to
+    /// attach to and the log channel goes silent.
+    pub fn console(&self) -> &Console {
+        &self.console
+    }
+
     /// Where the buffer currently ends — pass to [`Feed::seen_since`] before acting.
     pub fn mark(&self) -> usize {
         self.lines.len()
