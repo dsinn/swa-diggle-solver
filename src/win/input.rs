@@ -141,6 +141,33 @@ pub fn click_at(x: i32, y: i32) -> Result<(), crate::Error> {
     Ok(())
 }
 
+/// [`click_at`], refusing to fire unless the game is what sits under the target point.
+///
+/// Our clicks are *positional*: `SendInput` delivers them to whatever window is topmost at that
+/// screen coordinate, with no reference to the game at all. Keystrokes have never had this problem —
+/// they go through `PostMessageW` to a specific HWND (see [`PostMessageInput::press_key`]) and cannot
+/// leave the process. That asymmetry is why a run could pause a video in a browser while the game
+/// carried on responding normally: the click went to the browser, the keys did not.
+///
+/// It costs one `WindowFromPoint` per click and removes a whole class of accident — a window
+/// appearing over the game, the user alt-tabbing mid-run, the game being minimised. Every one of
+/// those turns a click meant for a button into a click on someone else's application.
+///
+/// `GA_ROOT` because `WindowFromPoint` returns the deepest child under the point, which for a LOVE
+/// window is not necessarily the HWND we hold.
+pub fn click_at_in(win: &crate::win::window::GameWindow, x: i32, y: i32) -> Result<(), crate::Error> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
+    let under = unsafe { GetAncestor(WindowFromPoint(POINT { x, y }), GA_ROOT) };
+    if under != win.hwnd {
+        return Err(crate::Error::Win32(format!(
+            "refusing to click ({x}, {y}): {under:?} is in front of the game, not {:?}",
+            win.hwnd
+        )));
+    }
+    click_at(x, y)
+}
+
 /// Injects `count` left clicks at the current cursor position.
 ///
 /// `count = 2` is how to reach `doubleClickEffect` (`overworldview.lua:1446-1468`), which on a

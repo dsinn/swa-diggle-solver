@@ -91,9 +91,11 @@ pub fn click(win: &GameWindow, button: &Button) -> Result<f64, crate::Error> {
         )));
     };
     let (sx, sy) = win.client_to_screen(button.click.0, button.click.1)?;
-    crate::win::input::warp_cursor(sx, sy)?;
-    std::thread::sleep(std::time::Duration::from_millis(250));
-    crate::win::input::inject_left_click(1)?;
+    // One batched, position-carrying, game-checked click. The old warp -> sleep(250) -> positionless
+    // click was a race this module's own primitive was written to remove: anything that moved the
+    // cursor inside that gap - the user, or the game's hotspot navigation, which warps the real OS
+    // cursor - sent a hardware-level click somewhere else entirely.
+    crate::win::input::click_at_in(win, sx, sy)?;
     Ok(inliers)
 }
 
@@ -134,9 +136,11 @@ pub fn click_when_ready(
         std::thread::sleep(std::time::Duration::from_millis(400));
     }
     let (sx, sy) = win.client_to_screen(button.click.0, button.click.1)?;
-    crate::win::input::warp_cursor(sx, sy)?;
-    std::thread::sleep(std::time::Duration::from_millis(250));
-    crate::win::input::inject_left_click(1)?;
+    // One batched, position-carrying, game-checked click. The old warp -> sleep(250) -> positionless
+    // click was a race this module's own primitive was written to remove: anything that moved the
+    // cursor inside that gap - the user, or the game's hotspot navigation, which warps the real OS
+    // cursor - sent a hardware-level click somewhere else entirely.
+    crate::win::input::click_at_in(win, sx, sy)?;
     Ok(best)
 }
 
