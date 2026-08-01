@@ -106,6 +106,13 @@ pub struct WorldMap {
     here: Option<String>,
     /// `areaFlags.hell` — zero means the anomaly has not opened and the trigger is still live.
     hell: Option<i64>,
+    /// Set when a node cost us [`crate::rest::REST_THRESHOLD`] or more health, cleared once we are
+    /// topped up. Held on the map because the decision is "where to go next", which is its job.
+    wants_rest: bool,
+    /// `player.gold` — an inn will not serve us below [`crate::rest::INN_COST`].
+    gold: i64,
+    /// Campfire fuel carried, which makes a campfire usable even at a used area.
+    fuel: i64,
 }
 
 /// Where to head, and why. The reason is carried so a route can be explained rather than just taken.
@@ -128,6 +135,8 @@ pub enum Goal {
     Anomaly,
     /// A level > 3 surface node: arriving opens the anomaly.
     OpenTheAnomaly,
+    /// Health is down and somewhere nearby can restore it.
+    Rest,
     /// Somewhere unseen, to grow the map toward one of the above.
     Explore,
 }
@@ -160,6 +169,28 @@ impl WorldMap {
     /// Has the anomaly already opened? `None` when no save has been read yet.
     pub fn anomaly_available(&self) -> Option<bool> {
         self.hell.map(|h| h == 0)
+    }
+
+    /// Records what a node cost us, and whether that is worth a detour to heal.
+    ///
+    /// Called with the health readings from either side of a node. Once set, the intent survives
+    /// until [`WorldMap::rested`] clears it — a rest site may be several hops away, and forgetting
+    /// on the way would strand us at low health next to the fight we were avoiding.
+    pub fn note_health(&mut self, before: crate::rest::Health, after: crate::rest::Health) {
+        if crate::rest::should_rest(before, after) {
+            self.wants_rest = true;
+        }
+    }
+
+    /// Cleared once health is back up.
+    pub fn rested(&mut self, now: crate::rest::Health) {
+        if now.is_full() {
+            self.wants_rest = false;
+        }
+    }
+
+    pub fn wants_rest(&self) -> bool {
+        self.wants_rest
     }
 
     /// Folds one adjacency dump into the map.
@@ -232,6 +263,8 @@ impl WorldMap {
         if let Some(loc) = save.str_at("overworld.playerLocation") {
             self.here.get_or_insert_with(|| loc.to_string());
         }
+        self.gold = save.int_at("player.gold").unwrap_or(0);
+        self.fuel = crate::rest::fuel_from_save(save);
     }
 
     /// Where to go next.
@@ -270,6 +303,26 @@ impl WorldMap {
             });
             if let Some(p) = candidates.first() {
                 return Some(Plan { target: p.key.clone(), reason: Goal::OpenTheAnomaly });
+            }
+        }
+
+        // Health before exploration: walking into the next fight hurt is how a run ends. Ranked by
+        // site — a campfire costs nothing and needs no subworld — then by whether we can actually
+        // rest there, which for an inn means carrying the ten gold it charges.
+        if self.wants_rest {
+            let mut sites: Vec<(&Place, crate::rest::Site)> = self
+                .places
+                .values()
+                .filter(|p| p.key != here && !p.avoid)
+                .filter_map(|p| crate::rest::site(&p.heading).map(|s| (p, s)))
+                .filter(|(_, s)| crate::rest::can_rest_at(*s, self.gold))
+                .collect();
+            let fuel = self.fuel;
+            sites.sort_by(|(pa, sa), (pb, sb)| {
+                sb.rank(fuel).cmp(&sa.rank(fuel)).then(pa.key.cmp(&pb.key))
+            });
+            if let Some((p, _)) = sites.first() {
+                return Some(Plan { target: p.key.clone(), reason: Goal::Rest });
             }
         }
 
@@ -646,6 +699,59 @@ mod tests {
         assert!(m.get("l4").unwrap().avoid, "l4 swallowed us once");
         assert!(!m.get("l7").unwrap().avoid, "an _explored flag is not a lost woods");
         assert_eq!(m.anomaly_available(), Some(true));
+    }
+
+    /// Real headings from the captured island: a campfire and a village both adjacent.
+    fn hurt_at_l1() -> WorldMap {
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "l1",
+            "Weedley Copse crypt",
+            vec![
+                node("start", "Cottam campfire"),
+                node("l10", "Ulrome village"),
+                node("l4", "Bainton Clump — level 1 forest"),
+            ],
+        ));
+        m.note_health(crate::rest::Health { current: 12, max: 12 }, crate::rest::Health { current: 7, max: 12 });
+        m
+    }
+
+    #[test]
+    fn losing_four_health_sends_us_to_rest_before_exploring() {
+        let m = hurt_at_l1();
+        assert!(m.wants_rest());
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Rest);
+        assert_eq!(plan.target, "start", "the campfire, not the village");
+    }
+
+    #[test]
+    fn a_village_is_not_a_plan_without_the_ten_gold() {
+        let mut m = hurt_at_l1();
+        // Strip the campfire so only the village remains, then arrive skint.
+        m.places.remove("start");
+        m.gold = 9;
+        let plan = m.next_target().unwrap();
+        assert_ne!(plan.reason, Goal::Rest, "nine gold buys a wasted walk and no health");
+        m.gold = 10;
+        assert_eq!(m.next_target().unwrap().reason, Goal::Rest);
+    }
+
+    #[test]
+    fn healing_up_clears_the_intent() {
+        let mut m = hurt_at_l1();
+        m.rested(crate::rest::Health { current: 12, max: 12 });
+        assert!(!m.wants_rest());
+        assert_ne!(m.next_target().unwrap().reason, Goal::Rest);
+    }
+
+    #[test]
+    fn the_anomaly_still_outranks_resting() {
+        // Health is worth a detour, but not at the cost of the objective.
+        let mut m = hurt_at_l1();
+        m.fold(&dump("l1", "Weedley Copse crypt", vec![node("hp", "The Rift anomaly")]));
+        assert_eq!(m.next_target().unwrap().reason, Goal::Anomaly);
     }
 
     #[test]

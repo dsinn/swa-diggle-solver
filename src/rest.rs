@@ -1,0 +1,271 @@
+//! Health, and when to go and get it back.
+//!
+//! Combat is the only thing that costs health and the only thing health is for, so the policy is
+//! simple: after a node that cost us real health, top up before taking the next fight. The user set
+//! the bar at **four or more** lost at a single overworld node.
+//!
+//! Health is read straight from `mainSaveData.player` (`health`, `maxHealth`) — no vision needed.
+//!
+//! ## Where resting happens, and what it costs
+//!
+//! `ui/rest.lua` serves both, and they are not priced the same:
+//!
+//! - **Inn**, inside a village: `costText = '-10'` and `golddisplay.add(-10)` (`:59`, `:117`) — ten
+//!   gold. Reached by entering the village subworld, walking to the `store_inn` subnode, `Enter`
+//!   (`overworld/generators/village.lua:361-368`), then `Rest` (`ui/inn.lua:55`).
+//! - **Campfire**: `costIcon` is a campfire when `overworldview.areaUnused()` and firewood
+//!   otherwise, with **`costText = nil`** (`ui/rest.lua:54-55`) — no gold at all.
+//!
+//! So a campfire is the cheaper rest and needs no subworld, no shop, and no walking to a subnode.
+//! The user asked for villages; campfires are worth preferring where one is adjacent, and this
+//! module ranks them accordingly. Both restore `min(healthNeed, healthGive)` where
+//! `healthNeed = maxHealth - health` (`:159-161`), so neither is guaranteed to be a full heal.
+//!
+//! Resting also sets `lastRested` (`:265`), which is what clears the `tiredness` status
+//! (`overworldview.lua:225-233`) — a second reason not to put it off indefinitely.
+//!
+//! ## The dream, which is why resting is not a fire-and-forget action
+//!
+//! Resting can drop into the `Physics dream` (`overworld/events/rested.lua:10-17`). It is random and
+//! becomes rarer with exposure — gated on `love.math.random(1,4)==1` the first times and then
+//! `random(1, physicsDream)==1` — so it will not show up reliably in testing and must be handled
+//! whenever it does.
+//!
+//! Two properties make it hostile to the patterns used everywhere else in this project:
+//!
+//! - **`Wake up` is bound to `goBack`, not `affirmative`** (`:112-116`). Space will not dismiss it,
+//!   and Escape — the other `goBack` binding — is forbidden here, since it maps to
+//!   `goBack() or options()` and can strand a run in the options menu. So this button must be
+//!   **clicked**, at [`WAKE_UP`].
+//! - **It is not there when the dream starts.** `showIf = function() return wakeUp end`, and outside
+//!   the `alreadyCorrupt` case `wakeUp` only becomes true from an `onCollisionCallbacks` handler
+//!   (`:56-70`) — that is, when two tiles in the dream's physics simulation collide. There is no
+//!   fixed duration to wait out. The button's arrival has to be *observed*.
+
+/// Health lost at one overworld node that sends us looking for a rest.
+///
+/// The user's number. Below it, the detour costs more time than the health is worth.
+pub const REST_THRESHOLD: i64 = 4;
+
+/// `Wake up` on the dream screen: a default 250x100 button at screen-space (0, 0.85) with an
+/// xOffset of 0.75 (`overworld/events/rested.lua:112-113`), so x = 250*0.75, y = 1080*0.85 at
+/// 1920x1080. The same slot Travel and Enter use — which is safe only because the dream screen is
+/// the only thing on top when it is showing.
+pub const WAKE_UP: (f64, f64) = (0.75, 0.85);
+
+/// The player's health, from `mainSaveData.player`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Health {
+    pub current: i64,
+    pub max: i64,
+}
+
+impl Health {
+    pub fn from_save(save: &crate::game::save::Table) -> Option<Self> {
+        Some(Health {
+            current: save.int_at("player.health")?,
+            max: save.int_at("player.maxHealth")?,
+        })
+    }
+
+    /// How much a full rest would restore.
+    pub fn missing(&self) -> i64 {
+        (self.max - self.current).max(0)
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.missing() <= 0
+    }
+}
+
+/// Did this node cost enough health to be worth resting off?
+///
+/// Takes the readings from either side of the node rather than a single "damage" number, because
+/// health can also go *up* — items, effects, a rest we already took — and a naive subtraction of a
+/// larger figure from a smaller one would report a huge loss.
+pub fn should_rest(before: Health, after: Health) -> bool {
+    let lost = before.current - after.current;
+    lost >= REST_THRESHOLD && !after.is_full()
+}
+
+/// What the inn charges (`ui/rest.lua:49`, `getPlayerGold() >= 10`).
+pub const INN_COST: i64 = 10;
+
+/// A place that can restore health.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Site {
+    /// Free while the area is unused, then firewood.
+    Campfire,
+    /// Inside a village. Ten gold, and a walk across a subworld to reach it.
+    Inn,
+}
+
+impl Site {
+    /// Higher is better, given the fuel we carry.
+    ///
+    /// A campfire always beats an inn — no subworld to enter, no subnode to cross, no gold — but
+    /// **carrying fuel widens the gap rather than creating it**. Without fuel a campfire works only
+    /// while its area is unused, which we cannot see; with fuel it works regardless, so the trip is
+    /// a certainty rather than a gamble and there is no reason to spend ten gold at an inn.
+    pub fn rank(self, fuel: i64) -> u8 {
+        match self {
+            Site::Campfire if fuel > 0 => 3,
+            Site::Campfire => 2,
+            Site::Inn => 1,
+        }
+    }
+}
+
+/// Which kind of rest site a heading names, if any.
+pub fn site(heading: &str) -> Option<Site> {
+    let h = heading.trim_end();
+    if h.ends_with("campfire") {
+        Some(Site::Campfire)
+    } else if h.ends_with("village") || h.ends_with("inn") {
+        Some(Site::Inn)
+    } else {
+        None
+    }
+}
+
+/// Item groups whose stacked variants count as campfire fuel.
+///
+/// `items/fuel.lua` builds each as `('%s%d'):format(group, i)` for `i` in 1..5, with
+/// `usefulness.campfirerest = 'fuel'` and `craft.fill = i`. So the trailing digit *is* the fill
+/// value, which is what `getPlayerCampfireFuelCount` sums (`overworld.lua:483-492`).
+const FUEL_GROUPS: &[&str] = &["scrapwood", "firewood", "charcoal"];
+
+/// How much campfire fuel the save says we carry.
+///
+/// Mirrors `getPlayerCampfireFuelCount`: walk `playerData.items`, keep the ones that are fuel, and
+/// add up their `craft.fill`. Anything nonzero makes a campfire usable even where the area has
+/// already been used.
+pub fn fuel_count(items: &[String]) -> i64 {
+    items
+        .iter()
+        .filter_map(|it| {
+            let group = FUEL_GROUPS.iter().find(|g| it.starts_with(**g))?;
+            it[group.len()..].parse::<i64>().ok()
+        })
+        .sum()
+}
+
+/// Fuel carried, read from `mainSaveData.items`.
+pub fn fuel_from_save(save: &crate::game::save::Table) -> i64 {
+    let Some(items) = save.table_at("items") else { return 0 };
+    let keys: Vec<String> =
+        items.arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+    fuel_count(&keys)
+}
+
+/// Can we actually rest here, given what we are carrying?
+///
+/// `getCanRest` (`ui/rest.lua:43-50`) gates the two differently:
+///
+/// ```lua
+/// if campfire then
+///     return location.type=='campfire' and areaUnused() or getPlayerCampfireFuelCount()~=0
+/// end
+/// return overworld.getPlayerGold()>=10
+/// ```
+///
+/// So an inn is a straight gold check, while a campfire is free only while the area is **unused**
+/// and costs firewood thereafter. We cannot see `areaUnused` or the fuel count from outside, so a
+/// campfire is treated as available and the walk is occasionally wasted — the cheap failure, since
+/// the alternative is never using the free option at all. `restInsomnia` gear blocks resting
+/// outright (`:45`) and is likewise invisible to us.
+pub fn can_rest_at(site: Site, gold: i64) -> bool {
+    match site {
+        Site::Campfire => true,
+        Site::Inn => gold >= INN_COST,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hp(current: i64, max: i64) -> Health {
+        Health { current, max }
+    }
+
+    #[test]
+    fn four_lost_is_the_bar() {
+        assert!(should_rest(hp(12, 12), hp(8, 12)), "exactly four qualifies");
+        assert!(!should_rest(hp(12, 12), hp(9, 12)), "three does not");
+        assert!(should_rest(hp(12, 12), hp(2, 12)));
+    }
+
+    #[test]
+    fn there_is_no_point_resting_at_full_health() {
+        // Lost five, then something healed us back. A rest would restore nothing.
+        assert!(!should_rest(hp(12, 12), hp(12, 12)));
+    }
+
+    #[test]
+    fn gaining_health_is_never_a_reason_to_rest() {
+        // The reading can rise -- a potion, an effect, a rest already taken. Subtracting the wrong
+        // way round would read that as a huge loss and send us off to heal after being healed.
+        assert!(!should_rest(hp(4, 12), hp(11, 12)));
+    }
+
+    #[test]
+    fn a_campfire_outranks_a_village() {
+        // Free and immediate, against ten gold and a walk across a subworld.
+        assert!(
+            site("Cottam campfire").unwrap().rank(0) > site("Ulrome village").unwrap().rank(0)
+        );
+        // Real headings from the captured dump.
+        assert_eq!(site("Greenoak Backwoods campfire"), Some(Site::Campfire));
+        assert_eq!(site("Ulrome village"), Some(Site::Inn));
+        assert_eq!(site("Weedley Copse — level 0 crypt"), None);
+        assert_eq!(site("Bainton Clump — level 1 forest"), None);
+    }
+
+    #[test]
+    fn an_inn_is_useless_without_ten_gold() {
+        // `getCanRest` is a flat `getPlayerGold() >= 10`, so walking to a village with nine gold
+        // buys a wasted trip and no health.
+        assert!(!can_rest_at(Site::Inn, 9));
+        assert!(can_rest_at(Site::Inn, 10));
+        assert!(can_rest_at(Site::Inn, 107));
+        // A campfire never asks for gold.
+        assert!(can_rest_at(Site::Campfire, 0));
+    }
+
+    #[test]
+    fn firewood_makes_a_campfire_beat_the_inn_outright() {
+        // With fuel the campfire works whatever the area's state, so paying ten gold is pure waste.
+        assert!(Site::Campfire.rank(3) > Site::Campfire.rank(0));
+        assert!(Site::Campfire.rank(0) > Site::Inn.rank(0), "still preferred without fuel");
+    }
+
+    #[test]
+    fn fuel_is_the_trailing_digit_of_a_stack() {
+        // `items/fuel.lua` builds `scrapwood1..5` etc. with `craft.fill = i`.
+        assert_eq!(fuel_count(&["scrapwood3".into()]), 3);
+        assert_eq!(fuel_count(&["firewood5".into(), "charcoal2".into()]), 7);
+        // Real inventory contents from the sandbox save: neither is fuel.
+        assert_eq!(fuel_count(&["healthPotion4".into(), "antivenom4".into()]), 0);
+    }
+
+    #[test]
+    fn fuel_reads_out_of_the_save() {
+        let save = crate::game::save::parse(
+            r#"return { items = { "healthPotion4", "firewood2" }, player = { gold = 3 } }"#,
+        )
+        .unwrap();
+        assert_eq!(fuel_from_save(&save), 2);
+    }
+
+    #[test]
+    fn health_reads_out_of_the_save() {
+        let save = crate::game::save::parse(
+            r#"return { player = { health = 8, maxHealth = 12, gold = 107 } }"#,
+        )
+        .unwrap();
+        let h = Health::from_save(&save).unwrap();
+        assert_eq!(h.missing(), 4);
+        assert!(!h.is_full());
+    }
+}
