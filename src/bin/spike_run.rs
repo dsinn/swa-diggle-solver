@@ -24,8 +24,11 @@
 //! screen, and reading that grid is a capability this run does not have. Arriving at one is
 //! reported and stepped over rather than faked.
 //!
-//! **The anomaly fight itself.** Level 8, and losing it ends the run. Reaching it is the milestone
-//! here.
+//! ## The anomaly fight is NOT skipped
+//!
+//! It is level 8, and this character came straight here, so losing is the likely outcome. That is
+//! the experiment: find out how badly a rushed run loses rather than assume it. A loss cannot be
+//! undone in the game — only by restoring a checkpoint.
 //!
 //! **Drives the real mouse and keyboard. Restore a checkpoint to rewind.**
 
@@ -52,11 +55,10 @@ const LOCATE_ME: (i32, i32) = (32, 918);
 const AREA_BUTTON: (i32, i32) = (187, 918);
 const EMPTY_MAP: (i32, i32) = (1750, 160);
 const NEUTRAL: (i32, i32) = (300, 300);
-const MAX_STEPS: usize = 14;
+const MAX_STEPS: usize = 20;
 
 #[derive(Debug)]
 enum Stop {
-    AnomalyReached,
     AnomalyBeaten,
     AtShrine(String),
     /// Standing on a subworld whose interior we cannot yet clear.
@@ -76,6 +78,14 @@ struct Run<'a> {
     latest: Option<Adjacency>,
     save_dir: PathBuf,
     log: String,
+    /// How many `Lore screen:` announcements we have answered.
+    ///
+    /// Counted rather than marked. The lines arrive while some earlier action is pumping, so a mark
+    /// taken at the top of the next iteration is already past them — that is how a run sat at a
+    /// village gate whose text was sitting in the buffer. And they come in runs: entering Ulrome
+    /// printed two at once, each needing its own dismissal, so "have I seen one since X" cannot
+    /// answer "how many are left".
+    lore_done: usize,
 }
 
 impl Run<'_> {
@@ -139,6 +149,38 @@ impl Run<'_> {
         Ok(moved > 0.05)
     }
 
+    /// Dismisses a lore screen if one is up.
+    ///
+    /// The text comes **before** the options. Entering a corrupted village shows a lore screen
+    /// first, and while it is up the event's choices do not exist yet — so `parse_events` finds
+    /// nothing, the map is not on screen, and everything downstream stalls. A live run sat at a
+    /// village gate for exactly this reason.
+    ///
+    /// Dismissed with Space rather than a click: the button declares
+    /// `userFunctionName = 'affirmative'` (`ui/lorescreen.lua:46-50`), which is read rather than
+    /// assumed, and its position varies with whether it carries text.
+    fn dismiss_lore(&mut self) -> bool {
+        let seen = self.feed.lines().iter().filter(|l| l.contains("Lore screen:")).count();
+        if seen <= self.lore_done {
+            return false;
+        }
+        let _ = diggle_solver::observe::settle::wait_for_quiescence(self.win, 0.02, Duration::from_secs(8));
+        for _ in 0..4 {
+            let Ok(before) = diggle_solver::win::capture::capture_window(self.win) else { break };
+            self.keys.focus();
+            std::thread::sleep(Duration::from_millis(250));
+            let _ = self.keys.press_key(VK_SPACE, SC_SPACE);
+            std::thread::sleep(Duration::from_millis(900));
+            self.pump();
+            let Ok(after) = diggle_solver::win::capture::capture_window(self.win) else { break };
+            if before.diff_fraction(&after, diggle_solver::observe::settle::FULL) > 0.05 {
+                break;
+            }
+        }
+        self.log.push_str("  dismissed a lore screen\n");
+        true
+    }
+
     /// Answers an arrival event, if one is up. Returns its title.
     fn handle_event(&mut self, mark: usize) -> Option<String> {
         let ev = event::parse_events(self.feed.since(mark)).pop()?;
@@ -194,6 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         latest: None,
         save_dir: save_dir.clone(),
         log: String::from("# Spike: the run\n\n"),
+        lore_done: 0,
     };
 
     if diggle_solver::act::click_when_ready(&win, &diggle_solver::act::CONTINUE, Duration::from_secs(30)).is_err() {
@@ -229,7 +272,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A global stop, so the report is always written. A spike killed from outside leaves a stale
     // report on disk that then reads as the current result.
-    let stop = drive(&mut r, &fight, &mut health, Instant::now() + Duration::from_secs(600));
+    let stop = drive(&mut r, &fight, &mut health, Instant::now() + Duration::from_secs(900));
     r.log.push_str(&format!("\n## Stopped\n\n{stop:?}\n\n"));
     r.log.push_str(&format!(
         "at **{}**; {} places known; anomaly {:?}{}; beaten: {}\n\n",
@@ -263,6 +306,24 @@ fn drive(
         if r.map.anomaly_beaten() {
             return Stop::AnomalyBeaten;
         }
+        // An event can be up at the top of any iteration, and while one is it owns the screen —
+        // clicking the map does nothing and `recentre` times out with "no pan dump". Entering a
+        // subworld raises one immediately, which is how a live run got stuck at a village gate it
+        // had just walked through. Answer it first, then look at the map.
+        let mark = r.feed.mark();
+        r.pump();
+        // Text first, then options: a lore screen hides the event's choices behind it.
+        if r.dismiss_lore() {
+            r.log.push_str(&format!("{step}. cleared text before looking at the map
+"));
+            continue;
+        }
+        if let Some(title) = r.handle_event(mark) {
+            r.log.push_str(&format!("{step}. answered `{title}` before looking at the map
+"));
+            continue;
+        }
+
         let Some(fresh) = r.recentre() else {
             return Stop::Failed("no pan dump after locate-me".into());
         };
@@ -327,12 +388,15 @@ fn drive(
             .as_ref()
             .filter(|p| p.has_combat() && !p.completed && must_fight_here)
         {
+            // The anomaly is fought like anything else. It is level 8 against a character that came
+            // straight here, so losing is the likely outcome — and finding out how badly is the
+            // point. A loss cannot be undone in the game, only by restoring a checkpoint.
             let is_anomaly = r.map.anomaly().map(|a| a.key == p.key).unwrap_or(false);
-            if is_anomaly {
-                r.log.push_str(&format!("{step}. **the anomaly** at `{here}` ({})\n", p.heading));
-                return Stop::AnomalyReached;
-            }
-            r.log.push_str(&format!("{step}. fighting `{here}` ({})\n", p.heading));
+            r.log.push_str(&format!(
+                "{step}. fighting {}`{here}` ({})\n",
+                if is_anomaly { "**THE ANOMALY** " } else { "" },
+                p.heading
+            ));
             if !matches!(r.click_area_button("Combat"), Ok(true)) {
                 return Stop::Failed(format!("Combat did not open at {here}"));
             }
@@ -374,7 +438,7 @@ fn drive(
                 &mut r.feed,
                 &r.keys,
                 &mut log,
-                deadline.min(Instant::now() + Duration::from_secs(240)),
+                deadline.min(Instant::now() + Duration::from_secs(400)),
             );
             r.log.push_str(&log.lines().map(|l| format!("    {l}\n")).collect::<String>());
             match outcome {
