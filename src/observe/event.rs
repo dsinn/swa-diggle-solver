@@ -93,7 +93,36 @@ pub fn harmful(text: &str) -> bool {
         "sacrifice", "rob", "steal", "loot", "burn", "betray", "threaten", "extort",
     ];
     let t = text.to_ascii_lowercase();
-    WORDS.iter().any(|w| t.split(|c: char| !c.is_ascii_alphabetic()).any(|word| word == *w))
+    let words: Vec<&str> = t.split(|c: char| !c.is_ascii_alphabetic()).filter(|w| !w.is_empty()).collect();
+    words.iter().enumerate().any(|(i, w)| {
+        WORDS.contains(w) && !reads_as_a_noun(words.get(i.wrapping_sub(1)).copied(), i)
+    })
+}
+
+/// Is a harmful word being *named* rather than *done*?
+///
+/// The list above screens for actions we refuse to take, but the same words are ordinary nouns.
+/// "Ask about the attack." is a question about something that already happened; refusing it is a
+/// false positive that leaves a real event unanswered. The discriminator is the preceding word: a
+/// determiner or preposition in front makes it a noun, and nothing else does.
+///
+/// Deliberately asymmetric. An unrecognised context stays *harmful*, so the list only ever loses its
+/// grip on constructions explicitly named here — a false positive costs one unanswered event, a
+/// false negative kills a villager.
+fn reads_as_a_noun(previous: Option<&str>, index: usize) -> bool {
+    // Nothing in front of it: an imperative, which is how every option we must refuse is phrased —
+    // "Kill him.", "Attack the guard."
+    if index == 0 {
+        return false;
+    }
+    const NOUN_MARKERS: &[&str] = &[
+        // Determiners.
+        "the", "a", "an", "this", "that", "these", "those", "their", "his", "her", "its", "your",
+        "my", "our", "no", "any",
+        // Prepositions — "about the attack", "news of the murder", "after the raid".
+        "about", "of", "from", "after", "before", "during", "for", "on", "in", "at",
+    ];
+    previous.is_some_and(|p| NOUN_MARKERS.contains(&p))
 }
 
 const START: &str = "Event:";
@@ -254,6 +283,16 @@ Choices = {
         assert!(harmful("Kill him"));
         // Substrings must not trigger it -- "skill" is not "kill", and refusing every option would
         // leave the run unable to answer anything.
+        // Named, not done. Both seen live at the Ulrome gate, where refusing the first left the
+        // event unanswered and stalled the run at a screen it could have walked through.
+        assert!(!harmful("Ask about the attack."));
+        assert!(!harmful("Ask why they aren't defending."));
+        // The same noun still bites when it is an imperative, which is the case that matters.
+        assert!(harmful("Attack."));
+        assert!(harmful("Join in and attack"));
+        // A preposition in front is what marks it as a noun — but only in front of the word itself.
+        assert!(!harmful("Ask about the murder"));
+        assert!(harmful("Try to murder him"));
         assert!(!harmful("Test your skill"));
         assert!(!harmful("Continue"));
         assert!(!harmful("Pay 50 gold"));
