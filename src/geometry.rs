@@ -174,6 +174,40 @@ impl Geometry {
             }
         }
 
+        // A ragged board: the save states the current column heights, and only when they no longer
+        // add up to the full board.
+        //
+        // `tileboard.lua:2457-2467` writes `letters.columns` **only** `if #letters ~= totalTileCount`,
+        // each entry `#tilegrid[i]`. That is why it has never appeared before, and why its absence
+        // has always been safe to ignore.
+        //
+        // It has to be honoured rather than warned about: a tile that falls off the bottom leaves a
+        // column one short, and the flat array is column-major bottom-to-top, so every index after
+        // that column addresses the wrong cell. Row 0 is the bottom row here (see
+        // `crate::layout::tile_centres`), which is what makes a short column fill from the bottom
+        // and leave its gap at the top — matching the board exactly as drawn.
+        //
+        // `col_y_offsets` is deliberately left alone. On a hexagonal board that offset centres a
+        // column that is *nominally* short, which is a property of the board's shape and not of how
+        // many tiles happen to be sitting in it right now.
+        if let Some(cols) = save.table_at("tileboard").and_then(|t| t.map.get("columns")) {
+            if let Some(t) = cols.as_table() {
+                let heights: Vec<usize> =
+                    t.arr.iter().filter_map(|v| v.as_int()).map(|n| n.max(0) as usize).collect();
+                if !heights.is_empty() {
+                    if heights.len() == geometry.rows_per_col.len() {
+                        geometry.rows_per_col = heights;
+                    } else {
+                        problems.push(format!(
+                            "save lists {} column heights but the shape has {} columns",
+                            heights.len(),
+                            geometry.rows_per_col.len()
+                        ));
+                    }
+                }
+            }
+        }
+
         if geometry.total_tiles() != tile_count {
             problems.push(format!(
                 "board shape accounts for {} tiles but the dump has {tile_count}",
@@ -390,5 +424,88 @@ mod tests {
         assert!(r.geometry.locked_rows.contains(&2));
         assert!(r.geometry.locked_cols.contains(&3));
         assert!(r.geometry.adjacency_required, "must be surfaced, it is not modelled");
+    }
+}
+
+#[cfg(test)]
+mod ragged_board_tests {
+    use super::*;
+
+    /// The live 15-tile board from a village inn fight, with its `columns` field.
+    ///
+    /// On screen it was drawn as, top row first:
+    ///
+    /// ```text
+    /// C  .  S  L
+    /// T  Y  I  E
+    /// R  A  P  C
+    /// R  C  I  A
+    /// ```
+    ///
+    /// One tile had fallen off the bottom of column 2, leaving that column three tall with its gap
+    /// at the TOP.
+    fn live_save() -> crate::game::save::Table {
+        crate::game::save::parse(
+            "return {\n\
+             \x20 tileboard = {\n\
+             \x20   \"R\", \"R\", \"T\", \"C\",\n\
+             \x20   \"C\", \"A\", \"Y\",\n\
+             \x20   \"I\", \"P\", \"I\", \"S\",\n\
+             \x20   \"A\", \"C\", \"E\", \"L\",\n\
+             \x20   columns = { 4, 3, 4, 4 },\n\
+             \x20 },\n\
+             }\n",
+        )
+        .expect("parses")
+    }
+
+    #[test]
+    fn the_saves_column_heights_are_honoured() {
+        let r = Geometry::from_save(&live_save(), 15);
+        assert_eq!(r.geometry.rows_per_col, vec![4, 3, 4, 4]);
+        assert_eq!(r.geometry.total_tiles(), 15);
+        assert!(r.problems.is_empty(), "no complaint for a legitimately ragged board: {:?}", r.problems);
+    }
+
+    #[test]
+    fn indices_land_in_the_right_columns() {
+        let g = Geometry::from_save(&live_save(), 15).geometry;
+        // Column-major, bottom-to-top. Verified letter by letter against the drawn board.
+        assert_eq!(g.position(0), Some((1, 1)), "first R, bottom of column 1");
+        assert_eq!(g.position(3), Some((1, 4)), "C, top of column 1");
+        assert_eq!(g.position(4), Some((2, 1)), "C, bottom of the SHORT column");
+        assert_eq!(g.position(6), Some((2, 3)), "Y, top of the short column - row 4 is empty");
+        assert_eq!(g.position(7), Some((3, 1)), "I, bottom of column 3");
+        assert_eq!(g.position(8), Some((3, 2)), "the wood P");
+        assert_eq!(g.position(14), Some((4, 4)), "L, top of column 4");
+        assert_eq!(g.position(15), None, "there is no sixteenth tile");
+    }
+
+    #[test]
+    fn a_full_board_is_unaffected() {
+        // No `columns` key at all, which is the normal case -- the game only writes it when the
+        // board is short (tileboard.lua:2457).
+        let save = crate::game::save::parse(
+            "return { tileboard = { \"A\", \"B\", \"C\", \"D\" } }",
+        )
+        .expect("parses");
+        let r = Geometry::from_save(&save, 16);
+        assert_eq!(r.geometry.rows_per_col, vec![4, 4, 4, 4]);
+    }
+
+    #[test]
+    fn the_short_column_puts_its_gap_at_the_top() {
+        // Row 0 is the bottom (crate::layout::tile_centres), so column 2's three tiles occupy the
+        // bottom three cells. The proof that matters: the top of the short column is HIGHER on
+        // screen than the bottom, and there is no tile above it.
+        let g = Geometry::from_save(&live_save(), 15).geometry;
+        let centres = crate::layout::tile_centres(&g, 1920, 1080);
+        assert_eq!(centres.len(), 15);
+        let bottom_of_short = centres[4]; // C
+        let top_of_short = centres[6]; // Y
+        assert!(top_of_short.1 < bottom_of_short.1, "row 3 sits above row 1");
+        // And column 1, which is full, reaches higher still than the short column's top.
+        let top_of_full = centres[3]; // C
+        assert!(top_of_full.1 < top_of_short.1, "the full column has a tile where column 2 has a gap");
     }
 }
