@@ -668,6 +668,10 @@ fn drive(
             // window, and here. A mark is only meaningful if nothing between it and the read can
             // consume the feed, and almost every helper here consumes the feed.
             let mark = r.feed.mark();
+            // Which subworld we were in *before* the click, so that "we are in one" and "this button
+            // put us in one" stay distinguishable. Inside a village they are not the same thing at
+            // all, and conflating them is what stopped this run: see the loop below.
+            let inside_before = r.map.inside().map(str::to_string);
             if !matches!(r.click_area_button("Combat"), Ok(true)) {
                 return Stop::Failed(format!("Combat did not open at {here}"));
             }
@@ -692,15 +696,27 @@ fn drive(
             };
             let mut pregame = false;
             loop {
-                if r.affirmative().state.is_ready() || r.map.inside().is_some() {
-                    // A live affirmative or a subworld dump: whatever that button did, it was not
-                    // starting a fight.
-                    break;
-                }
+                // Pump and test the POSITIVE signal first. The other two branches are inferences
+                // from what has not happened, and an inference must never pre-empt an announcement
+                // that is already sitting unread in the feed — which is exactly what went wrong:
+                // `Pregame screen:` was printed, and this loop returned before ever pumping.
                 r.pump();
                 if r.feed.seen_since(mark, "Pregame screen:") {
                     pregame = true;
                     r.pregame_seen = true;
+                    break;
+                }
+                // A live affirmative, or a subworld we were NOT in a moment ago: whatever that
+                // button did, it was not starting a fight.
+                //
+                // `inside().is_some()` was the test here, and inside a village it is true before the
+                // click as well as after — so it fired every time, on the first iteration, and the
+                // run reported "that button entered `l10`" while standing in `l10` already. The
+                // pregame it had just opened stayed on screen, and the next step's click found no
+                // area button at all. Only a *change* is evidence.
+                if r.affirmative().state.is_ready()
+                    || r.map.inside().map(str::to_string) != inside_before
+                {
                     break;
                 }
                 if Instant::now() >= by {
@@ -716,14 +732,18 @@ fn drive(
                 // exactly like fights. Record what we just learned and let the next iteration deal
                 // with being inside; failing here left the run standing in a village.
                 r.pump();
-                if let Some(container) = r.map.inside().map(|s| s.to_string()) {
-                    r.log.push_str(&format!(
-                        "  no pregame — that button entered `{container}`, which is a subworld
-"
-                    ));
-                    continue;
+                let inside_now = r.map.inside().map(str::to_string);
+                if inside_now != inside_before {
+                    if let Some(container) = inside_now {
+                        r.log.push_str(&format!(
+                            "  no pregame — that button entered `{container}`, which is a subworld\n"
+                        ));
+                        continue;
+                    }
                 }
-                return Stop::Failed(format!("no pregame and no subworld at {here}"));
+                return Stop::Failed(format!(
+                    "no pregame at {here} and still inside {inside_before:?}"
+                ));
             }
             r.keys.focus();
             std::thread::sleep(Duration::from_millis(400));
