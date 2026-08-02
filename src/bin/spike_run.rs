@@ -683,6 +683,14 @@ fn drive(
             );
             r.log.push_str(&log.lines().map(|l| format!("    {l}\n")).collect::<String>());
             match outcome {
+                // A win with nothing on offer is still a win, and the node is still cleared. Treating
+                // it as a stop would end the run on the ordinary case of a reward roll coming up
+                // empty (`utils/world.lua:1287`).
+                Ok(Outcome::ClearedWithoutReward { turns, screens }) => {
+                    r.log.push_str(&format!(
+                        "  cleared in {turns} turns, no reward offered ({screens} screen(s))\n"
+                    ));
+                }
                 Ok(Outcome::Cleared { turns, reward }) => {
                     r.log.push_str(&format!("  cleared in {turns} turns, took {reward:?}\n"));
                 }
