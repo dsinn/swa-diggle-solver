@@ -333,6 +333,22 @@ impl Fight<'_> {
     /// exactly a `Give up` screen. So the refusal stands until the area total can be read, and it
     /// says so in the log rather than stalling silently.
     fn finish(&self, feed: &mut Feed, log: &mut String, state: &str) -> Result<bool, crate::Error> {
+        // Read the word on the button before anything else.
+        //
+        // The health check below infers what the slot *should* say; this asks what it *does* say, by
+        // comparing the `Finish` and `Eulogise` templates and taking the better match. A live death
+        // screen finally gave us the second one, and the pair separates by 0.147 where any single
+        // threshold had eleven thousandths to work with. Independent of the save, so it still holds
+        // when the save is stale or unreadable — and it errs toward "yes, Eulogise" when the screen
+        // cannot be read at all.
+        if crate::act::slot_is_eulogise(self.win) {
+            log.push_str(
+                "  **not clicking (0.9,0.9)**: the slot reads `Eulogise`, not `Finish` — the \
+                 character is dead and this would end the run\n",
+            );
+            return Ok(false);
+        }
+
         // A save we cannot read is not permission to click. Refusing costs a loop iteration;
         // guessing costs the run.
         match save::load(&self.combat_path).ok().and_then(|cs| cs.int_at("rpg.player.health")) {

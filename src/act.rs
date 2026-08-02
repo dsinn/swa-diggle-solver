@@ -59,7 +59,7 @@ pub struct Button {
 
 /// Combat's `Finish`, which ends a cleared fight.
 ///
-/// `ss(0.9, 0.9)` with the 300x100 `default` size — centre (1728, 972), matching the coordinate a
+/// `ss(0.9, 0.9)` with the 250x100 `default` size — centre (1728, 972), matching the coordinate a
 /// live run already clicks (`WaitPhase -> Finish at (1728,972)`).
 ///
 /// ## What it does and does not prove
@@ -92,87 +92,75 @@ pub struct Button {
 ///
 /// ## Measured, against the whole saved-frame corpus
 ///
+/// All figures are for the **exact** 250x100 button rect. An earlier crop was 300x100 and so carried
+/// 25 px of scene down each side; that made it score 1.0000 on two frames of the *same crypt* and
+/// would have made it scene-dependent anywhere else. `default` is 250x100
+/// (`ui/elements/button.lua:17`), so that is what the template is.
+///
 /// ```text
-///   Finish, spike-frames-live/now.png              1.0000  err 0.0000
-///   Finish, spike-frames-live/combat-stalled.png   1.0000  err 0.0000   independent, 2 days apart
-///   'Adventure!' plank, 16-selected.png            0.7843  err 0.0769   <- nearest confusable
-///   greyed Finish at 0 health, finish-at-zero-*.png 0.8380 err 0.0743   <- see below
-///   Finish under a hover tooltip, waitphase-*.png  0.5794  err 0.1718
-///   plain overworld terrain, overworld-campfire    0.5653  err 0.1646   <- no button at all
+///   Finish, now.png                         1.0000  err 0.0000
+///   Finish, combat-stalled.png              1.0000  err 0.0000   independent, 2 days apart
+///   Finish + `Fight on!`, different scene   1.0000  err 0.0000   <- scene-independent, as intended
+///   greyed Finish at 0 health               0.8639  err 0.0720
+///   `Eulogise`, the same slot at death      0.8527  err 0.0537   <- the real confusable
+///   'Adventure!' plank                      0.8228  err 0.0696
+///   plain overworld terrain                 0.6784  err 0.1271
+///   postgame Continue                       0.3327  err 0.2352
 /// ```
 ///
 /// ## Two questions, and only one of them has a clean answer
 ///
-/// A live run reached 0 health with the fight won. The slot read `Finish`, drawn **inactive**
-/// (`activeIf` is `WaitPhase or SmokebombWaitPhase or PlayerTurn`), and scored 0.8380 — while a
-/// *different word* on a plank scores 0.7843. Fifty-four thousandths apart, one sample each.
+/// "Is this word `Finish` or `Eulogise`" does **not** separate on one template: 0.8527 for a word
+/// swap against 0.8639 for a mere state change is eleven thousandths, and any cut point between
+/// them would be fitting noise. [`slot_is_eulogise`] compares the two templates instead, which
+/// separates the same pair by 0.147.
 ///
-/// So "is this word `Finish` or `Give up`" does **not** separate on this template: changing the
-/// button's state costs about as much as changing its word, and any threshold between those two
-/// numbers would be fitting noise.
+/// "Is an **active** `Finish` on screen" separates cleanly — 1.0000 against 0.8639 greyed — and that
+/// is what [`COMBAT_FINISH_ACTIVE`] asks. An inactive button cannot be clicked anyway, so waiting
+/// for an active one costs nothing and gives the strongest reading available.
 ///
-/// "Is an active `Finish` on screen" separates enormously, though — 0.8380 inactive against 1.0000
-/// active, later confirmed at 0.9880 under the red low-health tint. That is the question
-/// [`COMBAT_FINISH_ACTIVE`] asks, and it is the one worth asking: an inactive button cannot be
-/// clicked anyway, so waiting for an active one costs nothing and yields the strongest reading the
-/// template can give.
-///
-/// Two things that measurement settles, neither of which was visible from the old negative controls
-/// (a reward screen at 0.2777, a village map at 0.1080):
-///
-/// 1. **A different word on the same style of plank scores 0.7843.** That is the empirical stand-in
-///    for `Give up`, and the old 0.55 sat *below* it — the threshold could not have separated them.
-/// 2. **Flat brown map terrain scores 0.5653**, also above 0.55. The template is a low-contrast
-///    wooden plank and `INLIER_TOLERANCE` is 90 across three channels, about 30 each, which brown
-///    ground clears against brown wood. The village map measured 0.1080 only because that particular
-///    map was dark green.
-///
-/// A true `Finish` scores **1.0000 with zero error, reproducibly, on independent captures**. So the
-/// threshold belongs just under that, not just over the noise.
+/// Note the tightened crop made terrain rejection *worse*, 0.5653 to 0.6784: the wide version had
+/// dark scene edges that brown ground could not match, and the exact one is all brown wood. That is
+/// a fair price for a template that means the same thing in every scene, and the thresholds sit far
+/// above it either way.
 pub const COMBAT_FINISH: Button = Button {
     name: "combat Finish",
     template: "combat-finish.png",
-    // The 300x100 button spans (1578,922)-(1878,1022); this is that grown by 8 px of slack.
-    search: (1570, 914, 1886, 1030),
-    origin: (1578, 922),
+    // `default` is 250x100 (`ui/elements/button.lua:17`) centred at (1728,972), so the button is
+    // exactly (1603,922)-(1853,1022). This is that grown by 8 px of slack -- no scene included.
+    search: (1595, 914, 1861, 1030),
+    origin: (1603, 922),
     click: (1728, 972),
 };
 
 /// `Finish` is on screen, so a fight is sitting in `WaitPhase`. See [`COMBAT_FINISH`].
 ///
-/// **0.90, not 0.55.** Deliberately high, because the errors are not symmetric: failing to see a
-/// `Finish` costs one loop iteration, while mistaking `Give up` for it eulogises the run. Sits 0.10
-/// below both measured true positives and 0.12 above the nearest confusable.
-///
-/// It also rejects a `Finish` occluded by a hover tooltip (0.5794). That is intended and nearly free
-/// — the tooltip only renders under the cursor, and every reader parks at `NEUTRAL` first.
-///
-/// ## This threshold is not the real guarantee
-///
-/// `Give up` has never been captured — the run has never reached zero health — so 0.7843 is a proxy
-/// from a different button, not a measurement of the thing itself. The guarantee comes from the
-/// source instead: **both** paths that render `Give up` require `getPlayerHealth() <= 0`
-/// (`rpg.lua:576` and `:594`), and `Eulogise` requires `gameover`. With health above zero this slot
-/// can only say `Finish`. Gate the press on health, and the fingerprint stops being load-bearing.
-pub const COMBAT_FINISH_PRESENT: f64 = 0.90;
+/// **0.95.** Raised from 0.90 once the bounds became exact: with the template cropped to the button
+/// itself, a genuine `Finish` scores 1.0000, so the bar can sit far above every confusable — the
+/// greyed button (0.8639), `Eulogise` (0.8527), the `Adventure!` plank (0.8228) and bare terrain
+/// (0.6784) — without ever risking a true positive.
+pub const COMBAT_FINISH_PRESENT: f64 = 0.95;
 
 /// `Finish` is not merely on screen but **drawn active**, i.e. clickable. See [`COMBAT_FINISH`].
 ///
-/// Separate from [`COMBAT_FINISH_PRESENT`] because it answers a harder question and is used for a
-/// riskier decision — pressing at zero health, where the wrong label ends the run.
+/// Separate from [`COMBAT_FINISH_PRESENT`] because it answers a harder question and gates a riskier
+/// decision — pressing at zero health, where the wrong label ends the run.
 ///
-/// The two states are far apart, which is what makes this usable: an active plank measured **1.0000**
-/// on two independent captures, the greyed one **0.8380**. 0.97 admits only a near-exact match, and
-/// a word swap should cost far more than 3% of the crop.
+/// **0.97, and high on purpose.** Now that the template is the exact button rect rather than the
+/// button plus 25 px of scene, every genuine match measures **1.0000** — three independent frames,
+/// two scenes, zero error. A threshold near 1.0 therefore costs nothing on the true positives while
+/// putting 0.106 between itself and the nearest confusable.
 ///
-/// Confirmed live: a run reached zero health with the area cleared, and the active `Finish` — under the
-/// red low-health tint that washes the whole scene — measured **0.9880**. So the bar is clearable in
-/// the exact condition it exists for, with margin, and is not merely theoretical.
+/// The asymmetry settles it: refusing a real `Finish` costs one loop iteration, pressing `Eulogise`
+/// ends the run. When one side of a mistake is recoverable and the other is not, the bar belongs
+/// just under the true positive rather than midway to the noise.
 ///
-/// The other half is still an estimate. An active `Give up` has never been captured, so the bound
-/// on it is arithmetic — roughly 7% of the crop is lettering — rather than a measurement.
-/// [`crate::fight::Fight::finish`] logs the best score whenever this bar is missed, so the first run
-/// that meets a real `Give up` replaces the estimate with a number.
+/// One caveat kept honest: the 0.9880 reading taken live at low health was against the *old*
+/// 300x100 crop, whose outer margin the red tint barely touched. The exact crop is all plank, so the
+/// same tint must cost somewhat more, and no frame of an **active** `Finish` at low health was ever
+/// saved to measure it. If a live run is ever refused here at, say, 0.96, that is this caveat
+/// arriving — and [`crate::fight::Fight::finish`] logs the best score precisely so it arrives as a
+/// number rather than a mystery.
 pub const COMBAT_FINISH_ACTIVE: f64 = 0.97;
 
 /// The reward screen's `Confirm`, captured in its **greyed** state.
@@ -255,6 +243,68 @@ pub const REWARD_SCREEN_PRESENT: f64 = 0.90;
 /// active button and 1.0000 for the greyed one.
 pub const REWARD_NOTHING_PICKED: f64 = 0.86;
 
+/// `Eulogise` — the same slot as [`COMBAT_FINISH`], when the character is dead.
+///
+/// Captured from a live death screen ("!! YOU DIED !!", `l10sub11`, 0/12 health). Cropped at exactly
+/// [`COMBAT_FINISH`]'s geometry so the two are directly comparable: same 300x100 at (1578, 922).
+///
+/// ## This retires an estimate
+///
+/// [`COMBAT_FINISH_ACTIVE`] was set to 0.97 on the arithmetic that lettering is "roughly 7% of the
+/// crop", with the note that no `Give up` or `Eulogise` had ever been captured. Now one has, and the
+/// answer is symmetric and comfortable:
+///
+/// ```text
+///                              vs finish tpl   vs eulogise tpl
+///   the death screen              0.8535          1.0000
+///   Finish, now.png               1.0000          0.8535
+///   Finish, combat-stalled.png    1.0000          0.8535
+///   Finish + Fight on!            1.0000          0.8535
+///   greyed Finish at 0 health     0.8380          0.8174
+///   'Adventure!' plank            0.7843          0.8012
+///   postgame Continue             0.2777          0.3714
+///   plain overworld terrain       0.5653          0.5451
+/// ```
+///
+/// A word swap costs **0.1465**, not the ~0.07 I estimated — so 0.97 rejects `Eulogise` with 0.12 to
+/// spare, and even 0.90 would have held. The guess was conservative in the right direction, which is
+/// luck rather than method; the number is now measured.
+///
+/// ## Argmax beats a threshold here
+///
+/// Two templates for one slot turn a threshold question into a classification: whichever scores
+/// higher is the word on the button. Every row above separates by at least 0.146 that way, against
+/// margins as thin as 0.02 for any single cut point. [`slot_is_eulogise`] uses it.
+pub const COMBAT_EULOGISE: Button = Button {
+    name: "combat Eulogise",
+    template: "combat-eulogise.png",
+    search: (1595, 914, 1861, 1030),
+    origin: (1603, 922),
+    click: (1728, 972),
+};
+
+/// The dead-character slot is showing. See [`COMBAT_EULOGISE`].
+///
+/// 0.97: true positive 1.0000, nearest confusable 0.8527 — the same reasoning as
+/// [`COMBAT_FINISH_ACTIVE`]. Exact bounds make a near-1.0 bar free.
+pub const COMBAT_EULOGISE_PRESENT: f64 = 0.97;
+
+/// Does the bottom-right slot read `Eulogise` rather than `Finish`?
+///
+/// Compares both templates and takes the better match, rather than asking one of them a yes/no
+/// question. Pressing this slot while it says `Eulogise` ends the run, so the useful form is "which
+/// word is it", not "is it probably Finish".
+///
+/// Errs toward **yes** on a capture fault: a slot we could not read is not one to press.
+pub fn slot_is_eulogise(win: &GameWindow) -> bool {
+    let eulogise = score_exact(win, &COMBAT_EULOGISE);
+    let finish = score_exact(win, &COMBAT_FINISH);
+    match (eulogise, finish) {
+        (Ok(e), Ok(f)) => e > f && e >= COMBAT_EULOGISE_PRESENT,
+        _ => true,
+    }
+}
+
 /// The postgame stats screen's `Continue`.
 ///
 /// `ui/postgame.lua:69` — `button('Continue', 1, 0.85, { xOffset = -0.75 })`, a `default` button
@@ -306,7 +356,7 @@ pub const POSTGAME_CONTINUE_PRESENT: f64 = 0.90;
 /// their search boxes being smaller than their own templates. A hand-written list silently stops
 /// covering the thing you just added, which is the moment coverage matters most.
 pub const ALL: &[&Button] =
-    &[&CONTINUE, &PROGRESS, &COMBAT_FINISH, &REWARD_CONFIRM, &POSTGAME_CONTINUE];
+    &[&CONTINUE, &PROGRESS, &COMBAT_FINISH, &COMBAT_EULOGISE, &REWARD_CONFIRM, &POSTGAME_CONTINUE];
 
 /// Start menu `Continue`. Measured on 52.3 at 1920x1080; `Restart` is the adjacent button at
 /// x≈500 and eulogises the run, which is exactly why this is verified rather than assumed.
@@ -762,6 +812,33 @@ mod threshold_tests {
         // Blank brown map, no button in the slot at all.
         let ground = score(&COMBAT_FINISH, "overworld-campfire.png").unwrap();
         assert!(ground < COMBAT_FINISH_PRESENT, "bare map ground scored {ground:.4}");
+    }
+
+    /// The confusable that mattered all along, finally measured rather than estimated.
+    ///
+    /// `Eulogise` occupies the identical slot and plank as `Finish`; only the word differs. A single
+    /// template cannot separate them — 0.8527 for the word swap against 0.8639 for `Finish` merely
+    /// going greyed — so the test is that **argmax over the two templates** does.
+    #[test]
+    fn finish_and_eulogise_are_told_apart_by_comparing_both_templates() {
+        let Some(f_on_finish) = score(&COMBAT_FINISH, "now.png") else {
+            eprintln!("SKIP: frame corpus not present");
+            return;
+        };
+        let e_on_finish = score(&COMBAT_EULOGISE, "now.png").unwrap();
+        let f_on_death = score(&COMBAT_FINISH, "eulogise-at-death.png").unwrap();
+        let e_on_death = score(&COMBAT_EULOGISE, "eulogise-at-death.png").unwrap();
+
+        assert!(f_on_finish > e_on_finish, "{f_on_finish:.4} vs {e_on_finish:.4} on a Finish frame");
+        assert!(e_on_death > f_on_death, "{e_on_death:.4} vs {f_on_death:.4} on the death screen");
+
+        // Both margins comfortably wider than anything a single cut point could offer.
+        let margin = (f_on_finish - e_on_finish).min(e_on_death - f_on_death);
+        assert!(margin > 0.10, "argmax margin only {margin:.4}");
+
+        // And the death screen must not clear the Finish bars at all.
+        assert!(f_on_death < COMBAT_FINISH_PRESENT, "Eulogise scored {f_on_death:.4} as Finish");
+        assert!(f_on_death < COMBAT_FINISH_ACTIVE);
     }
 
     #[test]
