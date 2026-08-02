@@ -104,6 +104,14 @@ struct Run<'a> {
     /// has a larger index, the same event has the same index, and nothing has to stay in step with a
     /// count that can drift.
     answered_event: Option<usize>,
+    /// Have we already been through the pregame screen in this save?
+    ///
+    /// It appears once per save — the item-selection screen before the first fight — and never
+    /// again. So after the first one there is nothing to wait FOR, and the wait can collapse to a
+    /// single immediate look. The branch decision is deliberately unchanged: "no pregame" still has
+    /// to be distinguished from "that button entered a subworld", and conflating the two would send
+    /// a real fight down the subworld path.
+    pregame_seen: bool,
 }
 
 impl Run<'_> {
@@ -339,6 +347,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         log: String::from("# Spike: the run\n\n"),
         affirm: affirm::ButtonArt::load(Path::new(&cfg.game_dir), "right")?,
         answered_event: None,
+        pregame_seen: false,
     };
 
     // Timed because the startup felt slow and nobody could say which part was slow. `wait_for_window`
@@ -617,7 +626,12 @@ fn drive(
             // the case it is actually needed for. The remaining timeout covers "the fight is still
             // starting", which is a real wait rather than an inferred one — and ten seconds is
             // generous for a screen that announces itself on `onActive`.
-            let by = Instant::now() + Duration::from_secs(10);
+            // Nothing to wait for once it has been used: one pass, then move on.
+            let by = if r.pregame_seen {
+                Instant::now()
+            } else {
+                Instant::now() + Duration::from_secs(10)
+            };
             let mut pregame = false;
             loop {
                 if r.affirmative().state.is_ready() || r.map.inside().is_some() {
@@ -628,6 +642,7 @@ fn drive(
                 r.pump();
                 if r.feed.seen_since(mark, "Pregame screen:") {
                     pregame = true;
+                    r.pregame_seen = true;
                     break;
                 }
                 if Instant::now() >= by {
