@@ -306,6 +306,23 @@ fn pattern_admits(pattern: &str, c: u8) -> bool {
 /// exactly where it is easiest to measure. An earlier draft of this note called for measuring key
 /// pitch to tell wooden-squares-with-letters apart; that was more machinery than the problem needs.
 ///
+/// ### Measured, not assumed
+///
+/// Two live captures of this exact region, one with the keyboard up and one taken a moment after the
+/// wildcard was committed, scored with the same inlier metric the check will use
+/// (`cargo run --bin inlier_probe`):
+///
+/// ```text
+///        kb-region.png vs kb-region.png          inliers 1.0000
+///        kb-region.png vs after-letter-kb.png    inliers 0.2592
+///  after-letter-kb.png vs after-letter-kb.png    inliers 1.0000
+/// ```
+///
+/// So keyboard against tile board is **0.26**, against a self-comparison control of 1.00. The two
+/// screens are nowhere near each other and the threshold has a wide gap to sit in — around 0.5 leaves
+/// room on both sides. The self-comparisons are the positive control: they prove the metric responds
+/// at all, so 0.26 is a real separation rather than a broken measurement.
+///
 /// The board will not be pixel-identical afterwards — the wildcard has become a letter — so this is a
 /// similarity judgement, not equality. Score it by inliers for the same reason everything else here
 /// does: a partial mismatch should cost proportionally rather than fail outright.
