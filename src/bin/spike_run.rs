@@ -686,10 +686,12 @@ fn drive(
                 // A win with nothing on offer is still a win, and the node is still cleared. Treating
                 // it as a stop would end the run on the ordinary case of a reward roll coming up
                 // empty (`utils/world.lua:1287`).
-                Ok(Outcome::ClearedWithoutReward { turns, screens }) => {
-                    r.log.push_str(&format!(
-                        "  cleared in {turns} turns, no reward offered ({screens} screen(s))\n"
-                    ));
+                // A win with nothing on offer is still a win, and the node is still cleared. Whatever
+                // screen it left up is not dismissed by the fight -- the top of this loop already
+                // presses the bottom-right affirmative for lore screens, and a post-combat screen is
+                // the same thing wearing a different backdrop. One place that knows how to press it.
+                Ok(Outcome::ClearedWithoutReward { turns }) => {
+                    r.log.push_str(&format!("  cleared in {turns} turns, no reward offered\n"));
                 }
                 Ok(Outcome::Cleared { turns, reward }) => {
                     r.log.push_str(&format!("  cleared in {turns} turns, took {reward:?}\n"));

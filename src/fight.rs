@@ -39,14 +39,17 @@ const NEUTRAL: (i32, i32) = (300, 300);
 /// A dungeon that has not ended in this many player turns is not going to.
 const MAX_TURNS: usize = 40;
 
-/// How long to keep looking for a way off the post-combat screen once the fight has resolved.
+/// How long `combatSaveData` must stay unreadable before the fight is called over.
 ///
-/// The fight is over by this point — `combatSaveData` is gone — so this is bounded by how long the
-/// game takes to draw whatever comes next, not by anything we are waiting to happen.
-const AFTERMATH: Duration = Duration::from_secs(15);
-
-/// Presses allowed on the post-combat affirmative before concluding it is not moving.
-const AFTERMATH_PRESSES: usize = 6;
+/// A failed read is **not** proof that it ended. Nothing deletes this file per fight — the only two
+/// `love.filesystem.remove` calls for it are the abandoned-run eulogy (`overworld.lua:968`) and the
+/// postgame (`:1154`), both of which end the whole run. What actually happens mid-fight is that the
+/// game rewrites it (`rpg.lua:43`), and a read landing inside that window fails. Returning on the
+/// first failure would end a live fight; this is the window a rewrite has to complete in.
+///
+/// It doubles as the grace period for `Item selection:` to print, since the fight resolving and the
+/// reward screen being built are not the same instant.
+const SAVE_SETTLE: Duration = Duration::from_secs(3);
 
 /// How a fight ended.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,8 +70,11 @@ pub enum Outcome {
     Stalled { turns: usize, state: String },
     /// Ran out of time or turns.
     Exhausted { turns: usize },
-    /// Won, but there was no reward to choose. `screens` counts the affirmatives dismissed.
-    ClearedWithoutReward { turns: usize, screens: usize },
+    /// Won, but no reward screen was offered.
+    ///
+    /// Whatever screen the game left up is deliberately **not** dismissed here — see
+    /// [`Fight::run`]. The caller's own loop presses it, the same way it presses a lore screen.
+    ClearedWithoutReward { turns: usize },
 }
 
 impl Outcome {
@@ -98,6 +104,8 @@ impl Fight<'_> {
         let mut last_state = String::new();
         let mut last_change = Instant::now();
         let mut finished = false;
+        // When `combatSaveData` first became unreadable, cleared on every successful read.
+        let mut unreadable_since: Option<Instant> = None;
         let mut peak_health: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         // Everything below asks "since this fight began", never "ever". A driver reuses one [`Feed`]
         // across fights, and the previous fight's `Item selection:` is still in the buffer — matching
@@ -106,13 +114,28 @@ impl Fight<'_> {
 
         while Instant::now() < deadline && turns < MAX_TURNS {
             feed.pump();
-            let Ok(cs) = save::load(&self.combat_path) else {
-                // The file going away means the fight resolved. A reward screen is the *common*
-                // next thing, not the only one.
-                if feed.seen_since(began, "Item selection:") {
-                    return self.take_reward(feed, keys, log, turns, deadline);
+            let cs = match save::load(&self.combat_path) {
+                Ok(cs) => {
+                    unreadable_since = None;
+                    cs
                 }
-                return self.aftermath(feed, keys, log, turns, deadline, began);
+                Err(_) => {
+                    // A reward screen is the common next thing, but not the only one.
+                    if feed.seen_since(began, "Item selection:") {
+                        return self.take_reward(feed, keys, log, turns, deadline);
+                    }
+                    // Not proof of anything yet: see `SAVE_SETTLE`. Give the rewrite time to finish
+                    // and the reward screen time to announce itself.
+                    let since = *unreadable_since.get_or_insert(Instant::now());
+                    if since.elapsed() < SAVE_SETTLE {
+                        std::thread::sleep(Duration::from_millis(150));
+                        continue;
+                    }
+                    log.push_str(&format!(
+                        "  fight over after {turns} turns; no reward screen offered\n"
+                    ));
+                    return Ok(Outcome::ClearedWithoutReward { turns });
+                }
             };
             let state = cs.str_at("rpg.player.turnState").unwrap_or("").to_string();
             if state != last_state {
@@ -156,81 +179,6 @@ impl Fight<'_> {
             }
         }
         Ok(Outcome::Exhausted { turns })
-    }
-
-    /// Gets off whatever screen a finished fight left us on, when it is not the reward screen.
-    ///
-    /// **A won fight does not always offer a reward.** `utils/world.lua:1287` only builds the item
-    /// selection `if #rewards>0`, and the reward list is filtered by class, by what is already
-    /// unlocked, and by a `rng:random(1,3)==3` roll for loot — so an empty list is ordinary, not
-    /// exceptional. With no rewards nothing announces itself, `Item selection:` never prints, and
-    /// waiting for it can only burn the deadline. That is exactly what `Exhausted { turns: 2 }` was:
-    /// a fight won cleanly, then two minutes of polling for a screen that was never going to exist.
-    ///
-    /// So the question is asked the other way round — not "did the game say a reward screen opened"
-    /// but "is there something here I can press". [`affirm`] answers that from the game's own button
-    /// artwork, and an `Absent` slot with the fight over means we are already back on the map.
-    ///
-    /// Read → press → re-read, bounded on both counts: the loop exits when the slot stops being
-    /// pressable, so a screen that swallows a press costs one more iteration rather than stranding
-    /// the run, and a slot that never clears reports rather than spinning.
-    fn aftermath(
-        &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, turns: usize,
-        deadline: Instant, began: usize,
-    ) -> Result<Outcome, crate::Error> {
-        let art = crate::observe::affirm::ButtonArt::load(&self.game_dir, "right")
-            .map_err(|e| crate::Error::Win32(e.to_string()))?;
-        let until = deadline.min(Instant::now() + AFTERMATH);
-        let mut screens = 0usize;
-
-        while Instant::now() < until && screens < AFTERMATH_PRESSES {
-            feed.pump();
-            // A reward screen can still turn up here: the fight resolving and the screen being built
-            // are not the same instant, and this is the window between them. Keyed on the fight's
-            // own mark, not a fresh one -- a mark taken here would have nothing behind it, which is
-            // the windowing mistake this project has made three times.
-            if feed.seen_since(began, "Item selection:") {
-                return self.take_reward(feed, keys, log, turns, deadline);
-            }
-            self.park();
-            let reading = self.affirmative(&art);
-            if !reading.state.is_ready() {
-                std::thread::sleep(Duration::from_millis(250));
-                // Absent for a whole pass with the fight already over: nothing is gating us.
-                if !self.affirmative(&art).state.is_ready() {
-                    log.push_str(&format!(
-                        "  no reward screen; {screens} affirmative(s) dismissed, slot now {:?}\n",
-                        reading.state
-                    ));
-                    return Ok(Outcome::ClearedWithoutReward { turns, screens });
-                }
-                continue;
-            }
-            keys.focus();
-            std::thread::sleep(Duration::from_millis(150));
-            keys.press_key(VK_SPACE, SC_SPACE)?;
-            screens += 1;
-            log.push_str(&format!(
-                "  post-combat affirmative {screens} ({:?}, score {:.2})\n",
-                reading.state, reading.score
-            ));
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        log.push_str("  post-combat screen would not clear\n");
-        self.shot("combat-aftermath");
-        Ok(Outcome::ClearedWithoutReward { turns, screens })
-    }
-
-    /// Reads the bottom-right affirmative slot from a crop of just that slot.
-    fn affirmative(&self, art: &crate::observe::affirm::ButtonArt) -> crate::observe::affirm::Reading {
-        use crate::observe::affirm;
-        let absent = affirm::Reading { state: affirm::State::Absent, score: 0.0, margin: 0.0 };
-        let Ok((cw, ch)) = self.win.client_size() else { return absent };
-        let (x, y, w, h) = affirm::ButtonArt::crop_rect(&affirm::LORE_AFFIRMATIVE, cw, ch);
-        match crate::win::capture::capture_client_rect(self.win, x, y, w, h) {
-            Ok(f) => art.read_cropped(&f, &affirm::LORE_AFFIRMATIVE, (cw, ch), (x, y)),
-            Err(_) => absent,
-        }
     }
 
     /// One player turn: read the board, choose a word, type it, submit, wait for the turn to move.
