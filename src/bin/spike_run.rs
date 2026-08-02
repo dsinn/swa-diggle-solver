@@ -54,7 +54,9 @@ use diggle_solver::observe::feed::Feed;
 use diggle_solver::observe::log::{Console, LogMirror};
 use diggle_solver::observe::pan;
 use diggle_solver::overworld::{Goal, WorldMap};
-use diggle_solver::win::input::{click_at_in, warp_cursor, Input, PostMessageInput, SC_SPACE, VK_SPACE};
+use diggle_solver::win::input::{
+    click_at_in, warp_cursor, Input, PostMessageInput, SC_RETURN, SC_SPACE, VK_RETURN, VK_SPACE,
+};
 use diggle_solver::win::window::GameWindow;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -489,17 +491,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // it lies hero select, which nothing in this tree can drive yet. Better to stop here naming
         // the reason than to click into a screen we cannot leave.
         match diggle_solver::act::score_exact(&win, &diggle_solver::act::MENU_START) {
-            Ok(q) if q >= diggle_solver::act::MENU_START_PRESENT => r.log.push_str(&format!(
-                "ABORT: no Continue — the menu offers `Start` ({q:.4}), i.e. no save to resume. \
-                 Starting a new run needs hero select, which is not implemented.\n"
-            )),
-            Ok(q) => r.log.push_str(&format!(
-                "ABORT: no Continue, and no `Start` either (best {q:.4}) — the menu may not have \
-                 rendered\n"
-            )),
-            Err(e) => r.log.push_str(&format!("ABORT: no Continue; could not read `Start`: {e}\n")),
+            Ok(q) if q >= diggle_solver::act::MENU_START_PRESENT => {
+                r.log.push_str(&format!(
+                    "no Continue — the menu offers `Start` ({q:.4}), so there is no save to \
+                     resume. Beginning a new run.\n"
+                ));
+                if let Err(e) = start_new_run(&mut r, &cfg.game_dir) {
+                    r.log.push_str(&format!("ABORT: {e}\n"));
+                    return finish(&mut game, &r.log);
+                }
+            }
+            Ok(q) => {
+                r.log.push_str(&format!(
+                    "ABORT: no Continue, and no `Start` either (best {q:.4}) — the menu may not \
+                     have rendered\n"
+                ));
+                return finish(&mut game, &r.log);
+            }
+            Err(e) => {
+                r.log.push_str(&format!("ABORT: no Continue; could not read `Start`: {e}\n"));
+                return finish(&mut game, &r.log);
+            }
         }
-        return finish(&mut game, &r.log);
     }
     let by = Instant::now() + Duration::from_secs(40);
     while Instant::now() < by && r.latest.is_none() {
@@ -582,6 +595,114 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let out = r.log.clone();
     finish(&mut game, &out)
+}
+
+/// Starts a fresh run: press `Start`, get through hero select, clear the pregame.
+///
+/// ## Hero select is silent, so this does not try to see it
+///
+/// Grepping every `print("` in the game's `ui/`, neither `heroselect.lua` nor `classselection.lua`
+/// announces itself. But the screens around them do — `ui/unlockscreen.lua:32` prints
+/// `Unlock screen:` and `ui/pregame.lua:91` prints `Pregame screen:` — and
+/// `heroselect.load -> unlockedCheck -> modesequence` is the order.
+///
+/// So the selection screen needs no fingerprint of its own. **`Pregame screen:` is the success
+/// test**, and that is what this waits for. `spike_reach_overworld` did something similar but
+/// stopped on "two consecutive non-reactions", which is a stall detector standing in for a success
+/// test — it could not tell arriving from giving up. Here the non-reaction count only decides when
+/// to abandon; arrival is decided by the game saying so.
+///
+/// ## The default class, on purpose
+///
+/// Return takes whatever is selected. Choosing a class *well* is a separate question needing its own
+/// evidence, and nothing in the MVP depends on it — a run that starts is worth more than a run that
+/// starts as the right class.
+fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
+    /// Enough Returns for the unlock chain, which is longer on a profile with unlocks pending.
+    const MAX_RETURNS: usize = 16;
+    let mark = r.feed.mark();
+
+    // Verified click: this slot reads `Restart` when a save exists, and that eulogises the run.
+    // `act::click` refuses rather than guessing, which is the entire safety argument.
+    let q = diggle_solver::act::click(r.win, &diggle_solver::act::MENU_START)
+        .map_err(|e| format!("could not click `Start`: {e}"))?;
+    r.log.push_str(&format!("  clicked `Start` ({q:.4})\n"));
+
+    // Hero select is CLICK-to-choose, not Return-to-accept.
+    //
+    // A first cut drove Return here and sent sixteen of them into a screen that ignores every one —
+    // the same trap `spike_reach_overworld`'s header records for the start menu, whose buttons
+    // "declare no `userFunctionName`, so Return does nothing there". There is no default champion to
+    // accept; a card has to be picked.
+    //
+    // `ui/elements/herodisplay` is placed at `(0.5, 0.5)` with an x-index of
+    // `i-((#selectedHeroes-1)/2)-1` (`ui/heroselect.lua:355`), so with three heroes the cards sit at
+    // screen centre and one card-width either side. Measured on a live screen: 508, 958, 1408 —
+    // centre +/- 450.
+    //
+    // Then `Space`, because `heroselect.lua:335` binds `mousereleased = userFunctions.affirmative`.
+    // Select-then-confirm, exactly like the reward screen.
+    //
+    // **The middle card, and the reason is honesty about what we can read.** Today's three were
+    // 6/12, 20/20 and 4/4 — a spread that decides runs, and health has ended every run this project
+    // has attempted. Choosing on it means reading those numbers off the screen, which is OCR and is
+    // not built. The middle card is picked because it needs no arithmetic, not because it is best;
+    // that it was the 20/20 Warrior today is luck and must not be mistaken for a policy.
+    const CARD_SPACING: i32 = 450;
+    let (cx, cy) = (960, 540);
+    if let Ok((sx, sy)) = r.win.client_to_screen(cx, cy) {
+        r.log.push_str(&format!("  choosing the middle champion at ({cx},{cy})\n"));
+        let _ = click_at_in(r.win, sx, sy);
+        r.park();
+        std::thread::sleep(Duration::from_millis(600));
+        r.keys.focus();
+        std::thread::sleep(Duration::from_millis(250));
+        let _ = r.keys.press_key(VK_SPACE, SC_SPACE);
+        std::thread::sleep(Duration::from_millis(900));
+    }
+    let _ = CARD_SPACING;
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    for i in 1..=MAX_RETURNS {
+        r.pump();
+        if r.feed.seen_since(mark, "Pregame screen:") {
+            r.log.push_str(&format!("  reached the pregame after {i} Return(s)\n"));
+            r.pregame_seen = true;
+            // The pregame IS an item-selection screen, and clearing it is what lets the overworld
+            // load — so the adjacency dump the caller waits for cannot arrive until this is done.
+            let mut il = String::new();
+            let picked = diggle_solver::itemchoice::choose(
+                r.win,
+                &mut r.feed,
+                &r.keys,
+                game_dir,
+                &mut il,
+                deadline,
+            );
+            r.log.push_str(&il.lines().map(|l| format!("    {l}\n")).collect::<String>());
+            return match picked {
+                Ok(diggle_solver::itemchoice::Chosen::Took(k)) => {
+                    r.log.push_str(&format!("  pregame: took **{k}**\n"));
+                    Ok(())
+                }
+                Ok(other) => Err(format!("pregame screen could not be cleared: {other:?}")),
+                Err(e) => Err(format!("pregame screen: {e}")),
+            };
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("no `Pregame screen:` within 120s ({i} Returns sent)"));
+        }
+        // Logged because the unlock chain's length varies with `persistentSaveData`, so how many of
+        // these it takes is the one number that says which path the profile went down.
+        if r.feed.seen_since(mark, "Unlock screen:") && i == 1 {
+            r.log.push_str("  unlock screens present — this profile has unlocks pending\n");
+        }
+        r.keys.focus();
+        std::thread::sleep(Duration::from_millis(250));
+        let _ = r.keys.press_key(VK_RETURN, SC_RETURN);
+        std::thread::sleep(Duration::from_millis(900));
+    }
+    Err(format!("still no `Pregame screen:` after {MAX_RETURNS} Returns"))
 }
 
 fn drive(
