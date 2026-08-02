@@ -300,7 +300,40 @@ impl Fight<'_> {
     /// the two are not simultaneous. The console is checked before the save because it has no flush
     /// delay — and re-clicking this coordinate once the reward screen is up would land on the item
     /// row.
+    ///
+    /// ## Refuses to click at zero health
+    ///
+    /// This coordinate is not always `Finish`. `rpg.lua:592-597` is one button whose label is a
+    /// function — `Eulogise` when `gameover`, `Give up` when `getPlayerHealth() <= 0` and enemies
+    /// remain, `Finish` otherwise — and there is a second `Give up` at the same anchor
+    /// (`rpg.lua:573-576`) under the same health condition. Both of the wrong labels end the run.
+    ///
+    /// The template match is not what makes this safe. A different word on the same plank measures
+    /// 0.7843 against our `Finish` crop (see [`crate::act::COMBAT_FINISH`]) — the artwork is
+    /// identical and only the glyphs differ, so there is a real score for `Give up` that no
+    /// threshold can be *proven* to exclude while we have never captured one. The condition the game
+    /// itself branches on is in the save we already hold, so read that instead: above zero health
+    /// this slot cannot say anything but `Finish`.
     fn finish(&self, feed: &mut Feed, log: &mut String, state: &str) -> Result<bool, crate::Error> {
+        // A save we cannot read is not permission to click. Refusing costs a loop iteration;
+        // guessing costs the run.
+        match save::load(&self.combat_path).ok().and_then(|cs| cs.int_at("rpg.player.health")) {
+            Some(h) if h > 0 => {}
+            Some(h) => {
+                log.push_str(&format!(
+                    "  **not clicking (0.9,0.9) at {h} health** — that slot reads `Give up` or \
+                     `Eulogise` here (`rpg.lua:576`, `:594`), not `Finish`\n"
+                ));
+                return Ok(false);
+            }
+            None => {
+                log.push_str(
+                    "  **not clicking (0.9,0.9)**: could not read `rpg.player.health`, so whether \
+                     the slot says `Finish` or `Give up` is unknown\n",
+                );
+                return Ok(false);
+            }
+        }
         let _ = crate::observe::settle::wait_for_quiescence(self.win, 0.02, Duration::from_secs(6));
         let (fx, fy) = self.win.button_center(&FINISH)?;
         let (sx, sy) = self.win.client_to_screen(fx, fy)?;

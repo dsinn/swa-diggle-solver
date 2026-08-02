@@ -53,21 +53,45 @@ pub struct Button {
 /// run then fails looking for a map. See [`crate::fight::Fight::run`], which is built to join a
 /// fight already in progress.
 ///
-/// ## The confusable state is NOT measured
+/// ## `Give up` is the SAME BUTTON, not a neighbouring one
 ///
-/// `Give up` shares this slot (see `fight::FINISH`), and pressing it in place of `Finish` abandons a
-/// won fight. The crop includes the lettering, so the two should separate far more than a recolour
-/// would — but that is reasoning, not measurement, and no capture of `Give up` exists yet. Measure
-/// it before this is used to decide anything destructive.
+/// This is worse than "shares a slot". `rpg.lua:592-597` is a single `ui.elements.button` whose
+/// label is a function:
 ///
-/// Measured against every screen captured so far:
+/// ```lua
+/// return gameover and 'Eulogise'
+///     or (rpgview.getPlayerHealth() or 0) <= 0 and (rpgview.fixedEnemiesRemaining() or 1)>0
+///        and 'Give up'
+///     or 'Finish'
+/// ```
+///
+/// Same object, same plank artwork, same position, same size. Only the glyphs differ — so every
+/// pixel outside the lettering matches perfectly, and the inlier fraction cannot fall below the
+/// share of the crop the text occupies. Pressing it while it reads `Give up` eulogises the run;
+/// while it reads `Eulogise`, likewise.
+///
+/// ## Measured, against the whole saved-frame corpus
 ///
 /// ```text
-///   WaitPhase, the frame it came from   1.0000
-///   reward screen                       0.2777
-///   combat, mid-PlayerTurn              0.2317
-///   village map                         0.1080
+///   Finish, spike-frames-live/now.png              1.0000  err 0.0000
+///   Finish, spike-frames-live/combat-stalled.png   1.0000  err 0.0000   independent, 2 days apart
+///   'Adventure!' plank, 16-selected.png            0.7843  err 0.0769   <- nearest confusable
+///   Finish under a hover tooltip, waitphase-*.png  0.5794  err 0.1718
+///   plain overworld terrain, overworld-campfire    0.5653  err 0.1646   <- no button at all
 /// ```
+///
+/// Two things that measurement settles, neither of which was visible from the old negative controls
+/// (a reward screen at 0.2777, a village map at 0.1080):
+///
+/// 1. **A different word on the same style of plank scores 0.7843.** That is the empirical stand-in
+///    for `Give up`, and the old 0.55 sat *below* it — the threshold could not have separated them.
+/// 2. **Flat brown map terrain scores 0.5653**, also above 0.55. The template is a low-contrast
+///    wooden plank and `INLIER_TOLERANCE` is 90 across three channels, about 30 each, which brown
+///    ground clears against brown wood. The village map measured 0.1080 only because that particular
+///    map was dark green.
+///
+/// A true `Finish` scores **1.0000 with zero error, reproducibly, on independent captures**. So the
+/// threshold belongs just under that, not just over the noise.
 pub const COMBAT_FINISH: Button = Button {
     name: "combat Finish",
     template: "combat-finish.png",
@@ -76,7 +100,22 @@ pub const COMBAT_FINISH: Button = Button {
 };
 
 /// `Finish` is on screen, so a fight is sitting in `WaitPhase`. See [`COMBAT_FINISH`].
-pub const COMBAT_FINISH_PRESENT: f64 = 0.55;
+///
+/// **0.90, not 0.55.** Deliberately high, because the errors are not symmetric: failing to see a
+/// `Finish` costs one loop iteration, while mistaking `Give up` for it eulogises the run. Sits 0.10
+/// below both measured true positives and 0.12 above the nearest confusable.
+///
+/// It also rejects a `Finish` occluded by a hover tooltip (0.5794). That is intended and nearly free
+/// — the tooltip only renders under the cursor, and every reader parks at `NEUTRAL` first.
+///
+/// ## This threshold is not the real guarantee
+///
+/// `Give up` has never been captured — the run has never reached zero health — so 0.7843 is a proxy
+/// from a different button, not a measurement of the thing itself. The guarantee comes from the
+/// source instead: **both** paths that render `Give up` require `getPlayerHealth() <= 0`
+/// (`rpg.lua:576` and `:594`), and `Eulogise` requires `gameover`. With health above zero this slot
+/// can only say `Finish`. Gate the press on health, and the fingerprint stops being load-bearing.
+pub const COMBAT_FINISH_PRESENT: f64 = 0.90;
 
 /// The reward screen's `Confirm`, captured in its **greyed** state.
 ///
@@ -97,23 +136,34 @@ pub const COMBAT_FINISH_PRESENT: f64 = 0.55;
 ///
 /// ## Two questions, two thresholds
 ///
-/// Measured against four live frames:
+/// Measured across the whole saved-frame corpus, not just the four frames this started with:
 ///
 /// ```text
-///   greyed Confirm, the frame it was cropped from   1.0000
-///   ACTIVE Confirm, after an item was selected      0.7255
-///   village map, same slot                          0.0068
-///   combat screen, same slot                        0.1196
+///   greyed Confirm, post-crypt.png                 1.0000  err 0.0000
+///   plain overworld terrain, overworld-campfire    0.7709  err 0.1143   <- no screen at all
+///   ACTIVE Confirm, reward-selected.png            0.7255  err 0.0967
+///   a village crossing, crossing-stall.png         0.5965  err 0.1180
+///   dark-green village map, same slot              0.0068
+///   combat screen, same slot                       0.1196
 /// ```
 ///
-/// The active button is the same plank and the same lettering in a different colour, so it scores
-/// 0.73 against the greyed template — far too close to call with the 0.55 used elsewhere. That
-/// threshold answers a *different* question perfectly well, and the two must not be conflated:
+/// **Read the second and third rows together.** Blank brown map ground scores *higher* against this
+/// template than a real reward screen with a selection made. That is an inversion, and it means no
+/// single inlier threshold can both accept every true screen and reject terrain — the ordering
+/// itself is wrong, so there is no cut point to find.
 ///
-/// - **[`REWARD_SCREEN_PRESENT`]** — is a reward screen up at all? Either state clears it and
-///   nothing else comes within 6x of it.
-/// - **[`REWARD_NOTHING_PICKED`]** — is it still greyed, i.e. has our click on an item registered?
-///   Sits in the gap between 0.7255 and 1.0000, and is the read-back for selecting an item.
+/// The cause is the same one that bit [`COMBAT_FINISH`]: the crop is a low-contrast wooden plank and
+/// `INLIER_TOLERANCE` is 90 summed over three channels, roughly 30 each, which brown ground clears
+/// against brown wood. The original negative controls hid it because both were dark screens — a
+/// green village map and a combat backdrop. The confusable was never another *screen*; it was the
+/// ground.
+///
+/// Two questions, and only the first can be answered from this template:
+///
+/// - **[`REWARD_SCREEN_PRESENT`]** — is a reward screen up at all? Answerable, but only for the
+///   greyed state, and only well above the terrain score.
+/// - **[`REWARD_NOTHING_PICKED`]** — is it still greyed, i.e. did our click register? Unaffected:
+///   it is asked *while the screen is known to be up*, where terrain is not among the candidates.
 pub const REWARD_CONFIRM: Button = Button {
     name: "reward Confirm",
     template: "reward-confirm-inactive.png",
@@ -121,8 +171,25 @@ pub const REWARD_CONFIRM: Button = Button {
     click: (1652, 918),
 };
 
-/// A reward screen is on screen, in either state. See [`REWARD_CONFIRM`].
-pub const REWARD_SCREEN_PRESENT: f64 = 0.55;
+/// A reward screen is on screen. See [`REWARD_CONFIRM`] for why this is 0.90 and not 0.55.
+///
+/// At 0.55 this fired on plain overworld ground (0.7709). That is not a near miss: the loop asks it
+/// every iteration, and a `true` sends the run into [`crate::itemchoice::choose`], which finds no
+/// offers in the feed and reports a screen it cannot clear. A blank patch of map would have ended
+/// the run.
+///
+/// **Narrowed on purpose: this now means "up and untouched", not "up in either state".** The greyed
+/// screen measures 1.0000 and terrain 0.7709, so 0.90 separates them; the *active* state at 0.7255
+/// is below the cut and is no longer recognised here. That is the right trade for the one caller
+/// this has — the loop asks on arrival, before anything has been picked, and
+/// [`crate::itemchoice::choose`] confirms its own selection through
+/// [`REWARD_NOTHING_PICKED`] and leaves via Space within the same call. A screen with a selection
+/// already made is not a state the run produces, and closing the game at one rewinds it to
+/// `WaitPhase` rather than restoring it.
+///
+/// Still worth replacing with a signal that is not brown: the `Choose one:` heading is dark text on
+/// light board and would not have this failure mode. That needs a capture, so it waits for the game.
+pub const REWARD_SCREEN_PRESENT: f64 = 0.90;
 
 /// Still greyed, so nothing has been selected yet. Placed midway between the measured 0.7255 for the
 /// active button and 1.0000 for the greyed one.
@@ -311,5 +378,97 @@ mod tests {
             let d = ((b.click.0 - FORBIDDEN.0).pow(2) + (b.click.1 - FORBIDDEN.1).pow(2)) as f64;
             assert!(d.sqrt() > 120.0, "{} clicks too close to the Fight on! slot", b.name);
         }
+    }
+}
+
+/// Threshold regression tests, run against saved frames rather than a live game.
+///
+/// These pin the numbers that the doc comments above quote. Both thresholds were once set from
+/// negative controls that happened to be dark screens, and both turned out to admit plain brown map
+/// ground — a failure invisible until something scored the templates against *every* frame on disk
+/// instead of the handful that motivated them.
+///
+/// The frames are gitignored (`/spike-frames*/`), so these skip where they are absent, as the
+/// game-source tests do. The templates themselves are tracked, so a template edit still gets checked
+/// wherever a corpus exists.
+#[cfg(test)]
+mod threshold_tests {
+    use super::*;
+    use crate::win::capture::Frame;
+
+    fn frame(name: &str) -> Option<Frame> {
+        let path = PathBuf::from("spike-frames-live").join(name);
+        let dec = png::Decoder::new(std::fs::File::open(path).ok()?);
+        let mut rdr = dec.read_info().ok()?;
+        let mut buf = vec![0; rdr.output_buffer_size()];
+        let info = rdr.next_frame(&mut buf).ok()?;
+        let n = info.color_type.samples();
+        // The same BGRA layout `capture_window` produces, so this exercises the live comparison.
+        let mut bgra = Vec::with_capacity((info.width * info.height * 4) as usize);
+        for px in buf.chunks_exact(n) {
+            bgra.extend_from_slice(&[px[2], px[1], px[0], 255]);
+        }
+        Some(Frame { width: info.width as i32, height: info.height as i32, bgra })
+    }
+
+    /// Scores a button's template against a saved frame, in its own search box.
+    fn score(button: &Button, name: &str) -> Option<f64> {
+        let f = frame(name)?;
+        let tpl = Template::load(&PathBuf::from("templates").join(button.template)).ok()?;
+        find_at_scale_in(&f, &tpl, 1.0, 1, Some(button.search)).map(|m| m.inliers)
+    }
+
+    #[test]
+    fn finish_is_told_apart_from_another_plank_and_from_bare_ground() {
+        let Some(real) = score(&COMBAT_FINISH, "now.png") else {
+            eprintln!("SKIP: frame corpus not present");
+            return;
+        };
+        // Two independent captures two days apart, both exact. The threshold sits under these.
+        assert!(real >= COMBAT_FINISH_PRESENT, "a real Finish scored {real:.4}");
+        let older = score(&COMBAT_FINISH, "combat-stalled.png").unwrap();
+        assert!(older >= COMBAT_FINISH_PRESENT, "an older real Finish scored {older:.4}");
+
+        // The nearest confusable available: a wooden plank button reading `Adventure!`. `Give up` is
+        // the *same button object* as Finish (`rpg.lua:592-597`) so it would score at least this
+        // well, and pressing it eulogises the run.
+        let other_plank = score(&COMBAT_FINISH, "16-selected.png").unwrap();
+        assert!(
+            other_plank < COMBAT_FINISH_PRESENT,
+            "a different word on a plank scored {other_plank:.4}, at or above the threshold"
+        );
+
+        // Blank brown map, no button in the slot at all.
+        let ground = score(&COMBAT_FINISH, "overworld-campfire.png").unwrap();
+        assert!(ground < COMBAT_FINISH_PRESENT, "bare map ground scored {ground:.4}");
+    }
+
+    #[test]
+    fn a_reward_screen_is_told_apart_from_bare_ground() {
+        let Some(real) = score(&REWARD_CONFIRM, "post-crypt.png") else {
+            eprintln!("SKIP: frame corpus not present");
+            return;
+        };
+        assert!(real >= REWARD_SCREEN_PRESENT, "a real greyed Confirm scored {real:.4}");
+        let ground = score(&REWARD_CONFIRM, "overworld-campfire.png").unwrap();
+        assert!(ground < REWARD_SCREEN_PRESENT, "bare map ground scored {ground:.4}");
+    }
+
+    /// Pins the inversion itself, because it is the reason [`REWARD_SCREEN_PRESENT`] cannot simply be
+    /// tuned down again: bare ground scores **higher** than a real reward screen whose item has been
+    /// selected. Anyone lowering the threshold to catch the active state will re-admit the map.
+    #[test]
+    fn bare_ground_outranks_a_selected_reward_screen() {
+        let Some(ground) = score(&REWARD_CONFIRM, "overworld-campfire.png") else {
+            eprintln!("SKIP: frame corpus not present");
+            return;
+        };
+        let selected = score(&REWARD_CONFIRM, "reward-selected.png").unwrap();
+        assert!(
+            ground > selected,
+            "expected the inversion to still hold: ground {ground:.4} vs selected {selected:.4}. \
+             If this now fails, the template or the metric changed and REWARD_SCREEN_PRESENT can \
+             be reconsidered."
+        );
     }
 }
