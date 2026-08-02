@@ -288,25 +288,27 @@ fn pattern_admits(pattern: &str, c: u8) -> bool {
 /// The wildcard itself shows `[A-Z]` as a placeholder near the top of the screen while the keyboard
 /// is up, which is a second signal if one is ever wanted.
 ///
-/// ### What the check must NOT key on
+/// ### Recognising it without a stored template
 ///
-/// Two traps, both confirmed live.
+/// Do not template-match a captured keyboard. The game supports alternative keyboard layouts, so the
+/// glyph on any given key is not fixed, and anything keyed on letter positions fails for a player on
+/// a different layout.
 ///
-/// **The letters move.** The game supports alternative keyboard layouts, so the glyph on any given
-/// key is not fixed. A match that depends on letter positions would fail for anyone not on the
-/// layout the template was captured from. Glyphs are a modest fraction of the region -- the rest is
-/// key face and shadow -- so an inlier score stays comfortably above threshold with every letter
-/// different, but the threshold has to be chosen knowing that and not tuned tight against one
-/// capture.
+/// Compare the region against **itself** instead. Capture it once immediately before clicking the
+/// wildcard — that is the tile board — and again after sending the letter. Back near the board
+/// reference means the keyboard has gone; still far from it means the letter did not take and should
+/// be sent again. Nothing is stored on disk, nothing depends on a layout, and the reference is
+/// seconds old from the same session and the same window.
 ///
-/// **The tile board looks like a keyboard.** Dismissing the keyboard puts the tile board back in the
-/// same place, and board tiles are also wooden squares with letters on them. Verified by capturing
-/// this exact region a moment after committing a wildcard: it went from keyboard keys to
-/// `O A E T / S K G R` board tiles. So "wooden squares with letters are present" does not
-/// distinguish the two screens at all.
+/// The two screens are easy to tell apart in that comparison because the keyboard is much the wider:
+/// ten keys spanning roughly 1095 px against a tile board of about 520 px. Inside a 675 px region the
+/// edges are keys in one case and plain background in the other, so the difference is concentrated
+/// exactly where it is easiest to measure. An earlier draft of this note called for measuring key
+/// pitch to tell wooden-squares-with-letters apart; that was more machinery than the problem needs.
 ///
-/// The discriminator is **geometry**: keyboard keys are small and ten across, board tiles are large
-/// and four across. Key pitch, not material and not glyphs.
+/// The board will not be pixel-identical afterwards — the wildcard has become a letter — so this is a
+/// similarity judgement, not equality. Score it by inliers for the same reason everything else here
+/// does: a partial mismatch should cost proportionally rather than fail outright.
 ///
 /// ### The cursor sits in the middle of it
 ///
