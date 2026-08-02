@@ -293,6 +293,34 @@ pub enum Goal {
     Scare { need: i64, below: i64 },
 }
 
+/// Extra damage aimed for beyond a threshold, to absorb error in our own damage model.
+///
+/// Our score is a reimplementation of the game's, not the game's, and it can be optimistic. Live:
+/// `Neil Patrick Harrow 19+2hp` needed 21, the search played `CRACKS` believing it did 20 or more,
+/// and the next turn showed the enemy on **1 hp**. One point short turned a kill into another turn
+/// of being hit back — and against a fearable enemy the same error is the difference between it
+/// fleeing and it staying.
+///
+/// One, not more: every point of buffer discards words that would in fact have been enough, and the
+/// observed error is one. This is a hedge against a model that is slightly wrong, not a licence to
+/// ignore what it says.
+pub const DAMAGE_BUFFER: i64 = 1;
+
+/// The buffer actually affordable inside a band of `slack` spare damage.
+///
+/// A band has two edges and both want protecting, so a full buffer costs `2 * DAMAGE_BUFFER` of
+/// width. Where the band is narrower than that, the buffer shrinks rather than inverting the band —
+/// which matters precisely for the enemies the band exists for. A `fear` enemy on low maximum health
+/// has almost no room between "hurt enough to run" and "dead": at 4 health from a maximum of 6 the
+/// whole non-lethal band is 2..3, and a fixed buffer would empty it and send us back to killing
+/// something we could have frightened off.
+///
+/// Splitting the slack evenly is the graceful version of the same idea: as much margin as exists,
+/// shared between the two ways of being wrong, and zero when there is none to share.
+fn affordable_buffer(slack: i64) -> i64 {
+    DAMAGE_BUFFER.min((slack / 2).max(0))
+}
+
 impl Goal {
     /// Picks the goal for an enemy, given what modifies it.
     ///
@@ -306,7 +334,12 @@ impl Goal {
         mods: &Modifiers, health: i64, armour: i64, max_health: Option<i64>,
         player: Option<&PlayerState>,
     ) -> Goal {
-        let need = health + armour;
+        // What actually kills. Kept exact, because it is also the ceiling a scare must stay under —
+        // buffering it in one direction would license the very kill we are avoiding.
+        let lethal = health + armour;
+        // What we AIM for to kill. Overshooting a kill costs nothing but a slightly worse word;
+        // undershooting costs a whole turn, and a turn of being hit back.
+        let need = lethal + DAMAGE_BUFFER;
         let kill = Goal::FirstKill { need };
         if mods.overkill_gold {
             // Gold scales with the excess, so this one really does want the corpse.
@@ -315,22 +348,26 @@ impl Goal {
         // `immobile` suppresses fleeing outright (`rpgview.lua:1646`) -- it cannot run, so trying to
         // frighten it just leaves it alive and swinging.
         if mods.immobile {
-            return Self::killing_blow(kill, need, player);
+            return Self::killing_blow(kill, lethal, player);
         }
         let (Some(nerve), Some(max)) = (mods.nerve, max_health) else {
-            return Self::killing_blow(kill, need, player);
+            return Self::killing_blow(kill, lethal, player);
         };
         let Some(top) = nerve.leaves_at_or_below(max) else {
-            return Self::killing_blow(kill, need, player);
+            return Self::killing_blow(kill, lethal, player);
         };
-        let below = need;
+        let below = lethal;
         // Armour absorbs first, so reaching `top` health costs the difference plus the armour.
         let scare_need = ((health - top) + armour).max(0);
         if scare_need >= below {
             // No non-lethal hit reaches the threshold.
-            return Self::killing_blow(kill, need, player);
+            return Self::killing_blow(kill, lethal, player);
         }
-        Goal::Scare { need: scare_need, below }
+        // Buffer both edges by as much as the band can spare. `slack` is the width of the raw
+        // non-lethal band `scare_need ..= below - 1`; see `affordable_buffer` for why this shrinks
+        // instead of inverting.
+        let b = affordable_buffer(below - 1 - scare_need);
+        Goal::Scare { need: scare_need + b, below: below - b }
     }
 
     /// The kill, adjusted for what a well-rested charge is worth on this particular wound.
@@ -338,7 +375,9 @@ impl Goal {
     /// Overkill on a killing blow heals `floor(overkill/2)` and spends a charge, but **only if the
     /// heal is positive** (`rpgview.lua:1086, 1204-1210`) — so an overkill of 1 is free. See
     /// [`crate::rested`] for the mechanic in full.
-    fn killing_blow(kill: Goal, need: i64, player: Option<&PlayerState>) -> Goal {
+    /// `lethal` is the EXACT damage that kills, unbuffered, because every branch here is arithmetic
+    /// about overkill and a padded threshold would silently shift the free window.
+    fn killing_blow(kill: Goal, lethal: i64, player: Option<&PlayerState>) -> Goal {
         let Some(p) = player else { return kill };
         if !p.heals {
             return kill;
@@ -348,15 +387,22 @@ impl Goal {
             // Keep the charge: kill with an overkill of 0 or 1, which heals nothing. Only worth
             // doing when a charge is actually consumable -- a gear flag heals for free, so there is
             // nothing to protect and a scratch may as well be topped up.
+            //
+            // Deliberately unbuffered, and consistently so: the free window is two wide, and
+            // `affordable_buffer(1)` is 0 — there is no slack here to spend on safety. Falling one
+            // short costs a turn; buffering would cost the charge this branch exists to protect.
             crate::rested::Aim::Frugal if p.consumes_charge => {
-                Goal::Scare { need, below: need + 2 }
+                Goal::Scare { need: lethal, below: lethal + 2 }
             }
             crate::rested::Aim::Frugal => kill,
             // Spend it well: the first answer whose half-overkill covers the deficit. If none does,
             // the search falls back to its best-scoring word, which is exactly "if we cannot heal
             // fully, use the best scoring answer".
+            //
+            // Buffered, because this is a kill with no upper bound: overshooting heals a little more
+            // than needed, undershooting fails to kill at all.
             crate::rested::Aim::HealFully => {
-                Goal::FirstKill { need: need + 2 * p.vitals.missing() }
+                Goal::FirstKill { need: lethal + 2 * p.vitals.missing() + DAMAGE_BUFFER }
             }
         }
     }
@@ -885,7 +931,7 @@ mod tests {
         // An ordinary enemy still races for the first kill -- speed matters when gold does not.
         assert_eq!(
             Goal::for_enemy(&Modifiers::none(), 3, 2, None, None),
-            Goal::FirstKill { need: 5 }
+            Goal::FirstKill { need: 6 }
         );
     }
 
@@ -1036,6 +1082,46 @@ mod tests {
 
 #[cfg(test)]
 mod scare_goal_tests {
+    /// The whole reason the buffer is proportional rather than fixed.
+    ///
+    /// A `fear` enemy on a small maximum has almost no room between "hurt enough to run" and "dead".
+    /// A flat +/-1 would invert the band and send us back to killing something we could have
+    /// frightened off — which for a human is a Murder flag we did not have to take.
+    #[test]
+    fn a_frightenable_enemy_with_no_room_keeps_its_band_rather_than_losing_it() {
+        // health 4 of a maximum 6: fleeing needs it at or below (6-1)/2 = 2, so 2 damage; 4 kills.
+        // The raw band is 2..=3, one point of slack, and half of that is nothing to spend.
+        let g = Goal::for_enemy(&feared(), 4, 0, Some(6), None);
+        assert_eq!(g, Goal::Scare { need: 2, below: 4 }, "unbuffered, but still a scare");
+    }
+
+    #[test]
+    fn a_band_with_two_to_spare_buys_a_buffer_on_each_side() {
+        // health 6 of a maximum 6: flee at or below 2, so 4 damage; 6 kills. Raw band 4..=5 is one
+        // wide -- still nothing. Widen the enemy and the buffer appears.
+        assert_eq!(
+            Goal::for_enemy(&feared(), 6, 0, Some(6), None),
+            Goal::Scare { need: 4, below: 6 }
+        );
+        // health 12 of 12: flee at or below 5, so 7 damage; 12 kills. Raw band 7..=11 has four to
+        // spare, so a full point goes to each edge.
+        assert_eq!(
+            Goal::for_enemy(&feared(), 12, 0, Some(12), None),
+            Goal::Scare { need: 8, below: 11 }
+        );
+    }
+
+    /// The buffer must never turn a survivable scare into a kill.
+    #[test]
+    fn the_buffered_ceiling_still_leaves_the_enemy_alive() {
+        let g = Goal::for_enemy(&feared(), 12, 0, Some(12), None);
+        let Goal::Scare { need, below } = g else { panic!("expected a scare, got {g:?}") };
+        assert!(below <= 12, "damage below this must not reach the 12 that kills");
+        assert!(need < below, "the band must not be empty");
+        // The worst case inside the band still frightens it: 8 damage leaves 4, and 4*2 < 12.
+        assert!(crate::flee::Nerve::Fear.would_leave(12 - need, 12));
+    }
+
     use super::*;
     use crate::flee::Nerve;
 
@@ -1049,7 +1135,7 @@ mod scare_goal_tests {
         // must stay under 12.
         assert_eq!(
             Goal::for_enemy(&feared(), 12, 0, Some(12), None),
-            Goal::Scare { need: 7, below: 12 }
+            Goal::Scare { need: 8, below: 11 }
         );
     }
 
@@ -1059,7 +1145,7 @@ mod scare_goal_tests {
         // the lethal line moves out by the same amount.
         assert_eq!(
             Goal::for_enemy(&feared(), 12, 3, Some(12), None),
-            Goal::Scare { need: 10, below: 15 }
+            Goal::Scare { need: 11, below: 14 }
         );
     }
 
@@ -1068,7 +1154,7 @@ mod scare_goal_tests {
         // It will run at the start of its own turn; our only job is not to kill it first.
         assert_eq!(
             Goal::for_enemy(&feared(), 4, 0, Some(12), None),
-            Goal::Scare { need: 0, below: 4 }
+            Goal::Scare { need: 1, below: 3 }
         );
     }
 
@@ -1077,12 +1163,12 @@ mod scare_goal_tests {
         // rpgview.lua:1646 -- the flee branch requires `not currentEnemy.immobile`. Trying to scare
         // one would leave it alive and still attacking.
         let m = Modifiers { immobile: true, ..feared() };
-        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12), None), Goal::FirstKill { need: 12 });
+        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12), None), Goal::FirstKill { need: 13 });
     }
 
     #[test]
     fn without_a_known_maximum_we_do_not_guess() {
-        assert_eq!(Goal::for_enemy(&feared(), 12, 0, None, None), Goal::FirstKill { need: 12 });
+        assert_eq!(Goal::for_enemy(&feared(), 12, 0, None, None), Goal::FirstKill { need: 13 });
     }
 
     #[test]
@@ -1095,7 +1181,7 @@ mod scare_goal_tests {
     #[test]
     fn a_one_health_maximum_offers_no_non_lethal_scare() {
         // leaves_at_or_below is None below 2 max health, so there is no room to hurt without killing.
-        assert_eq!(Goal::for_enemy(&feared(), 1, 0, Some(1), None), Goal::FirstKill { need: 1 });
+        assert_eq!(Goal::for_enemy(&feared(), 1, 0, Some(1), None), Goal::FirstKill { need: 2 });
     }
 }
 
@@ -1127,31 +1213,31 @@ mod rested_goal_tests {
     #[test]
     fn a_bad_wound_buys_a_full_top_up() {
         // Missing 8, and the heal is half the overkill, so 16 of overkill are needed: damage 26.
-        assert_eq!(goal(Some(&player(4, true))), Goal::FirstKill { need: 26 });
+        assert_eq!(goal(Some(&player(4, true))), Goal::FirstKill { need: 27 });
     }
 
     #[test]
     fn full_health_kills_normally() {
-        assert_eq!(goal(Some(&player(12, true))), Goal::FirstKill { need: 10 });
+        assert_eq!(goal(Some(&player(12, true))), Goal::FirstKill { need: 11 });
     }
 
     #[test]
     fn a_free_heal_is_never_conserved() {
         // A gear flag grants the heal without spending anything (the decrement at :1204-1210 only
         // touches statusEffects), so there is no reason to avoid a scratch top-up.
-        assert_eq!(goal(Some(&player(10, false))), Goal::FirstKill { need: 10 });
+        assert_eq!(goal(Some(&player(10, false))), Goal::FirstKill { need: 11 });
     }
 
     #[test]
     fn bleeding_kills_normally_because_no_heal_can_happen() {
         let p = PlayerState { bleeding: true, ..player(4, true) };
-        assert_eq!(goal(Some(&p)), Goal::FirstKill { need: 10 });
+        assert_eq!(goal(Some(&p)), Goal::FirstKill { need: 11 });
     }
 
     #[test]
     fn a_cancelled_heal_kills_normally() {
         let p = PlayerState { heals: false, ..player(4, true) };
-        assert_eq!(goal(Some(&p)), Goal::FirstKill { need: 10 });
+        assert_eq!(goal(Some(&p)), Goal::FirstKill { need: 11 });
     }
 
     #[test]
@@ -1162,7 +1248,7 @@ mod rested_goal_tests {
         let p = player(4, true);
         assert_eq!(
             Goal::for_enemy(&m, 12, 0, Some(12), Some(&p)),
-            Goal::Scare { need: 7, below: 12 }
+            Goal::Scare { need: 8, below: 11 }
         );
     }
 }
