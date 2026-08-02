@@ -21,6 +21,7 @@
 use crate::observe::template::{find_at_scale_in, Template};
 use crate::win::capture::capture_window;
 use crate::win::window::GameWindow;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// A button we are willing to click, described by how to *recognise* it.
@@ -68,11 +69,30 @@ fn template_path(name: &str) -> PathBuf {
 /// that a screen has moved on. An `Err` means the template could not be loaded or the screen could
 /// not be captured, which is a fault.
 pub fn locate(win: &GameWindow, button: &Button) -> Result<Option<f64>, crate::Error> {
-    let tpl = Template::load(&template_path(button.template))
-        .map_err(|e| crate::Error::Config(format!("template {}: {e}", button.template)))?;
-    let frame = capture_window(win)?;
+    // Cached across calls. `click_when_ready` polls four times a second, and re-reading and
+    // re-decoding the same PNG from disk each time is pure waste -- templates never change during a
+    // run.
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<&'static str, Template>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let tpl = {
+        let mut map = cache.lock().unwrap();
+        if !map.contains_key(button.template) {
+            let t = Template::load(&template_path(button.template))
+                .map_err(|e| crate::Error::Config(format!("template {}: {e}", button.template)))?;
+            map.insert(button.template, t);
+        }
+        map[button.template].clone()
+    };
+    // Capture only the search box, not the whole window.
+    //
+    // The buttons this locates do not move, and `click_when_ready` polls four times a second while
+    // the game loads. Grabbing 1920x1080 to look at a 290x135 corner of it is ~50x the pixels for
+    // the same answer. Nothing needs translating back into window space because this returns the
+    // match's QUALITY and never its position.
     let (x0, y0, x1, y1) = button.search;
-    Ok(find_at_scale_in(&frame, &tpl, 1.0, 1, Some((x0, y0, x1, y1)))
+    let frame = crate::win::capture::capture_client_rect(win, x0, y0, x1 - x0, y1 - y0)?;
+    Ok(find_at_scale_in(&frame, &tpl, 1.0, 1, None)
         .filter(|m| m.inliers >= MIN_INLIERS)
         .map(|m| m.inliers))
 }
@@ -115,11 +135,27 @@ pub fn click_when_ready(
     timeout: std::time::Duration,
 ) -> Result<f64, crate::Error> {
     let deadline = std::time::Instant::now() + timeout;
+    let started = std::time::Instant::now();
     let mut best = 0.0f64;
+    let mut attempts = 0usize;
+    let mut spent_looking = std::time::Duration::ZERO;
     loop {
-        match locate(win, button) {
+        let probe = std::time::Instant::now();
+        let result = locate(win, button);
+        spent_looking += probe.elapsed();
+        attempts += 1;
+        match result {
             Ok(Some(inliers)) => {
                 best = inliers;
+                // Separates the two explanations for a slow start: a button that took a long time to
+                // APPEAR, versus a check that is slow to run. Guessing between them once already
+                // produced a fix for the wrong one.
+                eprintln!(
+                    "{} found after {:?} over {attempts} attempts ({:?} of that inside locate)",
+                    button.name,
+                    started.elapsed(),
+                    spent_looking
+                );
                 break;
             }
             Ok(None) => {}
