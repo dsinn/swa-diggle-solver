@@ -301,6 +301,29 @@ pub enum Goal {
     /// is open — `showConsecrateButton` requires `hell ~= 0` (`shrine.lua:93-96`). Once it is open,
     /// corruption resets areas to incomplete, so a shrine needing a fight only earns a detour if it
     /// already lies on the route; one that is merely awaiting a `Visit` stays cheap.
+    ///
+    /// ## An UNCORRUPTED shrine is strictly beneficial, and that is worth stating
+    ///
+    /// It costs no fight, and the payoff is combat-relevant. The full chain, verified in source:
+    ///
+    /// ```text
+    ///   ShowAGoodButton      hasWon() and not heretic            shrine.lua:36-40
+    ///   Consecrate           + majorShrine + hell ~= 0           shrine.lua:92-95
+    ///   Pray                 + areaUnused + (hell == 0 or consecrated or desecrated)
+    ///                                                            shrine.lua:98-103
+    ///   -> wildcardRewards   queues 3 gold-bordered, 3 silver,   utils/blessings.lua:95-110
+    ///                        or 1 gold WILDCARD tile
+    /// ```
+    ///
+    /// **Every shrine is a major one.** `overworld/generators/world.lua:86-89` sets
+    /// `majorShrine = true` for any location whose key starts with `shrine`, so there is no minor
+    /// shrine to pray at without consecrating first. With the anomaly already open — `hell ~= 0` —
+    /// that ordering is satisfied, and solve → Consecrate → Pray runs straight through.
+    ///
+    /// Wildcards are the mechanic Diggle handles best and has exercised live. So an uncorrupted
+    /// shrine is the cheapest way to make the *next* fight winnable, which is precisely what a run
+    /// at low health needs — and why this outranks [`Goal::EasiestHostile`] rather than being a
+    /// luxury deferred until healthy.
     Shrine,
     /// Somewhere unseen, to grow the map toward one of the above.
     Explore,
@@ -1829,6 +1852,41 @@ mod tests {
 
     /// An unvisited subworld container counts as hostile, because a bandit camp is an ordinary
     /// forest until you are standing in it (`overworld/generators/world.lua:466-475`).
+    /// Hurt, nowhere to rest, and an **uncorrupted** shrine within reach: take the shrine, not the
+    /// cheapest fight.
+    ///
+    /// It costs no fight and pays in wildcard tiles (`utils/blessings.lua:95-110`), which is the one
+    /// thing that makes the *next* fight winnable. A hurt run choosing a level 1 skirmish over a
+    /// free blessing would have the trade exactly backwards.
+    #[test]
+    fn an_uncorrupted_shrine_beats_the_cheapest_fight_while_hurt() {
+        let mut m = hurt_at_l1();
+        m.hell = Some(0.1); // anomaly open, so consecrating is possible
+        m.fold(&dump(
+            "l1",
+            "Weedley Copse crypt",
+            vec![node("shrine2", "Gransmoor shrine"), node("c1", "Rookdale — level 2 crypt")],
+        ));
+        // No rest anywhere, and nothing left to explore.
+        for p in m.places.values_mut() {
+            p.used = true;
+            p.visited = true;
+            p.hidden = Some(0);
+        }
+        m.gold = 0;
+        m.fuel = 0;
+        // Everything hostile EXCEPT the shrine.
+        for p in m.places.values_mut() {
+            if p.key != "shrine2" {
+                p.corrupted = true;
+                p.completed = false;
+            }
+        }
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Shrine);
+        assert_eq!(plan.target, "shrine2");
+    }
+
     /// The anomaly must never be picked as the "easiest" fight. Its heading has no `— level N`, so
     /// a naive `unwrap_or(0)` ranked the hardest fight on the map as the gentlest.
     #[test]
