@@ -136,6 +136,18 @@ impl Place {
     /// container as hostile would block resting at the first quiet village we find, which is the
     /// opposite of what wanting a rest is for.
     ///
+    /// ## Known over-correction, out of scope for the MVP
+    ///
+    /// Not every unvisited forest is a camp. An **apple orchard** is a perfectly peaceful one, and
+    /// under this rule a hurt run refuses it along with the genuine ambushes. The eventual shape is
+    /// to allow such a forest as a *last* choice — ranked below anywhere known safe, but above a
+    /// corrupted village that certainly costs a fight — rather than lumping it in with the camps.
+    ///
+    /// Deliberately not built yet. Telling an orchard from a camp before entering means finding a
+    /// signal the generator leaves behind, and the MVP is to reach the anomaly quickly; a run that
+    /// occasionally walks the long way round is cheaper than that research. Written down so the
+    /// crudeness here is a recorded decision and not an oversight.
+    ///
     /// Cleared is safe, whichever way it got that way: corruption that has been fought off leaves
     /// `completed` set, and a camp we have already emptied is not going to refill.
     pub fn hostile_to_enter(&self) -> bool {
@@ -292,6 +304,12 @@ pub enum Goal {
     Shrine,
     /// Somewhere unseen, to grow the map toward one of the above.
     Explore,
+    /// Hurt, and **everywhere** is hostile — so take the cheapest fight on the map.
+    ///
+    /// The last resort of [`WorldMap::next_target`]'s first pass. Distinct from the goals above
+    /// because it is not pursuing any of them: it is choosing where to bleed. Carries the level so
+    /// a caller can log what it is walking into.
+    EasiestHostile { level: Option<u32> },
 }
 
 impl WorldMap {
@@ -596,8 +614,53 @@ impl WorldMap {
             if let Some(plan) = self.plan(true) {
                 return Some(plan);
             }
+            // Nowhere safe left on the map. Rather than fall straight through to the objective —
+            // which is ordered by *usefulness* and can put a level 8 anomaly first — take the
+            // cheapest fight there is.
+            if let Some(plan) = self.easiest_hostile() {
+                return Some(plan);
+            }
         }
         self.plan(false)
+    }
+
+    /// The lowest-level hostile area, for when being hurt has run out of safe options.
+    ///
+    /// Two reasons this beats going at the objective while hurt, and the second is the better one:
+    ///
+    /// 1. It is the fight least likely to end the run.
+    /// 2. **Winning it may be what unlocks a rest.** A corrupted village's inn is locked behind the
+    ///    village being cleared (`overworld/generators/village.lua:371-395`), so clearing the
+    ///    cheapest one is a route to the rest we could not otherwise reach — not merely the least
+    ///    bad way to keep moving.
+    ///
+    /// **The anomaly is excluded, and an unknown level sorts LAST.** Both because of the same trap:
+    /// the anomaly's heading is `The Rift anomaly`, with no `— level N` in it, so [`Place::level`]
+    /// returns `None` for the hardest fight on the map. Treating an absent level as zero ranked it
+    /// as the gentlest option available — the exact opposite of this function's purpose, and it
+    /// would have sent a run at a third health straight into the level 8 fight it was trying to
+    /// avoid.
+    ///
+    /// So: unknown means unknown, and goes to the back. And the anomaly is not a stepping stone
+    /// towards a rest under any reading — it is the objective, and reaching it is what the whole
+    /// first pass exists to defer.
+    fn easiest_hostile(&self) -> Option<Plan> {
+        let here = self.here.as_deref().unwrap_or("");
+        let mut candidates: Vec<&Place> = self
+            .places
+            .values()
+            .filter(|p| p.key != here && !p.avoid && p.hostile_to_enter())
+            .filter(|p| p.key != ANOMALY_KEY && !p.type_is("anomaly"))
+            .collect();
+        candidates.sort_by(|a, b| {
+            a.level()
+                .unwrap_or(u32::MAX)
+                .cmp(&b.level().unwrap_or(u32::MAX))
+                .then(a.key.cmp(&b.key))
+        });
+        candidates
+            .first()
+            .map(|p| Plan { target: p.key.clone(), reason: Goal::EasiestHostile { level: p.level() } })
     }
 
     /// The planner proper. `skip_hostile` excludes anywhere [`Place::hostile_to_enter`] flags.
@@ -1676,10 +1739,11 @@ mod tests {
         assert_eq!(m.next_target().unwrap().reason, Goal::Rest);
     }
 
-    /// The other half of that trade: with nowhere to rest, the objective still wins. A preference
-    /// that could strand the run would be worse than the priority it replaced.
+    /// The other half of that trade: with nowhere to rest we still move. But we move to the
+    /// **cheapest fight**, not to the objective — and specifically NOT to the anomaly, whose heading
+    /// carries no level and so once sorted as the gentlest thing on the map.
     #[test]
-    fn a_live_anomaly_still_wins_when_no_rest_is_reachable() {
+    fn with_nowhere_safe_we_take_the_cheapest_fight_not_the_anomaly() {
         let mut m = hurt_at_l1();
         m.fold(&dump("l1", "Weedley Copse crypt", vec![node("hp", "The Rift anomaly")]));
         m.hell = Some(0.1);
@@ -1688,7 +1752,15 @@ mod tests {
         for p in m.places.values_mut() {
             p.corrupted = true; // every village locked behind its own clearing
             p.completed = false;
+            p.visited = true;
+            p.hidden = Some(0); // and nothing left to explore
         }
+        let plan = m.next_target().unwrap();
+        assert_ne!(plan.target, "hp", "the anomaly is the one fight we must not pick as 'easiest'");
+        assert!(matches!(plan.reason, Goal::EasiestHostile { .. }), "got {:?}", plan.reason);
+
+        // Once health is back, the anomaly is the objective again.
+        m.rested(crate::rest::Health { current: 12, max: 12 });
         assert_eq!(m.next_target().unwrap().reason, Goal::Anomaly);
     }
 
@@ -1747,12 +1819,43 @@ mod tests {
             v.completed = false;
         }
         let plan = m.next_target().unwrap();
-        assert_eq!(plan.reason, Goal::OpenTheAnomaly);
         assert_eq!(plan.target, "v1", "a preference must not strand the run");
+        assert_eq!(
+            plan.reason,
+            Goal::EasiestHostile { level: Some(6) },
+            "with nowhere safe, the reason is 'cheapest fight', not 'objective'"
+        );
     }
 
     /// An unvisited subworld container counts as hostile, because a bandit camp is an ordinary
     /// forest until you are standing in it (`overworld/generators/world.lua:466-475`).
+    /// The anomaly must never be picked as the "easiest" fight. Its heading has no `— level N`, so
+    /// a naive `unwrap_or(0)` ranked the hardest fight on the map as the gentlest.
+    #[test]
+    fn the_anomaly_is_never_the_cheapest_fight() {
+        let mut m = hurt_at_l1();
+        m.hell = Some(0.1);
+        m.fold(&dump(
+            "l1",
+            "Weedley Copse crypt",
+            vec![node("hp", "The Rift anomaly"), node("c1", "Rookdale — level 9 crypt")],
+        ));
+        for p in m.places.values_mut() {
+            p.corrupted = true;
+            p.completed = false;
+            p.used = true;
+            p.visited = true;
+            p.hidden = Some(0);
+        }
+        m.gold = 0;
+        m.fuel = 0;
+        let plan = m.next_target().unwrap();
+        assert_ne!(plan.target, "hp", "the anomaly must never rank as the cheapest fight");
+        // The fixture's `l4` is a level 1 forest, which is genuinely the cheapest thing here.
+        assert_eq!(plan.reason, Goal::EasiestHostile { level: Some(1) });
+        assert_eq!(plan.target, "l4");
+    }
+
     /// An unvisited **forest** is hostile, because a bandit camp is one until you stand in it
     /// (`overworld/generators/world.lua:466-475`). An unvisited village is not — `banditos` maps
     /// only `pine_forest` and `oak_forest`, and treating every container as hostile would block
