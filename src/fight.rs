@@ -448,7 +448,18 @@ fn reward_offers(lines: &[String]) -> Vec<(String, i32, i32)> {
     let start = lines.iter().rposition(|l| l.contains("Item selection:"));
     let Some(start) = start else { return out };
     for line in lines.iter().skip(start + 1) {
-        let parts: Vec<&str> = line.split('\t').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+        // Split on ANY whitespace, not on tabs.
+        //
+        // Lua's `print` separates with `\t`, so tabs are what the game emits — but they are not what
+        // we read. The console scrape delivers these rows tab-expanded to spaces, and splitting on
+        // `\t` then yielded a single part, ended the block on its first row, and reported "no offers
+        // parsed" for a screen showing three items. The run sat on `Choose one:` until it ran out of
+        // steps, with `Blacksmith gloves`, `Weird veiny beige thumb` and `Gold idol` on offer.
+        //
+        // Whitespace splitting is right for both forms because the shape carries the meaning: the
+        // key is one token, the last two are the coordinates, and the name in between may contain
+        // spaces (it usually does) but is never needed.
+        let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 4 {
             break; // the block has ended
         }
@@ -479,6 +490,27 @@ mod tests {
         assert_eq!(offers.len(), 3);
         assert_eq!(offers[0], ("phoenixFeather".into(), 480, 540));
         assert_eq!(offers[2], ("gildedTetraTeabag".into(), 1440, 540));
+    }
+
+    /// The rows exactly as they reach us, copied from a live raw log — tab-expanded, column-padded,
+    /// and with a three-word item name in the middle column.
+    #[test]
+    fn reads_the_rows_in_the_form_the_console_actually_delivers() {
+        let lines: Vec<String> = [
+            "Item selection:",
+            "        armourLeatherGloves     Blacksmith gloves       480     540",
+            "        iBeforeEBad     Weird veiny beige thumb 960     540",
+            "        goldIdol        Gold idol       1440    540",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let offers = reward_offers(&lines);
+        assert_eq!(offers.len(), 3, "this screen was showing three items");
+        assert_eq!(offers[0], ("armourLeatherGloves".into(), 480, 540));
+        // The one that matters: a name containing spaces must not be mistaken for extra columns.
+        assert_eq!(offers[1], ("iBeforeEBad".into(), 960, 540));
+        assert_eq!(offers[2], ("goldIdol".into(), 1440, 540));
     }
 
     #[test]
