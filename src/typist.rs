@@ -288,6 +288,21 @@ fn pattern_admits(pattern: &str, c: u8) -> bool {
 /// The wildcard itself shows `[A-Z]` as a placeholder near the top of the screen while the keyboard
 /// is up, which is a second signal if one is ever wanted.
 ///
+/// ### The cursor sits in the middle of it
+///
+/// Clicking the wildcard leaves the pointer inside this region, and the game draws a cursor there.
+/// Two independent reasons that is fine, and the check should keep both:
+///
+/// - **Match by inliers, not by hash.** [`crate::observe::template`] scores the *fraction* of
+///   template pixels that agree, which is occlusion-robust by design — it was chosen so overworld
+///   nodes still match under drifting cloud. A cursor removes its own pixels from the agreeing set
+///   and nothing else; against a 675x295 region that is well under 1%, and the threshold sits at
+///   0.55. An exact `Frame::region_hash` would NOT survive it, so this must not be built that way.
+/// - **Park first anyway.** `Run::park` moves the pointer to (760, 240), which is outside this
+///   rectangle, and costs nothing. Belt and braces: the parking makes it not arise, the inlier
+///   scoring makes it harmless if parking is ever missed or the pointer is warped back by the game's
+///   own hotspot navigation.
+///
 /// ## Why this blocks a fight today
 ///
 /// [`Typist::type_word`] will happily plan a word through a wildcard, and `crate::combat::Board`
