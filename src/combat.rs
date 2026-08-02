@@ -116,21 +116,74 @@ impl From<crate::Error> for SelectError {
     }
 }
 
-/// How long to wait for the on-screen keyboard to fade in or out.
+/// How long the board takes to fade fully out or fully in.
 ///
-/// `showKeyboard` fades the board out (`tileboard.hide'fade'`, `rpg.lua:695`) rather than swapping
-/// it, so neither transition is instant. Generous, because the cost of being wrong is asymmetric: too
-/// short and a perfectly good wildcard is reported as a missed click.
-pub const KEYBOARD_TIMEOUT: Duration = Duration::from_millis(2500);
+/// Not a guess. `showKeyboard` calls `tileboard.hide'fade'`, which only sets `alphaHide`
+/// (`tileboard.lua:2094-2096`); the movement is in `update` (`tileboard.lua:1678-1682`):
+///
+/// ```lua
+/// if alphaHide and tileboardData.colour[4] ~= 0 then
+///     tileboardData.colour[4] = math.max(0, tileboardData.colour[4]-delta*3)
+/// elseif not alphaHide and tileboardData.colour[4] ~= 1 then
+///     tileboardData.colour[4] = math.min(1, tileboardData.colour[4]+delta*3)
+/// ```
+///
+/// Alpha travels 0..1 at 3 per second, scaled by `delta`, so the fade is **1/3 second** either way
+/// and does not vary with frame rate. In practice the check trips sooner than this — the region stops
+/// resembling its reference well before alpha reaches its endpoint.
+pub const FADE: Duration = Duration::from_millis(334);
+
+/// How long to wait for the on-screen keyboard to appear or go.
+///
+/// Four fades. A margin for a frame hitch or a slow poll, not for uncertainty about the duration —
+/// and small enough that a genuinely refused letter is reported in seconds instead of tens of them,
+/// since [`LETTER_ATTEMPTS`] pays this timeout on each try.
+pub const KEYBOARD_TIMEOUT: Duration = Duration::from_millis(4 * 334);
 
 /// Attempts at sending the letter before giving up on the word.
 pub const LETTER_ATTEMPTS: usize = 3;
 
-/// How long to let the board fade back in after the keyboard closes.
+/// How long to let the board come back to the selection we expect after the keyboard closes.
 ///
-/// Shorter than the resume-from-save wait, because nothing is being re-dealt here: the same tiles
-/// are simply becoming visible again.
-pub const BOARD_RETURN_TIMEOUT: Duration = Duration::from_secs(5);
+/// A ceiling on the poll below, not a duration to wait out: the board is read until it shows exactly
+/// the tiles we have selected and nothing else, and this only decides when to give up. Four fades,
+/// same margin as [`KEYBOARD_TIMEOUT`], because nothing is being re-dealt — the same tiles are simply
+/// becoming visible again.
+pub const BOARD_RETURN_TIMEOUT: Duration = Duration::from_millis(4 * 334);
+
+/// How the board compared with the selection we believe we made.
+#[derive(Debug, PartialEq, Eq)]
+enum Settled {
+    /// Exactly the expected tiles are selected, and nothing else.
+    Yes,
+    /// Tiles we asked for that never appeared: the action did not take.
+    Missing(Vec<usize>),
+    /// Tiles selected that we never asked for.
+    Unexpected(Vec<usize>),
+}
+
+/// Compares what the board shows as selected against what we asked for.
+///
+/// Split out from the poll so the judgement can be tested without a window — the loop around it is
+/// only a clock.
+fn compare_selection(changed: &[usize], expected: &[usize], restless: &[usize]) -> Settled {
+    let missing: Vec<usize> = expected.iter().copied().filter(|j| !changed.contains(j)).collect();
+    if !missing.is_empty() {
+        // A tile we asked for and cannot see is the more useful complaint: it means the action did
+        // not take, where an extra tile means it took somewhere else too.
+        return Settled::Missing(missing);
+    }
+    let unexpected: Vec<usize> = changed
+        .iter()
+        .copied()
+        .filter(|j| !expected.contains(j) && !restless.contains(j))
+        .collect();
+    if unexpected.is_empty() {
+        Settled::Yes
+    } else {
+        Settled::Unexpected(unexpected)
+    }
+}
 
 /// Drives tile selection on a live board.
 pub struct Board<'a> {
@@ -289,6 +342,34 @@ impl<'a> Board<'a> {
         }
     }
 
+    /// Waits for the board to show exactly `expected` as selected, and reports what else it shows.
+    ///
+    /// The fade has a known length ([`FADE`]), and waiting it out would be enough today. It is the
+    /// wrong thing to rely on: the duration is a constant in the game's `update`, an animation could
+    /// be added ahead of it, and a slow frame extends it. So the fixed wait is only a floor — the
+    /// exit condition is the board *agreeing with us*, which is the thing actually needed and stays
+    /// true however the animation is changed.
+    ///
+    /// `restless` tiles are excluded, as they are everywhere else: an exploding tile pulses on its
+    /// own and would never let the set settle.
+    ///
+    fn settle_to(
+        &self, baseline: &[f64], expected: &[usize], restless: &[usize], timeout: Duration,
+    ) -> Result<Settled, crate::Error> {
+        std::thread::sleep(FADE);
+        let deadline = Instant::now() + timeout;
+        loop {
+            let now = self.selected_now(baseline)?;
+            let changed: Vec<usize> =
+                now.iter().enumerate().filter(|(_, c)| **c).map(|(j, _)| j).collect();
+            let verdict = compare_selection(&changed, expected, restless);
+            if verdict == Settled::Yes || Instant::now() >= deadline {
+                return Ok(verdict);
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+
     /// Selects a wildcard tile and gives it a letter.
     ///
     /// The ordinary confirm-by-luminance cannot be used for the click: selecting a wildcard fades
@@ -299,21 +380,24 @@ impl<'a> Board<'a> {
     /// `baseline` is still the pre-word board, and the tile is checked against it at the end: the
     /// board comes back unchanged apart from this tile, which is now both selected and lettered.
     fn place_wildcard(
-        &self, i: usize, letter: char, baseline: &[f64],
+        &self, i: usize, letter: char, baseline: &[f64], want: &[usize], restless: &[usize],
     ) -> Result<(), SelectError> {
+        // Everything selected so far, plus the tile this step is for.
+        let expected: Vec<usize> = want.iter().copied().chain(std::iter::once(i)).collect();
+        let verify = |s: Settled| match s {
+            Settled::Yes => Ok(()),
+            Settled::Missing(_) => Err(SelectError::Stuck(i)),
+            Settled::Unexpected(got) => Err(SelectError::Stray { wanted: i, got }),
+        };
+
         // The reference must be captured while the board is up, before anything is clicked.
         let board = self.read_keyboard_region()?;
         self.click(i)?;
 
         if !self.wait_for_board(&board, false, KEYBOARD_TIMEOUT)? {
             // No keyboard. Either the click missed, or this player has `submitWildcardRegex` and the
-            // tile selects like any other (`wordboard.lua:140-143`). The tile itself says which.
-            let selected = self.selected_now(baseline)?;
-            return if selected.get(i).copied().unwrap_or(false) {
-                Ok(())
-            } else {
-                Err(SelectError::Stuck(i))
-            };
+            // tile selects like any other (`wordboard.lua:140-143`). The board itself says which.
+            return verify(self.settle_to(baseline, &expected, restless, BOARD_RETURN_TIMEOUT)?);
         }
 
         for _ in 0..LETTER_ATTEMPTS {
@@ -323,18 +407,11 @@ impl<'a> Board<'a> {
             )?;
             if self.wait_for_board(&board, true, KEYBOARD_TIMEOUT)? {
                 // `hideKeyboard` calls `tileboard.unhide()` (`rpg.lua:704`), so the board fades back
-                // in rather than reappearing. Rejoining the word before it settles would compare a
-                // half-faded board against the baseline, read every tile as changed, and abort the
-                // word with a stray on the *next* click -- the failure blamed on the wildcard.
-                self.wait_until_ready(BOARD_RETURN_TIMEOUT)?;
-                // The tile is selected and lettered; confirm against the untouched board like any
-                // other click, so a wildcard step ends in the same state the caller expects.
-                let selected = self.selected_now(baseline)?;
-                return if selected.get(i).copied().unwrap_or(false) {
-                    Ok(())
-                } else {
-                    Err(SelectError::Stuck(i))
-                };
+                // in rather than reappearing. Rejoining the word before it agrees with us would
+                // compare a half-faded board against the baseline, read every tile as changed, and
+                // abort on a stray at the *next* click -- a failure that would look like the
+                // ordinary click's fault rather than the wildcard's.
+                return verify(self.settle_to(baseline, &expected, restless, BOARD_RETURN_TIMEOUT)?);
             }
         }
         Err(SelectError::LetterRefused { tile: i, letter })
@@ -375,9 +452,10 @@ impl<'a> Board<'a> {
 
         for &(i, wildcard) in plan {
             if let Some(letter) = wildcard {
-                // A wildcard runs its own confirmed sequence and rejoins here with the tile
-                // selected, so the rest of the word proceeds against the same baseline.
-                self.place_wildcard(i, letter, &baseline)?;
+                // A wildcard runs its own confirmed sequence and rejoins here with the board showing
+                // exactly `want` plus this tile, so the rest of the word proceeds against the same
+                // baseline as if an ordinary click had happened.
+                self.place_wildcard(i, letter, &baseline, &want, &restless)?;
                 want.push(i);
                 continue;
             }
@@ -415,6 +493,36 @@ mod tests {
 
     fn flat(w: i32, h: i32, v: u8) -> Frame {
         Frame { width: w, height: h, bgra: vec![v; (w * h * 4) as usize] }
+    }
+
+    #[test]
+    fn a_board_showing_exactly_what_we_asked_for_has_settled() {
+        assert_eq!(compare_selection(&[0, 3, 5], &[0, 3, 5], &[]), Settled::Yes);
+        // Order is not part of the question: the board reports positions, not sequence.
+        assert_eq!(compare_selection(&[5, 0, 3], &[3, 5, 0], &[]), Settled::Yes);
+    }
+
+    #[test]
+    fn a_still_fading_board_is_neither_settled_nor_an_error_yet() {
+        // Mid-fade every tile reads as changed. That must come back as Unexpected so the poll keeps
+        // going -- returning Yes here is the bug that aborts the next click with a stray.
+        let all: Vec<usize> = (0..8).collect();
+        assert_eq!(compare_selection(&all, &[0, 3], &[]), Settled::Unexpected(vec![1, 2, 4, 5, 6, 7]));
+    }
+
+    #[test]
+    fn a_tile_we_asked_for_and_cannot_see_outranks_an_extra_one() {
+        // Both wrong at once: report the one that says the action did not take.
+        assert_eq!(compare_selection(&[0, 9], &[0, 3], &[]), Settled::Missing(vec![3]));
+    }
+
+    #[test]
+    fn a_restless_tile_never_stops_the_board_settling() {
+        // An exploding tile pulses on its own, so it differs from the baseline on every read. Left
+        // in, the poll could only ever time out.
+        assert_eq!(compare_selection(&[0, 3, 4], &[0, 3], &[4]), Settled::Yes);
+        // But it is still allowed to be one of the tiles we selected.
+        assert_eq!(compare_selection(&[0, 4], &[0, 4], &[4]), Settled::Yes);
     }
 
     #[test]
