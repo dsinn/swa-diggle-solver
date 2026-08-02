@@ -37,6 +37,47 @@ pub struct Button {
     pub click: (i32, i32),
 }
 
+/// Combat's `Finish`, which ends a cleared fight.
+///
+/// `ss(0.9, 0.9)` with the 300x100 `default` size — centre (1728, 972), matching the coordinate a
+/// live run already clicks (`WaitPhase -> Finish at (1728,972)`).
+///
+/// ## What it does and does not prove
+///
+/// It proves **`WaitPhase`**, not "a fight is happening". The button is drawn only once the enemies
+/// are done; mid-`PlayerTurn` the slot is empty, which is why a combat capture from turn 2 scores
+/// 0.2317 here. A general "are we in combat" check needs a different signal — the tile board.
+///
+/// That is still the signal worth having, because `WaitPhase` is exactly the state a run gets
+/// stranded in: resuming a save drops us straight into it with no overworld dump to be had, and the
+/// run then fails looking for a map. See [`crate::fight::Fight::run`], which is built to join a
+/// fight already in progress.
+///
+/// ## The confusable state is NOT measured
+///
+/// `Give up` shares this slot (see `fight::FINISH`), and pressing it in place of `Finish` abandons a
+/// won fight. The crop includes the lettering, so the two should separate far more than a recolour
+/// would — but that is reasoning, not measurement, and no capture of `Give up` exists yet. Measure
+/// it before this is used to decide anything destructive.
+///
+/// Measured against every screen captured so far:
+///
+/// ```text
+///   WaitPhase, the frame it came from   1.0000
+///   reward screen                       0.2777
+///   combat, mid-PlayerTurn              0.2317
+///   village map                         0.1080
+/// ```
+pub const COMBAT_FINISH: Button = Button {
+    name: "combat Finish",
+    template: "combat-finish.png",
+    search: (1570, 914, 1586, 930),
+    click: (1728, 972),
+};
+
+/// `Finish` is on screen, so a fight is sitting in `WaitPhase`. See [`COMBAT_FINISH`].
+pub const COMBAT_FINISH_PRESENT: f64 = 0.55;
+
 /// The reward screen's `Confirm`, captured in its **greyed** state.
 ///
 /// `ui/itemselection.lua:272` — `button('Confirm', 0.5, 0.85, { xOffset = 2.768, activeIf =
