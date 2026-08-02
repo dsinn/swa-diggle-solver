@@ -459,6 +459,35 @@ pub const CHARACTER_STATS: Button = Button {
 /// The character screen is up. See [`CHARACTER_STATS`]. 0.70 — nothing else comes near 0.30.
 pub const CHARACTER_STATS_PRESENT: f64 = 0.70;
 
+/// The character screen's return arrow, bottom-right — the way out.
+///
+/// A `small` 100x100 at (1674,917)-(1774,1017). Fingerprinted so that leaving the character screen
+/// is a verified click like every other, rather than a bare coordinate. The first version of the
+/// escape clicked (1730, 968) on faith, which was the only click in that change asking the observer
+/// nothing — the exact habit behind the day's failures.
+///
+/// ```text
+///   the character screen, two captures   1.0000  err 0.0000
+///   plain overworld terrain              0.6847  err 0.1285
+///   combat WaitPhase                     0.6721  err 0.1295
+///   hero select                          0.6425  err 0.1371
+///   postgame                             0.3023  err 0.2597
+///   the main menu                        0.1056  err 0.3819
+/// ```
+///
+/// 0.85 sits 0.15 either side. The confusables cluster near 0.68 because they are all brown planks
+/// in roughly this corner; none of them carries this arrow.
+pub const CHARACTER_BACK: Button = Button {
+    name: "character back",
+    template: "character-back.png",
+    search: (1666, 909, 1782, 1025),
+    origin: (1674, 917),
+    click: (1724, 967),
+};
+
+/// The character screen's exit is on screen. See [`CHARACTER_BACK`].
+pub const CHARACTER_BACK_PRESENT: f64 = 0.85;
+
 /// Which screen the game is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -536,6 +565,7 @@ pub const ALL: &[&Button] =
     &MENU_START,
     &HEROSELECT_CONFIRM,
     &CHARACTER_STATS,
+    &CHARACTER_BACK,
 ];
 
 /// Start menu `Continue`. Measured on 52.3 at 1920x1080; `Restart` is the adjacent button at

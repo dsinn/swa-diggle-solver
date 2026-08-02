@@ -886,13 +886,21 @@ fn drive(
         if screen == diggle_solver::act::Screen::Character {
             // A dead end: from here the area-button coordinate means `Stats`. The way out is the
             // back arrow in the bottom-right corner.
-            if let Ok((bx, by)) = r.win.client_to_screen(1730, 968) {
-                let _ = click_at_in(r.win, bx, by);
-                r.park();
-                std::thread::sleep(Duration::from_millis(900));
-                r.pump();
+            match diggle_solver::act::click_exact(
+                r.win,
+                &diggle_solver::act::CHARACTER_BACK,
+                diggle_solver::act::CHARACTER_BACK_PRESENT,
+            ) {
+                Ok(q) => {
+                    r.park();
+                    std::thread::sleep(Duration::from_millis(900));
+                    r.pump();
+                    r.log.push_str(&format!(
+                        "  left the character screen via the return arrow ({q:.4})\n"
+                    ));
+                }
+                Err(e) => return Stop::Failed(format!("stuck on the character screen: {e}")),
             }
-            r.log.push_str("  left the character screen\n");
             continue;
         }
         if Path::new(STOP_FILE).exists() {
