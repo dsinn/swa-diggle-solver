@@ -850,12 +850,34 @@ fn drive(
         // heading carries a level and reads exactly like a fight, but its area button ENTERS the
         // subworld (`getLocationButtons` tests `typeData.subworld` first). Clearing one means
         // fighting through its interior, which is a capability this run does not have.
+        // ...but only when the subworld is where we are trying to GET TO. Standing on one we are
+        // merely walking past is not a reason to stop.
+        //
+        // This branch used to fire on any container underfoot, and it ended a run that was doing
+        // nothing wrong: at 0 health the planner correctly chose the `l7` campfire, the route there
+        // crosses Ulrome, and arriving at Ulrome killed the run on the spot. The machinery to cross
+        // a subworld already existed and had worked one step earlier in that very log —
+        // `l10sub7` out to `l18` — because `cross_toward` runs when we are *inside*. We simply
+        // never got inside, having stopped on the doorstep.
+        //
+        // Falling through instead lets the code below click the area button, which enters the
+        // subworld (`getLocationButtons` tests `typeData.subworld` before `basicCombatZone`), after
+        // which the next iteration is "inside" and the crossing logic takes over.
         if let Some(p) = place.as_ref().filter(|p| p.subworld_container) {
+            let heading_for = r.map.next_hop().map(|h| h.plan.target);
+            let stuck_here = heading_for.as_deref().map(|t| t == here).unwrap_or(true);
+            if stuck_here {
+                r.log.push_str(&format!(
+                    "{step}. `{here}` ({}) is the destination and is a subworld — clearing it from \
+                     the inside is not implemented\n",
+                    p.heading
+                ));
+                return Stop::AtSubworld(here);
+            }
             r.log.push_str(&format!(
-                "{step}. `{here}` ({}) is a subworld — clearing it from the inside is not implemented\n",
-                p.heading
+                "{step}. `{here}` is a subworld on the way to `{}` — entering to cross it\n",
+                heading_for.as_deref().unwrap_or("?")
             ));
-            return Stop::AtSubworld(here);
         }
         // Ask where we are GOING before deciding to fight. The first live run had these the other
         // way round: it saw an unfinished fight underfoot and cleared it unconditionally, when the
