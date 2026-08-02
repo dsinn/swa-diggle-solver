@@ -69,6 +69,16 @@ const SHOW_AREA_BUTTONS: (i32, i32) = (32, 918);
 /// the right ones before it is clicked.
 const AREA_BUTTON: (i32, i32) = (187, 918);
 const EMPTY_MAP: (i32, i32) = (1750, 160);
+/// Touch this file to stop the run **gracefully** at the next step boundary.
+///
+/// The alternatives are both worse. Killing `spike_run` — `timeout`, Ctrl-C, stopping the background
+/// task — ends the process before `main` writes the report and the stop frame, so the run costs a
+/// launch and returns nothing. Killing the *game* does leave a report, but it interrupts whatever
+/// was mid-flight: a click, a save write, an unconfirmed reward screen (which discards the reward).
+///
+/// Checked at the top of the loop, between steps, where nothing is half-done. Consumed on read so a
+/// stale file cannot end the next run before it starts.
+const STOP_FILE: &str = ".diggle-stop";
 
 /// Points tried, in order, when looking for map with no location under it.
 ///
@@ -89,6 +99,8 @@ const MAX_STEPS: usize = 20;
 
 #[derive(Debug)]
 enum Stop {
+    /// Someone asked us to stop, via [`STOP_FILE`].
+    Requested,
     AnomalyBeaten,
     AtShrine(String),
     /// Standing on a subworld whose interior we cannot yet clear.
@@ -468,7 +480,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         menu_at.elapsed()
     ));
     if found.is_err() {
-        r.log.push_str("ABORT: no Continue\n");
+        // No `Continue` means no save — so the menu is offering `Start` instead. Say which, because
+        // "no Continue" alone cannot distinguish "fresh save, ready to start a new run" from "the
+        // menu never rendered", and those want opposite responses.
+        //
+        // Recognised, deliberately not pressed. That slot reads `Restart` when a save DOES exist and
+        // pressing it eulogises the run, so the fingerprint is the whole safety argument — and past
+        // it lies hero select, which nothing in this tree can drive yet. Better to stop here naming
+        // the reason than to click into a screen we cannot leave.
+        match diggle_solver::act::score_exact(&win, &diggle_solver::act::MENU_START) {
+            Ok(q) if q >= diggle_solver::act::MENU_START_PRESENT => r.log.push_str(&format!(
+                "ABORT: no Continue — the menu offers `Start` ({q:.4}), i.e. no save to resume. \
+                 Starting a new run needs hero select, which is not implemented.\n"
+            )),
+            Ok(q) => r.log.push_str(&format!(
+                "ABORT: no Continue, and no `Start` either (best {q:.4}) — the menu may not have \
+                 rendered\n"
+            )),
+            Err(e) => r.log.push_str(&format!("ABORT: no Continue; could not read `Start`: {e}\n")),
+        }
         return finish(&mut game, &r.log);
     }
     let by = Instant::now() + Duration::from_secs(40);
@@ -563,6 +593,12 @@ fn drive(
         }
         if r.map.anomaly_beaten() {
             return Stop::AnomalyBeaten;
+        }
+        if Path::new(STOP_FILE).exists() {
+            let _ = std::fs::remove_file(STOP_FILE);
+            r.log.push_str(&format!("{step}. stop requested — ending cleanly
+"));
+            return Stop::Requested;
         }
         // An event can be up at the top of any iteration, and while one is it owns the screen —
         // clicking the map does nothing and `recentre` times out with "no pan dump". Entering a

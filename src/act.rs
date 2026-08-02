@@ -305,6 +305,39 @@ pub fn slot_is_eulogise(win: &GameWindow) -> bool {
     }
 }
 
+/// The main menu's `Start` — a **new** run, only present when no save exists.
+///
+/// `default` 250x100 centred at (500, 810), so exactly (375,760)-(625,860).
+///
+/// ## The same slot says `Restart` when a save exists, and that eulogises
+///
+/// This is the hazard the module header opens with, and it is the Finish/Eulogise pattern again:
+/// one position, two words, and one of them destroys a run. Both sides are measured:
+///
+/// ```text
+///   `Start`, fresh save (no mainSaveData)   1.0000  err 0.0000
+///   `Restart`, menu with a save present     0.8619  err 0.0503   <- eulogises if pressed
+///   plain overworld terrain                 0.5400  err 0.1865
+///   a postgame screen                       0.0898  err 0.3753
+///   combat WaitPhase                        0.0832  err 0.2949
+/// ```
+///
+/// A word swap costs 0.138 here, in line with the 0.147 measured for Finish vs Eulogise. So
+/// [`MENU_START_PRESENT`] at 0.95 separates them with 0.09 to spare, and the run refuses rather than
+/// eulogises if it ever meets the wrong one.
+pub const MENU_START: Button = Button {
+    name: "menu Start",
+    template: "menu-start.png",
+    search: (367, 752, 633, 868),
+    origin: (375, 760),
+    click: (500, 810),
+};
+
+/// The menu is offering a **new** run, not `Restart`. See [`MENU_START`].
+///
+/// 0.95: `Start` measures 1.0000, `Restart` 0.8619.
+pub const MENU_START_PRESENT: f64 = 0.95;
+
 /// The postgame stats screen's `Continue`.
 ///
 /// `ui/postgame.lua:69` — `button('Continue', 1, 0.85, { xOffset = -0.75 })`, a `default` button
@@ -356,7 +389,15 @@ pub const POSTGAME_CONTINUE_PRESENT: f64 = 0.90;
 /// their search boxes being smaller than their own templates. A hand-written list silently stops
 /// covering the thing you just added, which is the moment coverage matters most.
 pub const ALL: &[&Button] =
-    &[&CONTINUE, &PROGRESS, &COMBAT_FINISH, &COMBAT_EULOGISE, &REWARD_CONFIRM, &POSTGAME_CONTINUE];
+    &[
+    &CONTINUE,
+    &PROGRESS,
+    &COMBAT_FINISH,
+    &COMBAT_EULOGISE,
+    &REWARD_CONFIRM,
+    &POSTGAME_CONTINUE,
+    &MENU_START,
+];
 
 /// Start menu `Continue`. Measured on 52.3 at 1920x1080; `Restart` is the adjacent button at
 /// x≈500 and eulogises the run, which is exactly why this is verified rather than assumed.
