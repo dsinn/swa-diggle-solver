@@ -18,9 +18,17 @@
 //! is open, because they cost a fight we no longer need.
 //!
 //! Health leads because the anomaly does not expire and health does not return by itself, so a
-//! detour is only ever a delay while skipping one can end the save. It is a *preference*, not a
-//! guarantee: where nothing restable is reachable — every inn on a corrupted map is locked behind
-//! its village being cleared — the branch falls through and the run gets on with the objective.
+//! detour is only ever a delay while skipping one can end the save.
+//!
+//! **While a rest is wanted, every branch also avoids hostile ground** — an uncleared corrupted
+//! area, or an unvisited forest that might be a bandit camp — because a subworld under attack has
+//! to be cleared before you can leave it, whatever errand took you in. Not just the branch heading
+//! for the objective: arriving at a shrine through an uncleared village hurts exactly as much.
+//!
+//! Both are *preferences*, not guarantees. The planner runs twice — once avoiding hostile ground,
+//! once not — so a hurt run with nowhere safe to go still gets on with the objective rather than
+//! standing still. Exploring counts as somewhere to go, and is preferred over a hostile area,
+//! because a frontier may hold the rest site we have not found yet.
 //!
 //! ## Where it deliberately stops
 //!

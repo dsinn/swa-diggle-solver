@@ -128,12 +128,21 @@ impl Place {
     ///   *is* a forest as far as anything outside it can tell. There is no heading to read and no
     ///   flag to check — you find out by arriving.
     ///
-    /// The second is why this treats an unvisited container as hostile rather than as unknown. We
-    /// cannot show such a place is safe, only that it has not bitten us yet, and "not yet" is a poor
-    /// thing to spend a run on at a third health.
+    /// The second is why an unvisited **forest** counts as hostile rather than unknown: we cannot
+    /// show it is safe, only that it has not bitten us yet.
+    ///
+    /// Forests specifically, and not subworlds in general. `banditos` maps exactly `pine_forest` and
+    /// `oak_forest`, so a village is never rewritten into a camp — and treating every unvisited
+    /// container as hostile would block resting at the first quiet village we find, which is the
+    /// opposite of what wanting a rest is for.
+    ///
+    /// Cleared is safe, whichever way it got that way: corruption that has been fought off leaves
+    /// `completed` set, and a camp we have already emptied is not going to refill.
     pub fn hostile_to_enter(&self) -> bool {
-        (self.corrupted && !self.completed)
-            || (self.subworld_container && !self.visited && !self.completed)
+        if self.completed {
+            return false;
+        }
+        self.corrupted || (self.type_is("forest") && !self.visited)
     }
 
     pub fn type_is(&self, type_name: &str) -> bool {
@@ -576,7 +585,25 @@ impl WorldMap {
     /// a failure: it means the map is fully explored with no trigger found, and the caller has to
     /// widen the search rather than keep walking.
     pub fn next_target(&self) -> Option<Plan> {
+        // While a rest is wanted, EVERY branch skips areas that cost a fight to leave — not just the
+        // one heading for the objective. A plan is a plan whatever its reason, and arriving at a
+        // shrine or a frontier through an uncleared corrupted village hurts exactly as much as
+        // arriving at an anomaly trigger that way.
+        //
+        // Two passes, so the rule cannot strand the run: if avoiding hostile ground leaves nothing
+        // at all to do, the second pass drops the restriction and we get on with it.
+        if self.wants_rest {
+            if let Some(plan) = self.plan(true) {
+                return Some(plan);
+            }
+        }
+        self.plan(false)
+    }
+
+    /// The planner proper. `skip_hostile` excludes anywhere [`Place::hostile_to_enter`] flags.
+    fn plan(&self, skip_hostile: bool) -> Option<Plan> {
         let here = self.here.as_deref().unwrap_or("");
+        let ok = |p: &Place| !(skip_hostile && p.hostile_to_enter());
 
         // **Health first, ahead of everything including a live anomaly.**
         //
@@ -616,7 +643,7 @@ impl WorldMap {
                 // `destroyedAreaButtons` replaces the button set outright
                 // (`overworld/generators/village.lua:393-395`) — this filter is wrong and corrupted
                 // villages go back to being written off.
-                .filter(|p| p.key != here && !p.avoid && (!p.corrupted || p.completed))
+                .filter(|p| p.key != here && !p.avoid && (!p.corrupted || p.completed) && ok(p))
                 .filter_map(|p| crate::rest::site(&p.heading).map(|s| (p, s)))
                 .filter(|(p, s)| crate::rest::can_rest_at(*s, self.gold, self.fuel, !p.used))
                 .collect();
@@ -627,7 +654,12 @@ impl WorldMap {
         }
 
 
-        if let Some(p) = self.anomaly() {
+        // The anomaly is hostile by construction, so `ok` skips it too on the first pass. That is
+        // the point rather than an oversight: it is a level 8 fight, and walking into it below half
+        // health is the single most expensive thing this run can do. On the first pass we would
+        // rather go exploring — which is also how an unknown rest site gets found — and the second
+        // pass takes it when there is genuinely nothing else.
+        if let Some(p) = self.anomaly().filter(|p| ok(p)) {
             return Some(Plan { target: p.key.clone(), reason: Goal::Anomaly });
         }
 
@@ -642,35 +674,10 @@ impl WorldMap {
         // any save has been read, and an unknown flag is treated as still available, since a wasted
         // trip is cheaper than stranding the run.
         if self.anomaly_available().unwrap_or(true) {
-            // While hurt, skip anywhere that commits us to a fight to get back out. See
-            // [`Place::hostile_to_enter`] — this is a *hostile* filter, not a subworld one: a quiet
-            // village is somewhere to rest, and nothing here avoids it.
-            //
-            // Tried in two passes rather than one filter, so being hurt cannot strand the run. If
-            // every trigger on the map is hostile, we still go — the objective beats a preference
-            // when the preference has nowhere to send us.
-            let pick = |skip_hostile: bool| -> Option<&Place> {
-                let mut candidates: Vec<&Place> = self
-                    .places
-                    .values()
-                    .filter(|p| p.key != here && p.triggers_anomaly() && !p.avoid)
-                    .filter(|p| !(skip_hostile && p.hostile_to_enter()))
-                    .collect();
-                candidates.sort_by(|a, b| {
-                    a.completed
-                        .cmp(&b.completed)
-                        .then(a.level().cmp(&b.level()))
-                        .then(a.key.cmp(&b.key))
-                });
-                candidates.first().copied()
-            };
-            if let Some(p) = self.wants_rest.then(|| pick(true)).flatten() {
-                return Some(Plan { target: p.key.clone(), reason: Goal::OpenTheAnomaly });
-            }
             let mut candidates: Vec<&Place> = self
                 .places
                 .values()
-                .filter(|p| p.key != here && p.triggers_anomaly() && !p.avoid)
+                .filter(|p| p.key != here && p.triggers_anomaly() && !p.avoid && ok(p))
                 .collect();
             // Any qualifying node does; prefer one we have not cleared, then the lowest level for a
             // predictable arrival, then by key so the choice is stable across runs.
@@ -710,7 +717,7 @@ impl WorldMap {
         if let Some(p) = self
             .places
             .values()
-            .filter(|p| p.key != here && !p.avoid && p.type_is("shrine") && !p.consecrated)
+            .filter(|p| p.key != here && !p.avoid && ok(p) && p.type_is("shrine") && !p.consecrated)
             .filter(|p| !(anomaly_open && p.corrupted))
             .min_by_key(|p| dist_or_far(&dist, &p.key))
         {
@@ -719,7 +726,7 @@ impl WorldMap {
         // Nothing qualifying is known yet, so grow the map. Unvisited places first — standing on one
         // is what produces a dump — and among those prefer the ones still hiding neighbours.
         let mut frontier: Vec<&Place> =
-            self.places.values().filter(|p| p.key != here && p.is_frontier() && !p.avoid).collect();
+            self.places.values().filter(|p| p.key != here && p.is_frontier() && !p.avoid && ok(p)).collect();
         // Order matters, and a live run showed why. From l10 with l1 and l18 both adjacent and both
         // unvisited, sorting by key chose `l1` — already **completed**, so it revealed nothing — and
         // the run then had to walk back through l10 to reach l18. Two of three hops wasted, on an
@@ -1715,7 +1722,12 @@ mod tests {
         assert_eq!(plan.target, "c1", "the corrupted village costs a fight to leave");
     }
 
-    /// ...but if every trigger is hostile, being hurt must not stop the run entirely.
+    /// ...but with genuinely nothing else to do, being hurt must not stop the run entirely.
+    ///
+    /// Note what "nothing else" has to mean now that the rule is global: exploring counts as
+    /// something else, and is *preferred*, because a frontier might hold the rest site we are
+    /// looking for. So this fixture leaves no frontier at all — every place visited, nothing
+    /// hidden — which is the only state in which diving into hostile ground is the best move left.
     #[test]
     fn a_hostile_trigger_is_still_taken_when_it_is_the_only_one() {
         let mut m = hurt_at_l1();
@@ -1724,6 +1736,8 @@ mod tests {
         // No rest anywhere, and every other neighbour too small to trigger the anomaly.
         for p in m.places.values_mut() {
             p.used = true;
+            p.visited = true;
+            p.hidden = Some(0); // no frontier left, so exploring is not an option
         }
         m.gold = 0;
         m.fuel = 0;
@@ -1739,16 +1753,31 @@ mod tests {
 
     /// An unvisited subworld container counts as hostile, because a bandit camp is an ordinary
     /// forest until you are standing in it (`overworld/generators/world.lua:466-475`).
+    /// An unvisited **forest** is hostile, because a bandit camp is one until you stand in it
+    /// (`overworld/generators/world.lua:466-475`). An unvisited village is not — `banditos` maps
+    /// only `pine_forest` and `oak_forest`, and treating every container as hostile would block
+    /// resting at the first quiet village we find.
     #[test]
-    fn an_unvisited_container_is_treated_as_hostile_while_hurt() {
-        let mut p = Place { key: "f1".into(), ..Default::default() };
-        p.subworld_container = true;
-        assert!(p.hostile_to_enter(), "never been in, so it cannot be shown to be safe");
-        p.visited = true;
-        assert!(!p.hostile_to_enter(), "we have stood in it and come back out");
-        p.visited = false;
-        p.completed = true;
-        assert!(!p.hostile_to_enter(), "cleared is safe whether or not we remember visiting");
+    fn an_unvisited_forest_is_hostile_but_an_unvisited_village_is_not() {
+        let forest = Place {
+            key: "f1".into(),
+            heading: "Bainton Clump — level 1 forest".into(),
+            ..Default::default()
+        };
+        assert!(forest.hostile_to_enter(), "could be a bandit camp; nothing outside it says so");
+
+        let village = Place {
+            key: "v1".into(),
+            heading: "Ulrome — level 6 village".into(),
+            ..Default::default()
+        };
+        assert!(!village.hostile_to_enter(), "somewhere to REST, which is the whole point");
+
+        let visited = Place { visited: true, ..forest.clone() };
+        assert!(!visited.hostile_to_enter(), "we have stood in it and come back out");
+
+        let cleared = Place { completed: true, corrupted: true, ..forest.clone() };
+        assert!(!cleared.hostile_to_enter(), "corruption fought off is corruption gone");
     }
 
     /// Resuming at low health must ask for a rest even though no drop was ever observed — the delta
