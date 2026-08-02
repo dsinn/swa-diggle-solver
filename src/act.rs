@@ -37,6 +37,56 @@ pub struct Button {
     pub click: (i32, i32),
 }
 
+/// The reward screen's `Confirm`, captured in its **greyed** state.
+///
+/// `ui/itemselection.lua:272` — `button('Confirm', 0.5, 0.85, { xOffset = 2.768, activeIf =
+/// function() return selection end })`, a `default` button (250x100), giving centre (1652, 918).
+///
+/// ## Why a captured crop, when [`crate::observe::affirm`] insists on shipped artwork
+///
+/// The `default` type ships as `button-*.jpg` — only the arrow and tab types are PNG
+/// (`ui/elements/button.lua:16-28`) — and a JPEG has no alpha, so matching one scores the backdrop
+/// it was authored against along with the button.
+///
+/// Here that objection does not apply, and specifically so: `fancyboard.png` is drawn at the same
+/// 0.5/0.85 anchor immediately before it (`:271`), and the icon overlay is `getIcon(selection)`,
+/// which does not exist until something is chosen. The greyed Confirm is therefore the same pixels
+/// on every reward screen — a capture of it is the composition the game always draws, not whatever
+/// happened to be behind it once.
+///
+/// ## Two questions, two thresholds
+///
+/// Measured against four live frames:
+///
+/// ```text
+///   greyed Confirm, the frame it was cropped from   1.0000
+///   ACTIVE Confirm, after an item was selected      0.7255
+///   village map, same slot                          0.0068
+///   combat screen, same slot                        0.1196
+/// ```
+///
+/// The active button is the same plank and the same lettering in a different colour, so it scores
+/// 0.73 against the greyed template — far too close to call with the 0.55 used elsewhere. That
+/// threshold answers a *different* question perfectly well, and the two must not be conflated:
+///
+/// - **[`REWARD_SCREEN_PRESENT`]** — is a reward screen up at all? Either state clears it and
+///   nothing else comes within 6x of it.
+/// - **[`REWARD_NOTHING_PICKED`]** — is it still greyed, i.e. has our click on an item registered?
+///   Sits in the gap between 0.7255 and 1.0000, and is the read-back for selecting an item.
+pub const REWARD_CONFIRM: Button = Button {
+    name: "reward Confirm",
+    template: "reward-confirm-inactive.png",
+    search: (1519, 860, 1535, 876),
+    click: (1652, 918),
+};
+
+/// A reward screen is on screen, in either state. See [`REWARD_CONFIRM`].
+pub const REWARD_SCREEN_PRESENT: f64 = 0.55;
+
+/// Still greyed, so nothing has been selected yet. Placed midway between the measured 0.7255 for the
+/// active button and 1.0000 for the greyed one.
+pub const REWARD_NOTHING_PICKED: f64 = 0.86;
+
 /// Start menu `Continue`. Measured on 52.3 at 1920x1080; `Restart` is the adjacent button at
 /// x≈500 and eulogises the run, which is exactly why this is verified rather than assumed.
 pub const CONTINUE: Button = Button {
