@@ -288,6 +288,26 @@ fn pattern_admits(pattern: &str, c: u8) -> bool {
 /// The wildcard itself shows `[A-Z]` as a placeholder near the top of the screen while the keyboard
 /// is up, which is a second signal if one is ever wanted.
 ///
+/// ### What the check must NOT key on
+///
+/// Two traps, both confirmed live.
+///
+/// **The letters move.** The game supports alternative keyboard layouts, so the glyph on any given
+/// key is not fixed. A match that depends on letter positions would fail for anyone not on the
+/// layout the template was captured from. Glyphs are a modest fraction of the region -- the rest is
+/// key face and shadow -- so an inlier score stays comfortably above threshold with every letter
+/// different, but the threshold has to be chosen knowing that and not tuned tight against one
+/// capture.
+///
+/// **The tile board looks like a keyboard.** Dismissing the keyboard puts the tile board back in the
+/// same place, and board tiles are also wooden squares with letters on them. Verified by capturing
+/// this exact region a moment after committing a wildcard: it went from keyboard keys to
+/// `O A E T / S K G R` board tiles. So "wooden squares with letters are present" does not
+/// distinguish the two screens at all.
+///
+/// The discriminator is **geometry**: keyboard keys are small and ten across, board tiles are large
+/// and four across. Key pitch, not material and not glyphs.
+///
 /// ### The cursor sits in the middle of it
 ///
 /// Clicking the wildcard leaves the pointer inside this region, and the game draws a cursor there.
