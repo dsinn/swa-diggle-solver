@@ -50,11 +50,20 @@ const REPORT: &str = "spike-run.md";
 const FRAMES: &str = "spike-frames-live";
 const AREA_BUTTONS: diggle_solver::win::capture::Region =
     diggle_solver::win::capture::Region { nx: 0.0, ny: 0.68, nw: 0.45, nh: 0.18 };
-const LOCATE_ME: (i32, i32) = (32, 918);
+const SHOW_AREA_BUTTONS: (i32, i32) = (32, 918);
 /// `Combat` / `Travel` / `Visit` all land here — which is why the area buttons must be known to be
 /// the right ones before it is clicked.
 const AREA_BUTTON: (i32, i32) = (187, 918);
 const EMPTY_MAP: (i32, i32) = (1750, 160);
+
+/// Points tried, in order, when looking for map with no location under it.
+///
+/// One fixed point cannot be right everywhere — a subworld packs its nodes into a much smaller area
+/// than a world map, and where the nodes fall depends on the seed. All of these are inside the map
+/// area and clear of the chrome ([`hud::is_map_point`] covers the top strip and the corners), and
+/// they are spread so that a map dense around one is sparse around another.
+const EMPTY_MAP_CANDIDATES: [(i32, i32); 4] =
+    [EMPTY_MAP, (1750, 800), (170, 240), (960, 170)];
 /// Where the cursor is parked so it cannot hover something we are about to fingerprint.
 ///
 /// Deliberately clear of the view's hotspot rectangle, `{0, 0, 300, height*0.8}`
@@ -140,23 +149,49 @@ impl Run<'_> {
     /// The waiting is the point. Locate-me centres without `instant` (`overworldview.lua:491`), so
     /// it animates, and input during the animation goes nowhere — that is what made a Space vanish
     /// against a visible Combat button. `Screen pan finished` (`:1255`) is the signal.
+    ///
+    /// ## Why the middle step is *read* and not merely clicked
+    ///
+    /// [`affirm::SHOW_AREA_BUTTONS`] shares its slot with the current location's area buttons. Clicking
+    /// (32, 918) without looking presses whichever of the two is there, and on a combat node the
+    /// other one is `Combat`. Reading the slot first costs one 76x92 crop and turns "the click did
+    /// nothing" into "the arrow was not there", which is a different bug with a different fix.
+    ///
+    /// The empty-space click is retried across several candidates because "empty" is a property of
+    /// the map, not of the coordinate: `core:mousereleased` only restores the button when the
+    /// release was over **no location** (`:1479-1485`), and one fixed point cannot be empty on every
+    /// map. Each attempt is checked, so this converges rather than hoping.
     fn recentre(&mut self) -> Option<Adjacency> {
-        let (ex, ey) = self.win.client_to_screen(EMPTY_MAP.0, EMPTY_MAP.1).ok()?;
-        let _ = click_at_in(self.win, ex, ey);
-        std::thread::sleep(Duration::from_millis(500));
-        self.pump();
-        let (lx, ly) = self.win.client_to_screen(LOCATE_ME.0, LOCATE_ME.1).ok()?;
-        let _ = click_at_in(self.win, lx, ly);
-        self.park();
-        let by = Instant::now() + Duration::from_secs(12);
-        while Instant::now() < by {
-            std::thread::sleep(Duration::from_millis(250));
+        for (n, &(cx, cy)) in EMPTY_MAP_CANDIDATES.iter().enumerate() {
+            let Ok((ex, ey)) = self.win.client_to_screen(cx, cy) else { continue };
+            let _ = click_at_in(self.win, ex, ey);
+            self.park();
+            std::thread::sleep(Duration::from_millis(500));
             self.pump();
-            if let Some(a) = self.latest.as_ref() {
-                if a.reason.contains("pan") {
-                    return Some(a.clone());
+            let slot = self.read_slot(&affirm::SHOW_AREA_BUTTONS);
+            self.log.push_str(&format!(
+                "  locate-me slot after clicking empty map at ({cx},{cy}): {:?} (score {:.2})\n",
+                slot.state, slot.score
+            ));
+            if !slot.state.is_ready() {
+                // That point was not empty: the click selected something, which leaves the slot
+                // showing that location's buttons instead. Try elsewhere.
+                continue;
+            }
+            let Ok((lx, ly)) = self.win.client_to_screen(SHOW_AREA_BUTTONS.0, SHOW_AREA_BUTTONS.1) else { continue };
+            let _ = click_at_in(self.win, lx, ly);
+            self.park();
+            let by = Instant::now() + Duration::from_secs(12);
+            while Instant::now() < by {
+                std::thread::sleep(Duration::from_millis(250));
+                self.pump();
+                if let Some(a) = self.latest.as_ref() {
+                    if a.reason.contains("pan") {
+                        return Some(a.clone());
+                    }
                 }
             }
+            self.log.push_str(&format!("  no pan finished after locate-me (candidate {n})\n"));
         }
         None
     }
@@ -210,11 +245,19 @@ impl Run<'_> {
 
     /// Reads the affirmative slot in the bottom-right corner.
     fn affirmative(&self) -> affirm::Reading {
+        self.read_slot(&affirm::LORE_AFFIRMATIVE)
+    }
+
+    /// Reads any `right`-artwork slot from a crop of just that slot.
+    ///
+    /// One reader for both corners: the lore screen's continue arrow and the overworld's locate-me
+    /// arrow are the same five images, differing only in where they sit.
+    fn read_slot(&self, spec: &diggle_solver::win::window::ButtonSpec) -> affirm::Reading {
         let absent = affirm::Reading { state: affirm::State::Absent, score: 0.0, margin: 0.0 };
         let Ok((cw, ch)) = self.win.client_size() else { return absent };
-        let (x, y, w, h) = affirm::ButtonArt::crop_rect(&affirm::LORE_AFFIRMATIVE, cw, ch);
+        let (x, y, w, h) = affirm::ButtonArt::crop_rect(spec, cw, ch);
         match diggle_solver::win::capture::capture_client_rect(self.win, x, y, w, h) {
-            Ok(f) => self.affirm.read_cropped(&f, &affirm::LORE_AFFIRMATIVE, (cw, ch), (x, y)),
+            Ok(f) => self.affirm.read_cropped(&f, spec, (cw, ch), (x, y)),
             Err(_) => absent,
         }
     }
@@ -465,9 +508,24 @@ fn drive(
         // with no transition and no dump (`:1256-1259`) — so a dragged map invalidates every
         // coordinate we hold without saying so. Hence: act on a dump immediately, never hold one
         // across an action, and verify what the click did.
+        // Inside a subworld the dump normally arrives free, because we arrive every hop. It does NOT
+        // arrive on the hop that never happened: a run resumed inside a subworld has only the
+        // `World loaded` dump, whose coordinates are unusable.
+        //
+        // `verboseAdjacencyData` prints `xoffset+location.posX*zoomMult` (`:1033`), and that dump is
+        // emitted at `:1607` — *before* the camera is placed. Measured live: it reported the well at
+        // (960, 520) while the well was drawn at (755, 600). Every entry is off by the same
+        // translation, which happens to be the player's own world position, and that is the one
+        // coordinate the dump never prints. So it cannot be corrected from the dump alone.
+        //
+        // Locate-me is the way out, and the earlier note here — that it "does not work in a
+        // subworld" — was wrong about the cause. The button is simply not on screen: it shares its
+        // slot with the location's area buttons. Clicking empty map restores it
+        // (`core:mousereleased`, `:1479-1485`), and that branch tests only whether a location was
+        // under the release, not which world we are in.
         let inside_now = r.map.inside().is_some();
         let fresh = if inside_now {
-            match r.settled_dump(Duration::from_secs(8)) {
+            match r.settled_dump(Duration::from_secs(8)).or_else(|| r.recentre()) {
                 Some(a) => a,
                 None => return Stop::Failed("inside a subworld with no settled dump".into()),
             }
@@ -789,4 +847,35 @@ fn finish(
     std::fs::File::create(REPORT)?.write_all(log.as_bytes())?;
     println!("{log}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every point we are willing to click looking for empty map must actually be map.
+    ///
+    /// The search retries until the locate-me arrow appears, so a bad candidate is not fatal — but a
+    /// candidate sitting on chrome would press the character screen or the menu, which is a click
+    /// this project has already made once by hand.
+    #[test]
+    fn every_empty_map_candidate_is_inside_the_map_area() {
+        for (x, y) in EMPTY_MAP_CANDIDATES {
+            assert!(
+                diggle_solver::observe::hud::is_map_point(x, y, 1920, 1080),
+                "({x}, {y}) is chrome: {:?}",
+                diggle_solver::observe::hud::chrome_at(x, y, 1920, 1080)
+            );
+        }
+    }
+
+    /// The coordinate we click for locate-me must be the one its ButtonSpec resolves to, or we read
+    /// one slot and press another.
+    #[test]
+    fn the_click_point_matches_the_slot_we_read() {
+        assert_eq!(
+            diggle_solver::win::window::button_center(&affirm::SHOW_AREA_BUTTONS, 1920, 1080),
+            SHOW_AREA_BUTTONS
+        );
+    }
 }

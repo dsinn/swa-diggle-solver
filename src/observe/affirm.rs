@@ -89,6 +89,46 @@ pub struct ButtonArt {
 pub const LORE_AFFIRMATIVE: ButtonSpec =
     ButtonSpec { ss_x: 1.0, ss_y: 0.9, os_x: -0.75, os_y: 0.0, w: 64.0, h: 80.0 };
 
+/// The overworld's "show functions for current location and centre the screen" button.
+///
+/// **Not the world-map overlay.** That is a different control — `overworld.lua:1427-1438`, a `small`
+/// button at `ss(1, 0)` carrying `icon = map.png`, whose handler is `setActiveMode(waypointselect)`.
+/// Opening an overlay of the *parent* world would indeed be no use for navigating a subworld. This
+/// button changes no mode at all: it calls `refreshAreaButtons` and `centreScreenOnPlayer()`, and
+/// `playerAbstract` is set from `locationData[playerLocation]`, which inside a subworld is the
+/// subworld's own node table. So it centres within the village.
+///
+/// `overworldview.lua:483-494`:
+///
+/// ```lua
+/// local showAreaButtonsButton = require'ui.elements.button'('', 0, 0.85, {
+///     type = 'right',
+///     tooltip = 'Show functions for current location and centre the screen.',
+///     xOffset = 0.5,
+/// ```
+///
+/// Same `right` artwork as [`LORE_AFFIRMATIVE`], so one [`ButtonArt`] reads both — bottom-left
+/// rather than bottom-right, giving centre (32, 918) at 1920x1080.
+///
+/// ## Why reading it matters rather than just clicking where it lives
+///
+/// It is **not always on screen**. `(0, 0.85)` is also where `Combat`, `Attack`, `Enter`, `Gather`,
+/// `Rest`, `Open` and `Wake up` are built across the generators, and on a fresh load into a subworld
+/// one of those occupies the slot. Clicking blind there presses whichever is present — on a combat
+/// node, starting a fight we did not choose. Those are labelled `default` buttons and this is a
+/// `right` arrow, so the fingerprint separates them; the position alone does not.
+///
+/// Verified from a live capture taken inside a corrupted village: after one click on empty map,
+/// `right-up.png` matched at (0, 878) — centre (32, 918) — with inliers 1.0000 and error 0.0003,
+/// against 0.026 for the same template elsewhere on the same frame.
+///
+/// It is restored by clicking **empty map space**: `core:mousereleased` falls through to
+/// `overworld.clearAreaButtons(); overworld.insertObject(showAreaButtonsButton)` when the release
+/// was over no location (`:1479-1485`). That is the whole recovery, and it works inside a subworld
+/// as well as out — the branch tests only whether a location was under the cursor.
+pub const SHOW_AREA_BUTTONS: ButtonSpec =
+    ButtonSpec { ss_x: 0.0, ss_y: 0.85, os_x: 0.5, os_y: 0.0, w: 64.0, h: 80.0 };
+
 /// Slack, in unscaled pixels, allowed around the computed top-left when searching.
 ///
 /// Not zero, because `button_center` rounds to whole pixels and the art is drawn with a shadow
@@ -227,6 +267,14 @@ mod tests {
         assert_eq!(button_center(&LORE_AFFIRMATIVE, 1920, 1080), (1872, 972));
         // Scales with the window like every other button.
         assert_eq!(button_center(&LORE_AFFIRMATIVE, 960, 540), (936, 486));
+    }
+
+    /// The bottom-left twin. Shares its slot with the area buttons, so this coordinate is only safe
+    /// to click once the slot has been *read* as showing the arrow.
+    #[test]
+    fn show_area_buttons_sits_in_the_bottom_left_corner() {
+        assert_eq!(button_center(&SHOW_AREA_BUTTONS, 1920, 1080), (32, 918));
+        assert_eq!(button_center(&SHOW_AREA_BUTTONS, 960, 540), (16, 459));
     }
 
     #[test]
