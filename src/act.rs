@@ -350,38 +350,33 @@ pub const MENU_START_PRESENT: f64 = 0.95;
 /// **does not exist** until a champion is picked. So its presence is exactly the confirmation that a
 /// click on a hero card landed, which is the one thing the driver could not otherwise know.
 ///
-/// ## The label changes with the class, and it changes by MORE than other buttons do
+/// ## The caption changes with the class, so this asks presence, not identity
 ///
-/// The caption is `classes[...].availableMessageShort or 'Start'`. Two classes measured live:
+/// The label is `classes[...].availableMessageShort or 'Start'`. Three classes measured live:
 ///
 /// ```text
 ///   `Fight!`     (the template itself)   1.0000  err 0.0000
-///   `Adventure!` (another class)         0.8158  err 0.0740
+///   `Arise`      (another class)         0.8751  err 0.0438
+///   `Adventure!` (another class)         0.8158  err 0.0740   <- lowest caption seen
+///   ---------------------------------------------------------  a 0.67-wide gap
 ///   NO champion selected                 0.1488  err 0.3612   <- the case to reject
 ///   the main menu                        0.1059  err 0.3788
-///   combat `Finish` plank                0.8912  err 0.0498   <- see the warning below
-///   plain overworld terrain              0.6615  err 0.1307
-///   postgame `Continue`                  0.3298  err 0.2345
 /// ```
 ///
-/// **0.8158, not the ~0.86 a word swap costs elsewhere.** The 0.147/0.138/0.147 measured on
-/// Finish-vs-Eulogise and Start-vs-Restart were all swaps between words of *similar length*.
-/// `Adventure!` against `Fight!` is nearly twice the glyph run, so it disturbs far more of the crop.
-/// A caption longer still would score lower again, and the set of captions is not enumerated here.
+/// **0.55, in the middle of the gap.** Two earlier attempts hugged the caption side — 0.80 off an
+/// estimate, then 0.70 after `Adventure!` came in at 0.8158 — and both were the wrong shape of
+/// answer. The question here is *does this button exist*, not *which word is on it*, and absence
+/// does not score 0.8; it scores 0.15. A bar at 0.55 leaves 0.27 under the lowest caption seen and
+/// 0.40 over absence, so an unseen caption longer than `Adventure!` still passes comfortably.
 ///
-/// So [`HEROSELECT_CONFIRM_PRESENT`] is **0.70**, not the 0.80 first chosen off the estimate — that
-/// left 0.016 of headroom under a caption we had not yet seen. The bar sits far below any plausible
-/// caption and still enormously above an unselected screen, because "no button at all" is not a near
-/// miss: 0.1488 against 0.70 is not a threshold decision, it is a different question entirely.
+/// Note how differently the caption cost behaves from the other slot-sharing buttons: 0.147 for
+/// Finish-vs-Eulogise and 0.138 for Start-vs-Restart, but 0.184 for `Adventure!`-vs-`Fight!`. Those
+/// were swaps between words of *similar length*; this one nearly doubles the glyph run. Any estimate
+/// of "what a word swap costs" is really an estimate about length.
 ///
-/// Biasing low is right here for a second reason: a false "selected" is caught immediately
-/// downstream, since `Space` on a button that does not exist changes nothing and the wait for
-/// `Pregame screen:` then fails with its own message. A false "not selected" aborts a run that was
-/// fine.
-///
-/// **Do not use this as a general screen check.** Combat's `Finish` occupies almost the same rect and
-/// scores 0.8912 here. Harmless while this is only ever asked on hero select — where `Finish` cannot
-/// be on screen — and a bug anywhere else.
+/// **Do not use this as a general screen check** — and at 0.55 that matters more, not less. Combat's
+/// `Finish` scores 0.8912 at this rect and bare terrain 0.6615, both well over the bar. Harmless
+/// while this is only ever asked on hero select, where neither can be on screen; a bug anywhere else.
 pub const HEROSELECT_CONFIRM: Button = Button {
     name: "hero select confirm",
     template: "heroselect-confirm.png",
@@ -391,7 +386,7 @@ pub const HEROSELECT_CONFIRM: Button = Button {
 };
 
 /// A champion is selected, so hero select can be confirmed. See [`HEROSELECT_CONFIRM`].
-pub const HEROSELECT_CONFIRM_PRESENT: f64 = 0.70;
+pub const HEROSELECT_CONFIRM_PRESENT: f64 = 0.55;
 
 /// The postgame stats screen's `Continue`.
 ///
