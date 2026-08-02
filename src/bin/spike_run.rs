@@ -536,6 +536,46 @@ fn drive(
         //
         // Order matters: text gates options. While a lore screen is up the choices do not exist yet,
         // so `parse_events` would find nothing and the map would not be on screen either.
+        // A reward screen gates everything behind it exactly as a lore screen does, and it is not
+        // always the fight loop that has to deal with it: a fight can end, hand back, and leave the
+        // screen standing. Until it is dismissed there is no map, no area buttons and no
+        // affirmative, so every later step fails looking for a screen nobody checked for. That is
+        // what four `Absent` locate-me readings at 0.23 turned out to be after a cleared crypt.
+        //
+        // Asked here, in the loop, rather than only where a fight happens to end — same reason
+        // dialogue and lore detection live here rather than at a village gate.
+        if diggle_solver::itemchoice::on_screen(r.win) {
+            r.log.push_str(&format!("{step}. a `Choose one:` screen is up
+"));
+            let mut il = String::new();
+            let picked = diggle_solver::itemchoice::choose(
+                r.win,
+                &mut r.feed,
+                &r.keys,
+                &mut il,
+                deadline.min(Instant::now() + Duration::from_secs(45)),
+            );
+            r.log.push_str(&il.lines().map(|l| format!("    {l}
+")).collect::<String>());
+            match picked {
+                Ok(diggle_solver::itemchoice::Chosen::Took(key)) => {
+                    r.log.push_str(&format!("  took **{key}**
+"));
+                    // The screen closes into whatever built it -- a postgame after a fight, the map
+                    // after a shop -- so let the next pass work out where we are rather than
+                    // assuming. It is dismissed; that was the blocking part.
+                    std::thread::sleep(Duration::from_millis(800));
+                    r.pump();
+                }
+                Ok(other) => {
+                    return Stop::Failed(format!(
+                        "a `Choose one:` screen is up and cannot be cleared: {other:?}"
+                    ))
+                }
+                Err(e) => return Stop::Failed(format!("item screen: {e}")),
+            }
+        }
+
         for _ in 0..10 {
             if r.clear_text_screen() {
                 r.log.push_str(&format!("{step}. cleared a text screen\n"));

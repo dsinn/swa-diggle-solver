@@ -1,6 +1,7 @@
 pub mod act;
 pub mod combat;
 pub mod config;
+pub mod itemchoice;
 pub mod fight;
 pub mod game;
 pub mod geometry;

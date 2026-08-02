@@ -18,8 +18,9 @@
 //!   perfectly static, which is how a click once landed on a slot with no tile in it.
 //! - **`Finish` is clicked, verified, and retried.** Clicking once and hoping stalled a run for 45
 //!   seconds; see [`Fight::finish`].
-//! - **The reward is confirmed at the item, not at the button.** `Confirm` draws the chosen reward
-//!   into its own background, so it has one appearance per item and no fixed fingerprint.
+//! - **The item screen is not ours.** `ui.itemselection` is built from seven places and only one is
+//!   a fight, so picking an item lives in [`crate::itemchoice`]; what stays here is the postgame it
+//!   opens into. See [`crate::itemchoice`] for why identification of the items is console-only.
 //! - **Nothing touches `combatSaveData` while the game is deleting it.** See [`Fight::take_reward`].
 
 use crate::combat::Board;
@@ -332,47 +333,43 @@ impl Fight<'_> {
         Ok(false)
     }
 
+    /// Picks a reward and clears the postgame, for a screen found outside a fight.
+    ///
+    /// A reward screen outlives the fight that produced it: it is still up on the next iteration of
+    /// whatever loop is driving, and until it is dismissed there is no map, no area buttons and no
+    /// affirmative — every later step fails for want of a screen nobody looked at. That is exactly
+    /// how a cleared crypt turned into four `Absent` readings and a run out of steps.
+    pub fn claim_reward(
+        &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, deadline: Instant,
+    ) -> Result<Outcome, crate::Error> {
+        self.take_reward(feed, keys, log, 0, deadline)
+    }
+
     /// Picks a reward, confirms it, and clears the postgame.
     fn take_reward(
         &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, turns: usize,
         deadline: Instant,
     ) -> Result<Outcome, crate::Error> {
-        feed.pump();
-        let offers = reward_offers(feed.lines());
-        if offers.is_empty() {
-            log.push_str("reward screen announced but no offers parsed\n");
-            return Ok(Outcome::Cleared { turns, reward: None });
+        match crate::itemchoice::choose(self.win, feed, keys, log, deadline)? {
+            crate::itemchoice::Chosen::Took(key) => {
+                return self.after_confirm(feed, keys, log, turns, deadline, Some(key));
+            }
+            other => {
+                log.push_str(&format!("  no reward taken: {other:?}
+"));
+                self.shot("reward-not-taken");
+                return Ok(Outcome::Cleared { turns, reward: None });
+            }
         }
-        // Let the screen settle before measuring anything on it.
-        let _ = crate::observe::settle::wait_for_quiescence(self.win, 0.02, Duration::from_secs(8));
+    }
 
-        // MVP: any reward will do. Seeded from the clock so repeated runs do not always take the
-        // same position, which would hide a click that only works on one of them.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() as usize)
-            .unwrap_or(0);
-        let (key, ix, iy) = offers[nanos % offers.len()].clone();
-        log.push_str(&format!("picking **{key}** at ({ix},{iy})\n"));
-
-        // Verify at the ITEM, not at Confirm: Confirm draws the chosen reward into its own
-        // background, so it has one appearance per item and no fixed fingerprint. Park before
-        // measuring or the hover highlight alone clears the threshold.
-        let probe = (ix - 90, iy - 90, 180, 180);
-        let before = crate::win::capture::capture_client_rect(self.win, probe.0, probe.1, probe.2, probe.3)
-            .map(|f| crate::combat::luma(&f, probe.2 / 2, probe.3 / 2, 60))?;
-        let (sx, sy) = self.win.client_to_screen(ix, iy)?;
-        click_at(sx, sy)?;
-        self.park();
-        std::thread::sleep(Duration::from_millis(600));
-        let after = crate::win::capture::capture_client_rect(self.win, probe.0, probe.1, probe.2, probe.3)
-            .map(|f| crate::combat::luma(&f, probe.2 / 2, probe.3 / 2, 60))?;
-        if (after - before).abs() <= crate::combat::CHANGED {
-            log.push_str(&format!("  item luma {before:.1} -> {after:.1}: NOT selected\n"));
-            return Ok(Outcome::Cleared { turns, reward: None });
-        }
-        log.push_str(&format!("  item luma {before:.1} -> {after:.1}, selected\n"));
-
+    /// Everything after `Confirm`: granting the item opens the postgame, which has to be cleared
+    /// before the map comes back. Fight-specific, which is why it did not move out with the screen.
+    fn after_confirm(
+        &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, turns: usize,
+        deadline: Instant, key: Option<String>,
+    ) -> Result<Outcome, crate::Error> {
+        let mark = feed.mark();
         // Confirm with Space: the button declares `userFunctionName = 'affirmative'` and
         // `activeIf = selection`, so it does nothing until something IS selected -- the guard is the
         // game's own.
@@ -400,7 +397,7 @@ impl Fight<'_> {
             std::thread::sleep(Duration::from_secs(2));
             feed.pump();
         }
-        Ok(Outcome::Cleared { turns, reward: Some(key) })
+        Ok(Outcome::Cleared { turns, reward: key })
     }
 
     fn park(&self) {
@@ -443,98 +440,6 @@ fn tiles_of(save: &Table) -> Vec<crate::observe::board::Tile> {
 ///
 /// `ui/itemselection.lua:419-430` prints each item with its name and **screen coordinates**, so the
 /// row never has to be located visually.
-fn reward_offers(lines: &[String]) -> Vec<(String, i32, i32)> {
-    let mut out = Vec::new();
-    let start = lines.iter().rposition(|l| l.contains("Item selection:"));
-    let Some(start) = start else { return out };
-    for line in lines.iter().skip(start + 1) {
-        // Split on ANY whitespace, not on tabs.
-        //
-        // Lua's `print` separates with `\t`, so tabs are what the game emits — but they are not what
-        // we read. The console scrape delivers these rows tab-expanded to spaces, and splitting on
-        // `\t` then yielded a single part, ended the block on its first row, and reported "no offers
-        // parsed" for a screen showing three items. The run sat on `Choose one:` until it ran out of
-        // steps, with `Blacksmith gloves`, `Weird veiny beige thumb` and `Gold idol` on offer.
-        //
-        // Whitespace splitting is right for both forms because the shape carries the meaning: the
-        // key is one token, the last two are the coordinates, and the name in between may contain
-        // spaces (it usually does) but is never needed.
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 4 {
-            break; // the block has ended
-        }
-        let (Ok(x), Ok(y)) = (parts[parts.len() - 2].parse(), parts[parts.len() - 1].parse()) else {
-            break;
-        };
-        out.push((parts[0].to_string(), x, y));
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reads_the_reward_row_with_its_coordinates() {
-        // Real output from a live run.
-        let lines: Vec<String> = "Item selection:\n\
-             \tphoenixFeather\tPhoenix feather\t480\t540\n\
-             \tarmourLeatherGloves\tBlacksmith gloves\t960\t540\n\
-             \tgildedTetraTeabag\tGilded tetra teabag\t1440\t540\n\
-             ach_something\talready achieved"
-            .lines()
-            .map(|s| s.to_string())
-            .collect();
-        let offers = reward_offers(&lines);
-        assert_eq!(offers.len(), 3);
-        assert_eq!(offers[0], ("phoenixFeather".into(), 480, 540));
-        assert_eq!(offers[2], ("gildedTetraTeabag".into(), 1440, 540));
-    }
-
-    /// The rows exactly as they reach us, copied from a live raw log — tab-expanded, column-padded,
-    /// and with a three-word item name in the middle column.
-    #[test]
-    fn reads_the_rows_in_the_form_the_console_actually_delivers() {
-        let lines: Vec<String> = [
-            "Item selection:",
-            "        armourLeatherGloves     Blacksmith gloves       480     540",
-            "        iBeforeEBad     Weird veiny beige thumb 960     540",
-            "        goldIdol        Gold idol       1440    540",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        let offers = reward_offers(&lines);
-        assert_eq!(offers.len(), 3, "this screen was showing three items");
-        assert_eq!(offers[0], ("armourLeatherGloves".into(), 480, 540));
-        // The one that matters: a name containing spaces must not be mistaken for extra columns.
-        assert_eq!(offers[1], ("iBeforeEBad".into(), 960, 540));
-        assert_eq!(offers[2], ("goldIdol".into(), 1440, 540));
-    }
-
-    #[test]
-    fn takes_the_latest_block_not_the_first() {
-        // A second fight must not pick up the previous fight's offers.
-        let lines: Vec<String> = "Item selection:\n\
-             \toldThing\tOld\t480\t540\n\
-             noise\n\
-             Item selection:\n\
-             \tnewThing\tNew\t960\t540"
-            .lines()
-            .map(|s| s.to_string())
-            .collect();
-        let offers = reward_offers(&lines);
-        assert_eq!(offers, vec![("newThing".to_string(), 960, 540)]);
-    }
-
-    #[test]
-    fn an_announcement_with_no_rows_yields_nothing() {
-        let lines = vec!["Item selection:".to_string()];
-        assert!(reward_offers(&lines).is_empty());
-    }
-}
-
 #[cfg(test)]
 mod tileboard_tests {
     use super::*;
