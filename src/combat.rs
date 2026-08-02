@@ -239,6 +239,29 @@ impl<'a> Board<'a> {
     /// the previous step instead would let a missed click look like a successful one.
     pub fn select_word(&self, plan: &[usize]) -> Result<(), SelectError> {
         let baseline = self.read()?;
+
+        // Some tiles change without being touched. An exploding tile counts down with a pulsing red
+        // glow, so it differs from any baseline within a frame or two and every later comparison
+        // reads it as newly selected -- which aborted a live word with
+        // `clicking tile 1 also changed [4]`, where tile 4 was the bomb and tile 1 had selected
+        // perfectly well.
+        //
+        // Measured rather than guessed at: read the board twice, and anything that moved on its own
+        // is excluded from stray detection for the rest of the word. The safety property survives,
+        // because it never rested on watching other tiles -- a misplaced click still fails, as the
+        // tile we asked for does not become selected.
+        std::thread::sleep(Duration::from_millis(250));
+        let restless: Vec<usize> = {
+            let second = self.read()?;
+            baseline
+                .iter()
+                .zip(second.iter())
+                .enumerate()
+                .filter(|(_, (a, b))| (*a - *b).abs() > CHANGED)
+                .map(|(i, _)| i)
+                .collect()
+        };
+
         let mut want: Vec<usize> = Vec::with_capacity(plan.len());
 
         for &i in plan {
@@ -247,8 +270,11 @@ impl<'a> Board<'a> {
                 let changed = self.click_and_confirm(i, &baseline)?;
                 // Everything selected must be something we asked for. A stray selection cannot be
                 // repaired by clicking more, so it stops the word rather than corrupting it.
-                let stray: Vec<usize> =
-                    changed.iter().copied().filter(|j| !want.contains(j) && *j != i).collect();
+                let stray: Vec<usize> = changed
+                    .iter()
+                    .copied()
+                    .filter(|j| !want.contains(j) && *j != i && !restless.contains(j))
+                    .collect();
                 if !stray.is_empty() {
                     return Err(SelectError::Stray { wanted: i, got: stray });
                 }
