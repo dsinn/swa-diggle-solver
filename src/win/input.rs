@@ -141,6 +141,106 @@ pub fn click_at(x: i32, y: i32) -> Result<(), crate::Error> {
     Ok(())
 }
 
+/// Normalizes a screen point into `SendInput`'s absolute range, against the **virtual desktop**.
+fn absolute(x: i32, y: i32) -> Result<(i32, i32), crate::Error> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
+    let (vx, vy, vw, vh) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    };
+    if vw <= 1 || vh <= 1 {
+        return Err(crate::Error::Win32("virtual desktop has no extent".into()));
+    }
+    Ok((
+        ((x - vx) as f64 * 65535.0 / (vw - 1) as f64).round() as i32,
+        ((y - vy) as f64 * 65535.0 / (vh - 1) as f64).round() as i32,
+    ))
+}
+
+/// Drags the map from one screen point to another, in `steps` intermediate moves.
+///
+/// The intermediate moves are not cosmetic. `core:mousemoved` pans by the delta *since the last
+/// move event* (`overworldview.lua:1511`), so the scroll is a sum over the events actually
+/// delivered — and it only begins once a move has exceeded a 3 px threshold from the press point.
+/// One giant jump would be delivered as a single event and is far more likely to be coalesced or
+/// clamped than a sequence.
+///
+/// **Start on empty map.** `mousepressed` records `mousePressedOn = mouseIsOverLocation(x,y)`
+/// (`:1298`), and a press that began on a location spends its first 10 px switching out of
+/// selection mode instead of panning (`:1504-1509`). Releasing after a drag is inert either way —
+/// `mousereleased` acts only `if not isDragging` (`:1472`) — so this cannot select or travel by
+/// accident, but starting clear keeps the requested delta closer to the delivered one.
+///
+/// The delivered shift is **not** the requested one in general: the offset is clamped to the map
+/// bounds (`clampWithinBoundsX`, `:293-297`) and nothing is printed when it is. Callers must
+/// measure what they actually got — see [`crate::observe::pan::measure`].
+pub fn drag_in(
+    win: &crate::win::window::GameWindow, from: (i32, i32), to: (i32, i32), steps: usize,
+) -> Result<(), crate::Error> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
+    for p in [from, to] {
+        let under = unsafe { GetAncestor(WindowFromPoint(POINT { x: p.0, y: p.1 }), GA_ROOT) };
+        if under != win.hwnd {
+            return Err(crate::Error::Win32(format!(
+                "refusing to drag through ({}, {}): {under:?} is in front of the game",
+                p.0, p.1
+            )));
+        }
+    }
+    let steps = steps.max(1);
+    let mv = |x: i32, y: i32| -> Result<INPUT, crate::Error> {
+        let (nx, ny) = absolute(x, y)?;
+        Ok(INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: nx,
+                    dy: ny,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        })
+    };
+    let send = |events: &[INPUT]| -> Result<(), crate::Error> {
+        let sent = unsafe { SendInput(events, std::mem::size_of::<INPUT>() as i32) };
+        if sent != events.len() as u32 {
+            return Err(crate::Error::Win32(format!(
+                "SendInput accepted {sent} of {} drag events",
+                events.len()
+            )));
+        }
+        Ok(())
+    };
+
+    send(&[mv(from.0, from.1)?])?;
+    std::thread::sleep(Duration::from_millis(40));
+    send(&[mouse_event(MOUSEEVENTF_LEFTDOWN)])?;
+    std::thread::sleep(Duration::from_millis(60));
+    for i in 1..=steps {
+        let t = i as f64 / steps as f64;
+        let x = from.0 as f64 + (to.0 - from.0) as f64 * t;
+        let y = from.1 as f64 + (to.1 - from.1) as f64 * t;
+        send(&[mv(x.round() as i32, y.round() as i32)?])?;
+        // The game integrates these per frame; delivering them faster than it renders just gets
+        // them coalesced into one delta, which defeats the point of stepping.
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    std::thread::sleep(Duration::from_millis(60));
+    send(&[mouse_event(MOUSEEVENTF_LEFTUP)])?;
+    Ok(())
+}
+
 /// [`click_at`], refusing to fire unless the game is what sits under the target point.
 ///
 /// Our clicks are *positional*: `SendInput` delivers them to whatever window is topmost at that

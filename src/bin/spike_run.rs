@@ -39,6 +39,7 @@ use diggle_solver::observe::affirm;
 use diggle_solver::observe::event;
 use diggle_solver::observe::feed::Feed;
 use diggle_solver::observe::log::{Console, LogMirror};
+use diggle_solver::observe::pan;
 use diggle_solver::overworld::{Goal, WorldMap};
 use diggle_solver::win::input::{click_at_in, warp_cursor, Input, PostMessageInput, SC_SPACE, VK_SPACE};
 use diggle_solver::win::window::GameWindow;
@@ -136,6 +137,53 @@ impl Run<'_> {
         if let Ok((x, y)) = self.win.client_to_screen(NEUTRAL.0, NEUTRAL.1) {
             let _ = warp_cursor(x, y);
         }
+    }
+
+    /// Scrolls the map by roughly `want` and reports how far it **actually** moved.
+    ///
+    /// The drag is open-loop and clamped, so the answer comes from comparing frames rather than from
+    /// the delta we asked for: lift a patch of map, drag, find the patch again, and the displacement
+    /// is the shift. That needs no sprite identity and no calibration constant, and it cancels tint
+    /// and scale because it compares a rendering against itself.
+    ///
+    /// Several patch positions are tried because a patch of flat void matches equally well
+    /// everywhere, and would report whichever candidate the sweep reached first. `None` means the
+    /// map moved by an unknown amount, which the caller must treat as losing its position entirely —
+    /// a pan that happened but was not measured is worse than one that never happened.
+    fn pan_map(&mut self, want: pan::Shift) -> Option<pan::Shift> {
+        let (cw, ch) = self.win.client_size().ok()?;
+        let before = diggle_solver::win::capture::capture_window(self.win).ok()?;
+
+        // Clear of the chrome, and spread so that a map blank around one is textured around another.
+        let spots = [(760, 300), (1100, 500), (500, 620), (1300, 250)];
+        let (patch, taken_at) = spots
+            .iter()
+            .filter(|(x, y)| diggle_solver::observe::hud::is_map_point(*x, *y, cw, ch))
+            .filter_map(|&(x, y)| pan::patch_from(&before, x, y, pan::PATCH).map(|t| (t, (x, y))))
+            .max_by(|a, b| pan::variance(&a.0).total_cmp(&pan::variance(&b.0)))?;
+
+        // Drag from a point that leaves room to travel in the wanted direction, and stay inside the
+        // window: an endpoint outside it is refused outright by `drag_in`'s window guard.
+        let (sx, sy) = (
+            (cw / 2 - want.dx.round() as i32 / 2).clamp(160, cw - 160),
+            (ch / 2 - want.dy.round() as i32 / 2).clamp(160, ch - 160),
+        );
+        let (ex, ey) = (
+            (sx + want.dx.round() as i32).clamp(4, cw - 4),
+            (sy + want.dy.round() as i32).clamp(4, ch - 4),
+        );
+        let from = self.win.client_to_screen(sx, sy).ok()?;
+        let to = self.win.client_to_screen(ex, ey).ok()?;
+        if diggle_solver::win::input::drag_in(self.win, from, to, 8).is_err() {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+
+        let after = diggle_solver::win::capture::capture_window(self.win).ok()?;
+        // Search generously: the clamp can swallow most of the requested movement, so the patch may
+        // barely have moved at all, and the honest answer to that is a small measured shift.
+        let radius = (want.dx.abs().max(want.dy.abs()) as i32 + pan::PATCH).max(200);
+        pan::measure(&after, &patch, taken_at, want, radius)
     }
 
     fn apply_save(&mut self) -> Option<diggle_solver::rest::Health> {
@@ -582,11 +630,42 @@ fn drive(
             // positions in screen space regardless of visibility, so an exit can sit off-screen or
             // under the HUD — and clicking one at (213, 18) opened the character screen, after which
             // the area-button coordinate meant `Stats` and the run spent its whole budget there.
+            // Not fatal any more: the map can be scrolled until the node is somewhere clickable.
+            // Ulrome is bigger than the window — from `l10sub6` the road to l19 sits at (169, 24)
+            // under the inventory button, the road to l7 at x=2109, and two more below y=1660.
+            //
+            // The pan is measured rather than assumed. Scrolling is silent and clamped to the map
+            // bounds (`clampWithinBoundsX`, `overworldview.lua:293-297`), so the delta we asked for
+            // is an upper bound on the delta we got, and nothing announces the difference.
+            let mut at = at;
             if let Ok((cw, ch)) = r.win.client_size() {
-                if let Some(chrome) = diggle_solver::observe::hud::chrome_at(at.0 as i32, at.1 as i32, cw, ch) {
+                let needs_pan = diggle_solver::observe::hud::chrome_at(at.0 as i32, at.1 as i32, cw, ch)
+                    .is_some()
+                    || pan::shift_to_reach(at, cw, ch).matters();
+                if needs_pan {
+                    let want = pan::shift_to_reach(at, cw, ch);
+                    match r.pan_map(want) {
+                        Some(got) => {
+                            at = pan::moved(at, got);
+                            r.log.push_str(&format!(
+                                "  panned by ({:.0}, {:.0}) of ({:.0}, {:.0}) wanted; `{}` now at ({:.0}, {:.0})\n",
+                                got.dx, got.dy, want.dx, want.dy, what, at.0, at.1
+                            ));
+                        }
+                        None => {
+                            return Stop::Failed(format!(
+                                "{what}: at ({:.0}, {:.0}), out of reach, and the pan could not be \
+                                 measured — position is now unknown",
+                                at.0, at.1
+                            ))
+                        }
+                    }
+                }
+                if let Some(chrome) =
+                    diggle_solver::observe::hud::chrome_at(at.0 as i32, at.1 as i32, cw, ch)
+                {
                     return Stop::Failed(format!(
-                        "{what}: its position ({:.0}, {:.0}) is {chrome}, not map — \
-                         reaching it needs selection by graph, not by pixel",
+                        "{what}: still {chrome} at ({:.0}, {:.0}) after panning",
                         at.0, at.1
                     ));
                 }

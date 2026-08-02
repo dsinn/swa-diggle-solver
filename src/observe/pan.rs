@@ -37,6 +37,8 @@
 //! reach. The measuring half is the frame comparison, which belongs with the capture code.
 
 use crate::observe::adjacency::Adjacency;
+use crate::observe::template::Template;
+use crate::win::capture::Frame;
 
 /// A translation of the map in screen pixels, as measured between two frames.
 ///
@@ -182,4 +184,86 @@ mod tests {
         assert_eq!((x, y), (1800.0, 120.0));
         assert!(crate::observe::hud::is_map_point(x as i32, y as i32, 1920, 1080));
     }
+}
+
+/// Minimum inlier score for a tracked patch to be believed.
+///
+/// A genuine frame-to-frame patch match scores ~1.000, because it is the same rendering compared
+/// against itself. The readings that produced a bogus constant `-192` in the first travel attempt
+/// scored 0.718 and 0.601 — the metric was there all along, and not checking it is what turned a
+/// self-diagnosing instrument into a silent liar.
+pub const MIN_INLIERS: f64 = 0.95;
+
+/// Side of the square lifted from the map to track the pan with.
+pub const PATCH: i32 = 96;
+
+/// Lifts a square of the frame as a template.
+///
+/// Channels are swapped on the way: [`crate::win::capture::Frame`] is BGRA and
+/// [`super::template::Template`] is compared as RGBA (`find_at_scale_in` reads `bgra[i+2]` as red).
+/// A patch built without the swap still matches *itself* perfectly, so the mistake survives every
+/// obvious test and only shows as a silent failure to find anything.
+pub fn patch_from(frame: &Frame, x: i32, y: i32, size: i32) -> Option<Template> {
+    if x < 0 || y < 0 || size <= 0 || x + size > frame.width || y + size > frame.height {
+        return None;
+    }
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for row in 0..size {
+        for col in 0..size {
+            let i = (((y + row) * frame.width + (x + col)) * 4) as usize;
+            rgba.push(frame.bgra[i + 2]);
+            rgba.push(frame.bgra[i + 1]);
+            rgba.push(frame.bgra[i]);
+            rgba.push(255);
+        }
+    }
+    Some(Template { name: "map-patch".into(), width: size as u32, height: size as u32, rgba })
+}
+
+/// Mean per-channel variance — a cheap proxy for how distinctive a patch is.
+///
+/// A patch of flat void matches equally well everywhere it is searched, so the displacement it
+/// reports is whichever candidate the sweep happened to visit first. Rejecting flat patches before
+/// the drag is cheaper than disbelieving the answer afterwards.
+pub fn variance(t: &Template) -> f64 {
+    let n = (t.rgba.len() / 4) as f64;
+    if n == 0.0 {
+        return 0.0;
+    }
+    let mut sum = [0f64; 3];
+    for px in t.rgba.chunks_exact(4) {
+        for c in 0..3 {
+            sum[c] += px[c] as f64;
+        }
+    }
+    let mean: Vec<f64> = sum.iter().map(|s| s / n).collect();
+    let mut var = 0f64;
+    for px in t.rgba.chunks_exact(4) {
+        for c in 0..3 {
+            var += (px[c] as f64 - mean[c]).powi(2);
+        }
+    }
+    var / (n * 3.0)
+}
+
+/// Finds `patch` again after a pan and reports how far the map actually moved.
+///
+/// `taken_at` is where the patch was lifted from, `expected` the shift we asked for. The search is
+/// bounded around the expected landing place: that is a speed fix, and it also keeps distant
+/// periodic false matches — cobblestone ground tiles, in this game — out of contention.
+///
+/// Returns `None` rather than a guess when the match is not convincing. The caller must treat that
+/// as "the map is now somewhere unknown" and re-establish position, because a pan that happened but
+/// was not measured is strictly worse than one that never happened.
+pub fn measure(
+    after: &Frame, patch: &Template, taken_at: (i32, i32), expected: Shift, radius: i32,
+) -> Option<Shift> {
+    let (ex, ey) = (
+        taken_at.0 + expected.dx.round() as i32,
+        taken_at.1 + expected.dy.round() as i32,
+    );
+    let bounds = Some((ex - radius, ey - radius, ex + radius, ey + radius));
+    let m = super::template::find_at_scale_in(after, patch, 1.0, 1, bounds)?;
+    (m.inliers >= MIN_INLIERS)
+        .then(|| Shift { dx: (m.x - taken_at.0) as f64, dy: (m.y - taken_at.1) as f64 })
 }
