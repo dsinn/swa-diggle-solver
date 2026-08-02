@@ -871,6 +871,30 @@ fn drive(
         if r.map.anomaly_beaten() {
             return Stop::AnomalyBeaten;
         }
+        // Ask what is on screen before acting on the assumption that it is the map.
+        //
+        // The navigator assumes "map" and finds out otherwise several steps later, by failing —
+        // four `Absent` locate-me readings after a cleared crypt, and a run that clicked into the
+        // character inventory and had no way back. Both were one look away from being known.
+        //
+        // Only screens that need naming are logged. The map is the ordinary case and reporting it
+        // every iteration would bury everything else.
+        let screen = diggle_solver::act::identify(r.win);
+        if screen != diggle_solver::act::Screen::Unknown {
+            r.log.push_str(&format!("{step}. screen: {screen:?}\n"));
+        }
+        if screen == diggle_solver::act::Screen::Character {
+            // A dead end: from here the area-button coordinate means `Stats`. The way out is the
+            // back arrow in the bottom-right corner.
+            if let Ok((bx, by)) = r.win.client_to_screen(1730, 968) {
+                let _ = click_at_in(r.win, bx, by);
+                r.park();
+                std::thread::sleep(Duration::from_millis(900));
+                r.pump();
+            }
+            r.log.push_str("  left the character screen\n");
+            continue;
+        }
         if Path::new(STOP_FILE).exists() {
             let _ = std::fs::remove_file(STOP_FILE);
             r.log.push_str(&format!("{step}. stop requested — ending cleanly

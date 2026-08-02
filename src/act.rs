@@ -432,6 +432,93 @@ pub const POSTGAME_CONTINUE: Button = Button {
 /// 0.90, sitting 0.22 above the nearest confusable and 0.10 below the true positive.
 pub const POSTGAME_CONTINUE_PRESENT: f64 = 0.90;
 
+/// The character/inventory screen's `Stats` button.
+///
+/// A dead end if the run lands there by accident: its area-button coordinate means `Stats`, so the
+/// navigator's usual click does nothing useful and the run spends its budget in a menu. That has now
+/// happened twice, and until this template existed nothing could even say it had happened.
+///
+/// `Stats` is unusually distinctive because no other screen puts a plank in the bottom-LEFT corner:
+///
+/// ```text
+///   the character screen   1.0000  err 0.0000
+///   overworld terrain      0.2952  err 0.2545
+///   combat WaitPhase       0.2902  err 0.2483
+///   the main menu          0.1567  err 0.2814
+///   postgame               0.1145  err 0.3895
+///   hero select            0.1101  err 0.3878
+/// ```
+pub const CHARACTER_STATS: Button = Button {
+    name: "character Stats",
+    template: "character-stats.png",
+    search: (137, 912, 403, 1028),
+    origin: (145, 920),
+    click: (270, 970),
+};
+
+/// The character screen is up. See [`CHARACTER_STATS`]. 0.70 — nothing else comes near 0.30.
+pub const CHARACTER_STATS_PRESENT: f64 = 0.70;
+
+/// Which screen the game is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    /// A fight sitting in `WaitPhase`, waiting for `Finish`.
+    CombatWaiting,
+    /// The character is dead; that slot reads `Eulogise`.
+    Dead,
+    /// A "Choose one:" item screen, untouched.
+    ItemChoice,
+    /// The postgame stats screen.
+    Postgame,
+    /// The character/inventory screen — a dead end for the navigator.
+    Character,
+    /// Hero select, with a champion already chosen.
+    HeroSelect,
+    /// The main menu, offering a new run.
+    MainMenu,
+    /// None of the above. Usually the map, but also any screen with no fingerprint yet.
+    Unknown,
+}
+
+/// Asks the screen what it is, before anything acts on an assumption about it.
+///
+/// The navigator assumes "map" and discovers otherwise several steps later, by failing. Four
+/// `Absent` locate-me readings after a cleared crypt were that; so was a run that clicked into the
+/// character inventory and spent the rest of its budget there. Both were knowable in one look.
+///
+/// Cheap enough to run every iteration only because these are [`score_exact`] comparisons — one per
+/// candidate at a known offset, not a template sweep. The same check built on [`locate`] would cost
+/// thousands of offsets per screen and would not be worth it.
+///
+/// **Order is by distinctiveness, not by likelihood.** `Dead` is tested before `CombatWaiting`
+/// because they share a slot and `Eulogise` must never be mistaken for `Finish`; `Character` is
+/// early because it is the one that strands a run.
+pub fn identify(win: &GameWindow) -> Screen {
+    let over = |b: &Button, t: f64| matches!(score_exact(win, b), Ok(q) if q >= t);
+    if over(&CHARACTER_STATS, CHARACTER_STATS_PRESENT) {
+        return Screen::Character;
+    }
+    if slot_is_eulogise(win) {
+        return Screen::Dead;
+    }
+    if over(&COMBAT_FINISH, COMBAT_FINISH_PRESENT) {
+        return Screen::CombatWaiting;
+    }
+    if over(&REWARD_CONFIRM, REWARD_SCREEN_PRESENT) {
+        return Screen::ItemChoice;
+    }
+    if over(&POSTGAME_CONTINUE, POSTGAME_CONTINUE_PRESENT) {
+        return Screen::Postgame;
+    }
+    if over(&MENU_START, MENU_START_PRESENT) || over(&CONTINUE, CONTINUE_PRESENT) {
+        return Screen::MainMenu;
+    }
+    if over(&HEROSELECT_CONFIRM, HEROSELECT_CONFIRM_PRESENT) {
+        return Screen::HeroSelect;
+    }
+    Screen::Unknown
+}
+
 /// Every button, so the invariant tests cover all of them.
 ///
 /// Exists because they did not. The geometry tests enumerated `[&CONTINUE, &PROGRESS]` by hand, so
@@ -448,6 +535,7 @@ pub const ALL: &[&Button] =
     &POSTGAME_CONTINUE,
     &MENU_START,
     &HEROSELECT_CONFIRM,
+    &CHARACTER_STATS,
 ];
 
 /// Start menu `Continue`. Measured on 52.3 at 1920x1080; `Restart` is the adjacent button at
