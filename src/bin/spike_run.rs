@@ -611,6 +611,16 @@ fn drive(
                 std::thread::sleep(Duration::from_millis(300));
                 r.pump();
                 pregame = r.feed.seen_since(mark, "Pregame screen:");
+                // Entering a subworld raises a lore screen instead of a pregame, and there is no
+                // point waiting out the full 30 s for an announcement that is never coming. That
+                // timeout was the delay before the FIRST text screen of a village -- later ones are
+                // prompt because nothing else waits on them.
+                //
+                // Both signals are positive rather than "nothing happened yet": a live affirmative
+                // button, or a dump saying we are now inside something.
+                if r.affirmative().state.is_ready() || r.map.inside().is_some() {
+                    break;
+                }
             }
             if !pregame {
                 // No pregame does not mean failure. `getLocationButtons` tests `typeData.subworld`

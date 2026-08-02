@@ -254,6 +254,30 @@ fn pattern_admits(pattern: &str, c: u8) -> bool {
     p.len() == 1 && p.as_bytes()[0] == c
 }
 
+/// Wildcard tiles — NOT YET IMPLEMENTED.
+///
+/// A wildcard is a blank tile that can stand for any letter, and it is **not** spent by clicking
+/// alone: you click it and then **type the letter you want on the keyboard**. Confirmed by the
+/// game's author after a live run met one.
+///
+/// It reads as `.` in the board dump, which is why a live fight chose `DROPLETS` using index 0 while
+/// index 0 printed as `.` — the search had already treated it as a free letter, correctly. What
+/// failed was the actuation: clicking it changed nine tiles at once (`clicking tile 0 also changed
+/// [1, 2, 4, 5, 6, 9, 10, 12, 13]`), because a click on a wildcard opens a letter prompt rather than
+/// simply selecting a tile, and the board redraws underneath it.
+///
+/// So [`Typist::type_word`] may plan a word through a wildcard, and [`crate::combat::Board`] cannot
+/// currently place it. Until this is implemented, a board containing `.` will fail selection on the
+/// turn that uses it.
+///
+/// What implementing it needs:
+/// 1. Recognising the wildcard tile in the dump rather than treating `.` as an ordinary letter.
+/// 2. After clicking it, sending the intended letter as a keystroke — the existing `type_text`
+///    path, not a click.
+/// 3. Selection verification that expects the whole board to redraw at that moment, since the
+///    restless-tile filter samples before the click and cannot predict it.
+pub mod wildcard {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
