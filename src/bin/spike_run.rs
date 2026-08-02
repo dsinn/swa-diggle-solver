@@ -149,11 +149,6 @@ struct Run<'a> {
     /// to be distinguished from "that button entered a subworld", and conflating the two would send
     /// a real fight down the subworld path.
     pregame_seen: bool,
-    /// Feed line index of the last `Pregame screen:` we answered.
-    ///
-    /// Identity rather than a tally, for the same reason [`Run::answered_event`] is: a count and the
-    /// game's reality can only drift, while an index is idempotent and self-resyncing.
-    answered_pregame: Option<usize>,
 }
 
 impl Run<'_> {
@@ -484,7 +479,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         affirm: affirm::ButtonArt::load(Path::new(&cfg.game_dir), "right")?,
         answered_event: None,
         pregame_seen: false,
-        answered_pregame: None,
     };
 
     // Timed because the startup felt slow and nobody could say which part was slow. `wait_for_window`
