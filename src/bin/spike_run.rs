@@ -605,22 +605,35 @@ fn drive(
                 return Stop::Failed(format!("Combat did not open at {here}"));
             }
             // The pregame announces itself; Space there is `Start`.
-            let by = Instant::now() + Duration::from_secs(30);
+            // Cheapest, most local signal first.
+            //
+            // This used to poll for `Pregame screen:` for thirty seconds and only then conclude the
+            // button had entered a subworld — inferring one outcome from the *absence* of the
+            // other's announcement. Entering a village never prints a pregame, so it always paid the
+            // full timeout, and that was the delay before the first text screen of a village.
+            //
+            // A text screen answers immediately, and reading its button is a 76x92 crop compared
+            // against four templates. So ask that first, every pass, and let the console answer only
+            // the case it is actually needed for. The remaining timeout covers "the fight is still
+            // starting", which is a real wait rather than an inferred one — and ten seconds is
+            // generous for a screen that announces itself on `onActive`.
+            let by = Instant::now() + Duration::from_secs(10);
             let mut pregame = false;
-            while Instant::now() < by && !pregame {
-                std::thread::sleep(Duration::from_millis(300));
-                r.pump();
-                pregame = r.feed.seen_since(mark, "Pregame screen:");
-                // Entering a subworld raises a lore screen instead of a pregame, and there is no
-                // point waiting out the full 30 s for an announcement that is never coming. That
-                // timeout was the delay before the FIRST text screen of a village -- later ones are
-                // prompt because nothing else waits on them.
-                //
-                // Both signals are positive rather than "nothing happened yet": a live affirmative
-                // button, or a dump saying we are now inside something.
+            loop {
                 if r.affirmative().state.is_ready() || r.map.inside().is_some() {
+                    // A live affirmative or a subworld dump: whatever that button did, it was not
+                    // starting a fight.
                     break;
                 }
+                r.pump();
+                if r.feed.seen_since(mark, "Pregame screen:") {
+                    pregame = true;
+                    break;
+                }
+                if Instant::now() >= by {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(150));
             }
             if !pregame {
                 // No pregame does not mean failure. `getLocationButtons` tests `typeData.subworld`
