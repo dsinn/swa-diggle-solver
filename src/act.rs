@@ -499,6 +499,43 @@ pub const CHARACTER_BACK: Button = Button {
 /// The character screen's exit is on screen. See [`CHARACTER_BACK`].
 pub const CHARACTER_BACK_PRESENT: f64 = 0.90;
 
+/// The combat pregame's `Start`, cropped to the part of it that is **on screen**.
+///
+/// `ui/pregame.lua:142` — `button('Start', 0.5, 1, { yOffset = -0.38 })`, a `default` 250x100 centred
+/// at (960, 1042). That runs to y=1092 on a 1080-tall client, so the bottom 12 px do not exist.
+///
+/// I had treated that as a reason not to fingerprint it, and it is not: cropping the **visible**
+/// rect (835,992)-(1085,1080) gives a perfectly ordinary 250x88 template. A clipped button is only
+/// awkward if you insist on cropping its nominal size.
+///
+/// ```text
+///   the pregame               1.0000  err 0.0000
+///   plain overworld terrain   0.7777  err 0.0996   <- nearest, as ever
+///   hero select               0.7277  err 0.0971
+///   combat WaitPhase          0.1138  err 0.3152
+///   the character screen      0.0733  err 0.3922
+///   postgame                  0.0585  err 0.4298
+///   the main menu             0.0581  err 0.4334
+/// ```
+///
+/// 0.90: 0.10 under the true positive, 0.12 over the nearest confusable.
+///
+/// **Preferred over the console announcement**, which is what this replaced. `Pregame screen:`
+/// proves the screen was *constructed*, not that it is *up* — the same "announcement is not
+/// readiness" trap in another costume — and it offers no way to tell whether the press worked. A
+/// fingerprint does both: presence gates the click, and disappearance confirms it.
+pub const PREGAME_START: Button = Button {
+    name: "pregame Start",
+    template: "pregame-start.png",
+    search: (827, 984, 1093, 1080),
+    origin: (835, 992),
+    // Inside the visible part, deliberately not the geometric centre at (960, 1042).
+    click: (960, 1035),
+};
+
+/// The combat pregame is up. See [`PREGAME_START`].
+pub const PREGAME_START_PRESENT: f64 = 0.90;
+
 /// Which screen the game is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -516,6 +553,8 @@ pub enum Screen {
     HeroSelect,
     /// The main menu, offering a new run.
     MainMenu,
+    /// The combat pregame, waiting for `Start`.
+    Pregame,
     /// None of the above. Usually the map, but also any screen with no fingerprint yet.
     Unknown,
 }
@@ -543,6 +582,9 @@ pub fn identify(win: &GameWindow) -> Screen {
     }
     if over(&COMBAT_FINISH, COMBAT_FINISH_PRESENT) {
         return Screen::CombatWaiting;
+    }
+    if over(&PREGAME_START, PREGAME_START_PRESENT) {
+        return Screen::Pregame;
     }
     if over(&REWARD_CONFIRM, REWARD_SCREEN_PRESENT) {
         return Screen::ItemChoice;
@@ -577,6 +619,7 @@ pub const ALL: &[&Button] =
     &HEROSELECT_CONFIRM,
     &CHARACTER_STATS,
     &CHARACTER_BACK,
+    &PREGAME_START,
 ];
 
 /// Start menu `Continue`. Measured on 52.3 at 1920x1080; `Restart` is the adjacent button at

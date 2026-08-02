@@ -909,30 +909,36 @@ fn drive(
             }
             continue;
         }
-        // The combat pregame: announced on the console, and dismissed with Space.
+        // The combat pregame: recognised by its `Start`, and the click validated by that button
+        // going away.
         //
-        // No fingerprint needed. `ui/pregame.lua:91` prints `Pregame screen:` on entry, and its
-        // `Start` is `userFunctionName = 'affirmative'` (`:142-148`) — so the console says when it is
-        // up and the keyboard clears it. That is cheaper and more robust than a template, and it
-        // sidesteps the one awkward thing about this button: at `ss(0.5, 1)` with `yOffset -0.38` it
-        // is centred at (960, 1042), so a 250x100 `default` runs to y=1092 and is **clipped by the
-        // bottom of the screen**. Any template for it would have to be 250x88.
-        //
-        // Keyed on the block's index so a pregame is answered once: pressing Space again on the
-        // combat screen behind it would be a different button entirely.
-        if let Some(at) = r.feed.lines().iter().rposition(|l| l.contains("Pregame screen:")) {
-            if r.answered_pregame != Some(at) {
-                r.answered_pregame = Some(at);
-                r.pregame_seen = true;
-                r.log.push_str(&format!("{step}. pregame is up — starting the encounter
-"));
-                r.keys.focus();
-                std::thread::sleep(Duration::from_millis(300));
-                let _ = r.keys.press_key(VK_SPACE, SC_SPACE);
-                std::thread::sleep(Duration::from_millis(1200));
-                r.pump();
-                continue;
+        // This first watched the console for `Pregame screen:` (`ui/pregame.lua:91`) and pressed
+        // Space. That worked, but it could only ever prove the screen had been *constructed* — the
+        // announcement-is-not-readiness trap again — and gave no way to tell whether the press took.
+        // The fingerprint answers both halves, which is why it is worth the crop.
+        if screen == diggle_solver::act::Screen::Pregame {
+            r.pregame_seen = true;
+            match diggle_solver::act::click_exact(
+                r.win,
+                &diggle_solver::act::PREGAME_START,
+                diggle_solver::act::PREGAME_START_PRESENT,
+            ) {
+                Ok(q) => r.log.push_str(&format!("{step}. pregame — started the encounter ({q:.4})
+")),
+                Err(e) => return Stop::Failed(format!("pregame Start refused: {e}")),
             }
+            r.park();
+            if !diggle_solver::act::wait_until_gone(
+                r.win,
+                &diggle_solver::act::PREGAME_START,
+                diggle_solver::act::PREGAME_START_PRESENT,
+                Duration::from_secs(8),
+            ) {
+                return Stop::Failed("clicked pregame Start but it is still on screen".into());
+            }
+            std::thread::sleep(Duration::from_millis(800));
+            r.pump();
+            continue;
         }
         if Path::new(STOP_FILE).exists() {
             let _ = std::fs::remove_file(STOP_FILE);
