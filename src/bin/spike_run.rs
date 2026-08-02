@@ -648,18 +648,50 @@ fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
     // has attempted. Choosing on it means reading those numbers off the screen, which is OCR and is
     // not built. The middle card is picked because it needs no arithmetic, not because it is best;
     // that it was the 20/20 Warrior today is luck and must not be mistaken for a policy.
+    // Aim at the NAME band, deliberately low on the card.
+    //
+    // The card body is a generous target, but it is not uniform: each card carries two `small`
+    // buttons along its top — "Randomise cosmetics" and "Save hero card", at `yOffset -5.4`
+    // (`ui/heroselect.lua:357-380`), which render around y=268. Hitting either does something
+    // plausible-looking and useless, and the first attempt came back with three recoloured champions
+    // and no selection, so that is not hypothetical.
+    //
+    // y=520 is the name/subtitle band: well below those icons and above the item panels at y~570,
+    // whose 32x32 tooltip hotspots (`herodisplay.lua:69`) are their own hazard.
     const CARD_SPACING: i32 = 450;
-    let (cx, cy) = (960, 540);
-    if let Ok((sx, sy)) = r.win.client_to_screen(cx, cy) {
-        r.log.push_str(&format!("  choosing the middle champion at ({cx},{cy})\n"));
-        let _ = click_at_in(r.win, sx, sy);
-        r.park();
-        std::thread::sleep(Duration::from_millis(600));
-        r.keys.focus();
-        std::thread::sleep(Duration::from_millis(250));
-        let _ = r.keys.press_key(VK_SPACE, SC_SPACE);
-        std::thread::sleep(Duration::from_millis(900));
+    let (cx, cy) = (960, 520);
+    let (sx, sy) =
+        r.win.client_to_screen(cx, cy).map_err(|e| format!("cannot reach the card: {e}"))?;
+    r.log.push_str(&format!("  choosing the middle champion at ({cx},{cy})\n"));
+    // The click's own result, not discarded. The previous version logged "choosing…" and threw the
+    // `Result` away with `let _ =`, so the line recorded an *intention* — it could not distinguish a
+    // click that landed from one that was refused. That is the whole reason the first attempt was
+    // hard to diagnose.
+    click_at_in(r.win, sx, sy).map_err(|e| format!("click on the champion card failed: {e}"))?;
+    r.park();
+
+    // Read back: the confirm button only exists once `selectedIndex` is set
+    // (`ui/heroselect.lua:333`), so its appearance IS the proof that the click selected something.
+    let seen = diggle_solver::act::wait_for(
+        r.win,
+        &diggle_solver::act::HEROSELECT_CONFIRM,
+        diggle_solver::act::HEROSELECT_CONFIRM_PRESENT,
+        Duration::from_secs(4),
+    );
+    if !seen.found() {
+        return Err(format!(
+            "clicked the champion card but no confirm button appeared (best {:.4} over {} looks, \
+             {} capture faults) — nothing was selected",
+            seen.best, seen.looks, seen.faults
+        ));
     }
+    r.log.push_str(&format!("  champion selected — confirm reads live ({:.4})\n", seen.best));
+
+    // Now Space is meaningful: the button is `userFunctionName = 'affirmative'`, and it exists.
+    r.keys.focus();
+    std::thread::sleep(Duration::from_millis(250));
+    let _ = r.keys.press_key(VK_SPACE, SC_SPACE);
+    std::thread::sleep(Duration::from_millis(900));
     let _ = CARD_SPACING;
 
     let deadline = Instant::now() + Duration::from_secs(120);

@@ -338,6 +338,61 @@ pub const MENU_START: Button = Button {
 /// 0.95: `Start` measures 1.0000, `Restart` 0.8619.
 pub const MENU_START_PRESENT: f64 = 0.95;
 
+/// Hero select's confirm button — proof that a champion **is** selected.
+///
+/// `ui/heroselect.lua:327-336`, `ss(1, 0.9)`, `xOffset -0.75`, `default` 250x100 → exactly
+/// (1608,922)-(1858,1022). The fourth distinct word to occupy this corner, after `Finish`,
+/// `Eulogise` and the postgame `Continue`.
+///
+/// ## It is a read-back, not a screen detector
+///
+/// `showIf = function() return selectedIndex and selectedHeroes[selectedIndex] end` — the button
+/// **does not exist** until a champion is picked. So its presence is exactly the confirmation that a
+/// click on a hero card landed, which is the one thing the driver could not otherwise know.
+///
+/// ## The label changes with the class, and it changes by MORE than other buttons do
+///
+/// The caption is `classes[...].availableMessageShort or 'Start'`. Two classes measured live:
+///
+/// ```text
+///   `Fight!`     (the template itself)   1.0000  err 0.0000
+///   `Adventure!` (another class)         0.8158  err 0.0740
+///   NO champion selected                 0.1488  err 0.3612   <- the case to reject
+///   the main menu                        0.1059  err 0.3788
+///   combat `Finish` plank                0.8912  err 0.0498   <- see the warning below
+///   plain overworld terrain              0.6615  err 0.1307
+///   postgame `Continue`                  0.3298  err 0.2345
+/// ```
+///
+/// **0.8158, not the ~0.86 a word swap costs elsewhere.** The 0.147/0.138/0.147 measured on
+/// Finish-vs-Eulogise and Start-vs-Restart were all swaps between words of *similar length*.
+/// `Adventure!` against `Fight!` is nearly twice the glyph run, so it disturbs far more of the crop.
+/// A caption longer still would score lower again, and the set of captions is not enumerated here.
+///
+/// So [`HEROSELECT_CONFIRM_PRESENT`] is **0.70**, not the 0.80 first chosen off the estimate — that
+/// left 0.016 of headroom under a caption we had not yet seen. The bar sits far below any plausible
+/// caption and still enormously above an unselected screen, because "no button at all" is not a near
+/// miss: 0.1488 against 0.70 is not a threshold decision, it is a different question entirely.
+///
+/// Biasing low is right here for a second reason: a false "selected" is caught immediately
+/// downstream, since `Space` on a button that does not exist changes nothing and the wait for
+/// `Pregame screen:` then fails with its own message. A false "not selected" aborts a run that was
+/// fine.
+///
+/// **Do not use this as a general screen check.** Combat's `Finish` occupies almost the same rect and
+/// scores 0.8912 here. Harmless while this is only ever asked on hero select — where `Finish` cannot
+/// be on screen — and a bug anywhere else.
+pub const HEROSELECT_CONFIRM: Button = Button {
+    name: "hero select confirm",
+    template: "heroselect-confirm.png",
+    search: (1600, 914, 1866, 1030),
+    origin: (1608, 922),
+    click: (1733, 972),
+};
+
+/// A champion is selected, so hero select can be confirmed. See [`HEROSELECT_CONFIRM`].
+pub const HEROSELECT_CONFIRM_PRESENT: f64 = 0.70;
+
 /// The postgame stats screen's `Continue`.
 ///
 /// `ui/postgame.lua:69` — `button('Continue', 1, 0.85, { xOffset = -0.75 })`, a `default` button
@@ -397,6 +452,7 @@ pub const ALL: &[&Button] =
     &REWARD_CONFIRM,
     &POSTGAME_CONTINUE,
     &MENU_START,
+    &HEROSELECT_CONFIRM,
 ];
 
 /// Start menu `Continue`. Measured on 52.3 at 1920x1080; `Restart` is the adjacent button at
