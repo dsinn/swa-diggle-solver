@@ -119,6 +119,9 @@ pub struct Modifiers {
     pub nerve: Option<crate::flee::Nerve>,
     /// `immobile` — it cannot run, so no threshold will make it leave (`rpgview.lua:1646`).
     pub immobile: bool,
+    /// Lexicons this enemy takes extra damage from, and by how much. Applied per word, because
+    /// membership is a property of the word rather than of the board.
+    pub bonuses: Vec<(HashSet<String>, f64)>,
     /// This enemy cancels overkill healing outright (`rpgview.lua:1084`).
     pub overkill_no_heal: bool,
     /// This enemy turns overkill healing into gold instead (`:1085`), which is the curse described
@@ -163,6 +166,7 @@ impl Modifiers {
                     .find(|k| statuses.contains_key(**k))
                     .and_then(|k| crate::flee::Nerve::from_status(k)),
                 immobile: save.path("rpg.enemy.immobile").is_some(),
+                bonuses: lexica.bonus_sets(&statuses),
                 overkill_no_heal: statuses.contains_key("overkillNoHeal"),
                 overkill_heal_to_gold: statuses.contains_key("overkillHealToGold"),
             },
@@ -179,6 +183,7 @@ impl Modifiers {
             problems: Vec::new(),
             nerve: None,
             immobile: false,
+            bonuses: Vec::new(),
             overkill_no_heal: false,
             overkill_heal_to_gold: false,
         }
@@ -194,6 +199,20 @@ impl Modifiers {
             return 1.0;
         }
         corners_used as f64 / corner_count as f64
+    }
+
+    /// The full multiplier for one word: the corner nerf, times this enemy's lexicon bonuses.
+    ///
+    /// `utils/words.lua:219-242` builds the bonus additively — `mult = mult + val - 1` per matching
+    /// lexicon — so two 1.5x lexicons make 2.0x, not 2.25x.
+    pub fn modifier_for(&self, word: &str, corners_used: usize, corner_count: usize) -> f64 {
+        let mut mult = 1.0;
+        for (words, val) in &self.bonuses {
+            if words.contains(word) {
+                mult += val - 1.0;
+            }
+        }
+        self.modifier(corners_used, corner_count) * mult
     }
 }
 
@@ -446,7 +465,7 @@ pub fn max_damage(
                         let score = scorer.score_typed(
                             &consumed,
                             word.chars().count(),
-                            mods.modifier(typed.corners_used, corner_count),
+                            mods.modifier_for(word, typed.corners_used, corner_count),
                         );
                         if local_best.as_ref().map(|b| score > b.score).unwrap_or(true) {
                             local_best = Some(Found { word: word.clone(), score, slice });
@@ -555,7 +574,7 @@ pub fn race_for_band(
                     let score = scorer.score_typed(
                         &consumed,
                         word.chars().count(),
-                        mods.modifier(typed.corners_used, corner_count),
+                        mods.modifier_for(word, typed.corners_used, corner_count),
                     );
                     if score >= need && below.map(|b| score < b).unwrap_or(true) {
                         let found = Found { word: word.clone(), score, slice };
@@ -1145,5 +1164,59 @@ mod rested_goal_tests {
             Goal::for_enemy(&m, 12, 0, Some(12), Some(&p)),
             Goal::Scare { need: 7, below: 12 }
         );
+    }
+}
+
+#[cfg(test)]
+mod lexicon_bonus_tests {
+    use super::*;
+
+    fn with_bonus(pairs: &[(&str, f64)]) -> Modifiers {
+        Modifiers {
+            bonuses: pairs
+                .iter()
+                .map(|(w, v)| (HashSet::from([w.to_string()]), *v))
+                .collect(),
+            ..Modifiers::none()
+        }
+    }
+
+    #[test]
+    fn a_bonus_lexicon_multiplies_the_word() {
+        // A slime carries lexiconBonusSlime 1.5 (rpg/enemies/slimes.lua:90).
+        let m = with_bonus(&[("OOZE", 1.5)]);
+        assert_eq!(m.modifier_for("OOZE", 0, 0), 1.5);
+        // A word outside the lexicon is untouched.
+        assert_eq!(m.modifier_for("STONE", 0, 0), 1.0);
+    }
+
+    #[test]
+    fn two_bonuses_stack_additively_not_multiplicatively() {
+        // utils/words.lua:219-242 does `mult = mult + val - 1` per lexicon, so 1.5 and 1.5 give 2.0,
+        // not 2.25. Some slimes carry fire AND ice (slimes.lua:294-295, 333-334).
+        let m = with_bonus(&[("SLEET", 1.5), ("SLEET", 1.5)]);
+        assert_eq!(m.modifier_for("SLEET", 0, 0), 2.0);
+        // The live pairing: fire 1.2 with ice 1.5 on a word in both lexicons.
+        let m = with_bonus(&[("EMBER", 1.2), ("EMBER", 1.5)]);
+        assert!((m.modifier_for("EMBER", 0, 0) - 1.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_corner_nerf_still_applies_on_top() {
+        // resistCornerless scales by cornersUsed/cornerCount, and the bonus multiplies that -- both
+        // are in play at once for a cornerless-resisting slime.
+        let m = Modifiers { resist_cornerless: true, ..with_bonus(&[("OOZE", 2.0)]) };
+        assert_eq!(m.modifier_for("OOZE", 2, 4), 1.0, "half the corners, doubled");
+        assert_eq!(m.modifier_for("OOZE", 0, 4), 0.0, "no corners is still no damage");
+    }
+
+    #[test]
+    fn under_scoring_is_what_makes_this_a_correctness_bug() {
+        // The reason bonuses could no longer be ignored: Goal::Scare has an UPPER bound. A word
+        // scored at 16 against a 1.5x enemy really lands 24, which clears `below` and kills the
+        // enemy we meant to frighten.
+        let m = with_bonus(&[("OOZE", 1.5)]);
+        let raw = 16.0;
+        assert_eq!(raw * m.modifier_for("OOZE", 0, 0), 24.0);
     }
 }

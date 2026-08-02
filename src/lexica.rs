@@ -115,6 +115,29 @@ impl Lexica {
         self.lexicons.iter().any(|l| l.words.contains(&up))
     }
 
+    /// Lexicons this enemy takes EXTRA damage from, with their multipliers.
+    ///
+    /// `utils/words.lua:219-242` accumulates `mult = mult + val - 1` for every status naming a
+    /// lexicon the word belongs to, so several bonuses stack additively on one word — a slime with
+    /// `lexiconBonusFire = 1.2` and `lexiconBonusIce = 1.5` (`rpg/enemies/slimes.lua:294-295`) pays
+    /// 1.7x on a word that is both.
+    ///
+    /// These used to be ignored on the argument that under-scoring is safe. That was true while
+    /// every goal was "at least N" and being wrong only cost turns. It stopped being true with
+    /// [`crate::search::Goal::Scare`], which has an upper bound: under-scoring a word by 1.5x can
+    /// carry it past the lethal line and kill an enemy we meant to frighten.
+    pub fn bonus_sets(&self, statuses: &HashMap<String, f64>) -> Vec<(HashSet<String>, f64)> {
+        let mut out = Vec::new();
+        for lex in &self.lexicons {
+            if let Some(&v) = statuses.get(&lex.status_key) {
+                if v > 1.0 {
+                    out.push((lex.words.clone(), v));
+                }
+            }
+        }
+        out
+    }
+
     /// Words to exclude from the search, given the enemy's status effects.
     ///
     /// Excludes any word belonging to a lexicon whose status value is `<= 1` — resist or immune.
@@ -276,5 +299,37 @@ mod tests {
         let lx = Lexica::load(&game_dir()).unwrap();
         let statuses = HashMap::from([("resistCornerless".to_string(), -1.0)]);
         assert!(lx.unmodelled(&statuses).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod live_lexica_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// The enemy in a live fight carried `lexiconBonusIce = 1.5` and `lexiconBonusFire = 1.2`, so
+    /// both lexica have to be loaded and both status keys derived correctly. Implementing the
+    /// arithmetic is worthless if the dictionaries are never found.
+    #[test]
+    fn ice_and_fire_are_both_loaded_with_the_right_status_keys() {
+        let game = Path::new("../sternly-worded-adventures");
+        if !game.join("utils/dictionaries/ice.lua").exists() {
+            eprintln!("skipped: no unpacked game at {}", game.display());
+            return;
+        }
+        let lx = Lexica::load(game).expect("lexica load");
+        let keys = lx.status_keys();
+        assert!(keys.contains(&"lexiconBonusIce"), "ice lexicon missing, got {keys:?}");
+        assert!(keys.contains(&"lexiconBonusFire"), "fire lexicon missing, got {keys:?}");
+        assert!(keys.contains(&"lexiconBonusSlime"), "slime lexicon missing, got {keys:?}");
+
+        // And the multipliers reach a word. Both sets are non-empty, so a bonus can actually apply.
+        let statuses =
+            HashMap::from([("lexiconBonusIce".into(), 1.5), ("lexiconBonusFire".into(), 1.2)]);
+        let sets = lx.bonus_sets(&statuses);
+        assert_eq!(sets.len(), 2, "both bonuses recognised");
+        assert!(sets.iter().all(|(w, _)| !w.is_empty()), "both lexicons carry words");
+        // Nothing is excluded: these are bonuses, not resistances.
+        assert!(lx.excluded_words(&statuses).is_empty());
     }
 }
