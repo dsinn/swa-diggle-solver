@@ -30,6 +30,19 @@ pub struct Button {
     /// Template file, relative to the repo's `templates/` directory.
     pub template: &'static str,
     /// Where to look for it, in client pixels, with slack for minor layout drift.
+    ///
+    /// **This is a capture rectangle, not an anchor box.** [`locate`] grabs exactly this region and
+    /// searches the template *inside* it, so it must be at least as large as the template in both
+    /// axes — otherwise there is nowhere for the template to sit and the match can never succeed.
+    /// The convention is the button's own rectangle grown by a slack margin on every side.
+    ///
+    /// Easy to get wrong, and it was: `COMBAT_FINISH` and `REWARD_CONFIRM` were both authored as
+    /// `top-left ± 8`, a 16x16 box, which reads perfectly sensibly if you have `diggle findpng` in
+    /// mind — its `bounds` argument constrains where the template's **top-left corner** may land, so
+    /// 16x16 means "within 8 px of here" and is right. Same numbers, two incompatible meanings, and
+    /// every offline measurement went through `findpng` while the live path silently returned
+    /// `None` forever. [`tests::every_search_box_can_contain_its_template`] now makes that
+    /// impossible to reintroduce.
     pub search: (i32, i32, i32, i32),
     /// Where to click once recognised, in client pixels. Not necessarily the template's centre —
     /// the progress button is clipped by the right screen edge, so its geometric centre is
@@ -95,7 +108,8 @@ pub struct Button {
 pub const COMBAT_FINISH: Button = Button {
     name: "combat Finish",
     template: "combat-finish.png",
-    search: (1570, 914, 1586, 930),
+    // The 300x100 button spans (1578,922)-(1878,1022); this is that grown by 8 px of slack.
+    search: (1570, 914, 1886, 1030),
     click: (1728, 972),
 };
 
@@ -167,7 +181,8 @@ pub const COMBAT_FINISH_PRESENT: f64 = 0.90;
 pub const REWARD_CONFIRM: Button = Button {
     name: "reward Confirm",
     template: "reward-confirm-inactive.png",
-    search: (1519, 860, 1535, 876),
+    // The 250x100 button spans (1527,868)-(1777,968); this is that grown by 8 px of slack.
+    search: (1519, 860, 1785, 976),
     click: (1652, 918),
 };
 
@@ -194,6 +209,14 @@ pub const REWARD_SCREEN_PRESENT: f64 = 0.90;
 /// Still greyed, so nothing has been selected yet. Placed midway between the measured 0.7255 for the
 /// active button and 1.0000 for the greyed one.
 pub const REWARD_NOTHING_PICKED: f64 = 0.86;
+
+/// Every button, so the invariant tests cover all of them.
+///
+/// Exists because they did not. The geometry tests enumerated `[&CONTINUE, &PROGRESS]` by hand, so
+/// the two buttons added later were checked by nothing — including the check that would have caught
+/// their search boxes being smaller than their own templates. A hand-written list silently stops
+/// covering the thing you just added, which is the moment coverage matters most.
+pub const ALL: &[&Button] = &[&CONTINUE, &PROGRESS, &COMBAT_FINISH, &REWARD_CONFIRM];
 
 /// Start menu `Continue`. Measured on 52.3 at 1920x1080; `Restart` is the adjacent button at
 /// x≈500 and eulogises the run, which is exactly why this is verified rather than assumed.
@@ -342,6 +365,30 @@ pub fn click_when_ready(
 mod tests {
     use super::*;
 
+    /// A search box smaller than its own template can never match, and the failure is silent:
+    /// [`locate`] returns `Ok(None)`, which every caller reads as the ordinary "not on screen".
+    ///
+    /// Both `COMBAT_FINISH` and `REWARD_CONFIRM` shipped this way and nothing noticed for four
+    /// commits, because every measurement went through `diggle findpng`, whose `bounds` argument
+    /// means the opposite thing — where the template's top-left may land, rather than what to
+    /// capture. The offline numbers were all correct and all irrelevant.
+    #[test]
+    fn every_search_box_can_contain_its_template() {
+        for b in ALL {
+            let tpl = Template::load(&template_path(b.template))
+                .unwrap_or_else(|e| panic!("{}: {e}", b.name));
+            let (w, h) = (b.search.2 - b.search.0, b.search.3 - b.search.1);
+            assert!(
+                w >= tpl.width as i32 && h >= tpl.height as i32,
+                "{}: search box is {w}x{h} but the template is {}x{} — locate() captures only the \
+                 box, so this can never match",
+                b.name,
+                tpl.width,
+                tpl.height
+            );
+        }
+    }
+
     #[test]
     fn continue_and_restart_do_not_share_a_search_box() {
         // Restart's face is centred near x=500 on 52.3. If CONTINUE's search box reached it, a
@@ -357,7 +404,7 @@ mod tests {
 
     #[test]
     fn click_points_lie_inside_their_search_boxes() {
-        for b in [&CONTINUE, &PROGRESS] {
+        for b in ALL {
             let (x0, y0, x1, y1) = b.search;
             assert!(
                 b.click.0 >= x0 && b.click.0 <= x1 && b.click.1 >= y0 && b.click.1 <= y1,
@@ -374,7 +421,7 @@ mod tests {
         // Normalized (0.72, 0.9) is `Hint` or `Fight on!` depending on state, and Fight on commits
         // to another enemy. No Button may target it. At 1920x1080 that is about (1382, 972).
         const FORBIDDEN: (i32, i32) = (1382, 972);
-        for b in [&CONTINUE, &PROGRESS] {
+        for b in ALL {
             let d = ((b.click.0 - FORBIDDEN.0).pow(2) + (b.click.1 - FORBIDDEN.1).pow(2)) as f64;
             assert!(d.sqrt() > 120.0, "{} clicks too close to the Fight on! slot", b.name);
         }
@@ -411,11 +458,29 @@ mod threshold_tests {
         Some(Frame { width: info.width as i32, height: info.height as i32, bgra })
     }
 
-    /// Scores a button's template against a saved frame, in its own search box.
+    /// Crops a frame to a client rectangle, standing in for `capture_client_rect`.
+    fn crop(f: &Frame, (x0, y0, x1, y1): (i32, i32, i32, i32)) -> Frame {
+        let (w, h) = (x1 - x0, y1 - y0);
+        let mut bgra = Vec::with_capacity((w * h * 4) as usize);
+        for y in y0..y1 {
+            let row = (y * f.width + x0) as usize * 4;
+            bgra.extend_from_slice(&f.bgra[row..row + (w as usize) * 4]);
+        }
+        Frame { width: w, height: h, bgra }
+    }
+
+    /// Scores a button's template against a saved frame **the way [`locate`] does**: capture only
+    /// the search box, then search the template inside that crop with no further bounds.
+    ///
+    /// Deliberately not `find_at_scale_in(whole_frame, .., Some(button.search))`. That is what
+    /// `diggle findpng` does, and it treats `search` as an anchor box rather than a capture
+    /// rectangle — the exact mismatch that let a 16x16 search box on a 300x100 template measure
+    /// perfectly offline while never once matching in the live run. A regression test that measures
+    /// through the wrong path is worse than none, because it certifies the bug.
     fn score(button: &Button, name: &str) -> Option<f64> {
         let f = frame(name)?;
         let tpl = Template::load(&PathBuf::from("templates").join(button.template)).ok()?;
-        find_at_scale_in(&f, &tpl, 1.0, 1, Some(button.search)).map(|m| m.inliers)
+        find_at_scale_in(&crop(&f, button.search), &tpl, 1.0, 1, None).map(|m| m.inliers)
     }
 
     #[test]
@@ -428,6 +493,17 @@ mod threshold_tests {
         assert!(real >= COMBAT_FINISH_PRESENT, "a real Finish scored {real:.4}");
         let older = score(&COMBAT_FINISH, "combat-stalled.png").unwrap();
         assert!(older >= COMBAT_FINISH_PRESENT, "an older real Finish scored {older:.4}");
+
+        // A *differently composed* WaitPhase: `Fight on!` beside it, a lit brazier and an open chest
+        // in the scene. Worth its own assertion because the other two scoring exactly 1.0000 was
+        // weak evidence — a template scores 1.0000 against the rendering it was cropped from, which
+        // says nothing about how the button looks when the screen around it differs. This is the
+        // frame the run was actually sitting on when the check failed.
+        let composed = score(&COMBAT_FINISH, "waitphase-with-fighton.png").unwrap();
+        assert!(
+            composed >= COMBAT_FINISH_PRESENT,
+            "a live WaitPhase with Fight on! beside it scored {composed:.4}"
+        );
 
         // The nearest confusable available: a wooden plank button reading `Adventure!`. `Give up` is
         // the *same button object* as Finish (`rpg.lua:592-597`) so it would score at least this
