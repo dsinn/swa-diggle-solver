@@ -101,19 +101,21 @@ pub struct Button {
 ///   plain overworld terrain, overworld-campfire    0.5653  err 0.1646   <- no button at all
 /// ```
 ///
-/// ## The template CANNOT stand in for the health check
+/// ## Two questions, and only one of them has a clean answer
 ///
-/// A live run reached 0 health with the fight won. The slot read `Finish`, drawn inactive
-/// (`activeIf` is `WaitPhase or SmokebombWaitPhase or PlayerTurn`), and scored **0.8380** — while a
-/// *different word* on a plank scores 0.7843. Fifty-four thousandths apart.
+/// A live run reached 0 health with the fight won. The slot read `Finish`, drawn **inactive**
+/// (`activeIf` is `WaitPhase or SmokebombWaitPhase or PlayerTurn`), and scored 0.8380 — while a
+/// *different word* on a plank scores 0.7843. Fifty-four thousandths apart, one sample each.
 ///
-/// So the two questions this template might answer are not equally answerable. "Is an active
-/// `Finish` on screen" separates cleanly at 0.90. "Is this word `Finish` or `Give up`" does not
-/// separate at all, because a state change to the same word costs about as much as changing the
-/// word. Any threshold placed between 0.7843 and 0.8380 would be fitting noise on one sample each.
+/// So "is this word `Finish` or `Give up`" does **not** separate on this template: changing the
+/// button's state costs about as much as changing its word, and any threshold between those two
+/// numbers would be fitting noise.
 ///
-/// That is why [`crate::fight::Fight::finish`] gates on health from the save rather than on this
-/// score, and why relaxing that gate needs a *different* signal — not a better threshold.
+/// "Is an active `Finish` on screen" separates enormously, though — 0.8380 inactive against 1.0000
+/// active, later confirmed at 0.9880 under the red low-health tint. That is the question
+/// [`COMBAT_FINISH_ACTIVE`] asks, and it is the one worth asking: an inactive button cannot be
+/// clicked anyway, so waiting for an active one costs nothing and yields the strongest reading the
+/// template can give.
 ///
 /// Two things that measurement settles, neither of which was visible from the old negative controls
 /// (a reward screen at 0.2777, a village map at 0.1080):
@@ -153,6 +155,25 @@ pub const COMBAT_FINISH: Button = Button {
 /// (`rpg.lua:576` and `:594`), and `Eulogise` requires `gameover`. With health above zero this slot
 /// can only say `Finish`. Gate the press on health, and the fingerprint stops being load-bearing.
 pub const COMBAT_FINISH_PRESENT: f64 = 0.90;
+
+/// `Finish` is not merely on screen but **drawn active**, i.e. clickable. See [`COMBAT_FINISH`].
+///
+/// Separate from [`COMBAT_FINISH_PRESENT`] because it answers a harder question and is used for a
+/// riskier decision — pressing at zero health, where the wrong label ends the run.
+///
+/// The two states are far apart, which is what makes this usable: an active plank measured **1.0000**
+/// on two independent captures, the greyed one **0.8380**. 0.97 admits only a near-exact match, and
+/// a word swap should cost far more than 3% of the crop.
+///
+/// Confirmed live: a run reached zero health with the area cleared, and the active `Finish` — under the
+/// red low-health tint that washes the whole scene — measured **0.9880**. So the bar is clearable in
+/// the exact condition it exists for, with margin, and is not merely theoretical.
+///
+/// The other half is still an estimate. An active `Give up` has never been captured, so the bound
+/// on it is arithmetic — roughly 7% of the crop is lettering — rather than a measurement.
+/// [`crate::fight::Fight::finish`] logs the best score whenever this bar is missed, so the first run
+/// that meets a real `Give up` replaces the estimate with a number.
+pub const COMBAT_FINISH_ACTIVE: f64 = 0.97;
 
 /// The reward screen's `Confirm`, captured in its **greyed** state.
 ///
@@ -234,13 +255,58 @@ pub const REWARD_SCREEN_PRESENT: f64 = 0.90;
 /// active button and 1.0000 for the greyed one.
 pub const REWARD_NOTHING_PICKED: f64 = 0.86;
 
+/// The postgame stats screen's `Continue`.
+///
+/// `ui/postgame.lua:69` — `button('Continue', 1, 0.85, { xOffset = -0.75 })`, a `default` button
+/// (250x100), giving centre (1732.5, 918) and a span of x 1607–1857, y 868–968.
+///
+/// ## Cropped to stop short of the lore arrow
+///
+/// [`crate::observe::affirm::LORE_AFFIRMATIVE`] is `ss(1.0, 0.9)` with `os_x -0.75`, 64x80 — centre
+/// (1872, 972), spanning **x 1840–1904**. The `Continue` plank runs to 1857, so the two overlap by
+/// about 17 px, and a naive crop of the whole button would put arrow pixels inside this template and
+/// `Continue` pixels inside the arrow's slot. Two readers sharing pixels is how one screen starts
+/// answering for another.
+///
+/// So the template is cut at **x 1830**, ten pixels clear of the arrow, and keeps only the lettering
+/// — which is the discriminating part anyway. The plank's wood grain is what every other brown thing
+/// on screen also has.
+///
+/// ## Measured
+///
+/// ```text
+///   the postgame itself           1.0000  err 0.0000
+///   plain overworld terrain       0.6798  err 0.1291   <- nearest confusable, as ever
+///   a reward screen               0.5337  err 0.1788
+///   'Adventure!' plank            0.2953  err 0.2615
+///   greyed Finish at 0 health     0.2862  err 0.2130
+///   combat WaitPhase              0.2587  err 0.2560
+/// ```
+///
+/// The last two matter because the combat `Finish` plank spans 1578–1878 and so sits right across
+/// this region. It scores 0.26 — the lettering is what carries the signal, exactly as intended.
+pub const POSTGAME_CONTINUE: Button = Button {
+    name: "postgame Continue",
+    template: "postgame-continue.png",
+    // 220x92 template at (1610,872), grown by 8 — and hard-stopped at 1838, under the arrow's 1840.
+    search: (1602, 864, 1838, 972),
+    origin: (1610, 872),
+    click: (1732, 918),
+};
+
+/// The postgame is on screen. See [`POSTGAME_CONTINUE`].
+///
+/// 0.90, sitting 0.22 above the nearest confusable and 0.10 below the true positive.
+pub const POSTGAME_CONTINUE_PRESENT: f64 = 0.90;
+
 /// Every button, so the invariant tests cover all of them.
 ///
 /// Exists because they did not. The geometry tests enumerated `[&CONTINUE, &PROGRESS]` by hand, so
 /// the two buttons added later were checked by nothing — including the check that would have caught
 /// their search boxes being smaller than their own templates. A hand-written list silently stops
 /// covering the thing you just added, which is the moment coverage matters most.
-pub const ALL: &[&Button] = &[&CONTINUE, &PROGRESS, &COMBAT_FINISH, &REWARD_CONFIRM];
+pub const ALL: &[&Button] =
+    &[&CONTINUE, &PROGRESS, &COMBAT_FINISH, &REWARD_CONFIRM, &POSTGAME_CONTINUE];
 
 /// Start menu `Continue`. Measured on 52.3 at 1920x1080; `Restart` is the adjacent button at
 /// x≈500 and eulogises the run, which is exactly why this is verified rather than assumed.
@@ -537,6 +603,35 @@ mod tests {
                 b.search
             );
         }
+    }
+
+    /// A button that is *not* the bottom-right arrow must not read the arrow's pixels.
+    ///
+    /// [`crate::observe::affirm::LORE_AFFIRMATIVE`] is `ss(1.0, 0.9)`, `os_x -0.75`, 64x80 — centre
+    /// (1872, 972), spanning x 1840–1904, y 932–1012. The postgame `Continue` is a 250x100 plank
+    /// running to x 1857, so the two genuinely overlap on screen, and a template cropped to the whole
+    /// button would put arrow pixels inside it while putting `Continue` pixels inside the arrow's
+    /// slot. Two readers sharing pixels is how one screen starts answering for another.
+    /// [`POSTGAME_CONTINUE`] is therefore cut at 1830, ten clear of the arrow.
+    ///
+    /// Asserted for this button only, rather than as a blanket rule, because the blanket rule is not
+    /// true. [`PROGRESS`] clicks (1855, 960) — inside the arrow slot — because it is not a neighbour
+    /// of that arrow, it **is** that arrow, read by template instead of by shipped artwork.
+    /// [`COMBAT_FINISH`]'s 300x100 crop also runs to 1878, and that overlap is pre-existing,
+    /// measured, and harmless in practice: combat WaitPhase and a lore screen are different screens,
+    /// so the two elements are never drawn together. Re-cropping it would invalidate every threshold
+    /// on it. Recorded as a follow-up rather than fixed here.
+    #[test]
+    fn the_postgame_continue_stops_clear_of_the_lore_arrow() {
+        const ARROW_LEFT: i32 = 1872 - 32; // 1840
+        assert!(
+            POSTGAME_CONTINUE.search.2 <= ARROW_LEFT,
+            "postgame Continue searches to x={}, into the arrow slot at x>={ARROW_LEFT}",
+            POSTGAME_CONTINUE.search.2
+        );
+        // And the template itself, not just the slack, must clear it.
+        let tpl = Template::load(&template_path(POSTGAME_CONTINUE.template)).unwrap();
+        assert!(POSTGAME_CONTINUE.origin.0 + tpl.width as i32 <= ARROW_LEFT);
     }
 
     #[test]

@@ -13,9 +13,14 @@
 //! 3. Otherwise take one hop toward whatever [`WorldMap::next_target`] wants, handling any arrival
 //!    event on the way.
 //!
-//! Priority is the map's: a live anomaly, then health, then opening the anomaly, then an
+//! Priority is the map's: **health first**, then a live anomaly, then opening the anomaly, then an
 //! unconsecrated shrine, then exploring. Corrupted shrines stop being destinations once the anomaly
 //! is open, because they cost a fight we no longer need.
+//!
+//! Health leads because the anomaly does not expire and health does not return by itself, so a
+//! detour is only ever a delay while skipping one can end the save. It is a *preference*, not a
+//! guarantee: where nothing restable is reachable — every inn on a corrupted map is locked behind
+//! its village being cleared — the branch falls through and the run gets on with the objective.
 //!
 //! ## Where it deliberately stops
 //!
@@ -468,6 +473,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return finish(&mut game, &r.log);
     }
     let mut health = r.apply_save();
+    // The first reading counts too. `note_health` needs a before and an after, so on a resumed save
+    // there is nothing for it to compare and the intent is never set — which is how a run that
+    // opened at 4/12 walked straight into a village fight without once considering a rest.
+    if let Some(h) = health {
+        r.map.note_health_level(h);
+    }
     r.log.push_str(&format!(
         "start at **{}**, hell {:?}, anomaly available {:?}, health {:?}\n\n",
         r.map.here().unwrap_or("?"),
@@ -652,6 +663,7 @@ fn drive(
             if let (Some(b), Some(a)) = (*health, now) {
                 r.map.note_health(b, a);
                 r.map.rested(a);
+                r.map.note_health_level(a);
             }
             *health = now;
             continue;
@@ -981,6 +993,7 @@ fn drive(
             if let (Some(b), Some(a)) = (*health, now) {
                 r.map.note_health(b, a);
                 r.map.rested(a);
+                r.map.note_health_level(a);
             }
             *health = now;
             continue;
@@ -1038,6 +1051,7 @@ fn drive(
         if let (Some(b), Some(a)) = (*health, now) {
             r.map.note_health(b, a);
             r.map.rested(a);
+            r.map.note_health_level(a);
         }
         *health = now;
         let _ = Goal::Explore;

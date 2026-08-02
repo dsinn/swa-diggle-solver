@@ -344,6 +344,24 @@ impl WorldMap {
         }
     }
 
+    /// Records the current health on its own, with no before-reading to compare against.
+    ///
+    /// [`WorldMap::note_health`] can only fire when we *watched* health fall, which leaves a run
+    /// that resumes at low health with no intent set at all — it walks into the next fight at a
+    /// third health because nothing ever observed the drop. Call this wherever a reading is taken,
+    /// including the very first one at startup.
+    ///
+    /// Sets and clears, so it is safe to call repeatedly: below half asks for a rest, full cancels
+    /// it, and anything in between leaves an existing intent standing. That middle case matters —
+    /// a partial heal must not cancel a rest we are still walking to.
+    pub fn note_health_level(&mut self, now: crate::rest::Health) {
+        if crate::rest::health_is_low(now) {
+            self.wants_rest = true;
+        } else if now.is_full() {
+            self.wants_rest = false;
+        }
+    }
+
     /// Cleared once health is back up.
     pub fn rested(&mut self, now: crate::rest::Health) {
         if now.is_full() {
@@ -533,12 +551,22 @@ impl WorldMap {
     pub fn next_target(&self) -> Option<Plan> {
         let here = self.here.as_deref().unwrap_or("");
 
-        if let Some(p) = self.anomaly() {
-            return Some(Plan { target: p.key.clone(), reason: Goal::Anomaly });
-        }
-
-
-
+        // **Health first, ahead of everything including a live anomaly.**
+        //
+        // This used to sit below the anomaly branch, on the reading that nothing shortens the run
+        // like going straight at the objective. That is true and it is also how a run dies: the
+        // anomaly is level 8, and arriving at it on a third health converts "the objective" into
+        // "the end of the save". The anomaly does not expire, and health does not recover by
+        // itself — so the detour is only ever a delay, while skipping it can be terminal.
+        //
+        // Ranked by site — a campfire costs nothing and needs no subworld — then by whether we can
+        // actually rest there, which for an inn means carrying the ten gold it charges.
+        //
+        // Falls through when nothing qualifies, which is the common case on a corrupted map: every
+        // inn there is locked behind its village being cleared. So this is a preference, not a
+        // guarantee, and a run with no reachable rest still gets on with the objective rather than
+        // standing still.
+        //
         // Health before exploration: walking into the next fight hurt is how a run ends. Ranked by
         // site — a campfire costs nothing and needs no subworld — then by whether we can actually
         // rest there, which for an inn means carrying the ten gold it charges.
@@ -570,6 +598,12 @@ impl WorldMap {
                 return Some(Plan { target: p.key.clone(), reason: Goal::Rest });
             }
         }
+
+
+        if let Some(p) = self.anomaly() {
+            return Some(Plan { target: p.key.clone(), reason: Goal::Anomaly });
+        }
+
 
 
         // Opening the anomaly comes BEFORE shrines, and not only because it is the objective:
@@ -1567,13 +1601,61 @@ mod tests {
         assert_ne!(m.next_target().unwrap().reason, Goal::Rest);
     }
 
+    /// **Reverses `the_anomaly_still_outranks_resting`**, on the user's instruction: resting is the
+    /// highest priority outside combat whenever health is low.
+    ///
+    /// The old assertion read "health is worth a detour, but not at the cost of the objective",
+    /// which is the wrong trade in this game. The anomaly does not expire and health does not come
+    /// back on its own, so the detour costs only time — while arriving at a level 8 fight on a third
+    /// health costs the save. Kept as an explicit test rather than deleted, so the reversal is
+    /// visible to whoever reads this next.
     #[test]
-    fn the_anomaly_still_outranks_resting() {
-        // Health is worth a detour, but not at the cost of the objective.
+    fn resting_outranks_even_a_live_anomaly() {
         let mut m = hurt_at_l1();
         m.fold(&dump("l1", "Weedley Copse crypt", vec![node("hp", "The Rift anomaly")]));
         m.hell = Some(0.1);
+        assert_eq!(m.next_target().unwrap().reason, Goal::Rest);
+    }
+
+    /// The other half of that trade: with nowhere to rest, the objective still wins. A preference
+    /// that could strand the run would be worse than the priority it replaced.
+    #[test]
+    fn a_live_anomaly_still_wins_when_no_rest_is_reachable() {
+        let mut m = hurt_at_l1();
+        m.fold(&dump("l1", "Weedley Copse crypt", vec![node("hp", "The Rift anomaly")]));
+        m.hell = Some(0.1);
+        m.gold = 0; // no inn will serve us
+        m.fuel = 0; // and no campfire fuel
+        for p in m.places.values_mut() {
+            p.corrupted = true; // every village locked behind its own clearing
+            p.completed = false;
+        }
         assert_eq!(m.next_target().unwrap().reason, Goal::Anomaly);
+    }
+
+    /// Resuming at low health must ask for a rest even though no drop was ever observed — the delta
+    /// rule cannot see a fight that happened before the process started.
+    #[test]
+    fn a_resumed_run_at_low_health_wants_a_rest() {
+        let mut m = WorldMap::default();
+        assert!(!m.wants_rest(), "nothing observed yet");
+        m.note_health_level(crate::rest::Health { current: 4, max: 12 });
+        assert!(m.wants_rest(), "4/12 is below half");
+    }
+
+    #[test]
+    fn exactly_half_is_not_yet_low_and_a_partial_heal_does_not_cancel() {
+        let mut m = WorldMap::default();
+        m.note_health_level(crate::rest::Health { current: 6, max: 12 });
+        assert!(!m.wants_rest(), "half is the game's `fear` line, and it is strict");
+
+        m.note_health_level(crate::rest::Health { current: 5, max: 12 });
+        assert!(m.wants_rest());
+        // Healing part-way must NOT cancel a rest we are still walking to.
+        m.note_health_level(crate::rest::Health { current: 8, max: 12 });
+        assert!(m.wants_rest(), "still short of full, so the errand stands");
+        m.note_health_level(crate::rest::Health { current: 12, max: 12 });
+        assert!(!m.wants_rest(), "full clears it");
     }
 
     #[test]

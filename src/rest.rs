@@ -88,6 +88,22 @@ pub fn should_rest(before: Health, after: Health) -> bool {
     lost >= REST_THRESHOLD && !after.is_full()
 }
 
+/// Is health low enough that resting is the priority, whatever route got us here?
+///
+/// [`should_rest`] is a **delta** rule — "that node was expensive" — and it has a blind spot it
+/// cannot see out of: it only fires when we watched health fall. A run that *resumes* at 4/12 has no
+/// before-reading to compare against, so nothing sets the intent and the navigator walks into the
+/// next fight at a third health. That is exactly what a live run did.
+///
+/// This is the absolute rule that closes it: below half, seek a rest, however we arrived.
+///
+/// Half is the game's own line, not one invented here. `rpgview.lua:1643` makes an enemy `fear`able
+/// at `health*2 < maxHealth`, so it is the threshold the game itself treats as "this one is in
+/// trouble" — the same arithmetic, strict, so an exact half is not yet low.
+pub fn health_is_low(now: Health) -> bool {
+    now.current * 2 < now.max
+}
+
 /// What the inn charges (`ui/rest.lua:49`, `getPlayerGold() >= 10`).
 pub const INN_COST: i64 = 10;
 

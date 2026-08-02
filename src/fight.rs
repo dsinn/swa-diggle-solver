@@ -135,6 +135,15 @@ impl Fight<'_> {
                     log.push_str(&format!(
                         "  fight over after {turns} turns; no reward screen offered\n"
                     ));
+                    // A rewardless win still raises the postgame, and it has to be cleared here.
+                    //
+                    // This used to be left to the caller's loop, on the reasoning that a leftover
+                    // screen is the loop's business, the same as a lore screen. That reasoning was
+                    // wrong about one thing: the loop finds a screen by reading the *arrow*
+                    // artwork, and the postgame's `Continue` is a `default` text button. It scores
+                    // 0.20 there and is simply never seen — so the run walked off looking for a map
+                    // with the stats screen still up, and reported a subworld navigation failure.
+                    self.clear_postgame(feed, keys, log, began, deadline);
                     return Ok(Outcome::ClearedWithoutReward { turns });
                 }
             };
@@ -329,11 +338,49 @@ impl Fight<'_> {
         match save::load(&self.combat_path).ok().and_then(|cs| cs.int_at("rpg.player.health")) {
             Some(h) if h > 0 => {}
             Some(h) => {
+                // Zero health is NOT automatically a refusal, because at zero health with the
+                // area's enemies all dead the slot still says `Finish` — and that is a fight we won
+                // and want to bank. A live run hit exactly this on its first try, so it is the
+                // common case, not the corner one.
+                //
+                // The exact condition is `health <= 0 AND fixedEnemiesRemaining() > 0`
+                // (`rpg.lua:594`), and `fixedEnemiesRemaining` is `#areaData.enemies` minus kills.
+                // `combatSaveData` has the kills; neither save has the area total, so the condition
+                // cannot be evaluated. What is left is the button itself.
+                //
+                // The button is readable *because it is greyed until the state settles*. Measured on
+                // that live frame: the inactive plank scores 0.8380, while an active one scores
+                // 1.0000 twice over. So waiting for an active match both avoids clicking a dead
+                // button and gives a much stronger reading than the 0.90 used elsewhere.
+                //
+                // **Residual risk, stated plainly:** an active `Give up` has never been captured, so
+                // nothing measured rules out its scoring above the bar. The estimate is that the
+                // lettering is roughly 7% of the crop, which puts a word swap well below 0.97 — but
+                // that is arithmetic, not a measurement. The best score is logged on failure so the
+                // next run that lands here settles it with a number instead of an estimate.
+                let seen = crate::act::wait_for(
+                    self.win,
+                    &crate::act::COMBAT_FINISH,
+                    crate::act::COMBAT_FINISH_ACTIVE,
+                    Duration::from_secs(6),
+                );
+                if !seen.found() {
+                    log.push_str(&format!(
+                        "  **not clicking (0.9,0.9) at {h} health**: waited for an active `Finish` \
+                         and the best score was {:.4} over {} looks (need {:.2}). At zero health \
+                         this slot reads `Give up` when enemies remain (`rpg.lua:594`), so an \
+                         unconfirmed button is not pressed.\n",
+                        seen.best,
+                        seen.looks,
+                        crate::act::COMBAT_FINISH_ACTIVE
+                    ));
+                    return Ok(false);
+                }
                 log.push_str(&format!(
-                    "  **not clicking (0.9,0.9) at {h} health** — that slot reads `Give up` or \
-                     `Eulogise` here (`rpg.lua:576`, `:594`), not `Finish`\n"
+                    "  at {h} health, but the slot is an active `Finish` ({:.4}) — the area is \
+                     clear and this fight is won\n",
+                    seen.best
                 ));
-                return Ok(false);
             }
             None => {
                 log.push_str(
@@ -429,26 +476,73 @@ impl Fight<'_> {
         &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, turns: usize,
         deadline: Instant, key: Option<String>, mark: usize,
     ) -> Result<Outcome, crate::Error> {
-        // `viewPostgameAndReturn` grants the item, opens the postgame, and asserts on deleting
-        // `combatSaveData`. Watch the CONSOLE, and do not touch that file while it is going: polling
-        // it across this window made the delete fail and crashed the game.
+        self.clear_postgame(feed, keys, log, mark, deadline);
+        Ok(Outcome::Cleared { turns, reward: key })
+    }
+
+    /// Waits for the postgame to appear and dismisses it.
+    ///
+    /// Shared by both endings, because both raise it: granting a reward opens it via
+    /// `viewPostgameAndReturn`, and a rewardless win opens it directly. Until it is dismissed there
+    /// is no map behind it.
+    ///
+    /// Errors are swallowed on purpose. Every caller has already achieved the thing it set out to do
+    /// — the fight is over and any reward is banked — so a failure to press Continue should degrade
+    /// to "the next loop iteration sees a screen" rather than discard that outcome.
+    fn clear_postgame(
+        &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, mark: usize,
+        deadline: Instant,
+    ) -> bool {
+        // Watch the CONSOLE, not `combatSaveData`. `viewPostgameAndReturn` asserts on deleting that
+        // file, and polling it across this window made the delete fail and crashed the game.
+        // Two independent ways in, because they fail differently. The console line is definitive but
+        // arrives through a screen-buffer scrape that can lag; the fingerprint is immediate but is
+        // one number. Either is enough to know the screen is up.
         let until = deadline.min(Instant::now() + Duration::from_secs(20));
-        let mut postgame = false;
+        let (mut postgame, mut how) = (false, "");
         while Instant::now() < until && !postgame {
             std::thread::sleep(Duration::from_millis(250));
             feed.pump();
-            postgame = feed.seen_since(mark, "Postgame screen:");
+            if feed.seen_since(mark, "Postgame screen:") {
+                postgame = true;
+                how = "console";
+            } else if matches!(
+                crate::act::score_exact(self.win, &crate::act::POSTGAME_CONTINUE),
+                Ok(q) if q >= crate::act::POSTGAME_CONTINUE_PRESENT
+            ) {
+                postgame = true;
+                how = "the Continue fingerprint";
+            }
         }
-        log.push_str(&format!("  postgame reached: {postgame}\n"));
+        log.push_str(&format!(
+            "  postgame reached: {postgame}{}\n",
+            if postgame { format!(" (via {how})") } else { String::new() }
+        ));
         if postgame {
             // Postgame's Continue is `affirmative` -> `goBack()`, guarded by `activeIf = backMode`.
             keys.focus();
             std::thread::sleep(Duration::from_millis(300));
-            keys.press_key(VK_SPACE, SC_SPACE)?;
-            std::thread::sleep(Duration::from_secs(2));
+            if keys.press_key(VK_SPACE, SC_SPACE).is_err() {
+                log.push_str("  could not send Space to the postgame\n");
+                return false;
+            }
+            // Verify it actually went, rather than trusting the keystroke. This screen is the one
+            // that gates the map behind it, and a press that did not land looks identical to one
+            // that did until something checks.
+            let gone_by = Instant::now() + Duration::from_secs(6);
+            let mut gone = false;
+            while Instant::now() < gone_by && !gone {
+                std::thread::sleep(Duration::from_millis(250));
+                gone = !matches!(
+                    crate::act::score_exact(self.win, &crate::act::POSTGAME_CONTINUE),
+                    Ok(q) if q >= crate::act::POSTGAME_CONTINUE_PRESENT
+                );
+            }
+            log.push_str(&format!("  postgame dismissed: {gone}\n"));
             feed.pump();
+            return gone;
         }
-        Ok(Outcome::Cleared { turns, reward: key })
+        postgame
     }
 
     fn park(&self) {
