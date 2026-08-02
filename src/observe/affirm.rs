@@ -147,12 +147,44 @@ impl ButtonArt {
     /// The search is bounded to the slot rather than the screen. That is not only a speed choice: an
     /// unbounded search would happily find the same arrow somewhere else on a screen that has
     /// several, and report a control we are not about to press.
+    /// Reads the slot from a capture of just that slot.
+    ///
+    /// The button never moves, so grabbing the whole window to look at a 64x80 corner is around 300
+    /// times the pixels for the same answer — and this runs in a poll loop while waiting for text
+    /// screens. `client` is the full client size, which the slot's position is derived from;
+    /// `origin` is where the crop was taken.
+    pub fn read_cropped(
+        &self, frame: &Frame, spec: &ButtonSpec, client: (i32, i32), origin: (i32, i32),
+    ) -> Reading {
+        self.read_at(frame, spec, client, origin)
+    }
+
+    /// The slot's crop rectangle for a given client size: `(x, y, w, h)`, with slack for the search.
+    pub fn crop_rect(spec: &ButtonSpec, client_w: i32, client_h: i32) -> (i32, i32, i32, i32) {
+        let s = crate::layout::scale(client_w, client_h);
+        let (cx, cy) = button_center(spec, client_w, client_h);
+        let (tw, th) = ((spec.w * s).round() as i32, (spec.h * s).round() as i32);
+        let pad = SEARCH_SLACK + 2;
+        let x = (cx - tw / 2 - pad).max(0);
+        let y = (cy - th / 2 - pad).max(0);
+        let w = (tw + pad * 2).min(client_w - x);
+        let h = (th + pad * 2).min(client_h - y);
+        (x, y, w, h)
+    }
+
     pub fn read(&self, frame: &Frame, spec: &ButtonSpec) -> Reading {
         let (w, h) = (frame.width, frame.height);
+        self.read_at(frame, spec, (w, h), (0, 0))
+    }
+
+    fn read_at(
+        &self, frame: &Frame, spec: &ButtonSpec, client: (i32, i32), origin: (i32, i32),
+    ) -> Reading {
+        let (w, h) = client;
         let s = crate::layout::scale(w, h);
         let (cx, cy) = button_center(spec, w, h);
         let (tw, th) = ((spec.w * s).round() as i32, (spec.h * s).round() as i32);
-        let (x0, y0) = (cx - tw / 2, cy - th / 2);
+        let (x0, y0) = (cx - tw / 2 - origin.0, cy - th / 2 - origin.1);
         let bounds = Some((
             x0 - SEARCH_SLACK,
             y0 - SEARCH_SLACK,

@@ -202,9 +202,12 @@ impl Run<'_> {
 
     /// Reads the affirmative slot in the bottom-right corner.
     fn affirmative(&self) -> affirm::Reading {
-        match diggle_solver::win::capture::capture_window(self.win) {
-            Ok(f) => self.affirm.read(&f, &affirm::LORE_AFFIRMATIVE),
-            Err(_) => affirm::Reading { state: affirm::State::Absent, score: 0.0, margin: 0.0 },
+        let absent = affirm::Reading { state: affirm::State::Absent, score: 0.0, margin: 0.0 };
+        let Ok((cw, ch)) = self.win.client_size() else { return absent };
+        let (x, y, w, h) = affirm::ButtonArt::crop_rect(&affirm::LORE_AFFIRMATIVE, cw, ch);
+        match diggle_solver::win::capture::capture_client_rect(self.win, x, y, w, h) {
+            Ok(f) => self.affirm.read_cropped(&f, &affirm::LORE_AFFIRMATIVE, (cw, ch), (x, y)),
+            Err(_) => absent,
         }
     }
 
@@ -237,13 +240,13 @@ impl Run<'_> {
             return false;
         }
         for attempt in 1..=6 {
-            // Short, because this is now insurance rather than the mechanism. The old 8 s cap was
-            // sized for a design that pressed once and hoped; a lore screen animates its text in, so
-            // it routinely ran the full wait and made entering a village feel hung. Read-act-re-read
-            // already handles a press swallowed by a transition — it costs one more iteration of
-            // about a second, which is cheaper than waiting eight up front, every time.
-            let _ =
-                diggle_solver::observe::settle::wait_for_quiescence(self.win, 0.02, Duration::from_secs(2));
+            // No quiescence wait at all any more.
+            //
+            // It was insurance against pressing into a transition, but a lore screen animates its
+            // text in over a blurred, drifting backdrop, so quiescence at 0.02 is never reached and
+            // the full timeout was burned on every press — twice per screen, on every screen. The
+            // button fingerprint is a better readiness signal than stillness ever was: it says the
+            // control is painted and live, and the re-read after the press says whether it took.
             self.keys.focus();
             std::thread::sleep(Duration::from_millis(150));
             let _ = self.keys.press_key(VK_SPACE, SC_SPACE);
