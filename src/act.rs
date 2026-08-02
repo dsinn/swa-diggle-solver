@@ -475,19 +475,19 @@ pub const CHARACTER_STATS_PRESENT: f64 = 0.70;
 ///   the main menu                        0.1056  err 0.3819
 /// ```
 ///
-/// **0.99, not a midpoint.** Every other threshold here brackets something that legitimately varies
-/// — a caption that changes with the class, a plank that greys out, a word swapped for another. This
-/// one varies in no way at all: a fixed icon, no text, no per-class form, and no inactive state on
-/// this screen. Two independent captures measured exactly 1.0000 with zero error.
+/// **0.90.** The arrow itself does not vary — fixed icon, no text, no per-class form, no inactive
+/// state on this screen — and two independent captures measured exactly 1.0000 with zero error, so
+/// the question is really "is this arrow present" rather than "how close is close enough".
 ///
-/// So the honest question is not "how close is close enough" but "is this arrow present", and for a
-/// pixel-stable sprite that is an equality test. Bracketing it at 0.85 would only widen the door to
-/// the 0.68 cluster below for no benefit.
+/// 0.99 was tried on that reasoning and is a shade too literal. A pixel-exact bar assumes the
+/// *capture* is as stable as the sprite, and it is not: the frame arrives through a live grab, and
+/// the plank behind the arrow can pick up a hover tint or a frame of animation from elsewhere on
+/// screen. 0.90 still leaves 0.22 to the nearest confusable at 0.6847 — an enormous margin by the
+/// standards of every other threshold here — while not betting the run on a capture being byte-clean.
 ///
 /// The confusables cluster near 0.68 because they are all brown planks in roughly this corner; none
-/// of them carries the arrow. If a hover or inactive rendering ever does appear, 0.99 rejects it and
-/// the run stops with "stuck on the character screen" — loud, and the safe direction, since the
-/// alternative is clicking something that is not this button.
+/// of them carries the arrow. A rejection stops the run with "stuck on the character screen", which
+/// is loud and the safe direction.
 pub const CHARACTER_BACK: Button = Button {
     name: "character back",
     template: "character-back.png",
@@ -497,7 +497,7 @@ pub const CHARACTER_BACK: Button = Button {
 };
 
 /// The character screen's exit is on screen. See [`CHARACTER_BACK`].
-pub const CHARACTER_BACK_PRESENT: f64 = 0.99;
+pub const CHARACTER_BACK_PRESENT: f64 = 0.90;
 
 /// Which screen the game is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
