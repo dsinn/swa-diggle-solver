@@ -57,6 +57,12 @@ pub struct Quality {
     pub carbon: Option<i64>,
     /// Locked by the tile itself rather than by a row or column rule.
     pub unselectable: bool,
+    /// `destroy` — an exploding tile, counting down to take its neighbours with it.
+    ///
+    /// Set together with `unselectable = -1` (`tileboard.lua:1172-1174`), so either alone would do
+    /// today. Both are honoured because they mean different things and only one of them is the
+    /// instruction we actually care about: do not touch this tile.
+    pub destroy: bool,
     /// Keys in `extra` that nothing here reads. Non-empty means a tile is carrying state that may
     /// change its score, and we are scoring it as if it were not.
     pub unmodelled: Vec<String>,
@@ -78,6 +84,7 @@ impl Quality {
             burn: extra.int_at("burn"),
             carbon: extra.int_at("carbon"),
             unselectable: extra.path("unselectable").is_some(),
+            destroy: extra.path("destroy").is_some(),
             unmodelled: extra
                 .map
                 .keys()
@@ -115,7 +122,7 @@ impl Tile {
 
     /// Unselectable tiles cannot form part of a word, so they must be excluded before searching.
     pub fn selectable(&self) -> bool {
-        !self.quality.unselectable
+        !self.quality.unselectable && !self.quality.destroy
     }
 }
 
@@ -412,5 +419,29 @@ mod live_wood_board {
         assert_eq!(dumps.len(), 1, "one complete board");
         let letters: String = dumps[0].tiles.iter().map(|t| t.letter.clone()).collect();
         assert_eq!(letters, "WYITYNWUILDAYRAT", "the wood tile must not be dropped");
+    }
+}
+
+#[cfg(test)]
+mod exploding_tile_tests {
+    use super::*;
+
+    /// An exploding tile is never part of a word.
+    ///
+    /// `tileboard.lua:1170-1176` sets `unselectable = -1` and `destroy = true` together, and draws
+    /// it in flat red (`:1917`). Either flag alone is enough here, so a future board that sets only
+    /// one still keeps our hands off it.
+    #[test]
+    fn a_tile_marked_for_destruction_is_not_selectable() {
+        let mut extra = crate::game::save::Table::default();
+        extra.map.insert("destroy".into(), crate::game::save::Value::Bool(true));
+        let bomb = Tile { letter: "4".into(), quality: Quality::from_extra(&extra) };
+        assert!(bomb.quality.destroy);
+        assert!(!bomb.selectable(), "an exploding tile must never be clicked");
+    }
+
+    #[test]
+    fn an_ordinary_tile_is_still_selectable() {
+        assert!(Tile::plain("E").selectable());
     }
 }
