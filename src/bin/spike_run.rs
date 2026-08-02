@@ -576,6 +576,47 @@ fn drive(
             }
         }
 
+        // A fight waiting to be finished gates the map exactly as an item screen does, and a save
+        // resumed mid-combat drops us straight into one — the run then demanded an overworld dump,
+        // found none, and stopped. Twice, on two different saves.
+        //
+        // Asked visually rather than from `combatSaveData`, whose existence proves nothing: it is
+        // the whole RUN's save, removed only at death or postgame (`overworld.lua:968`, `:1154`), so
+        // it is present all the time. `Finish` is drawn only in `WaitPhase`
+        // (see [`diggle_solver::act::COMBAT_FINISH`]), which is precisely the state that strands us.
+        //
+        // `Fight::run` is built to join a fight already in progress, so it needs no special entry:
+        // it reads the save, sees `WaitPhase`, and clicks Finish itself.
+        if matches!(
+            diggle_solver::act::locate(r.win, &diggle_solver::act::COMBAT_FINISH),
+            Ok(Some(q)) if q >= diggle_solver::act::COMBAT_FINISH_PRESENT
+        ) {
+            r.log.push_str(&format!("{step}. a fight is waiting to be finished
+"));
+            let mut fl = String::new();
+            let outcome = fight.run(
+                &mut r.feed,
+                &r.keys,
+                &mut fl,
+                deadline.min(Instant::now() + Duration::from_secs(300)),
+            );
+            r.log.push_str(&fl.lines().map(|l| format!("    {l}
+")).collect::<String>());
+            match outcome {
+                Ok(o) if o.cleared() => r.log.push_str(&format!("  {o:?}
+")),
+                Ok(other) => return Stop::Fought(format!("{other:?}")),
+                Err(e) => return Stop::Failed(e.to_string()),
+            }
+            let now = r.apply_save();
+            if let (Some(b), Some(a)) = (*health, now) {
+                r.map.note_health(b, a);
+                r.map.rested(a);
+            }
+            *health = now;
+            continue;
+        }
+
         for _ in 0..10 {
             if r.clear_text_screen() {
                 r.log.push_str(&format!("{step}. cleared a text screen\n"));
