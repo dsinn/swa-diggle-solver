@@ -254,29 +254,56 @@ fn pattern_admits(pattern: &str, c: u8) -> bool {
     p.len() == 1 && p.as_bytes()[0] == c
 }
 
-/// Wildcard tiles — NOT YET IMPLEMENTED.
+/// Wildcard tiles — SPEC, not yet implemented.
 ///
-/// A wildcard is a blank tile that can stand for any letter, and it is **not** spent by clicking
-/// alone: you click it and then **type the letter you want on the keyboard**. Confirmed by the
-/// game's author after a live run met one.
+/// A wildcard is a blank tile that can stand for any letter. It reads as `.` in the board dump, and
+/// the search already treats it correctly as a free letter — a live fight planned `DROPLETS` through
+/// index 0 while index 0 printed as `.`. What is missing is the actuation.
 ///
-/// It reads as `.` in the board dump, which is why a live fight chose `DROPLETS` using index 0 while
-/// index 0 printed as `.` — the search had already treated it as a free letter, correctly. What
-/// failed was the actuation: clicking it changed nine tiles at once (`clicking tile 0 also changed
-/// [1, 2, 4, 5, 6, 9, 10, 12, 13]`), because a click on a wildcard opens a letter prompt rather than
-/// simply selecting a tile, and the board redraws underneath it.
+/// ## Click it, then type — never type alone
 ///
-/// So [`Typist::type_word`] may plan a word through a wildcard, and [`crate::combat::Board`] cannot
-/// currently place it. Until this is implemented, a board containing `.` will fail selection on the
-/// turn that uses it.
+/// The obvious shortcut is to skip the click and just type the letter. That is wrong, and the reason
+/// is worth keeping: **if the letter you want already exists on the board, the ordinary tile wins**.
+/// Type `E` while a real `E` is present and the game spends that one, not the wildcard. Items exist
+/// that make *which* tile you spend matter, so this is a correctness problem rather than a
+/// shortcut — the click is what selects the wildcard specifically, and the keystroke only decides
+/// what it becomes.
 ///
-/// What implementing it needs:
-/// 1. Recognising the wildcard tile in the dump rather than treating `.` as an ordinary letter.
-/// 2. After clicking it, sending the intended letter as a keystroke — the existing `type_text`
-///    path, not a click.
-/// 3. Selection verification that expects the whole board to redraw at that moment, since the
-///    restless-tile filter samples before the click and cannot predict it.
-pub mod wildcard {}
+/// ## The sequence
+///
+/// 1. Click the wildcard tile, as any other tile.
+/// 2. Send the intended letter as a keystroke.
+/// 3. Check for the keyboard fingerprint.
+/// 4. **If the keyboard is still up, send the letter again.** Read → act → re-read, as everywhere
+///    else; the check is the exit condition, not a formality.
+///
+/// ## Recognising the screen
+///
+/// Choosing a wildcard's letter replaces the tile board with an on-screen QWERTY keyboard, so the
+/// board fingerprint cannot be used — there is no board. [`KEYBOARD`] is the region measured from a
+/// live capture at 1920x1080: bounded left by the `z` key, right by the `m` key, and top by the
+/// keyboard's upper edge. It is filled almost entirely with opaque wooden keys, which is what makes
+/// it stable against whatever fight scene is drawn behind.
+///
+/// The wildcard itself shows `[A-Z]` as a placeholder near the top of the screen while the keyboard
+/// is up, which is a second signal if one is ever wanted.
+///
+/// ## Why this blocks a fight today
+///
+/// [`Typist::type_word`] will happily plan a word through a wildcard, and `crate::combat::Board`
+/// cannot place it: clicking one changed nine tiles at once in a live fight
+/// (`clicking tile 0 also changed [1, 2, 4, 5, 6, 9, 10, 12, 13]`) because the board was being
+/// replaced by the keyboard underneath the check. The restless-tile filter cannot help — it samples
+/// before the click and cannot predict a whole-screen change — so selection verification has to
+/// expect this transition specifically.
+pub mod wildcard {
+    /// The keyboard region, in client pixels at 1920x1080.
+    ///
+    /// `(x0, y0, x1, y1)`, measured from a live capture: `z`'s left edge, the keyboard's top edge,
+    /// `m`'s right edge, and the bottom of the `z`-`m` row. Scale with
+    /// [`crate::layout::scale`] for other window sizes.
+    pub const KEYBOARD: (i32, i32, i32, i32) = (578, 605, 1253, 900);
+}
 
 #[cfg(test)]
 mod tests {
