@@ -764,6 +764,13 @@ fn drive(
                         None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
                     }
                 }
+                Crossing::Retreat { to } => match fresh.nodes.iter().find(|n| &n.key == to) {
+                    Some(n) => (
+                        format!("hurt and blocked in `{container}` — backing out via `{to}`"),
+                        (n.x, n.y),
+                    ),
+                    None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
+                },
                 Crossing::Fight { .. } => unreachable!("handled above"),
             };
             r.log.push_str(&format!("{step}. {what}\n"));

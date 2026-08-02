@@ -278,6 +278,13 @@ pub enum Crossing {
     Explore { to: String, toward: String },
     /// Standing on the exit road: leave for this overworld node.
     Leave { to: String },
+    /// Hurt, and the way onward is a fight — so go back the way we came instead.
+    ///
+    /// Legal for the same reason [`WorldMap::can_step`] documents and [`WorldMap::blocks_departure`]
+    /// forgot: `canTravelToDirect` needs **one** endpoint complete, and the node behind us is
+    /// complete by definition, since we walked through it. An unfinished fight blocks going onward,
+    /// never going back.
+    Retreat { to: String },
 }
 
 /// One move: the adjacent node to travel to, and the plan it serves.
@@ -998,9 +1005,25 @@ impl WorldMap {
         if here == exit_key {
             return Some(Crossing::Leave { to: leaving_to });
         }
-        // Nothing may be stepped off until it is complete, so an unfinished fight here is not a
-        // detour — it is the only legal move.
+        // An unfinished fight underfoot blocks going ONWARD. It does not block going back.
+        //
+        // This returned `Fight` unconditionally, and a live run paid for it: at 0 health, crossing
+        // Ulrome toward the `l7` campfire, it stepped onto `l10sub11` — a level 6 guard post — and
+        // concluded the only legal move was to fight it. Three turns later the board was down to one
+        // tile with nothing playable.
+        //
+        // `canTravelToDirect` needs one of the two endpoints complete
+        // (`overworldview.lua:1316-1321`), and the node we arrived from is complete by definition.
+        // [`WorldMap::can_step`] says so in as many words; this function simply never asked. So when
+        // a rest is what we are after, retreating is available and is the better move — the fight
+        // ahead is the thing we are trying to avoid, and taking it because we walked one node too
+        // far is the worst version of that.
         if self.blocks_departure(&here) {
+            if self.wants_rest {
+                if let Some(back) = self.retreat_step(&here) {
+                    return Some(Crossing::Retreat { to: back });
+                }
+            }
             return Some(Crossing::Fight { at: here });
         }
         if let Some(step) = self.first_step_toward(&here, &exit_key, false) {
@@ -1017,6 +1040,23 @@ impl WorldMap {
             .min_by(|a, b| a.cmp(b));
         let step = unseen.or_else(|| place.neighbours.iter().min())?.clone();
         Some(Crossing::Explore { to: step, toward: exit_key })
+    }
+
+    /// A neighbour we may legally step back to from a node that blocks going onward.
+    ///
+    /// Any **completed** neighbour qualifies, because `canTravelToDirect` accepts the move when
+    /// either endpoint is complete. Prefers one we have already stood on — that is the way we came,
+    /// and it leads back toward the entrance rather than deeper in.
+    fn retreat_step(&self, here: &str) -> Option<String> {
+        let me = self.places.get(here)?;
+        let mut back: Vec<&Place> = me
+            .neighbours
+            .iter()
+            .filter_map(|k| self.places.get(k))
+            .filter(|p| p.completed && !p.avoid)
+            .collect();
+        back.sort_by(|a, b| b.visited.cmp(&a.visited).then(a.key.cmp(&b.key)));
+        back.first().map(|p| p.key.clone())
     }
 
     /// Does an unfinished fight on this node forbid stepping off it?
@@ -1852,6 +1892,47 @@ mod tests {
 
     /// An unvisited subworld container counts as hostile, because a bandit camp is an ordinary
     /// forest until you are standing in it (`overworld/generators/world.lua:466-475`).
+    /// Hurt and standing on a node that blocks going onward: back out rather than fight.
+    ///
+    /// The live failure this comes from: at 0 health, crossing Ulrome toward the `l7` campfire, the
+    /// run stepped onto `l10sub11` — a level 6 guard post — and `cross_toward` reported the fight as
+    /// the only legal move. It was not. `canTravelToDirect` needs one endpoint complete, and the
+    /// node behind us is.
+    #[test]
+    fn hurt_and_blocked_we_back_out_instead_of_fighting() {
+        let exits = vec![Exit {
+            to_key: "l10_path_to_l7".into(),
+            to_heading: "Road to Greenoak".into(),
+            x: 100.0,
+            y: 100.0,
+        }];
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump(
+            "l10",
+            "l10sub11",
+            "Ulrome south — level 6 guard post",
+            vec![node("l10sub10", "Ulrome house")],
+            exits.clone(),
+        ));
+        m.entry("l10sub10").completed = true;
+        m.entry("l10sub10").visited = true;
+        m.entry("l10sub11").completed = false;
+
+        // Healthy: the fight underfoot is the only way onward, and we take it.
+        assert_eq!(
+            m.cross_toward(&exits),
+            Some(Crossing::Fight { at: "l10sub11".into() })
+        );
+
+        // Hurt: backing out is legal and is the better move.
+        m.note_health_level(crate::rest::Health { current: 0, max: 12 });
+        assert_eq!(
+            m.cross_toward(&exits),
+            Some(Crossing::Retreat { to: "l10sub10".into() }),
+            "the node we came from is complete, so stepping back is allowed"
+        );
+    }
+
     /// Hurt, nowhere to rest, and an **uncorrupted** shrine within reach: take the shrine, not the
     /// cheapest fight.
     ///
