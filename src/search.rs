@@ -119,6 +119,11 @@ pub struct Modifiers {
     pub nerve: Option<crate::flee::Nerve>,
     /// `immobile` — it cannot run, so no threshold will make it leave (`rpgview.lua:1646`).
     pub immobile: bool,
+    /// This enemy cancels overkill healing outright (`rpgview.lua:1084`).
+    pub overkill_no_heal: bool,
+    /// This enemy turns overkill healing into gold instead (`:1085`), which is the curse described
+    /// in `items/curses.lua:111`. Healing does not happen, so there is no charge to conserve.
+    pub overkill_heal_to_gold: bool,
 }
 
 impl Modifiers {
@@ -158,6 +163,8 @@ impl Modifiers {
                     .find(|k| statuses.contains_key(**k))
                     .and_then(|k| crate::flee::Nerve::from_status(k)),
                 immobile: save.path("rpg.enemy.immobile").is_some(),
+                overkill_no_heal: statuses.contains_key("overkillNoHeal"),
+                overkill_heal_to_gold: statuses.contains_key("overkillHealToGold"),
             },
             resolved.geometry,
         ))
@@ -172,6 +179,8 @@ impl Modifiers {
             problems: Vec::new(),
             nerve: None,
             immobile: false,
+            overkill_no_heal: false,
+            overkill_heal_to_gold: false,
         }
     }
 
@@ -276,8 +285,10 @@ impl Goal {
     /// threshold and the fight simply continues.
     pub fn for_enemy(
         mods: &Modifiers, health: i64, armour: i64, max_health: Option<i64>,
+        player: Option<&PlayerState>,
     ) -> Goal {
-        let kill = Goal::FirstKill { need: health + armour };
+        let need = health + armour;
+        let kill = Goal::FirstKill { need };
         if mods.overkill_gold {
             // Gold scales with the excess, so this one really does want the corpse.
             return Goal::MaxDamage;
@@ -285,19 +296,66 @@ impl Goal {
         // `immobile` suppresses fleeing outright (`rpgview.lua:1646`) -- it cannot run, so trying to
         // frighten it just leaves it alive and swinging.
         if mods.immobile {
-            return kill;
+            return Self::killing_blow(kill, need, player);
         }
-        let (Some(nerve), Some(max)) = (mods.nerve, max_health) else { return kill };
-        let Some(top) = nerve.leaves_at_or_below(max) else { return kill };
-        let below = health + armour;
+        let (Some(nerve), Some(max)) = (mods.nerve, max_health) else {
+            return Self::killing_blow(kill, need, player);
+        };
+        let Some(top) = nerve.leaves_at_or_below(max) else {
+            return Self::killing_blow(kill, need, player);
+        };
+        let below = need;
         // Armour absorbs first, so reaching `top` health costs the difference plus the armour.
-        let need = ((health - top) + armour).max(0);
-        if need >= below {
+        let scare_need = ((health - top) + armour).max(0);
+        if scare_need >= below {
             // No non-lethal hit reaches the threshold.
+            return Self::killing_blow(kill, need, player);
+        }
+        Goal::Scare { need: scare_need, below }
+    }
+
+    /// The kill, adjusted for what a well-rested charge is worth on this particular wound.
+    ///
+    /// Overkill on a killing blow heals `floor(overkill/2)` and spends a charge, but **only if the
+    /// heal is positive** (`rpgview.lua:1086, 1204-1210`) — so an overkill of 1 is free. See
+    /// [`crate::rested`] for the mechanic in full.
+    fn killing_blow(kill: Goal, need: i64, player: Option<&PlayerState>) -> Goal {
+        let Some(p) = player else { return kill };
+        if !p.heals {
             return kill;
         }
-        Goal::Scare { need, below }
+        match crate::rested::aim(p.vitals, true, p.bleeding) {
+            crate::rested::Aim::Best => kill,
+            // Keep the charge: kill with an overkill of 0 or 1, which heals nothing. Only worth
+            // doing when a charge is actually consumable -- a gear flag heals for free, so there is
+            // nothing to protect and a scratch may as well be topped up.
+            crate::rested::Aim::Frugal if p.consumes_charge => {
+                Goal::Scare { need, below: need + 2 }
+            }
+            crate::rested::Aim::Frugal => kill,
+            // Spend it well: the first answer whose half-overkill covers the deficit. If none does,
+            // the search falls back to its best-scoring word, which is exactly "if we cannot heal
+            // fully, use the best scoring answer".
+            crate::rested::Aim::HealFully => {
+                Goal::FirstKill { need: need + 2 * p.vitals.missing() }
+            }
+        }
     }
+}
+
+/// What the player brings to the choice of killing blow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerState {
+    pub vitals: crate::rested::Vitals,
+    /// Would overkill heal at all? Either a `wellRested*` status or the matching gear flag grants
+    /// it, and `overkillNoHeal` / `overkillHealToGold` cancel it (`rpgview.lua:1081-1085`).
+    pub heals: bool,
+    /// Is a limited charge spent doing so? True for the status, false for a gear flag — the
+    /// decrement at `:1204-1210` only touches `statusEffects`, so a gear flag heals for free and
+    /// there is nothing to conserve.
+    pub consumes_charge: bool,
+    /// `bleed` skips the heal branch entirely (`:1080`).
+    pub bleeding: bool,
 }
 
 /// How many words a thread claims at a time under [`Goal::MaxDamage`].
@@ -804,10 +862,10 @@ mod tests {
         .unwrap();
         let (mods, _) = Modifiers::from_save(&game_dir(), &save, 16).unwrap();
         assert!(mods.overkill_gold);
-        assert_eq!(Goal::for_enemy(&mods, 3, 0, None), Goal::MaxDamage);
+        assert_eq!(Goal::for_enemy(&mods, 3, 0, None, None), Goal::MaxDamage);
         // An ordinary enemy still races for the first kill -- speed matters when gold does not.
         assert_eq!(
-            Goal::for_enemy(&Modifiers::none(), 3, 2, None),
+            Goal::for_enemy(&Modifiers::none(), 3, 2, None, None),
             Goal::FirstKill { need: 5 }
         );
     }
@@ -971,7 +1029,7 @@ mod scare_goal_tests {
         // A cultist at full health: 12 of 12, no armour. It leaves at 5 or below, so we need 7 and
         // must stay under 12.
         assert_eq!(
-            Goal::for_enemy(&feared(), 12, 0, Some(12)),
+            Goal::for_enemy(&feared(), 12, 0, Some(12), None),
             Goal::Scare { need: 7, below: 12 }
         );
     }
@@ -981,7 +1039,7 @@ mod scare_goal_tests {
         // Armour absorbs first, so reaching the threshold costs the difference plus the armour, and
         // the lethal line moves out by the same amount.
         assert_eq!(
-            Goal::for_enemy(&feared(), 12, 3, Some(12)),
+            Goal::for_enemy(&feared(), 12, 3, Some(12), None),
             Goal::Scare { need: 10, below: 15 }
         );
     }
@@ -990,7 +1048,7 @@ mod scare_goal_tests {
     fn an_enemy_already_below_the_line_just_needs_a_non_lethal_word() {
         // It will run at the start of its own turn; our only job is not to kill it first.
         assert_eq!(
-            Goal::for_enemy(&feared(), 4, 0, Some(12)),
+            Goal::for_enemy(&feared(), 4, 0, Some(12), None),
             Goal::Scare { need: 0, below: 4 }
         );
     }
@@ -1000,24 +1058,92 @@ mod scare_goal_tests {
         // rpgview.lua:1646 -- the flee branch requires `not currentEnemy.immobile`. Trying to scare
         // one would leave it alive and still attacking.
         let m = Modifiers { immobile: true, ..feared() };
-        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12)), Goal::FirstKill { need: 12 });
+        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12), None), Goal::FirstKill { need: 12 });
     }
 
     #[test]
     fn without_a_known_maximum_we_do_not_guess() {
-        assert_eq!(Goal::for_enemy(&feared(), 12, 0, None), Goal::FirstKill { need: 12 });
+        assert_eq!(Goal::for_enemy(&feared(), 12, 0, None, None), Goal::FirstKill { need: 12 });
     }
 
     #[test]
     fn overkill_gold_still_wants_the_corpse() {
         // Gold scales with the excess, so this fight is the exception.
         let m = Modifiers { overkill_gold: true, ..feared() };
-        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12)), Goal::MaxDamage);
+        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12), None), Goal::MaxDamage);
     }
 
     #[test]
     fn a_one_health_maximum_offers_no_non_lethal_scare() {
         // leaves_at_or_below is None below 2 max health, so there is no room to hurt without killing.
-        assert_eq!(Goal::for_enemy(&feared(), 1, 0, Some(1)), Goal::FirstKill { need: 1 });
+        assert_eq!(Goal::for_enemy(&feared(), 1, 0, Some(1), None), Goal::FirstKill { need: 1 });
+    }
+}
+
+#[cfg(test)]
+mod rested_goal_tests {
+    use super::*;
+    use crate::rested::Vitals;
+
+    fn player(current: i64, consumes_charge: bool) -> PlayerState {
+        PlayerState {
+            vitals: Vitals { current, max: 12 },
+            heals: true,
+            consumes_charge,
+            bleeding: false,
+        }
+    }
+
+    /// Enemy on 10 with no armour, so the plain kill needs 10.
+    fn goal(p: Option<&PlayerState>) -> Goal {
+        Goal::for_enemy(&Modifiers::none(), 10, 0, None, p)
+    }
+
+    #[test]
+    fn a_scratch_kills_without_triggering_a_heal() {
+        // Missing 2 of 12. floor(overkill/2) must stay at 0, so overkill of 0 or 1: damage 10 or 11.
+        assert_eq!(goal(Some(&player(10, true))), Goal::Scare { need: 10, below: 12 });
+    }
+
+    #[test]
+    fn a_bad_wound_buys_a_full_top_up() {
+        // Missing 8, and the heal is half the overkill, so 16 of overkill are needed: damage 26.
+        assert_eq!(goal(Some(&player(4, true))), Goal::FirstKill { need: 26 });
+    }
+
+    #[test]
+    fn full_health_kills_normally() {
+        assert_eq!(goal(Some(&player(12, true))), Goal::FirstKill { need: 10 });
+    }
+
+    #[test]
+    fn a_free_heal_is_never_conserved() {
+        // A gear flag grants the heal without spending anything (the decrement at :1204-1210 only
+        // touches statusEffects), so there is no reason to avoid a scratch top-up.
+        assert_eq!(goal(Some(&player(10, false))), Goal::FirstKill { need: 10 });
+    }
+
+    #[test]
+    fn bleeding_kills_normally_because_no_heal_can_happen() {
+        let p = PlayerState { bleeding: true, ..player(4, true) };
+        assert_eq!(goal(Some(&p)), Goal::FirstKill { need: 10 });
+    }
+
+    #[test]
+    fn a_cancelled_heal_kills_normally() {
+        let p = PlayerState { heals: false, ..player(4, true) };
+        assert_eq!(goal(Some(&p)), Goal::FirstKill { need: 10 });
+    }
+
+    #[test]
+    fn scaring_takes_precedence_over_healing() {
+        // We cannot heal off an enemy we deliberately leave alive -- and not murdering it is worth
+        // more than a top-up.
+        let m = Modifiers { nerve: Some(crate::flee::Nerve::Fear), ..Modifiers::none() };
+        let p = player(4, true);
+        assert_eq!(
+            Goal::for_enemy(&m, 12, 0, Some(12), Some(&p)),
+            Goal::Scare { need: 7, below: 12 }
+        );
     }
 }

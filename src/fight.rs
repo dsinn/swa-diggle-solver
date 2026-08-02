@@ -178,7 +178,8 @@ impl Fight<'_> {
         // Overkill pays gold against a mimic or under a player curse, and the excess IS the reward,
         // so that fight wants the hardest hit rather than the quickest kill. Otherwise, an enemy
         // that can be frightened is frightened rather than killed.
-        let goal = Goal::for_enemy(&mods, health, armour, Some(peak));
+        let player = player_state(cs, &mods);
+        let goal = Goal::for_enemy(&mods, health, armour, Some(peak), player.as_ref());
         if let Goal::Scare { need, below } = goal {
             log.push_str(&format!(
                 "  {name} can be scared off ({:?}); aiming for {need}..{below} damage, not a kill
@@ -483,4 +484,35 @@ mod tileboard_tests {
         // was wrong by one -- which is how NATURALITY was submitted as YDIWYRIYAW.
         assert_eq!(tiles[1].letter, "Y");
     }
+}
+
+/// The player's side of the killing-blow decision, from `combatSaveData`.
+///
+/// Returns `None` when nothing about overkill matters, so the search keeps its ordinary goal.
+fn player_state(
+    cs: &Table, mods: &crate::search::Modifiers,
+) -> Option<crate::search::PlayerState> {
+    let current = cs.int_at("rpg.player.health")?;
+    let max = cs.int_at("rpg.player.maxHealth")?;
+    let status = |k: &str| cs.path(&format!("rpg.player.statusEffects.{k}")).is_some();
+    let gear = |k: &str| cs.path(&format!("rpg.player.gearFlags.{k}")).is_some();
+
+    // The charge lives in statusEffects; the gear flag grants the same heal permanently
+    // (`rpgview.lua:1082-1083` accepts either source).
+    let consumes_charge = status("wellRestedCampfire") || status("wellRestedInn");
+    let granted = consumes_charge || gear("wellRestedCampfire") || gear("wellRestedInn");
+    if !granted {
+        return None;
+    }
+    // Either the player's gear or the enemy's own status can cancel it (`:1084-1085`).
+    let cancelled = gear("overkillNoHeal")
+        || gear("overkillHealToGold")
+        || mods.overkill_no_heal
+        || mods.overkill_heal_to_gold;
+    Some(crate::search::PlayerState {
+        vitals: crate::rested::Vitals { current, max },
+        heals: !cancelled,
+        consumes_charge,
+        bleeding: status("bleed"),
+    })
 }
