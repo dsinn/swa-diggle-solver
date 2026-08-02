@@ -149,6 +149,11 @@ struct Run<'a> {
     /// to be distinguished from "that button entered a subworld", and conflating the two would send
     /// a real fight down the subworld path.
     pregame_seen: bool,
+    /// Feed line index of the last `Pregame screen:` we answered.
+    ///
+    /// Identity rather than a tally, for the same reason [`Run::answered_event`] is: a count and the
+    /// game's reality can only drift, while an index is idempotent and self-resyncing.
+    answered_pregame: Option<usize>,
 }
 
 impl Run<'_> {
@@ -479,6 +484,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         affirm: affirm::ButtonArt::load(Path::new(&cfg.game_dir), "right")?,
         answered_event: None,
         pregame_seen: false,
+        answered_pregame: None,
     };
 
     // Timed because the startup felt slow and nobody could say which part was slow. `wait_for_window`
@@ -902,6 +908,31 @@ fn drive(
                 Err(e) => return Stop::Failed(format!("stuck on the character screen: {e}")),
             }
             continue;
+        }
+        // The combat pregame: announced on the console, and dismissed with Space.
+        //
+        // No fingerprint needed. `ui/pregame.lua:91` prints `Pregame screen:` on entry, and its
+        // `Start` is `userFunctionName = 'affirmative'` (`:142-148`) — so the console says when it is
+        // up and the keyboard clears it. That is cheaper and more robust than a template, and it
+        // sidesteps the one awkward thing about this button: at `ss(0.5, 1)` with `yOffset -0.38` it
+        // is centred at (960, 1042), so a 250x100 `default` runs to y=1092 and is **clipped by the
+        // bottom of the screen**. Any template for it would have to be 250x88.
+        //
+        // Keyed on the block's index so a pregame is answered once: pressing Space again on the
+        // combat screen behind it would be a different button entirely.
+        if let Some(at) = r.feed.lines().iter().rposition(|l| l.contains("Pregame screen:")) {
+            if r.answered_pregame != Some(at) {
+                r.answered_pregame = Some(at);
+                r.pregame_seen = true;
+                r.log.push_str(&format!("{step}. pregame is up — starting the encounter
+"));
+                r.keys.focus();
+                std::thread::sleep(Duration::from_millis(300));
+                let _ = r.keys.press_key(VK_SPACE, SC_SPACE);
+                std::thread::sleep(Duration::from_millis(1200));
+                r.pump();
+                continue;
+            }
         }
         if Path::new(STOP_FILE).exists() {
             let _ = std::fs::remove_file(STOP_FILE);
