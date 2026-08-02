@@ -110,6 +110,15 @@ pub struct Modifiers {
     pub overkill_gold: bool,
     /// Reasons the search should not be trusted. Non-empty means a score here is a guess.
     pub problems: Vec<String>,
+    /// The quitting status this enemy carries, if any (`fear`, `terror`, `caution`).
+    ///
+    /// Read from `rpg.enemy.statusEffects`, which the save does carry
+    /// (`rpgview.lua:2513-2522`). Its presence is the whole trigger for preferring a scare: the
+    /// enemies that have it are mostly human, and killing a human is recorded as murder
+    /// (`onDeathFlags = {'Murder', ...}`, `rpg/enemies/humans.lua:58`).
+    pub nerve: Option<crate::flee::Nerve>,
+    /// `immobile` — it cannot run, so no threshold will make it leave (`rpgview.lua:1646`).
+    pub immobile: bool,
 }
 
 impl Modifiers {
@@ -144,6 +153,11 @@ impl Modifiers {
                 resist_cornerless: statuses.contains_key("resistCornerless"),
                 overkill_gold,
                 problems,
+                nerve: ["fear", "terror", "caution"]
+                    .iter()
+                    .find(|k| statuses.contains_key(**k))
+                    .and_then(|k| crate::flee::Nerve::from_status(k)),
+                immobile: save.path("rpg.enemy.immobile").is_some(),
             },
             resolved.geometry,
         ))
@@ -156,6 +170,8 @@ impl Modifiers {
             resist_cornerless: false,
             overkill_gold: false,
             problems: Vec::new(),
+            nerve: None,
+            immobile: false,
         }
     }
 
@@ -239,16 +255,48 @@ pub enum Goal {
     /// Hit as hard as possible. Required when overkill pays gold (`rpgview.lua:1211-1214`): the
     /// excess damage *is* the reward, so stopping at the first kill leaves money on the table.
     MaxDamage,
+    /// Frighten the enemy off instead of killing it: damage of at least `need`, but strictly less
+    /// than `below` so it survives to run.
+    ///
+    /// Worth more than the kill it replaces. The flee test is also evaluated inside `enemyCanHit`
+    /// (`rpgview.lua:1046-1052`), against the health the enemy *would* have -- so the turn that
+    /// pushes it past the line is also a turn it does not get to attack. And for the enemies that
+    /// carry `fear`, mostly humans, the kill would be recorded as murder.
+    Scare { need: i64, below: i64 },
 }
 
 impl Goal {
     /// Picks the goal for an enemy, given what modifies it.
-    pub fn for_enemy(mods: &Modifiers, health: i64, armour: i64) -> Goal {
+    ///
+    /// `max_health` is inferred rather than read: the save's enemy block carries
+    /// `health, armour, attacksCycle, statusEffects, name, state2, immobile, disguise`
+    /// (`rpgview.lua:2513-2522`) and no maximum, so the caller supplies the largest health it has
+    /// seen this enemy at. Both directions of error are safe -- guess low and the required damage
+    /// exceeds what would kill, so no scare is offered; guess high and the hit lands short of the
+    /// threshold and the fight simply continues.
+    pub fn for_enemy(
+        mods: &Modifiers, health: i64, armour: i64, max_health: Option<i64>,
+    ) -> Goal {
+        let kill = Goal::FirstKill { need: health + armour };
         if mods.overkill_gold {
-            Goal::MaxDamage
-        } else {
-            Goal::FirstKill { need: health + armour }
+            // Gold scales with the excess, so this one really does want the corpse.
+            return Goal::MaxDamage;
         }
+        // `immobile` suppresses fleeing outright (`rpgview.lua:1646`) -- it cannot run, so trying to
+        // frighten it just leaves it alive and swinging.
+        if mods.immobile {
+            return kill;
+        }
+        let (Some(nerve), Some(max)) = (mods.nerve, max_health) else { return kill };
+        let Some(top) = nerve.leaves_at_or_below(max) else { return kill };
+        let below = health + armour;
+        // Armour absorbs first, so reaching `top` health costs the difference plus the armour.
+        let need = ((health - top) + armour).max(0);
+        if need >= below {
+            // No non-lethal hit reaches the threshold.
+            return kill;
+        }
+        Goal::Scare { need, below }
     }
 }
 
@@ -286,7 +334,12 @@ pub fn search(
     threads: usize,
 ) -> Outcome {
     match goal {
-        Goal::FirstKill { need } => race_for_kill(dict, scorer, tiles, geometry, mods, need, threads),
+        Goal::FirstKill { need } => {
+            race_for_band(dict, scorer, tiles, geometry, mods, need, None, threads)
+        }
+        Goal::Scare { need, below } => {
+            race_for_band(dict, scorer, tiles, geometry, mods, need, Some(below), threads)
+        }
         Goal::MaxDamage => max_damage(dict, scorer, tiles, geometry, mods, threads),
     }
 }
@@ -388,6 +441,24 @@ pub fn race_for_kill(
     need: i64,
     threads: usize,
 ) -> Outcome {
+    race_for_band(dict, scorer, tiles, geometry, mods, need, None, threads)
+}
+
+/// First word scoring at least `need`, and under `below` when one is given.
+///
+/// The upper bound is what turns a kill race into a scare: the enemy has to survive to run away, so
+/// a lethal word is not an acceptable answer even though it scores higher.
+#[allow(clippy::too_many_arguments)]
+pub fn race_for_band(
+    dict: &Dictionary,
+    scorer: &Scorer,
+    tiles: &[Tile],
+    geometry: &Geometry,
+    mods: &Modifiers,
+    need: i64,
+    below: Option<i64>,
+    threads: usize,
+) -> Outcome {
     let typist = Typist::new(tiles, geometry);
     let corner_count = geometry.corner_count();
     let words = dict.words();
@@ -428,7 +499,7 @@ pub fn race_for_kill(
                         word.chars().count(),
                         mods.modifier(typed.corners_used, corner_count),
                     );
-                    if score >= need {
+                    if score >= need && below.map(|b| score < b).unwrap_or(true) {
                         let found = Found { word: word.clone(), score, slice };
                         let mut l = lethal.lock().unwrap();
                         // First writer wins, so the result does not depend on thread scheduling
@@ -733,10 +804,10 @@ mod tests {
         .unwrap();
         let (mods, _) = Modifiers::from_save(&game_dir(), &save, 16).unwrap();
         assert!(mods.overkill_gold);
-        assert_eq!(Goal::for_enemy(&mods, 3, 0), Goal::MaxDamage);
+        assert_eq!(Goal::for_enemy(&mods, 3, 0, None), Goal::MaxDamage);
         // An ordinary enemy still races for the first kill -- speed matters when gold does not.
         assert_eq!(
-            Goal::for_enemy(&Modifiers::none(), 3, 2),
+            Goal::for_enemy(&Modifiers::none(), 3, 2, None),
             Goal::FirstKill { need: 5 }
         );
     }
@@ -883,5 +954,70 @@ mod tests {
         assert_eq!(MIN_WORD_LEN, 1, "the game enforces no minimum word length");
         // Sorted, which is what makes a contiguous slice an alphabetical range.
         assert!(dict.words().windows(2).all(|w| w[0] <= w[1]));
+    }
+}
+
+#[cfg(test)]
+mod scare_goal_tests {
+    use super::*;
+    use crate::flee::Nerve;
+
+    fn feared() -> Modifiers {
+        Modifiers { nerve: Some(Nerve::Fear), ..Modifiers::none() }
+    }
+
+    #[test]
+    fn a_fearful_enemy_is_scared_not_killed() {
+        // A cultist at full health: 12 of 12, no armour. It leaves at 5 or below, so we need 7 and
+        // must stay under 12.
+        assert_eq!(
+            Goal::for_enemy(&feared(), 12, 0, Some(12)),
+            Goal::Scare { need: 7, below: 12 }
+        );
+    }
+
+    #[test]
+    fn armour_is_added_to_both_ends() {
+        // Armour absorbs first, so reaching the threshold costs the difference plus the armour, and
+        // the lethal line moves out by the same amount.
+        assert_eq!(
+            Goal::for_enemy(&feared(), 12, 3, Some(12)),
+            Goal::Scare { need: 10, below: 15 }
+        );
+    }
+
+    #[test]
+    fn an_enemy_already_below_the_line_just_needs_a_non_lethal_word() {
+        // It will run at the start of its own turn; our only job is not to kill it first.
+        assert_eq!(
+            Goal::for_enemy(&feared(), 4, 0, Some(12)),
+            Goal::Scare { need: 0, below: 4 }
+        );
+    }
+
+    #[test]
+    fn immobile_cannot_run_so_we_kill_it() {
+        // rpgview.lua:1646 -- the flee branch requires `not currentEnemy.immobile`. Trying to scare
+        // one would leave it alive and still attacking.
+        let m = Modifiers { immobile: true, ..feared() };
+        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12)), Goal::FirstKill { need: 12 });
+    }
+
+    #[test]
+    fn without_a_known_maximum_we_do_not_guess() {
+        assert_eq!(Goal::for_enemy(&feared(), 12, 0, None), Goal::FirstKill { need: 12 });
+    }
+
+    #[test]
+    fn overkill_gold_still_wants_the_corpse() {
+        // Gold scales with the excess, so this fight is the exception.
+        let m = Modifiers { overkill_gold: true, ..feared() };
+        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12)), Goal::MaxDamage);
+    }
+
+    #[test]
+    fn a_one_health_maximum_offers_no_non_lethal_scare() {
+        // leaves_at_or_below is None below 2 max health, so there is no room to hurt without killing.
+        assert_eq!(Goal::for_enemy(&feared(), 1, 0, Some(1)), Goal::FirstKill { need: 1 });
     }
 }

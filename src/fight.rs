@@ -87,6 +87,7 @@ impl Fight<'_> {
         let mut last_state = String::new();
         let mut last_change = Instant::now();
         let mut finished = false;
+        let mut peak_health: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         // Everything below asks "since this fight began", never "ever". A driver reuses one [`Feed`]
         // across fights, and the previous fight's `Item selection:` is still in the buffer — matching
         // it would send us to collect a reward that was taken minutes ago.
@@ -127,7 +128,7 @@ impl Fight<'_> {
                 }
                 "PlayerTurn" => {
                     turns += 1;
-                    match self.play_turn(feed, keys, log, &cs, turns)? {
+                    match self.play_turn(feed, keys, log, &cs, turns, &mut peak_health)? {
                         Some(bad) => return Ok(bad),
                         None => {}
                     }
@@ -147,8 +148,10 @@ impl Fight<'_> {
     }
 
     /// One player turn: read the board, choose a word, type it, submit, wait for the turn to move.
+    #[allow(clippy::too_many_arguments)]
     fn play_turn(
         &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, cs: &Table, turns: usize,
+        peak_health: &mut std::collections::HashMap<String, i64>,
     ) -> Result<Option<Outcome>, crate::Error> {
         let tiles = tiles_of(cs);
         if tiles.is_empty() {
@@ -163,9 +166,26 @@ impl Fight<'_> {
             log.push_str(&format!("  WARNING {p}\n"));
         }
 
+        // The enemy's maximum health is not in the save (`rpgview.lua:2513-2522` lists what is), and
+        // the flee thresholds are all defined against it. The highest health we have seen this
+        // enemy at is that maximum, because we start fights from the pregame with a fresh enemy and
+        // health only falls within a fight. Keyed by name, so the next enemy in a queue starts its
+        // own record rather than inheriting the last one's.
+        let peak = peak_health.entry(name.clone()).or_insert(health);
+        *peak = (*peak).max(health);
+        let peak = *peak;
+
         // Overkill pays gold against a mimic or under a player curse, and the excess IS the reward,
-        // so that fight wants the hardest hit rather than the quickest kill.
-        let goal = Goal::for_enemy(&mods, health, armour);
+        // so that fight wants the hardest hit rather than the quickest kill. Otherwise, an enemy
+        // that can be frightened is frightened rather than killed.
+        let goal = Goal::for_enemy(&mods, health, armour, Some(peak));
+        if let Goal::Scare { need, below } = goal {
+            log.push_str(&format!(
+                "  {name} can be scared off ({:?}); aiming for {need}..{below} damage, not a kill
+",
+                mods.nerve
+            ));
+        }
         let out = search::search(self.dict, self.scorer, &tiles, &geom, &mods, goal, 8);
         let letters: String = tiles.iter().map(|t| t.letter.as_str()).collect();
         let Some(found) = out.choice().cloned() else {
