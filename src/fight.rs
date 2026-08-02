@@ -198,10 +198,23 @@ impl Fight<'_> {
             log.push_str(&format!("turn {turns}: {} is not realizable\n", found.word));
             return Ok(Some(Outcome::NotRealizable { turns, word: found.word }));
         };
+        let steps: Vec<(usize, Option<char>)> = typed.steps().collect();
         log.push_str(&format!(
             "turn {turns}: {name} {health}+{armour}hp, board {letters}\n  \
-             play **{}** (scores {}, tiles {:?}, {} corners)\n",
-            found.word, found.score, typed.tiles, typed.corners_used
+             play **{}** (scores {}, tiles {:?}, {} corners{})\n",
+            found.word,
+            found.score,
+            typed.tiles,
+            typed.corners_used,
+            if typed.uses_a_wildcard() {
+                let w: Vec<String> = typed
+                    .steps()
+                    .filter_map(|(i, c)| c.map(|c| format!("{i}->{c}")))
+                    .collect();
+                format!(", wildcards {}", w.join(" "))
+            } else {
+                String::new()
+            }
         ));
 
         let board = Board::new(self.win, &geom)?;
@@ -210,7 +223,7 @@ impl Fight<'_> {
             log.push_str("  board never filled/settled -- not clicking into a moving board\n");
             return Ok(Some(Outcome::BoardNeverSettled { turns }));
         }
-        if let Err(e) = board.select_word(&typed.tiles) {
+        if let Err(e) = board.select_word(&steps) {
             log.push_str(&format!("  SELECTION FAILED: {e}\n"));
             self.shot("combat-select-fail");
             return Ok(Some(Outcome::SelectionFailed { turns, detail: e.to_string() }));

@@ -38,8 +38,27 @@ const WILDCARD: &str = ".";
 pub struct Typed {
     /// Dump indices of the tiles the word used, in selection order.
     pub tiles: Vec<usize>,
+    /// Parallel to [`Typed::tiles`]: the letter that must be typed into that tile because it is a
+    /// wildcard, and `None` for an ordinary tile where the click is the whole action.
+    ///
+    /// Kept here rather than recovered later because only the simulation knows it. A wildcard's
+    /// *letter* is not a property of the board — the same blank tile becomes a different letter in
+    /// every candidate word — so by the time an index reaches the clicker the information is gone.
+    pub wildcards: Vec<Option<char>>,
     /// How many of them are corner tiles — the numerator of the `resistCornerless` nerf.
     pub corners_used: usize,
+}
+
+impl Typed {
+    /// The word as a sequence of actions: which tile, and what to type into it.
+    pub fn steps(&self) -> impl Iterator<Item = (usize, Option<char>)> + '_ {
+        self.tiles.iter().copied().zip(self.wildcards.iter().copied())
+    }
+
+    /// Does placing this word involve the on-screen keyboard at all?
+    pub fn uses_a_wildcard(&self) -> bool {
+        self.wildcards.iter().any(Option::is_some)
+    }
 }
 
 /// A board prepared for repeated typing.
@@ -110,8 +129,18 @@ impl<'a> Typist<'a> {
                 Slot::Ephemeral(_) => unreachable!("checked above"),
             })
             .collect();
+        // The game lower-cases the letter before storing it (`onscreenKeypress`, `rpg.lua:664-666`),
+        // and `textinput` matches on `%a` either way, so the case here is cosmetic -- but sending
+        // what the game will store keeps a log line comparable with a `letterTemp` dump.
+        let wildcards: Vec<Option<char>> = built
+            .iter()
+            .map(|s| match s {
+                Slot::Wild(_, c) => Some((*c as char).to_ascii_lowercase()),
+                _ => None,
+            })
+            .collect();
         let corners_used = tiles.iter().filter(|&&i| self.geometry.is_corner(i)).count();
-        Some(Typed { tiles, corners_used })
+        Some(Typed { tiles, wildcards, corners_used })
     }
 
     fn step(&self, c: u8, selected: &mut [bool], built: &mut Vec<Slot>) -> Option<()> {
@@ -254,7 +283,7 @@ fn pattern_admits(pattern: &str, c: u8) -> bool {
     p.len() == 1 && p.as_bytes()[0] == c
 }
 
-/// Wildcard tiles — SPEC, not yet implemented.
+/// Wildcard tiles.
 ///
 /// A wildcard is a blank tile that can stand for any letter. It reads as `.` in the board dump, and
 /// the search already treats it correctly as a free letter — a live fight planned `DROPLETS` through
@@ -269,13 +298,43 @@ fn pattern_admits(pattern: &str, c: u8) -> bool {
 /// shortcut — the click is what selects the wildcard specifically, and the keystroke only decides
 /// what it becomes.
 ///
+/// There is a second typed path, found while implementing this and worth recording so it is not
+/// re-discovered as a shortcut: `rpg.textinput` selects a wildcard for **any punctuation character**
+/// (`rpg.lua:809-811`), `wordboard.select(tileboard.getUnselectedLegalTileWithLetter'.')`. That
+/// avoids the click, but it takes whichever wildcard the game's own corner-first scan reaches first.
+/// With two wildcards on the board and a reason to want the second — a corner, a material — there is
+/// no way to say so. The click can. So the click stays.
+///
 /// ## The sequence
 ///
 /// 1. Click the wildcard tile, as any other tile.
-/// 2. Send the intended letter as a keystroke.
-/// 3. Check for the keyboard fingerprint.
-/// 4. **If the keyboard is still up, send the letter again.** Read → act → re-read, as everywhere
+/// 2. Wait for the keyboard to appear. **This is the confirmation that the click landed**, and it
+///    replaces the usual luminance check, which cannot work here: `rpg.showKeyboard` calls
+///    `tileboard.hide'fade'` (`rpg.lua:695`), so every tile changes at once — that is exactly the
+///    `clicking tile 0 also changed [1, 2, 4, ...]` failure below.
+/// 3. Send the intended letter as text.
+/// 4. Check for the keyboard fingerprint.
+/// 5. **If the keyboard is still up, send the letter again.** Read → act → re-read, as everywhere
 ///    else; the check is the exit condition, not a formality.
+///
+/// Letters go out as **text**, not key events, on the same grounds as ordinary tile selection:
+/// `keyboardOpen` is handled inside `rpg.textinput` (`rpg.lua:802-807`), which forwards to
+/// `onscreenKeypress`. `love.keypressed` does not lead there.
+///
+/// ### Two cases where no keyboard appears, and neither is an error
+///
+/// `wordboard.select` only opens it when the tile has no letter yet **and** the player lacks the
+/// `submitWildcardRegex` gear flag (`wordboard.lua:140-143`). With that gear a wildcard selects like
+/// any other tile and the letter is decided at submission instead. So "clicked, no keyboard, tile is
+/// selected" is a success, not a timeout — and it is distinguishable from a missed click, which
+/// leaves the tile unselected too.
+///
+/// ### The retry has to be bounded
+///
+/// `onscreenKeypress` (`rpg.lua:663-672`) applies the tile's own `ligature` restriction before
+/// accepting: a restricted wildcard silently ignores a letter its pattern does not admit, and the
+/// keyboard stays up. Resending forever would hang the turn. A bounded retry turns that into a
+/// reported failure, which is what it is — [`Typist`] should not have proposed the letter.
 ///
 /// ## Recognising the screen
 ///
@@ -292,7 +351,10 @@ fn pattern_admits(pattern: &str, c: u8) -> bool {
 ///
 /// Do not template-match a captured keyboard. The game supports alternative keyboard layouts, so the
 /// glyph on any given key is not fixed, and anything keyed on letter positions fails for a player on
-/// a different layout.
+/// a different layout. `ui/objects/keyboard.lua:5-17` carries five of them, and they differ in row
+/// *width* as well as in glyphs — `qwerty`'s top row is 11 keys, `dvorak`'s is 8 — with each row
+/// centred by `xOffset = -(#letterset/2)+(i-0.5)`. So neither the letters nor the key positions are
+/// fixed; only "a wide block of wooden keys sits where the board was" is.
 ///
 /// Compare the region against **itself** instead. Capture it once immediately before clicking the
 /// wildcard — that is the tile board — and again after sending the letter. Back near the board
@@ -330,33 +392,101 @@ fn pattern_admits(pattern: &str, c: u8) -> bool {
 /// ### The cursor sits in the middle of it
 ///
 /// Clicking the wildcard leaves the pointer inside this region, and the game draws a cursor there.
-/// Two independent reasons that is fine, and the check should keep both:
+/// Worse, we do not even control where it ends up: `showKeyboard` and `hideKeyboard` both finish with
+/// `snapToNearestHotspot` (`rpg.lua:691`, `rpg.lua:711`), which warps the pointer onto whichever key
+/// or tile is nearest. Parking beforehand therefore does not settle the question — the game moves it
+/// back. Two independent reasons that is fine, and the check should keep both:
 ///
 /// - **Match by inliers, not by hash.** [`crate::observe::template`] scores the *fraction* of
 ///   template pixels that agree, which is occlusion-robust by design — it was chosen so overworld
 ///   nodes still match under drifting cloud. A cursor removes its own pixels from the agreeing set
 ///   and nothing else; against a 675x295 region that is well under 1%, and the threshold sits at
 ///   0.55. An exact `Frame::region_hash` would NOT survive it, so this must not be built that way.
-/// - **Park first anyway.** `Run::park` moves the pointer to (760, 240), which is outside this
-///   rectangle, and costs nothing. Belt and braces: the parking makes it not arise, the inlier
-///   scoring makes it harmless if parking is ever missed or the pointer is warped back by the game's
-///   own hotspot navigation.
+/// - **Nothing else in the region moves.** Both captures are of the same static screen furniture, so
+///   the cursor is the only mover and it is a rounding error against 675x295.
 ///
-/// ## Why this blocks a fight today
+/// ## What used to happen instead
 ///
 /// [`Typist::type_word`] will happily plan a word through a wildcard, and `crate::combat::Board`
-/// cannot place it: clicking one changed nine tiles at once in a live fight
+/// could not place it: clicking one changed nine tiles at once in a live fight
 /// (`clicking tile 0 also changed [1, 2, 4, 5, 6, 9, 10, 12, 13]`) because the board was being
 /// replaced by the keyboard underneath the check. The restless-tile filter cannot help — it samples
 /// before the click and cannot predict a whole-screen change — so selection verification has to
-/// expect this transition specifically.
+/// expect this transition specifically, which is what
+/// [`crate::combat::Board::select_word`] now does.
 pub mod wildcard {
     /// The keyboard region, in client pixels at 1920x1080.
     ///
     /// `(x0, y0, x1, y1)`, measured from a live capture: `z`'s left edge, the keyboard's top edge,
-    /// `m`'s right edge, and the bottom of the `z`-`m` row. Scale with
-    /// [`crate::layout::scale`] for other window sizes.
+    /// `m`'s right edge, and the bottom of the `z`-`m` row.
     pub const KEYBOARD: (i32, i32, i32, i32) = (578, 605, 1253, 900);
+
+    /// Inlier score at or above which the region is showing what the reference showed.
+    ///
+    /// Placed in the measured gap: keyboard against tile board scored **0.26**, and either against
+    /// itself **1.00**. Halfway leaves room for the cursor, the fade, and whatever the fight scene
+    /// does behind the board, on both sides.
+    pub const SAME: f64 = 0.55;
+
+    /// Where the keyboard block is anchored, in normalized client coordinates.
+    ///
+    /// `xPos or 0.5` and `yPos = 0.7`, from the call site (`rpg.lua:685`) and the defaults
+    /// (`ui/objects/keyboard.lua:44-45`). The game positions by a *fraction of the client* and then
+    /// adds offsets in game units multiplied by the scale — it does not letterbox — which is the same
+    /// model [`crate::win::window::button_center`] implements. Getting this wrong would only show on
+    /// a non-16:9 window, where the region would drift off the keys and every check would read
+    /// "changed".
+    const ANCHOR: (f64, f64) = (0.5, 0.7);
+
+    /// [`KEYBOARD`] as `(x, y, w, h)` for a given client size, clipped to it.
+    pub fn region(client_w: i32, client_h: i32) -> (i32, i32, i32, i32) {
+        let s = crate::layout::scale(client_w, client_h);
+        let (x0, y0, x1, y1) = KEYBOARD;
+        // The measured rectangle re-expressed as offsets from the anchor, at native size.
+        let (ax, ay) = (1920.0 * ANCHOR.0, 1080.0 * ANCHOR.1);
+        let x = (client_w as f64 * ANCHOR.0 + (x0 as f64 - ax) * s).round() as i32;
+        let y = (client_h as f64 * ANCHOR.1 + (y0 as f64 - ay) * s).round() as i32;
+        let w = ((x1 - x0) as f64 * s).round() as i32;
+        let h = ((y1 - y0) as f64 * s).round() as i32;
+        let x = x.clamp(0, client_w.max(1) - 1);
+        let y = y.clamp(0, client_h.max(1) - 1);
+        (x, y, w.min(client_w - x).max(1), h.min(client_h - y).max(1))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn at_native_size_the_region_is_the_measured_rectangle() {
+            assert_eq!(region(1920, 1080), (578, 605, 675, 295));
+        }
+
+        #[test]
+        fn it_scales_with_the_window() {
+            // Half size: the anchor stays at the same fraction of the client and the offsets halve.
+            // 540*0.7 = 378, plus (605-756)*0.5 = -75.5, which rounds away from zero to 303.
+            assert_eq!(region(960, 540), (289, 303, 338, 148));
+        }
+
+        #[test]
+        fn a_taller_window_moves_the_anchor_rather_than_stretching_the_region() {
+            // 1920x1200: scale stays 1.0 (width-limited), but the anchor is 0.7 of 1200 = 840, so
+            // the whole block sits 84px lower while keeping its size.
+            let (x, y, w, h) = region(1920, 1200);
+            assert_eq!((x, w, h), (578, 675, 295));
+            assert_eq!(y, 605 + 84);
+        }
+
+        #[test]
+        fn the_region_never_leaves_the_client_area() {
+            // A window smaller than the region must still yield a capturable rectangle, because the
+            // alternative is a BitBlt of a rectangle that is partly off-screen.
+            let (x, y, w, h) = region(320, 200);
+            assert!(x >= 0 && y >= 0 && w >= 1 && h >= 1);
+            assert!(x + w <= 320 && y + h <= 200);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -515,6 +645,40 @@ mod tests {
         let g = strip(3);
         assert_eq!(typed(&t, &g, "ABC"), Some(vec![0, 1, 2]));
         assert_eq!(typed(&t, &g, "ABCD"), None, "one wildcard cannot cover two missing letters");
+    }
+
+    #[test]
+    fn the_letter_for_each_wildcard_comes_back_aligned_with_its_tile() {
+        // The clicker walks `tiles` and `wildcards` together, so a misalignment would type a
+        // letter into the wrong tile -- or type nothing and leave the keyboard up, stalling the
+        // fight. Ordinary tiles must carry `None`, not a placeholder.
+        let t = tiles_of(&["A", "B", "."]);
+        let g = strip(3);
+        let typed = Typist::new(&t, &g).type_word("ABC").unwrap();
+        assert_eq!(typed.tiles, vec![0, 1, 2]);
+        assert_eq!(typed.wildcards, vec![None, None, Some('c')]);
+        assert!(typed.uses_a_wildcard());
+        assert_eq!(typed.steps().collect::<Vec<_>>(), vec![(0, None), (1, None), (2, Some('c'))]);
+    }
+
+    #[test]
+    fn a_word_with_no_wildcard_asks_for_no_typing_at_all() {
+        let t = tiles_of(&["A", "B"]);
+        let typed = Typist::new(&t, &strip(2)).type_word("AB").unwrap();
+        assert!(!typed.uses_a_wildcard());
+        assert_eq!(typed.wildcards, vec![None, None]);
+    }
+
+    #[test]
+    fn a_wildcard_dropped_by_a_ligature_does_not_leave_a_letter_behind() {
+        // Clause 1 undoes the previous selection when a ligature tile wins. If `wildcards` were
+        // built from anything but the final `built`, the abandoned wildcard's letter would survive
+        // into the plan and be typed at a tile that is not a wildcard.
+        let t = tiles_of(&["T", "TH", "."]);
+        let g = strip(3);
+        let typed = Typist::new(&t, &g).type_word("TH").unwrap();
+        assert_eq!(typed.tiles, vec![1], "the TH tile, not T plus a wildcard");
+        assert_eq!(typed.wildcards, vec![None]);
     }
 
     #[test]

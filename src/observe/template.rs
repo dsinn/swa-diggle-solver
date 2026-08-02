@@ -118,6 +118,43 @@ pub const ALPHA_MIN: u8 = 128;
 /// occluded pixels and still reports a high fraction for the part that is visible.
 pub const INLIER_TOLERANCE: i32 = 90;
 
+/// Inlier agreement between two captures of the **same region**, by the same metric as matching.
+///
+/// The other direction of the same idea: instead of asking "is this artwork somewhere in the frame",
+/// this asks "is this region still showing what it showed a moment ago". No template, nothing loaded
+/// from disk, no scale search — the two frames are already aligned by construction, so the whole
+/// thing is one pass.
+///
+/// Why it earns its place over a hash of the region: the score is the *fraction* of pixels that
+/// agree, so a small occlusion costs a small amount. That is what makes it usable with the game's
+/// own cursor drawn in the middle of the region — an exact hash would flip to "different" over a few
+/// hundred pixels. Same reasoning as [`INLIER_TOLERANCE`], applied to a self-comparison.
+///
+/// Returns 0 for mismatched sizes rather than panicking: a caller that has resized the window
+/// mid-check should see "not the same", which is true, and re-establish its reference.
+pub fn inliers_between(a: &crate::win::capture::Frame, b: &crate::win::capture::Frame) -> f64 {
+    if a.width != b.width || a.height != b.height {
+        return 0.0;
+    }
+    let total = a.bgra.len() / 4;
+    if total == 0 {
+        return 0.0;
+    }
+    let agree = a
+        .bgra
+        .chunks_exact(4)
+        .zip(b.bgra.chunks_exact(4))
+        .filter(|(pa, pb)| {
+            // Three channels only; the alpha byte of a BitBlt capture is not meaningful.
+            let d = (pa[0] as i32 - pb[0] as i32).abs()
+                + (pa[1] as i32 - pb[1] as i32).abs()
+                + (pa[2] as i32 - pb[2] as i32).abs();
+            d <= INLIER_TOLERANCE
+        })
+        .count();
+    agree as f64 / total as f64
+}
+
 /// Searches `frame` for `tpl` at a single scale, returning the best match.
 ///
 /// `step` subsamples candidate positions (1 = exhaustive). Nearest-neighbour is used for
@@ -276,6 +313,50 @@ mod tests {
             height: size,
             rgba: [r, g, b, alpha].repeat((size * size) as usize),
         }
+    }
+
+    #[test]
+    fn a_region_compared_with_itself_scores_one() {
+        // The positive control. Without it a broken metric that always returns 0 would look exactly
+        // like "the screen changed", which is the answer the caller is waiting for.
+        let f = solid_frame(30, 20, 10, 20, 30);
+        assert_eq!(inliers_between(&f, &f), 1.0);
+    }
+
+    #[test]
+    fn a_wholly_different_region_scores_zero() {
+        let a = solid_frame(30, 20, 0, 0, 0);
+        let b = solid_frame(30, 20, 255, 255, 255);
+        assert_eq!(inliers_between(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn a_small_occlusion_costs_only_its_own_area() {
+        // The cursor case, and the whole reason this is not a hash: the game warps the pointer into
+        // this region itself (`snapToNearestHotspot`), so some pixels always differ.
+        let a = solid_frame(20, 20, 0, 0, 0);
+        let mut b = a.clone();
+        for i in 0..8 {
+            b.bgra[i * 4] = 255;
+        }
+        let score = inliers_between(&a, &b);
+        assert!((score - (392.0 / 400.0)).abs() < 1e-9, "got {score}");
+        assert!(score >= crate::typist::wildcard::SAME, "must still read as unchanged");
+    }
+
+    #[test]
+    fn a_change_under_the_tolerance_is_not_a_change() {
+        // Idle animation and torch flicker move pixels a little every frame. A metric that called
+        // that "different" would report the keyboard as still open forever.
+        let a = solid_frame(10, 10, 100, 100, 100);
+        let b = solid_frame(10, 10, 110, 120, 125);
+        assert_eq!(inliers_between(&a, &b), 1.0, "10+20+25 = 55, under the tolerance");
+    }
+
+    #[test]
+    fn mismatched_sizes_read_as_different_rather_than_panicking() {
+        // A resized window mid-check must invalidate the reference, not crash a live fight.
+        assert_eq!(inliers_between(&solid_frame(10, 10, 0, 0, 0), &solid_frame(20, 10, 0, 0, 0)), 0.0);
     }
 
     /// A template painted into the frame must be found exactly, with zero error.

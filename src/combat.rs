@@ -88,6 +88,10 @@ pub enum SelectError {
     Stuck(usize),
     /// A click landed somewhere unplanned; the board is not in a state we can reason about.
     Stray { wanted: usize, got: Vec<usize> },
+    /// The on-screen keyboard would not take the letter. Almost always a restricted wildcard whose
+    /// pattern does not admit it (`onscreenKeypress`, `rpg.lua:664`), which is a planning error
+    /// rather than an input one — and the keyboard is still up, so the caller must clear it.
+    LetterRefused { tile: usize, letter: char },
     Win(crate::Error),
 }
 
@@ -97,6 +101,9 @@ impl std::fmt::Display for SelectError {
             SelectError::Stuck(i) => write!(f, "tile {i} would not select"),
             SelectError::Stray { wanted, got } => {
                 write!(f, "clicking tile {wanted} also changed {got:?}")
+            }
+            SelectError::LetterRefused { tile, letter } => {
+                write!(f, "wildcard {tile} would not take {letter:?}; keyboard still open")
             }
             SelectError::Win(e) => write!(f, "{e}"),
         }
@@ -109,6 +116,22 @@ impl From<crate::Error> for SelectError {
     }
 }
 
+/// How long to wait for the on-screen keyboard to fade in or out.
+///
+/// `showKeyboard` fades the board out (`tileboard.hide'fade'`, `rpg.lua:695`) rather than swapping
+/// it, so neither transition is instant. Generous, because the cost of being wrong is asymmetric: too
+/// short and a perfectly good wildcard is reported as a missed click.
+pub const KEYBOARD_TIMEOUT: Duration = Duration::from_millis(2500);
+
+/// Attempts at sending the letter before giving up on the word.
+pub const LETTER_ATTEMPTS: usize = 3;
+
+/// How long to let the board fade back in after the keyboard closes.
+///
+/// Shorter than the resume-from-save wait, because nothing is being re-dealt here: the same tiles
+/// are simply becoming visible again.
+pub const BOARD_RETURN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Drives tile selection on a live board.
 pub struct Board<'a> {
     win: &'a GameWindow,
@@ -116,6 +139,8 @@ pub struct Board<'a> {
     centres: Vec<(i32, i32)>,
     /// The rectangle the cheap capture reads, and the offset tile coordinates need.
     rect: (i32, i32, i32, i32),
+    /// The region watched to tell the on-screen keyboard from the tile board.
+    keyboard: (i32, i32, i32, i32),
     radius: i32,
 }
 
@@ -126,6 +151,7 @@ impl<'a> Board<'a> {
             win,
             centres: layout::tile_centres(geom, cw, ch),
             rect: layout::board_rect(geom, cw, ch),
+            keyboard: crate::typist::wildcard::region(cw, ch),
             // 55% of a tile: inside the face, so a small mapping error still samples the right tile
             // and a large one samples the gap.
             radius: (layout::tile_radius(cw, ch) * 0.55).round() as i32,
@@ -232,12 +258,95 @@ impl<'a> Board<'a> {
         }
     }
 
-    /// Puts a word on the board, confirming every tile before moving to the next.
+    /// Captures the region that tells the on-screen keyboard from the tile board.
+    fn read_keyboard_region(&self) -> Result<Frame, crate::Error> {
+        let (x, y, w, h) = self.keyboard;
+        capture_client_rect(self.win, x, y, w, h)
+    }
+
+    /// Waits until the keyboard region is, or is no longer, showing what `reference` showed.
     ///
-    /// `plan` is dump indices in **word order**. The baseline is taken once, before anything is
+    /// One primitive for both directions because they are the same measurement read two ways: the
+    /// reference is always the tile board, captured moments earlier in the same window, so "near it"
+    /// means the board is up and "far from it" means the keyboard is. See
+    /// [`crate::typist::wildcard`] for why this is a self-comparison and not a stored template.
+    ///
+    /// Returns whether the wanted state arrived before the deadline.
+    fn wait_for_board(
+        &self, reference: &Frame, want_board: bool, timeout: Duration,
+    ) -> Result<bool, crate::Error> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let now = self.read_keyboard_region()?;
+            let score = crate::observe::template::inliers_between(&now, reference);
+            if (score >= crate::typist::wildcard::SAME) == want_board {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+
+    /// Selects a wildcard tile and gives it a letter.
+    ///
+    /// The ordinary confirm-by-luminance cannot be used for the click: selecting a wildcard fades
+    /// the whole board out, so *every* tile changes and the stray check would fire on all of them.
+    /// The keyboard appearing is the confirmation instead — a positive signal for the same event,
+    /// and a more specific one, since only a wildcard produces it.
+    ///
+    /// `baseline` is still the pre-word board, and the tile is checked against it at the end: the
+    /// board comes back unchanged apart from this tile, which is now both selected and lettered.
+    fn place_wildcard(
+        &self, i: usize, letter: char, baseline: &[f64],
+    ) -> Result<(), SelectError> {
+        // The reference must be captured while the board is up, before anything is clicked.
+        let board = self.read_keyboard_region()?;
+        self.click(i)?;
+
+        if !self.wait_for_board(&board, false, KEYBOARD_TIMEOUT)? {
+            // No keyboard. Either the click missed, or this player has `submitWildcardRegex` and the
+            // tile selects like any other (`wordboard.lua:140-143`). The tile itself says which.
+            let selected = self.selected_now(baseline)?;
+            return if selected.get(i).copied().unwrap_or(false) {
+                Ok(())
+            } else {
+                Err(SelectError::Stuck(i))
+            };
+        }
+
+        for _ in 0..LETTER_ATTEMPTS {
+            crate::win::input::type_text_injected(
+                &letter.to_string(),
+                Duration::from_millis(40),
+            )?;
+            if self.wait_for_board(&board, true, KEYBOARD_TIMEOUT)? {
+                // `hideKeyboard` calls `tileboard.unhide()` (`rpg.lua:704`), so the board fades back
+                // in rather than reappearing. Rejoining the word before it settles would compare a
+                // half-faded board against the baseline, read every tile as changed, and abort the
+                // word with a stray on the *next* click -- the failure blamed on the wildcard.
+                self.wait_until_ready(BOARD_RETURN_TIMEOUT)?;
+                // The tile is selected and lettered; confirm against the untouched board like any
+                // other click, so a wildcard step ends in the same state the caller expects.
+                let selected = self.selected_now(baseline)?;
+                return if selected.get(i).copied().unwrap_or(false) {
+                    Ok(())
+                } else {
+                    Err(SelectError::Stuck(i))
+                };
+            }
+        }
+        Err(SelectError::LetterRefused { tile: i, letter })
+    }
+
+    /// Puts a word on the board, confirming every step before moving to the next.
+    ///
+    /// `plan` is `(dump index, letter to type into it if it is a wildcard)` in **word order**, which
+    /// is what [`crate::typist::Typed::steps`] yields. The baseline is taken once, before anything is
     /// clicked, so "selected" always means "differs from the untouched board" — comparing against
     /// the previous step instead would let a missed click look like a successful one.
-    pub fn select_word(&self, plan: &[usize]) -> Result<(), SelectError> {
+    pub fn select_word(&self, plan: &[(usize, Option<char>)]) -> Result<(), SelectError> {
         let baseline = self.read()?;
 
         // Some tiles change without being touched. An exploding tile counts down with a pulsing red
@@ -264,7 +373,14 @@ impl<'a> Board<'a> {
 
         let mut want: Vec<usize> = Vec::with_capacity(plan.len());
 
-        for &i in plan {
+        for &(i, wildcard) in plan {
+            if let Some(letter) = wildcard {
+                // A wildcard runs its own confirmed sequence and rejoins here with the tile
+                // selected, so the rest of the word proceeds against the same baseline.
+                self.place_wildcard(i, letter, &baseline)?;
+                want.push(i);
+                continue;
+            }
             let mut ok = false;
             for _ in 0..CLICK_ATTEMPTS {
                 let changed = self.click_and_confirm(i, &baseline)?;
