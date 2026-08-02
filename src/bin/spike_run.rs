@@ -237,7 +237,20 @@ impl Run<'_> {
     /// release was over **no location** (`:1479-1485`), and one fixed point cannot be empty on every
     /// map. Each attempt is checked, so this converges rather than hoping.
     fn recentre(&mut self) -> Option<Adjacency> {
+        let (cw, ch) = self.win.client_size().unwrap_or((1920, 1080));
         for (n, &(cx, cy)) in EMPTY_MAP_CANDIDATES.iter().enumerate() {
+            // Actually check the point is on the map before clicking it.
+            //
+            // The list's own comment says these are "inside the map area and clear of the chrome
+            // ([`hud::is_map_point`] covers the top strip and the corners)" — but nothing tested it,
+            // so the claim was documentation rather than behaviour. A fresh map paid for that: one
+            // of these clicks opened the character inventory, after which the area-button coordinate
+            // means `Stats` and the run has no way back. That failure is described three comments
+            // up in this same file, from a previous occurrence.
+            if !diggle_solver::observe::hud::is_map_point(cx, cy, cw, ch) {
+                self.log.push_str(&format!("  skipping ({cx},{cy}): not a map point\n"));
+                continue;
+            }
             let Ok((ex, ey)) = self.win.client_to_screen(cx, cy) else { continue };
             let _ = click_at_in(self.win, ex, ey);
             self.park();
