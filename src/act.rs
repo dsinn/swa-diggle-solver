@@ -453,12 +453,31 @@ pub const ALL: &[&Button] =
 /// Start menu `Continue`. Measured on 52.3 at 1920x1080; `Restart` is the adjacent button at
 /// x≈500 and eulogises the run, which is exactly why this is verified rather than assumed.
 pub const CONTINUE: Button = Button {
-    name: "Continue",
+    name: "menu Continue",
     template: "continue-button.png",
-    search: (60, 745, 350, 880),
-    origin: (68, 753),
+    // `default` 250x100 centred at (190, 812) -> exactly (65,762)-(315,862), grown by 8 of slack.
+    // Was a 205x63 hand-crop with a guessed "nominal" origin, which is why it could not use
+    // `score_exact` and had to be searched for.
+    search: (57, 754, 323, 870),
+    origin: (65, 762),
     click: (190, 812),
 };
+
+/// A **live** `Continue`, i.e. there is a save to resume.
+///
+/// Measured on the exact 250x100 crop:
+///
+/// ```text
+///   live `Continue`, a save present     1.0000  err 0.0000
+///   GREYED `Continue`, fresh save       0.7642  err 0.0936   <- must be rejected
+///   plain overworld terrain             0.5138  err 0.2037
+///   combat WaitPhase                    0.1548  err 0.3020
+/// ```
+///
+/// 0.90 sits 0.10 under the true positive and 0.14 over the greyed one. The greyed case is the whole
+/// point: on a fresh save the button is drawn but dead, so "is it there" is the wrong question and
+/// "is it live" is the right one.
+pub const CONTINUE_PRESENT: f64 = 0.90;
 
 /// The bottom-right plaque that advances a cutscene or dialogue.
 pub const PROGRESS: Button = Button {
@@ -608,6 +627,47 @@ pub fn locate(win: &GameWindow, button: &Button) -> Result<Option<f64>, crate::E
     Ok(find_at_scale_in(&frame, &tpl, 1.0, 1, None)
         .filter(|m| m.inliers >= MIN_INLIERS)
         .map(|m| m.inliers))
+}
+
+/// Verifies a button at its known origin, then clicks it — no search.
+///
+/// [`click`] goes through [`locate`], which sweeps the template across a slack region. For a button
+/// whose position is exact that is waste, and it is the same correction already applied to
+/// detection: one comparison, not hundreds.
+///
+/// **Returns the score; it does not prove the press did anything.** That distinction has cost this
+/// project three separate bugs in a day. `Start` was clicked at 1.0000 and the game stayed on the
+/// main menu, so every later click landed on menu background. Callers that need the press to have
+/// *worked* must watch for the consequence themselves — see [`wait_until_gone`].
+pub fn click_exact(win: &GameWindow, button: &Button, threshold: f64) -> Result<f64, crate::Error> {
+    let q = score_exact(win, button)?;
+    if q < threshold {
+        return Err(crate::Error::Win32(format!(
+            "refusing to click {}: scored {q:.4}, below {threshold:.2}. The layout may have changed,              or this is not the screen we think it is.",
+            button.name
+        )));
+    }
+    let (sx, sy) = win.client_to_screen(button.click.0, button.click.1)?;
+    crate::win::input::click_at_in(win, sx, sy)?;
+    Ok(q)
+}
+
+/// Waits until a button STOPS matching — i.e. the screen it belongs to has gone.
+///
+/// The read-back for a click that should navigate away. `click_exact` can only say the button was
+/// there when we pressed it; this says the press was acted on.
+pub fn wait_until_gone(
+    win: &GameWindow, button: &Button, threshold: f64, timeout: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        match score_exact(win, button) {
+            Ok(q) if q < threshold => return true,
+            _ => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(120));
+    }
+    false
 }
 
 /// Clicks the button, but **only** if it is verifiably there.

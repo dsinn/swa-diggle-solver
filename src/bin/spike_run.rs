@@ -472,10 +472,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // returns as soon as the HWND exists, the fixed 3 s after it is a guess, and `click_when_ready`
     // polls `locate` every 400 ms — three candidates, and guessing between them is how this project
     // wastes afternoons.
+    // One tight loop over BOTH menu buttons, breaking on whichever appears.
+    //
+    // This was `click_when_ready(CONTINUE, 30s)`, which polls `locate` — a *search* — four times a
+    // second, and on a fresh save `Continue` can never appear, so it burned the whole 30 s before
+    // `Start` was even considered. Every fresh-save launch paid it.
+    //
+    // Both buttons now have exact origins, so each look is two comparisons rather than thousands of
+    // offsets, and the loop exits the moment either is recognised.
     let menu_at = Instant::now();
-    let found = diggle_solver::act::click_when_ready(
-        &win, &diggle_solver::act::CONTINUE, Duration::from_secs(30),
-    );
+    let mut found: Result<f64, String> = Err("menu never rendered".into());
+    let mut offers_start = false;
+    let by = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < by {
+        let cont = diggle_solver::act::score_exact(&win, &diggle_solver::act::CONTINUE);
+        if matches!(cont, Ok(q) if q >= diggle_solver::act::CONTINUE_PRESENT) {
+            found = diggle_solver::act::click_exact(
+                &win,
+                &diggle_solver::act::CONTINUE,
+                diggle_solver::act::CONTINUE_PRESENT,
+            )
+            .map_err(|e| e.to_string());
+            break;
+        }
+        let start = diggle_solver::act::score_exact(&win, &diggle_solver::act::MENU_START);
+        if matches!(start, Ok(q) if q >= diggle_solver::act::MENU_START_PRESENT) {
+            offers_start = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    let found = if offers_start { Err("no Continue".to_string()) } else { found };
     r.log.push_str(&format!(
         "launch->window+3s {:?}, then Continue took {:?}\n",
         window_at.duration_since(launched),
@@ -624,9 +651,34 @@ fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
 
     // Verified click: this slot reads `Restart` when a save exists, and that eulogises the run.
     // `act::click` refuses rather than guessing, which is the entire safety argument.
-    let q = diggle_solver::act::click(r.win, &diggle_solver::act::MENU_START)
-        .map_err(|e| format!("could not click `Start`: {e}"))?;
+    let q = diggle_solver::act::click_exact(
+        r.win,
+        &diggle_solver::act::MENU_START,
+        diggle_solver::act::MENU_START_PRESENT,
+    )
+    .map_err(|e| format!("could not click `Start`: {e}"))?;
     r.log.push_str(&format!("  clicked `Start` ({q:.4})\n"));
+
+    // Confirm the press was ACTED ON, not merely that the button was there.
+    //
+    // Three runs died on this. `Start` reported 1.0000 every time and the game stayed on the main
+    // menu, so the champion click that followed landed on empty menu background — which is why three
+    // different card positions all read back 0.15 and looked like a hitbox problem. It was not; we
+    // were never on the champion screen at all.
+    //
+    // The menu going away is the consequence to watch for, and it is exactly what
+    // `wait_until_gone` asks.
+    if !diggle_solver::act::wait_until_gone(
+        r.win,
+        &diggle_solver::act::MENU_START,
+        diggle_solver::act::MENU_START_PRESENT,
+        Duration::from_secs(8),
+    ) {
+        return Err("clicked `Start` but the main menu is still up — the press did not take".into());
+    }
+    r.log.push_str("  the menu cleared\n");
+    // Whatever comes next needs a moment to draw before anything is clicked on it.
+    std::thread::sleep(Duration::from_millis(1200));
 
     // Hero select is CLICK-to-choose, not Return-to-accept.
     //
@@ -656,10 +708,18 @@ fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
     // plausible-looking and useless, and the first attempt came back with three recoloured champions
     // and no selection, so that is not hypothetical.
     //
-    // y=520 is the name/subtitle band: well below those icons and above the item panels at y~570,
-    // whose 32x32 tooltip hotspots (`herodisplay.lua:69`) are their own hazard.
+    // Aim at the **character sprite**, not the card and not the name.
+    //
+    // y=520 — the name band — was clicked and read back at 0.1543, i.e. nothing selected. The card
+    // body at large is not the target: `herodisplay` tracks `bodyHover` (`:44`, `:214-217`) and
+    // paints a highlight from it, so the *body* is the hover region and the caption below it is
+    // inert. On a live screen the sprite occupies roughly y 250-480, so y=400 is its middle.
+    //
+    // Still clear of the two `small` buttons along the card top — "Randomise cosmetics" and "Save
+    // hero card" at `yOffset -5.4` (`ui/heroselect.lua:357-380`), rendering near y=268 — which an
+    // earlier attempt hit, coming back with three recoloured champions and no selection.
     const CARD_SPACING: i32 = 450;
-    let (cx, cy) = (960, 520);
+    let (cx, cy) = (960, 400);
     let (sx, sy) =
         r.win.client_to_screen(cx, cy).map_err(|e| format!("cannot reach the card: {e}"))?;
     r.log.push_str(&format!("  choosing the middle champion at ({cx},{cy})\n"));
@@ -667,8 +727,22 @@ fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
     // `Result` away with `let _ =`, so the line recorded an *intention* — it could not distinguish a
     // click that landed from one that was refused. That is the whole reason the first attempt was
     // hard to diagnose.
+    // Hover FIRST, and do not park until the read-back is done.
+    //
+    // Two positions were tried — the name band and the sprite — and both read back 0.15, i.e. no
+    // selection. Two different places failing identically says the variable is not *where* we
+    // clicked. What our click has that a human's does not is a cursor that arrives and leaves in the
+    // same instant: `click_at_in` moves, presses and releases, and `park()` warped away immediately
+    // afterwards.
+    //
+    // `herodisplay` selects off `bodyHover` (`:44`, `:214-217`), a flag maintained in `update` from
+    // the cursor position. A hover state the game has never had a frame to observe cannot be true
+    // when the release is handled — so the dwell before the click is what makes it real, and not
+    // parking before the read-back is what stops us erasing it again.
+    warp_cursor(sx, sy).map_err(|e| format!("cannot move the cursor to the card: {e}"))?;
+    std::thread::sleep(Duration::from_millis(400));
     click_at_in(r.win, sx, sy).map_err(|e| format!("click on the champion card failed: {e}"))?;
-    r.park();
+    std::thread::sleep(Duration::from_millis(700));
 
     // Read back: the confirm button only exists once `selectedIndex` is set
     // (`ui/heroselect.lua:333`), so its appearance IS the proof that the click selected something.
@@ -686,17 +760,54 @@ fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
         ));
     }
     r.log.push_str(&format!("  champion selected — confirm reads live ({:.4})\n", seen.best));
+    r.park();
 
-    // Now Space is meaningful: the button is `userFunctionName = 'affirmative'`, and it exists.
-    r.keys.focus();
-    std::thread::sleep(Duration::from_millis(250));
-    let _ = r.keys.press_key(VK_SPACE, SC_SPACE);
-    std::thread::sleep(Duration::from_millis(900));
+    // Click the confirm button and verify IT went too.
+    //
+    // Space was tried first, on the grounds that the button declares
+    // `userFunctionName = 'affirmative'`. It did not take — sixteen Returns after it changed nothing
+    // — and rather than theorise about why, this uses the same shape that has worked everywhere else
+    // today: click a verified button, then watch for it to disappear. A press whose consequence is
+    // never checked is the single most expensive habit in this codebase.
+    let cq = diggle_solver::act::click_exact(
+        r.win,
+        &diggle_solver::act::HEROSELECT_CONFIRM,
+        diggle_solver::act::HEROSELECT_CONFIRM_PRESENT,
+    )
+    .map_err(|e| format!("could not click the confirm button: {e}"))?;
+    r.log.push_str(&format!("  confirmed the champion ({cq:.4})\n"));
+    if !diggle_solver::act::wait_until_gone(
+        r.win,
+        &diggle_solver::act::HEROSELECT_CONFIRM,
+        diggle_solver::act::HEROSELECT_CONFIRM_PRESENT,
+        Duration::from_secs(8),
+    ) {
+        return Err("clicked confirm but hero select is still up — the press did not take".into());
+    }
+    r.log.push_str("  hero select cleared\n");
+    std::thread::sleep(Duration::from_millis(1200));
     let _ = CARD_SPACING;
 
     let deadline = Instant::now() + Duration::from_secs(120);
     for i in 1..=MAX_RETURNS {
         r.pump();
+        // **`World loaded` is the arrival. The pregame is a COMBAT screen and belongs elsewhere.**
+        //
+        // This first waited on `Pregame screen:` and aborted after sixteen Returns, on a run that had
+        // already arrived — `World loaded  start  Water campfire` was sitting in the feed.
+        //
+        // The reason is not that the pregame is merely optional here. It is
+        // `core.startCombatPregame` (`overworldview.lua:514`), raised from the combat area button
+        // (`:423`) when a fight is entered. It is not part of starting a character at all, so no
+        // number of Returns on the hero-select chain could ever produce it: the run has to walk into
+        // a fight first. Waiting for it here was waiting for a screen from a different phase of the
+        // game.
+        //
+        // `World loaded` is the adjacency dump, and it is what the caller waits for next anyway.
+        if r.feed.seen_since(mark, "World loaded") {
+            r.log.push_str(&format!("  reached the overworld after {i} Return(s)\n"));
+            return Ok(());
+        }
         if r.feed.seen_since(mark, "Pregame screen:") {
             r.log.push_str(&format!("  reached the pregame after {i} Return(s)\n"));
             r.pregame_seen = true;
@@ -722,7 +833,7 @@ fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
             };
         }
         if Instant::now() >= deadline {
-            return Err(format!("no `Pregame screen:` within 120s ({i} Returns sent)"));
+            return Err(format!("neither `World loaded` nor `Pregame screen:` within 120s ({i} Returns sent)"));
         }
         // Logged because the unlock chain's length varies with `persistentSaveData`, so how many of
         // these it takes is the one number that says which path the profile went down.
@@ -734,7 +845,7 @@ fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
         let _ = r.keys.press_key(VK_RETURN, SC_RETURN);
         std::thread::sleep(Duration::from_millis(900));
     }
-    Err(format!("still no `Pregame screen:` after {MAX_RETURNS} Returns"))
+    Err(format!("never reached the overworld after {MAX_RETURNS} Returns"))
 }
 
 fn drive(
