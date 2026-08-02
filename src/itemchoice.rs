@@ -45,6 +45,7 @@ const NEUTRAL: (i32, i32) = (300, 300);
 /// Attempts at selecting an item before giving up.
 const PICK_ATTEMPTS: usize = 3;
 
+
 /// One item on offer: its key, and where the game says it is drawn.
 pub type Offer = (String, i32, i32);
 
@@ -123,29 +124,28 @@ pub fn offers(lines: &[String]) -> Vec<Offer> {
     out
 }
 
-/// Is a "Choose one:" screen up, in either state?
+/// Is a "Choose one:" screen up, untouched?
 ///
-/// Cheap enough to poll: a 250x100 template over a 16x16 search box. See
-/// [`crate::act::REWARD_CONFIRM`] for why the greyed capture identifies the screen whether or not
-/// anything has been picked.
+/// Cheap: one 250x100 comparison at a known offset, no search — see [`crate::act::score_exact`].
+/// A capture fault reads as absent, which is right for a poll that runs every iteration and wrong
+/// for a decision, so nothing destructive hangs off this.
 pub fn on_screen(win: &GameWindow) -> bool {
-    matches!(
-        crate::act::locate(win, &crate::act::REWARD_CONFIRM),
-        Ok(Some(q)) if q >= crate::act::REWARD_SCREEN_PRESENT
-    )
+    matches!(crate::act::score_exact(win, &crate::act::REWARD_CONFIRM),
+        Ok(q) if q >= crate::act::REWARD_SCREEN_PRESENT)
 }
 
 /// Is `Confirm` still greyed — i.e. has nothing been selected?
 ///
-/// The game's own answer, since `activeIf` *is* the selection (`ui/itemselection.lua:274`), rather
-/// than a pixel heuristic about the pedestal. Needs its own threshold: the active button is the same
-/// plank and lettering in another colour and scores 0.73 against the greyed template, so the 0.55
-/// that identifies the screen would call a live button greyed.
+/// The game's own answer, since `activeIf` *is* the selection (`ui/itemselection.lua:274`). This is
+/// the sole gate on whether a click registered; see [`choose`] for why the pedestal probe that used
+/// to accompany it was removed rather than recalibrated.
+///
+/// Needs its own threshold, above [`crate::act::REWARD_SCREEN_PRESENT`]: the active button is the
+/// same plank and lettering in another colour and scores 0.7255 against the greyed template, so a
+/// threshold set to *detect the screen* would also call a live button greyed.
 pub fn nothing_picked(win: &GameWindow) -> bool {
-    matches!(
-        crate::act::locate(win, &crate::act::REWARD_CONFIRM),
-        Ok(Some(q)) if q >= crate::act::REWARD_NOTHING_PICKED
-    )
+    matches!(crate::act::score_exact(win, &crate::act::REWARD_CONFIRM),
+        Ok(q) if q >= crate::act::REWARD_NOTHING_PICKED)
 }
 
 fn park(win: &GameWindow) {
@@ -233,17 +233,24 @@ pub fn choose(
         found.len()
     ));
 
-    // Two independent confirmations, because they answer different questions.
+    // `Confirm` going live is the whole check.
     //
-    // The pedestal's luminance says *this* item reacted, which is what separates a landed click from
-    // one that hit the next pedestal along. `Confirm` losing its greyed form says the game agrees a
-    // selection exists, which is authoritative but says nothing about which item.
-    let probe = (ix - 90, iy - 90, 180, 180);
-    let luma_at = || -> Result<f64, crate::Error> {
-        crate::win::capture::capture_client_rect(win, probe.0, probe.1, probe.2, probe.3)
-            .map(|f| crate::combat::luma(&f, probe.2 / 2, probe.3 / 2, 60))
-    };
-    let before = luma_at()?;
+    // There used to be a second one: sample the pedestal's luminance before and after, and require
+    // *both* it and `Confirm`. That cost a live run its reward. The pedestal moved 10.3 against a
+    // threshold of 12.0 borrowed from `combat::CHANGED` — a constant measured for *tile* selections,
+    // which move 42–141 — so a screen that had been successfully selected from was abandoned three
+    // attempts running while `Confirm` sat there live and saying so.
+    //
+    // Recalibrating it was the obvious repair and the wrong one. Ask what the check was *for*: it
+    // distinguished "our pedestal reacted" from "the click landed on the one next door". But the
+    // coordinates are not ours to get wrong — `ui/itemselection.lua:419` prints where the game drew
+    // each item, and we click exactly that. Mis-aiming is not a failure mode of reading a number out
+    // of a log. The check was guarding a door with no building behind it, and paying a capture, a
+    // probe and a second calibration story for the privilege.
+    //
+    // If "which item" ever does need verifying, the feed answers it after the fact and for free —
+    // `items.give(item, 'reward')` names what was granted. Pixels are the wrong instrument for a
+    // question the game answers in words.
     let (sx, sy) = win.client_to_screen(ix, iy)?;
 
     let mut picked = false;
@@ -251,15 +258,12 @@ pub fn choose(
         click_at(sx, sy)?;
         park(win);
         std::thread::sleep(Duration::from_millis(600));
-        let after = luma_at()?;
-        let moved = (after - before).abs() > crate::combat::CHANGED;
         let live = !nothing_picked(win);
         log.push_str(&format!(
-            "  attempt {attempt}: pedestal luma {before:.1} -> {after:.1} ({}), Confirm {}\n",
-            if moved { "changed" } else { "unchanged" },
-            if live { "live" } else { "still greyed" }
+            "  attempt {attempt}: Confirm {}\n",
+            if live { "live — selection registered" } else { "still greyed" }
         ));
-        if moved && live {
+        if live {
             picked = true;
             break;
         }

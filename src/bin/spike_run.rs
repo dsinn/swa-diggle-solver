@@ -489,6 +489,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // report on disk that then reads as the current result.
     let stop = drive(&mut r, &fight, &mut health, Instant::now() + Duration::from_secs(900));
     r.log.push_str(&format!("\n## Stopped\n\n{stop:?}\n\n"));
+
+    // Photograph whatever beat us, once, here.
+    //
+    // Not on every failed match -- the observer misses constantly and by design, because screens
+    // animate and a template scores near zero against a half-drawn one. Those misses are the normal
+    // operation of a retry loop, and shooting them would bury the one frame that matters under
+    // hundreds that do not.
+    //
+    // The frame that matters is the screen the run gave up on. Without it a stall is diagnosed from
+    // the log's last line, which names the step that noticed the problem rather than the state that
+    // caused it: three runs reported "no pan dump after locate-me" while sitting in combat with
+    // `Finish` on screen, and the map path was never the fault.
+    if !matches!(stop, Stop::AnomalyBeaten) {
+        match diggle_solver::win::capture::capture_window(r.win) {
+            Ok(f) => {
+                let path = PathBuf::from(FRAMES).join("gave-up.png");
+                match f.write_png(&path) {
+                    Ok(()) => r.log.push_str(&format!("screen at the stop: `{}`\n\n", path.display())),
+                    Err(e) => r.log.push_str(&format!("could not write the stop frame: {e}\n\n")),
+                }
+            }
+            Err(e) => r.log.push_str(&format!("could not capture the stop frame: {e}\n\n")),
+        }
+    }
     r.log.push_str(&format!(
         "at **{}**; {} places known; anomaly {:?}{}; beaten: {}\n\n",
         r.map.here().unwrap_or("?"),
@@ -588,10 +612,25 @@ fn drive(
         //
         // `Fight::run` is built to join a fight already in progress, so it needs no special entry:
         // it reads the save, sees `WaitPhase`, and clicks Finish itself.
-        if matches!(
-            diggle_solver::act::locate(r.win, &diggle_solver::act::COMBAT_FINISH),
-            Ok(Some(q)) if q >= diggle_solver::act::COMBAT_FINISH_PRESENT
-        ) {
+        // Polled, not asked once. Resuming a save lands here while the crypt is still fading in,
+        // and a template scores near zero against a half-drawn screen -- so a single low reading
+        // means "not yet", not "not there". Asking once is what sent three runs down the map path
+        // with `Finish` about to appear behind them.
+        let waited = diggle_solver::act::wait_for(
+            r.win,
+            &diggle_solver::act::COMBAT_FINISH,
+            diggle_solver::act::COMBAT_FINISH_PRESENT,
+            Duration::from_millis(2500),
+        );
+        if !waited.found() && (waited.best > 0.3 || waited.faults > 0) {
+            // Only worth a line when it was close or we were blind; a flat miss on the overworld is
+            // the ordinary case and would drown the log.
+            r.log.push_str(&format!(
+                "{step}. no Finish (best {:.2} over {} looks, {} capture faults)\n",
+                waited.best, waited.looks, waited.faults
+            ));
+        }
+        if waited.found() {
             r.log.push_str(&format!("{step}. a fight is waiting to be finished
 "));
             let mut fl = String::new();

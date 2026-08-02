@@ -314,6 +314,15 @@ impl Fight<'_> {
     /// threshold can be *proven* to exclude while we have never captured one. The condition the game
     /// itself branches on is in the save we already hold, so read that instead: above zero health
     /// this slot cannot say anything but `Finish`.
+    ///
+    /// **Conservative, not exact, and knowingly so.** The game's condition is health `<= 0` *and*
+    /// `fixedEnemiesRemaining() > 0`; at zero health with the area's enemies all dead the label is
+    /// still `Finish`, and this refuses it. Closing that gap needs `#areaData.enemies`, which is not
+    /// in `combatSaveData` — the save carries `stats.kills` and `stats.skippedEnemies`, two of the
+    /// three terms, but not the area's total. The nearby proxy, "is the current enemy still alive",
+    /// is wrong in the dangerous direction: a dead current enemy with more queued behind it is
+    /// exactly a `Give up` screen. So the refusal stands until the area total can be read, and it
+    /// says so in the log rather than stalling silently.
     fn finish(&self, feed: &mut Feed, log: &mut String, state: &str) -> Result<bool, crate::Error> {
         // A save we cannot read is not permission to click. Refusing costs a loop iteration;
         // guessing costs the run.
@@ -383,9 +392,14 @@ impl Fight<'_> {
         &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, turns: usize,
         deadline: Instant,
     ) -> Result<Outcome, crate::Error> {
+        // Marked BEFORE `choose`, because `choose` is what presses Confirm. A mark taken afterwards
+        // races the game: `Postgame screen:` can already be in the feed by the time we start
+        // watching for it, and `seen_since` would then wait out its whole timeout for a line that
+        // had already arrived.
+        let mark = feed.mark();
         match crate::itemchoice::choose(self.win, feed, keys, &self.game_dir, log, deadline)? {
             crate::itemchoice::Chosen::Took(key) => {
-                return self.after_confirm(feed, keys, log, turns, deadline, Some(key));
+                return self.after_confirm(feed, keys, log, turns, deadline, Some(key), mark);
             }
             other => {
                 log.push_str(&format!("  no reward taken: {other:?}
@@ -398,19 +412,23 @@ impl Fight<'_> {
 
     /// Everything after `Confirm`: granting the item opens the postgame, which has to be cleared
     /// before the map comes back. Fight-specific, which is why it did not move out with the screen.
+    /// **Confirm has already been pressed** — by [`crate::itemchoice::choose`], which owns it.
+    ///
+    /// This used to press it again, and that crashed the game. Extracting the item screen into its
+    /// own module moved the Space press into `choose` without removing the one here, so Confirm was
+    /// pressed twice: the first press ran `viewPostgameAndReturn`, which grants the item and then
+    /// `assert(love.filesystem.remove('combatSaveData'))`; the second re-entered the same handler
+    /// with the file already gone, `remove` returned false, and the assert took the process down
+    /// with `overworld.lua:1154: Failed to clean dungeon run save data`.
+    ///
+    /// Worth being precise about, because the traceback points at a file-deletion failure and the
+    /// project already has a hard-won rule about not touching `combatSaveData` while the game is
+    /// deleting it. That rule is real, it is honoured below — and it was **not** what happened here.
+    /// Nothing had the file open. It had simply already been deleted, by us, a moment earlier.
     fn after_confirm(
         &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, turns: usize,
-        deadline: Instant, key: Option<String>,
+        deadline: Instant, key: Option<String>, mark: usize,
     ) -> Result<Outcome, crate::Error> {
-        let mark = feed.mark();
-        // Confirm with Space: the button declares `userFunctionName = 'affirmative'` and
-        // `activeIf = selection`, so it does nothing until something IS selected -- the guard is the
-        // game's own.
-        let mark = feed.mark();
-        keys.focus();
-        std::thread::sleep(Duration::from_millis(300));
-        keys.press_key(VK_SPACE, SC_SPACE)?;
-
         // `viewPostgameAndReturn` grants the item, opens the postgame, and asserts on deleting
         // `combatSaveData`. Watch the CONSOLE, and do not touch that file while it is going: polling
         // it across this window made the delete fail and crashed the game.

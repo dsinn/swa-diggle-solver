@@ -19,6 +19,7 @@
 //! error that produced the F1 probe's phantom states.
 
 use crate::observe::template::{find_at_scale_in, Template};
+#[allow(unused_imports)]
 use crate::win::capture::capture_window;
 use crate::win::window::GameWindow;
 use std::collections::HashMap;
@@ -44,6 +45,12 @@ pub struct Button {
     /// `None` forever. [`tests::every_search_box_can_contain_its_template`] now makes that
     /// impossible to reintroduce.
     pub search: (i32, i32, i32, i32),
+    /// The template's exact top-left in client pixels, for [`score_exact`].
+    ///
+    /// Redundant with `search` only in appearance: `search` is a region grown by slack, this is the
+    /// one offset the template can actually occupy. Kept explicit rather than derived so the slack
+    /// can change without silently moving where we look.
+    pub origin: (i32, i32),
     /// Where to click once recognised, in client pixels. Not necessarily the template's centre —
     /// the progress button is clipped by the right screen edge, so its geometric centre is
     /// off-screen.
@@ -89,9 +96,24 @@ pub struct Button {
 ///   Finish, spike-frames-live/now.png              1.0000  err 0.0000
 ///   Finish, spike-frames-live/combat-stalled.png   1.0000  err 0.0000   independent, 2 days apart
 ///   'Adventure!' plank, 16-selected.png            0.7843  err 0.0769   <- nearest confusable
+///   greyed Finish at 0 health, finish-at-zero-*.png 0.8380 err 0.0743   <- see below
 ///   Finish under a hover tooltip, waitphase-*.png  0.5794  err 0.1718
 ///   plain overworld terrain, overworld-campfire    0.5653  err 0.1646   <- no button at all
 /// ```
+///
+/// ## The template CANNOT stand in for the health check
+///
+/// A live run reached 0 health with the fight won. The slot read `Finish`, drawn inactive
+/// (`activeIf` is `WaitPhase or SmokebombWaitPhase or PlayerTurn`), and scored **0.8380** — while a
+/// *different word* on a plank scores 0.7843. Fifty-four thousandths apart.
+///
+/// So the two questions this template might answer are not equally answerable. "Is an active
+/// `Finish` on screen" separates cleanly at 0.90. "Is this word `Finish` or `Give up`" does not
+/// separate at all, because a state change to the same word costs about as much as changing the
+/// word. Any threshold placed between 0.7843 and 0.8380 would be fitting noise on one sample each.
+///
+/// That is why [`crate::fight::Fight::finish`] gates on health from the save rather than on this
+/// score, and why relaxing that gate needs a *different* signal — not a better threshold.
 ///
 /// Two things that measurement settles, neither of which was visible from the old negative controls
 /// (a reward screen at 0.2777, a village map at 0.1080):
@@ -110,6 +132,7 @@ pub const COMBAT_FINISH: Button = Button {
     template: "combat-finish.png",
     // The 300x100 button spans (1578,922)-(1878,1022); this is that grown by 8 px of slack.
     search: (1570, 914, 1886, 1030),
+    origin: (1578, 922),
     click: (1728, 972),
 };
 
@@ -183,6 +206,7 @@ pub const REWARD_CONFIRM: Button = Button {
     template: "reward-confirm-inactive.png",
     // The 250x100 button spans (1527,868)-(1777,968); this is that grown by 8 px of slack.
     search: (1519, 860, 1785, 976),
+    origin: (1527, 868),
     click: (1652, 918),
 };
 
@@ -224,6 +248,7 @@ pub const CONTINUE: Button = Button {
     name: "Continue",
     template: "continue-button.png",
     search: (60, 745, 350, 880),
+    origin: (68, 753),
     click: (190, 812),
 };
 
@@ -232,6 +257,7 @@ pub const PROGRESS: Button = Button {
     name: "Progress",
     template: "progress-button.png",
     search: (1760, 865, 1920, 1055),
+    origin: (1768, 873),
     click: (1855, 960),
 };
 
@@ -249,6 +275,104 @@ fn template_path(name: &str) -> PathBuf {
 /// `Ok(None)` means "not present", which is ordinary and actionable — it is how a caller detects
 /// that a screen has moved on. An `Err` means the template could not be loaded or the screen could
 /// not be captured, which is a fault.
+/// Scores a button where it **is**, with no search at all.
+///
+/// [`locate`] sweeps the template across a slack region. That is worth paying for while the start
+/// menu is still laying itself out, but it is waste for a button whose position is known exactly:
+/// these are anchored at fixed normalized coordinates and the client is a fixed 1920x1080, so there
+/// is precisely one offset that can ever match. Capturing the template-sized rect at that offset
+/// turns a 17x17 sweep into a single comparison.
+///
+/// The slack was not buying safety either. If the client size ever changed, every `click` point
+/// would already be wrong by the same amount, so a match found 8 px away would be a match we must
+/// not act on.
+///
+/// Returns the raw score, so callers can log it. **A number below the threshold is not the same as
+/// "the screen has moved on"** — mid-animation everything scores low — which is why the loop guards
+/// poll this rather than asking once.
+pub fn score_exact(win: &GameWindow, button: &Button) -> Result<f64, crate::Error> {
+    let tpl = cached_template(button)?;
+    let (ox, oy) = button.origin;
+    let frame = crate::win::capture::capture_client_rect(win, ox, oy, tpl.width as i32, tpl.height as i32)?;
+    // The frame is exactly template-sized, so there is one candidate offset and this is a direct
+    // comparison — reusing the matcher rather than hand-rolling one keeps alpha handling identical.
+    Ok(find_at_scale_in(&frame, &tpl, 1.0, 1, None).map(|m| m.inliers).unwrap_or(0.0))
+}
+
+/// Polls [`score_exact`] until the button appears, and reports the best score if it never does.
+///
+/// Single-shot recognition is wrong for anything reached through a transition. The screen spends
+/// hundreds of milliseconds fading, sliding and animating, and during that time *every* template
+/// scores low — so "did not match" carries no information until the screen has had a chance to
+/// settle. A run resumed straight into combat, asked once while the crypt was still fading in, got
+/// a low score for a `Finish` that was about to be plainly visible, and fell through to the map
+/// path. Three times, with the same misleading "no pan dump after locate-me" each time.
+///
+/// Returns `Ok(Some(score))` on success and `Ok(None)` on a genuine timeout, with `best` telling the
+/// caller how close it came — that is what separates "never rendered" from "nearly, but the
+/// threshold is wrong", and the two want opposite fixes.
+///
+/// Capture faults are counted, not swallowed: `locate` folds them into `Err` and the loop's
+/// `matches!` turned both into a plain `false`, which is how a blind check looked exactly like an
+/// absent button.
+pub fn wait_for(
+    win: &GameWindow, button: &Button, threshold: f64, timeout: std::time::Duration,
+) -> WaitResult {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut best = 0.0f64;
+    let mut faults = 0usize;
+    let mut looks = 0usize;
+    loop {
+        match score_exact(win, button) {
+            Ok(q) => {
+                looks += 1;
+                best = best.max(q);
+                if q >= threshold {
+                    return WaitResult { score: Some(q), best: q, looks, faults };
+                }
+            }
+            Err(_) => faults += 1,
+        }
+        if std::time::Instant::now() >= deadline {
+            return WaitResult { score: None, best, looks, faults };
+        }
+        std::thread::sleep(std::time::Duration::from_millis(120));
+    }
+}
+
+/// What [`wait_for`] saw. `best` and `faults` exist so a miss is diagnosable from the log alone.
+#[derive(Debug, Clone, Copy)]
+pub struct WaitResult {
+    /// The score that cleared the threshold, if one did.
+    pub score: Option<f64>,
+    /// The highest score seen, whether or not it cleared.
+    pub best: f64,
+    /// How many times the screen was read.
+    pub looks: usize,
+    /// Reads that failed outright. Nonzero means we were blind, not that the button was absent.
+    pub faults: usize,
+}
+
+impl WaitResult {
+    pub fn found(&self) -> bool {
+        self.score.is_some()
+    }
+}
+
+/// Loads a button's template, cached across calls.
+fn cached_template(button: &Button) -> Result<Template, crate::Error> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<&'static str, Template>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut map = cache.lock().unwrap();
+    if !map.contains_key(button.template) {
+        let t = Template::load(&template_path(button.template))
+            .map_err(|e| crate::Error::Config(format!("template {}: {e}", button.template)))?;
+        map.insert(button.template, t);
+    }
+    Ok(map[button.template].clone())
+}
+
 pub fn locate(win: &GameWindow, button: &Button) -> Result<Option<f64>, crate::Error> {
     // Cached across calls. `click_when_ready` polls four times a second, and re-reading and
     // re-decoding the same PNG from disk each time is pure waste -- templates never change during a
@@ -385,6 +509,32 @@ mod tests {
                 b.name,
                 tpl.width,
                 tpl.height
+            );
+        }
+    }
+
+    /// `origin` and `search` describe the same button two ways, so they have to agree: the template
+    /// placed at `origin` must sit wholly inside `search`.
+    ///
+    /// Only `COMBAT_FINISH` and `REWARD_CONFIRM` have origins measured off live frames; the other
+    /// two are nominal, since nothing calls [`score_exact`] on them. This check is what would catch
+    /// a nominal value being badly wrong if that ever changed.
+    #[test]
+    fn each_origin_agrees_with_its_search_box() {
+        for b in ALL {
+            let tpl = Template::load(&template_path(b.template)).unwrap();
+            let (ox, oy) = b.origin;
+            assert!(
+                ox >= b.search.0
+                    && oy >= b.search.1
+                    && ox + tpl.width as i32 <= b.search.2
+                    && oy + tpl.height as i32 <= b.search.3,
+                "{}: template at origin {:?} ({}x{}) does not fit inside search {:?}",
+                b.name,
+                b.origin,
+                tpl.width,
+                tpl.height,
+                b.search
             );
         }
     }
