@@ -365,8 +365,22 @@ impl WorldMap {
         // Crossing into a subworld: remember the surface node we came from, because leaving by the
         // same exit is a retreat. Recorded here rather than derived later — once inside, nothing on
         // screen distinguishes the entrance road from any other exit.
-        if a.subworld.is_some() && self.inside().is_none() {
-            self.entered_from = self.here.clone();
+        if let Some((container, _)) = a.subworld.as_ref().filter(|_| self.inside().is_none()) {
+            // The road we land on names where it goes, and we have just come from there.
+            //
+            // Taking `self.here` instead was wrong and silently disabled the whole rule: entering a
+            // village goes l19 -> l10 -> l10_path_to_l19, so at this point `here` is the CONTAINER,
+            // l10. Storing that meant the entrance never matched any exit's `to_key`, and a live run
+            // turned straight back out of Ulrome with the guard against exactly that in place.
+            //
+            // The key is built by the game as `parent.key..'_path_to_'..k` (`overworldview.lua:1043`),
+            // so the suffix is the overworld node on the other side.
+            let prefix = format!("{container}_path_to_");
+            self.entered_from = a
+                .here_key
+                .strip_prefix(&prefix)
+                .filter(|k| !k.is_empty())
+                .map(str::to_string);
         } else if a.subworld.is_none() {
             self.entered_from = None;
         }
@@ -1036,6 +1050,11 @@ mod tests {
         // infinite made the run turn straight back out of the village it had just entered.
         let mut m = WorldMap::new();
         m.fold(&dump("l19", "Gipsyville crypt", vec![node("l10", "Ulrome — level 6 village")]));
+        // Entering lands on the entrance ROAD first -- this is the real sequence, and taking the
+        // previous `here` instead recorded the container and disabled the rule entirely.
+        m.fold(&inside_dump("l10", "l10_path_to_l19", "Road to Gipsyville crypt",
+            vec![node("l10sub6", "Ulrome guard post")], vec![exit("l19")]));
+        assert_eq!(m.entered_from.as_deref(), Some("l19"), "the road names where it came from");
         m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post",
             vec![node("l10_path_to_l19", "Road to Gipsyville crypt")], vec![exit("l19")]));
         // Offered the entrance and one unexplored way on, take the unexplored one.
@@ -1049,8 +1068,8 @@ mod tests {
         // to move.
         let mut m = WorldMap::new();
         m.fold(&dump("l19", "Gipsyville crypt", vec![node("l10", "Ulrome — level 6 village")]));
-        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post",
-            vec![node("l10_path_to_l19", "Road to Gipsyville crypt")], vec![exit("l19")]));
+        m.fold(&inside_dump("l10", "l10_path_to_l19", "Road to Gipsyville crypt",
+            vec![node("l10sub6", "Ulrome guard post")], vec![exit("l19")]));
         assert_eq!(m.exit_toward(&[exit("l19")]), Some("l19".into()));
     }
 
@@ -1059,7 +1078,8 @@ mod tests {
         // Otherwise a stale entrance would go on biasing exit choice in the *next* subworld.
         let mut m = WorldMap::new();
         m.fold(&dump("l19", "Gipsyville crypt", vec![node("l10", "Ulrome — level 6 village")]));
-        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post", vec![], vec![exit("l19")]));
+        m.fold(&inside_dump("l10", "l10_path_to_l19", "Road to Gipsyville crypt", vec![],
+            vec![exit("l19")]));
         assert_eq!(m.entered_from.as_deref(), Some("l19"));
         m.fold(&dump("l7", "Greenoak Backwoods campfire", vec![]));
         assert_eq!(m.entered_from, None);
