@@ -109,6 +109,33 @@ impl Place {
         self.level().is_some()
     }
 
+    /// Would going in here commit us to a fight we cannot decline?
+    ///
+    /// Being hurt is no reason to avoid a subworld as such — a quiet village is somewhere to *rest*.
+    /// The thing to avoid is a **hostile** one, because a subworld's exit is gated the same way its
+    /// interior is: `canTravelToDirect` refuses to step off an incomplete node
+    /// (`overworldview.lua:1316-1321`), so entering one that is under attack means clearing a node
+    /// before you can leave again. That is how a live run at 4/12 walked into Ulrome and had to
+    /// fight its way back out.
+    ///
+    /// Two ways to be hostile, and only one of them is visible from outside:
+    ///
+    /// - **An uncleared corrupted area.** Corruption puts the place under attack and swaps its
+    ///   buttons for `underAttackAreaButtons` (`overworld/generators/village.lua:371-395`). Knowable
+    ///   in advance, from `<key>_first_corrupt_time` against `completedAreas`.
+    /// - **A bandit camp.** Not knowable. `overworld/generators/world.lua:466-475` takes an ordinary
+    ///   forest and rewrites `forest.type` to `bandit_camp_pine` or `bandit_camp_oak`, so the camp
+    ///   *is* a forest as far as anything outside it can tell. There is no heading to read and no
+    ///   flag to check — you find out by arriving.
+    ///
+    /// The second is why this treats an unvisited container as hostile rather than as unknown. We
+    /// cannot show such a place is safe, only that it has not bitten us yet, and "not yet" is a poor
+    /// thing to spend a run on at a third health.
+    pub fn hostile_to_enter(&self) -> bool {
+        (self.corrupted && !self.completed)
+            || (self.subworld_container && !self.visited && !self.completed)
+    }
+
     pub fn type_is(&self, type_name: &str) -> bool {
         self.heading.trim_end().ends_with(type_name)
     }
@@ -615,6 +642,31 @@ impl WorldMap {
         // any save has been read, and an unknown flag is treated as still available, since a wasted
         // trip is cheaper than stranding the run.
         if self.anomaly_available().unwrap_or(true) {
+            // While hurt, skip anywhere that commits us to a fight to get back out. See
+            // [`Place::hostile_to_enter`] — this is a *hostile* filter, not a subworld one: a quiet
+            // village is somewhere to rest, and nothing here avoids it.
+            //
+            // Tried in two passes rather than one filter, so being hurt cannot strand the run. If
+            // every trigger on the map is hostile, we still go — the objective beats a preference
+            // when the preference has nowhere to send us.
+            let pick = |skip_hostile: bool| -> Option<&Place> {
+                let mut candidates: Vec<&Place> = self
+                    .places
+                    .values()
+                    .filter(|p| p.key != here && p.triggers_anomaly() && !p.avoid)
+                    .filter(|p| !(skip_hostile && p.hostile_to_enter()))
+                    .collect();
+                candidates.sort_by(|a, b| {
+                    a.completed
+                        .cmp(&b.completed)
+                        .then(a.level().cmp(&b.level()))
+                        .then(a.key.cmp(&b.key))
+                });
+                candidates.first().copied()
+            };
+            if let Some(p) = self.wants_rest.then(|| pick(true)).flatten() {
+                return Some(Plan { target: p.key.clone(), reason: Goal::OpenTheAnomaly });
+            }
             let mut candidates: Vec<&Place> = self
                 .places
                 .values()
@@ -1631,6 +1683,72 @@ mod tests {
             p.completed = false;
         }
         assert_eq!(m.next_target().unwrap().reason, Goal::Anomaly);
+    }
+
+    /// Hurt, and the nearest anomaly trigger is an uncleared corrupted village: prefer the other
+    /// one, because getting back out of the corrupted one costs a fight.
+    #[test]
+    fn while_hurt_a_hostile_subworld_is_not_the_way_to_open_the_anomaly() {
+        let mut m = hurt_at_l1();
+        m.hell = Some(0.0); // anomaly still to be opened
+        // Take resting off the table, so the planner reaches the branch under test rather than
+        // simply walking to the campfire the fixture provides.
+        for p in m.places.values_mut() {
+            p.used = true;
+        }
+        m.gold = 0;
+        m.fuel = 0;
+        m.fold(&dump(
+            "l1",
+            "Weedley Copse crypt",
+            vec![node("v1", "Ulrome — level 6 village"), node("c1", "Rookdale — level 9 crypt")],
+        ));
+        {
+            let v = m.entry("v1");
+            v.corrupted = true;
+            v.completed = false;
+        }
+        // Both trigger the anomaly (level > 3); the village is the lower level and would otherwise
+        // be preferred by the sort.
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::OpenTheAnomaly);
+        assert_eq!(plan.target, "c1", "the corrupted village costs a fight to leave");
+    }
+
+    /// ...but if every trigger is hostile, being hurt must not stop the run entirely.
+    #[test]
+    fn a_hostile_trigger_is_still_taken_when_it_is_the_only_one() {
+        let mut m = hurt_at_l1();
+        m.hell = Some(0.0);
+        m.fold(&dump("l1", "Weedley Copse crypt", vec![node("v1", "Ulrome — level 6 village")]));
+        // No rest anywhere, and every other neighbour too small to trigger the anomaly.
+        for p in m.places.values_mut() {
+            p.used = true;
+        }
+        m.gold = 0;
+        m.fuel = 0;
+        {
+            let v = m.entry("v1");
+            v.corrupted = true;
+            v.completed = false;
+        }
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::OpenTheAnomaly);
+        assert_eq!(plan.target, "v1", "a preference must not strand the run");
+    }
+
+    /// An unvisited subworld container counts as hostile, because a bandit camp is an ordinary
+    /// forest until you are standing in it (`overworld/generators/world.lua:466-475`).
+    #[test]
+    fn an_unvisited_container_is_treated_as_hostile_while_hurt() {
+        let mut p = Place { key: "f1".into(), ..Default::default() };
+        p.subworld_container = true;
+        assert!(p.hostile_to_enter(), "never been in, so it cannot be shown to be safe");
+        p.visited = true;
+        assert!(!p.hostile_to_enter(), "we have stood in it and come back out");
+        p.visited = false;
+        p.completed = true;
+        assert!(!p.hostile_to_enter(), "cleared is safe whether or not we remember visiting");
     }
 
     /// Resuming at low health must ask for a rest even though no drop was ever observed — the delta
