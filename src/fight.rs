@@ -350,7 +350,7 @@ impl Fight<'_> {
         &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, turns: usize,
         deadline: Instant,
     ) -> Result<Outcome, crate::Error> {
-        match crate::itemchoice::choose(self.win, feed, keys, log, deadline)? {
+        match crate::itemchoice::choose(self.win, feed, keys, &self.game_dir, log, deadline)? {
             crate::itemchoice::Chosen::Took(key) => {
                 return self.after_confirm(feed, keys, log, turns, deadline, Some(key));
             }

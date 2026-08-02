@@ -30,6 +30,10 @@
 //! sets the failure mode: with no block in the feed there is nothing to click, and no way off a
 //! screen whose only exit is `Confirm`, which `activeIf = selection` (`:274`) keeps dead until
 //! something is chosen.
+//!
+//! The keys the console prints are enough to *choose* as well as to click, because every item
+//! declares its kind in the game's own source — see [`PREFERRED_KINDS`] for the policy and
+//! [`crate::items`] for how the kinds are read.
 
 use crate::observe::feed::Feed;
 use crate::win::input::{click_at, warp_cursor, Input, PostMessageInput, SC_SPACE, VK_SPACE};
@@ -43,6 +47,44 @@ const PICK_ATTEMPTS: usize = 3;
 
 /// One item on offer: its key, and where the game says it is drawn.
 pub type Offer = (String, i32, i32);
+
+/// Kinds we can make use of, best first. Anything not listed ranks below all of them.
+///
+/// ## Why passive beats gear
+///
+/// Both apply on their own — `items.give` routes `gear` to `overworld.givePlayerGear` and `passive`
+/// to `overworld.givePlayerPassive` (`utils/items.lua:46-63`), and neither needs the player to do
+/// anything afterwards. The difference is capacity:
+///
+/// - `givePlayerPassive` (`overworld.lua:264-270`) appends to `playerData.passives` and regenerates
+///   the flag hash. There is no limit. The tenth passive works exactly like the first.
+/// - `givePlayerGear` (`overworld.lua:312-323`) appends to `playerData.gear`, but
+///   `playerHasGearEquipped` is `has and has <= getPlayerGearSlotCount()` (`:307-310`), and that
+///   count defaults to **3** (`:325-327`). Gear past the third slot is carried, not equipped — inert
+///   until something reorders it, which Diggle cannot do.
+///
+/// So a fourth piece of gear may well do nothing, while a fourth passive certainly does something.
+///
+/// Everything else needs to be *used*: consumables, potions and scrolls sit in the item bar waiting
+/// for a click Diggle never makes. Taking one is close to taking nothing, which is why they rank
+/// below both — not because they are bad items.
+///
+/// **Known refinement, deliberately not taken yet:** once fewer than three gear slots are free, gear
+/// is worth no more than a consumable, and the free-slot count is readable from `mainSaveData.gear`
+/// the way [`crate::rest::fuel_from_save`] reads `items`. Left out because that save is written on
+/// screen *exit*, so mid-run it can lag exactly the reward that changes it — and a wrong slot count
+/// would demote gear at the moment gear is the only thing on offer.
+pub const PREFERRED_KINDS: &[&str] = &["passive", "gear"];
+
+/// Where a kind sits in [`PREFERRED_KINDS`]. **Lower is better**; unknown kinds tie for last.
+///
+/// Unknown is not a failure state. It covers an item the scan could not attribute (see
+/// [`crate::items`]) as well as one that is genuinely a potion, and both deserve the same answer:
+/// take it only if nothing better is offered.
+pub fn rank(kind: Option<&str>) -> usize {
+    kind.and_then(|k| PREFERRED_KINDS.iter().position(|p| *p == k))
+        .unwrap_or(PREFERRED_KINDS.len())
+}
 
 /// Parses the offers out of the latest `Item selection:` block.
 ///
@@ -128,7 +170,8 @@ pub enum Chosen {
 /// Does **not** handle whatever comes next — a postgame, a shop returning to the map — because that
 /// differs per caller. This gets as far as a confirmed selection and stops.
 pub fn choose(
-    win: &GameWindow, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, deadline: Instant,
+    win: &GameWindow, feed: &mut Feed, keys: &PostMessageInput, game_dir: &std::path::Path,
+    log: &mut String, deadline: Instant,
 ) -> Result<Chosen, crate::Error> {
     // Poll rather than parse a single pump: the screen being up and its block reaching the feed are
     // not the same instant, and this can be entered a whole step after the screen appeared.
@@ -149,18 +192,46 @@ pub fn choose(
 
     let _ = crate::observe::settle::wait_for_quiescence(win, 0.02, Duration::from_secs(8));
 
-    // MVP: any item will do. Seeded from the clock so repeated runs do not always take the same
-    // position, which would hide a click that only works on one of them.
+    // Rank by kind, then break the tie at random.
     //
-    // This is the obvious place for a real policy — the keys are right here and readable
-    // (`goldIdol`, `armourLeatherGloves`) — and picking by clock nanoseconds is a placeholder, not a
-    // decision.
+    // A failed catalogue load is not fatal: every offer then ranks unknown, they all tie, and the
+    // pick falls back to exactly the arbitrary choice this used to make unconditionally. Worth
+    // saying out loud in the log, because "took the wrong-looking item" and "could not read the
+    // game's items directory" look identical from the outside otherwise.
+    let catalogue = match crate::items::Catalogue::load(game_dir) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            log.push_str(&format!("  could not read the item catalogue ({e}); picking at random\n"));
+            None
+        }
+    };
+    let kind_of = |key: &str| catalogue.as_ref().and_then(|c| c.kind(key)).map(|s| s.to_string());
+    log.push_str(&format!(
+        "  offered: {}\n",
+        found
+            .iter()
+            .map(|(k, _, _)| format!("{k} ({})", kind_of(k).unwrap_or_else(|| "?".into())))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+
+    let best = found.iter().map(|(k, _, _)| rank(kind_of(k).as_deref())).min().unwrap_or(0);
+    let shortlist: Vec<&Offer> =
+        found.iter().filter(|(k, _, _)| rank(kind_of(k).as_deref()) == best).collect();
+
+    // Seeded from the clock so repeated runs do not always take the same position when the shortlist
+    // has more than one item — an arbitrary-but-fixed choice would hide a click that only ever works
+    // on one pedestal.
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos() as usize)
         .unwrap_or(0);
-    let (key, ix, iy) = found[nanos % found.len()].clone();
-    log.push_str(&format!("  picking **{key}** at ({ix},{iy}) of {} offers\n", found.len()));
+    let (key, ix, iy) = shortlist[nanos % shortlist.len()].clone();
+    log.push_str(&format!(
+        "  picking **{key}** ({}) at ({ix},{iy}), best of {} offers\n",
+        kind_of(&key).unwrap_or_else(|| "unknown kind".into()),
+        found.len()
+    ));
 
     // Two independent confirmations, because they answer different questions.
     //
@@ -260,5 +331,39 @@ mod tests {
     #[test]
     fn an_announcement_with_no_rows_yields_nothing() {
         assert!(offers(&lines("Item selection:")).is_empty());
+    }
+
+    #[test]
+    fn passive_outranks_gear_outranks_everything_else() {
+        assert!(rank(Some("passive")) < rank(Some("gear")));
+        assert!(rank(Some("gear")) < rank(Some("consumable")));
+        assert_eq!(rank(Some("potion")), rank(Some("scroll")), "unusable kinds tie");
+        assert_eq!(rank(None), rank(Some("potion")), "an unreadable kind is no worse than a potion");
+    }
+
+    /// The screen we actually met, keys and all: gloves are `passive`, the idol is `gear`, and the
+    /// thumb is a `consumable`. The gloves win outright — no tie, so no randomness involved.
+    #[test]
+    fn the_live_screen_picks_the_gloves() {
+        let offered = ["armourLeatherGloves", "iBeforeEBad", "goldIdol"];
+        let kind = |k: &str| match k {
+            "armourLeatherGloves" => Some("passive"),
+            "goldIdol" => Some("gear"),
+            _ => Some("consumable"),
+        };
+        let best = offered.iter().map(|k| rank(kind(k))).min().unwrap();
+        let short: Vec<&str> =
+            offered.iter().copied().filter(|k| rank(kind(k)) == best).collect();
+        assert_eq!(short, vec!["armourLeatherGloves"]);
+    }
+
+    /// With no catalogue every kind reads unknown, so nothing is preferred and the shortlist is the
+    /// whole screen — the behaviour this had before a policy existed, rather than a stall.
+    #[test]
+    fn an_unreadable_catalogue_leaves_every_offer_eligible() {
+        let offered = ["a", "b", "c"];
+        let best = offered.iter().map(|_| rank(None)).min().unwrap();
+        let short = offered.iter().filter(|_| rank(None) == best).count();
+        assert_eq!(short, 3);
     }
 }

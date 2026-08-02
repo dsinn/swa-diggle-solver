@@ -552,6 +552,7 @@ fn drive(
                 r.win,
                 &mut r.feed,
                 &r.keys,
+                &fight.game_dir,
                 &mut il,
                 deadline.min(Instant::now() + Duration::from_secs(45)),
             );
