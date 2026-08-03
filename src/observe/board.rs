@@ -120,9 +120,22 @@ impl Tile {
         self.quality.burn
     }
 
+    /// The exclamation tile, which is unselectable by its **letter** rather than by a quality.
+    ///
+    /// `tileboard.lua:179`: "Unselectable tile. Falls off if it's at the bottom of the board at the
+    /// start of your turn." It carries no `unselectable` key in `extra` — the letter *is* the flag —
+    /// so [`Quality::unselectable`] is false for it and nothing else here would notice.
+    ///
+    /// Treated exactly as an exploding tile is treated, in both places that matter: excluded from
+    /// the letters offered to the search, and never a target for the typist. It also animates, so
+    /// `select_word`'s restless detection already declines to read it as a stray selection.
+    pub fn is_exclamation(&self) -> bool {
+        self.letter == "!"
+    }
+
     /// Unselectable tiles cannot form part of a word, so they must be excluded before searching.
     pub fn selectable(&self) -> bool {
-        !self.quality.unselectable && !self.quality.destroy
+        !self.quality.unselectable && !self.quality.destroy && !self.is_exclamation()
     }
 }
 
@@ -438,6 +451,30 @@ mod exploding_tile_tests {
         let bomb = Tile { letter: "4".into(), quality: Quality::from_extra(&extra) };
         assert!(bomb.quality.destroy);
         assert!(!bomb.selectable(), "an exploding tile must never be clicked");
+    }
+
+    #[test]
+    fn an_exclamation_tile_is_not_selectable() {
+        // `tileboard.lua:179`: "Unselectable tile. Falls off if it's at the bottom of the board at
+        // the start of your turn." The letter is the flag — it carries no `unselectable` key — so
+        // `Quality::unselectable` is false and everything else here would happily use it.
+        //
+        // A live run met one inside the anomaly and stalled ten turns in `PlayerTurn`, because the
+        // search kept being offered a letter the board would never let it click.
+        let bang = Tile::plain("!");
+        assert!(!bang.quality.unselectable, "the dump really does carry no flag for it");
+        assert!(!bang.selectable(), "an exclamation tile must never be offered to the search");
+    }
+
+    #[test]
+    fn excluding_an_exclamation_tile_does_not_shift_the_others() {
+        // The index is the click target, so dropping a tile from the *letters* would aim every later
+        // one at its neighbour. `Typist::new` gates by index for exactly this reason; this pins the
+        // property at the level the typist depends on.
+        let tiles = [Tile::plain("C"), Tile::plain("!"), Tile::plain("T")];
+        let usable: Vec<bool> = tiles.iter().map(|t| t.selectable()).collect();
+        assert_eq!(usable, vec![true, false, true]);
+        assert_eq!(tiles[2].letter, "T", "the tile after it keeps its own index");
     }
 
     #[test]
