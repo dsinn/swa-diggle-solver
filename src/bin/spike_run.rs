@@ -97,14 +97,57 @@ const EMPTY_MAP_CANDIDATES: [(i32, i32); 4] =
 /// right edge, next door to a function named `backOutOfHotspotMapPan`. Parking on the boundary of a
 /// region whose handler pans the map is not somewhere to leave a cursor for seconds at a time.
 const NEUTRAL: (i32, i32) = (760, 240);
-const MAX_STEPS: usize = 20;
+/// A budget, not a target. Run 4 reached the anomaly trigger on step 20 and died there — the cap
+/// expired on the exact step the interesting part began, so the cinematic skip below it had never
+/// run live. Three shrines and two fights cost that run its whole budget; getting past the trigger
+/// and into the anomaly needs roughly twice as much.
+///
+/// This bounds a program that holds the real mouse and keyboard, so it stays finite. Drop
+/// `.diggle-stop` in the working directory to end a run early — it is read between steps, where
+/// nothing is half-done.
+const MAX_STEPS: usize = 45;
+
+/// How many times to click a node, re-deriving its coordinates between tries, before giving up.
+///
+/// Three: one for the coordinate we were given, and two for coordinates the game is asked to restate
+/// after the map has been re-centred. A fourth would be re-asking a question already answered twice —
+/// if two fresh dumps in a row put the node somewhere a click does not select it, the problem is not
+/// staleness.
+const SELECT_RETRIES: usize = 3;
+/// How much of the area-button strip must change for a click to count as having selected something.
+///
+/// **This threshold is not calibrated and is deliberately unchanged from the value that failed.** It
+/// was 0.01 when a run clicked empty ocean, passed this check anyway, and pressed Space into an empty
+/// selection. Raising it blind risks the opposite failure — refusing a selection that did happen —
+/// so it keeps its old value until a live measurement says what a real `Travel` and a real miss
+/// actually score. The retry above is what makes the weak check survivable in the meantime: a miss
+/// that slips through now costs one arrival wait rather than the run.
+const SELECT_MOVED: f64 = 0.01;
+// A landmark-matching drift correction lived here: lift a textured patch when a dump is adopted,
+// find it again before each click, and shift the coordinate by however far the map had moved. It
+// worked, and it was the wrong tool. The search cost is the search area times the template — around
+// a million candidate positions against 96x96 pixels — which showed up immediately as long pauses
+// between moves, paid on every click to insure against a displacement that had been seen once.
+//
+// Pressing the arrow answers the same question for the price of a click, because the map's position
+// stops mattering once the game has just restated it. The retry below does that, and the run that
+// followed cleared the exact hop the drift had killed without the correction ever firing.
+
+/// How many consecutive locate-me misses to sit through before calling it a stall.
+///
+/// Three, each a second apart. A screen transition is half a second nominally
+/// (`utils/defaultconfig.lua:5`) and the loop re-identifies between attempts, so three covers a slow
+/// fade several times over while still failing promptly when the map really is not there.
+const RECENTRE_RETRIES: usize = 3;
 
 #[derive(Debug)]
 enum Stop {
     /// Someone asked us to stop, via [`STOP_FILE`].
     Requested,
     AnomalyBeaten,
-    AtShrine(String),
+    // `AtShrine` used to live here: arriving at a shrine ended the run, because finishing one needed
+    // a capability this program did not have. It does now, so a shrine is a detour rather than a
+    // terminus — see the arrival branch in `drive`.
     /// Standing on a subworld whose interior we cannot yet clear.
     AtSubworld(String),
     NoPlan,
@@ -120,6 +163,18 @@ struct Run<'a> {
     reader: adjacency::Reader,
     map: WorldMap,
     latest: Option<Adjacency>,
+    /// How many adjacency dumps have been parsed, ever.
+    ///
+    /// [`Run::latest`] is sticky — it is set when a dump arrives and never cleared — so "is there a
+    /// dump in hand whose reason mentions a pan" is answered `true` by a dump that arrived minutes
+    /// ago. `recentre` asked exactly that question after pressing the arrow and so could return
+    /// coordinates from before the press, having proved nothing about the press at all. A run died on
+    /// it: six recentres reported success while the console printed five `Screen pan finished` lines
+    /// all told, three of them caused by arrivals rather than by the arrow.
+    ///
+    /// A monotonic count fixes it without any timestamp bookkeeping: take the count before the click,
+    /// and only a dump that pushes it higher can answer for that click.
+    dumps: usize,
     save_dir: PathBuf,
     log: String,
     /// The game's own `right-*.png` artwork, for reading the affirmative slot off the screen.
@@ -129,6 +184,31 @@ struct Run<'a> {
     /// the screen right now" — and it was open-loop, so our count and the game's reality could only
     /// drift. See [`diggle_solver::observe::affirm`].
     affirm: affirm::ButtonArt,
+    /// Consecutive locate-me probes that produced no dump. Reset by any success.
+    ///
+    /// Consecutive is the point: a miss while a screen fades in is ordinary and self-correcting, and
+    /// only a run of them means the map is genuinely not coming.
+    recentre_misses: usize,
+    /// Shrines we have already tried to play this run.
+    ///
+    /// `used` is the real "this shrine is finished" flag, and it is the game's, which is why it is
+    /// trusted for planning. But it is only set by a *successful* pray — so a shrine we walked into
+    /// and failed to solve stays unused, the arrival branch fires again on the next iteration, and
+    /// the run spends its whole budget re-entering the same puzzle. This is the difference between
+    /// "there is nothing left to do here" and "we already had our go".
+    shrines_tried: std::collections::HashSet<String>,
+    /// Area-slot captures already taken, so a template is photographed once rather than every step.
+    slots_captured: std::collections::HashSet<String>,
+    /// An answered event has started the anomaly cinematic and it has not been skipped yet.
+    ///
+    /// A flag rather than a return value, because *which* caller answers the rumble is an accident of
+    /// timing. `handle_event` is called from three places and only one of them looks at what it
+    /// returns; the arrival wait — the loop most likely to be running when the ground rumbles, since
+    /// the trigger fires mid-hop — calls it bare and discards the title. So the event was answered,
+    /// `answered_event` was set, the outer loop's call correctly reported nothing new, and the skip
+    /// that this whole capability exists for never ran. Recording the fact on the run makes the
+    /// trigger independent of who noticed it.
+    pending_cinematic: bool,
     /// Feed line index of the last `Event:` block we acted on.
     ///
     /// Identity, not a tally. The previous design read `feed.since(mark)` with the mark taken at the
@@ -157,6 +237,7 @@ impl Run<'_> {
         for a in self.reader.push(&new) {
             self.map.fold(&a);
             self.latest = Some(a);
+            self.dumps += 1;
         }
     }
 
@@ -225,6 +306,20 @@ impl Run<'_> {
     /// it animates, and input during the animation goes nowhere — that is what made a Space vanish
     /// against a visible Combat button. `Screen pan finished` (`:1255`) is the signal.
     ///
+    /// ## What the signal does NOT cover
+    ///
+    /// That line is printed only when an animated `offsetTransition` completes
+    /// (`overworldview.lua:1249-1256`). Three other paths move the map and say nothing: the drag and
+    /// hotspot writes (`:1263-1265`) set `xoffset` directly, and `UpdateZoom` recentres with
+    /// `instant` (`:1095`). So silence here means "no animated pan finished", never "the map has not
+    /// moved", and a dump is evidence about the instant it was printed rather than a standing fact.
+    ///
+    /// The arrow being on screen is likewise not evidence that it can be pressed. It carries
+    /// `activeIf = core.getInteractionEnabled` (`:487`) and is *shown* by `clearToShowAreaButton`
+    /// (`:497-502`), which is exactly what `setInteractionEnabled(false)` calls — so the moments it
+    /// is most visible include the moments it is inert. Pressing it then does nothing at all, which
+    /// is indistinguishable from a press that worked unless a fresh dump is demanded afterwards.
+    ///
     /// ## Why the middle step is *read* and not merely clicked
     ///
     /// [`affirm::SHOW_AREA_BUTTONS`] shares its slot with the current location's area buttons. Clicking
@@ -267,24 +362,70 @@ impl Run<'_> {
                 continue;
             }
             let Ok((lx, ly)) = self.win.client_to_screen(SHOW_AREA_BUTTONS.0, SHOW_AREA_BUTTONS.1) else { continue };
+            // Counted BEFORE the click. Anything already in hand describes the map as it was, and the
+            // whole point of pressing the arrow is to learn where the map is now.
+            let before = self.dumps;
             let _ = click_at_in(self.win, lx, ly);
             self.park();
             let by = Instant::now() + Duration::from_secs(12);
             while Instant::now() < by {
                 std::thread::sleep(Duration::from_millis(250));
                 self.pump();
-                if let Some(a) = self.latest.as_ref() {
-                    if a.reason.contains("pan") {
+                if self.dumps > before {
+                    if let Some(a) = self.latest.as_ref().filter(|a| a.reason.contains("pan")) {
                         return Some(a.clone());
                     }
                 }
             }
-            self.log.push_str(&format!("  no pan finished after locate-me (candidate {n})\n"));
+            // Two very different failures reach this line, and the run that needed to tell them apart
+            // could not. `mousereleased` on the arrow does `refreshAreaButtons` and
+            // `centreScreenOnPlayer` together (`overworldview.lua:485-494`), so a press that lands
+            // *replaces* the arrow with the location's buttons. Reading the slot one more time
+            // therefore says which half went wrong: an arrow still sitting there was never pressed,
+            // an arrow that has gone was pressed and the pan simply went unannounced — and only the
+            // second leaves us holding coordinates worth anything.
+            let after = self.read_slot(&affirm::SHOW_AREA_BUTTONS);
+            self.log.push_str(&format!(
+                "  no pan finished after locate-me (candidate {n}); arrow is now {:?} ({:.2}) — {}\n",
+                after.state,
+                after.score,
+                if after.state.is_ready() {
+                    "the press did not land"
+                } else {
+                    "the press landed but no pan was announced"
+                }
+            ));
         }
         None
     }
 
     /// Clicks the lone area button, having first proved the strip is showing something.
+    /// Photographs the area-button slot, for building fingerprints of what can appear in it.
+    ///
+    /// The slot is **chrome, not map**: a `default` button at normalized `(0, 0.85)`, so it stays put
+    /// however far the map has panned. That is the whole reason it is worth reading — every other
+    /// arrival and selection check we have is downstream of a map coordinate, and map coordinates
+    /// have now moved silently twice, taking a run with them each time.
+    ///
+    /// `Combat`, `Attack`, `Enter`, `Gather`, `Rest`, `Open`, `Wake up` and `Visit` all land here
+    /// (`affirm.rs:115-119`), and a finished node shows its verb *greyed* rather than showing
+    /// nothing. So the fingerprints have to be told apart from each other and from their own greyed
+    /// forms — the nearest confusable state is never the background.
+    ///
+    /// `tag` records what the game's own state says should be in the slot, so the capture arrives
+    /// already labelled rather than needing to be identified afterwards.
+    fn snap_area_slot(&mut self, tag: &str) {
+        // `default` is 250x100 (`ui/elements/button.lua:17`), and [`AREA_BUTTON`] is its centre.
+        let (x, y) = (AREA_BUTTON.0 - 125, AREA_BUTTON.1 - 50);
+        if let Ok(f) = diggle_solver::win::capture::capture_client_rect(self.win, x, y, 250, 100) {
+            let path = Path::new(FRAMES).join(format!("slot-{tag}.png"));
+            match f.write_png(&path) {
+                Ok(()) => self.log.push_str(&format!("  captured the area slot as `{tag}`\n")),
+                Err(e) => self.log.push_str(&format!("  could not write the {tag} slot: {e}\n")),
+            }
+        }
+    }
+
     fn click_area_button(&mut self, what: &str) -> Result<bool, Box<dyn std::error::Error>> {
         let before = diggle_solver::win::capture::capture_window(self.win)?;
         let (bx, by) = self.win.client_to_screen(AREA_BUTTON.0, AREA_BUTTON.1)?;
@@ -402,9 +543,18 @@ impl Run<'_> {
             ));
         }
         // Reported, not swallowed: still-ready after six presses means the reading and the binding
-        // disagree, and that is worth seeing in the log rather than looping forever.
+        // disagree, and that is worth seeing in the log.
+        //
+        // **Returns false, because nothing was cleared.** This used to return `true`, which was
+        // survivable only by accident: the caller's `continue` re-entered an inner loop that gave up
+        // after ten tries. Once that `continue` was corrected to re-run the screen check, the lie
+        // became a hard stall — a live run sat on the overworld reading a phantom affirmative at 0.62
+        // and burned every remaining step re-clearing a text screen that was not there.
+        //
+        // The honest answer to "did you clear a text screen" is no, and the caller can then fall
+        // through to the map path, which is where a run standing on the map belongs.
         self.log.push_str("  affirmative still live after 6 presses — giving up on it\n");
-        true
+        false
     }
 
     /// Answers an arrival event, if an unanswered one has been announced. Returns its title.
@@ -422,6 +572,9 @@ impl Run<'_> {
         // answer the same event again on the next pass.
         self.answered_event = Some(at);
         let ev = event::parse_events(&tail).pop()?;
+        if ev.title.to_ascii_lowercase().contains("rumble") {
+            self.pending_cinematic = true;
+        }
         self.log.push_str(&format!("  event **{}**: {:?}\n", ev.title,
             ev.choices.iter().map(|c| c.text.clone()).collect::<Vec<_>>()));
         // Never `choices[0]`: a corrupted village can put "Kill him" first.
@@ -474,10 +627,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         reader: adjacency::Reader::new(),
         map: WorldMap::new(),
         latest: None,
+        dumps: 0,
         save_dir: save_dir.clone(),
         log: String::from("# Spike: the run\n\n"),
         affirm: affirm::ButtonArt::load(Path::new(&cfg.game_dir), "right")?,
         answered_event: None,
+        recentre_misses: 0,
+        shrines_tried: std::collections::HashSet::new(),
+        slots_captured: std::collections::HashSet::new(),
+        pending_cinematic: false,
         pregame_seen: false,
     };
 
@@ -657,6 +815,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Return takes whatever is selected. Choosing a class *well* is a separate question needing its own
 /// evidence, and nothing in the MVP depends on it — a run that starts is worth more than a run that
 /// starts as the right class.
+/// Skips the anomaly-opening cinematic by reloading the world from the main menu.
+///
+/// Proven in `spike_anomaly` and, until now, only ever run there — capability built in a spike and
+/// never wired into the thing that needs it, the same way the shrine solver sat unused. A live run
+/// reached `You feel the ground rumble` with no way past what follows it.
+///
+/// The sequence is `Escape -> options -> Menu -> main menu -> Continue`. The game never closes: the
+/// world is already on disk, so reloading it *is* the skip. The game's own source says so —
+/// `-- so we can save right away and main menu skip` — which is what makes this an intended path
+/// rather than an exploit.
+///
+/// ## The one sanctioned `Escape`
+///
+/// `Escape` is bound to `backOptions` (`utils/defaultbinds/keyboard.lua:9`), so on a screen with no
+/// `goBack` it opens the options menu — and a run that does not know it is in there will keep
+/// pressing at a map that is no longer on screen. This is the single place this program sends it,
+/// and it is safe here only because the next click is already decided.
+///
+/// Escape doing nothing is a real outcome, not a failure to retry: input is disabled while the beams
+/// play. It is reported so the caller can carry on rather than press blindly into a cutscene.
+fn skip_cinematic(r: &mut Run) -> Result<(), String> {
+    use diggle_solver::win::input::{SC_ESCAPE, VK_ESCAPE};
+    let before = diggle_solver::win::capture::capture_window(r.win)
+        .map_err(|e| format!("capture before Escape: {e}"))?;
+    r.keys.focus();
+    std::thread::sleep(Duration::from_millis(300));
+    r.keys.press_key(VK_ESCAPE, SC_ESCAPE).map_err(|e| format!("Escape: {e}"))?;
+    r.park();
+    std::thread::sleep(Duration::from_millis(1200));
+    r.pump();
+    let after = diggle_solver::win::capture::capture_window(r.win)
+        .map_err(|e| format!("capture after Escape: {e}"))?;
+    let moved = before.diff_fraction(&after, diggle_solver::observe::settle::FULL);
+    if moved < 0.05 {
+        return Err(format!("Escape moved the screen {moved:.3} — options did not open"));
+    }
+
+    // `Menu`: a `small` 100x100 at ss(1, 0), xOffset -2.63, yOffset 0.38 (`ui/options.lua:333-337`),
+    // so (1657, 38) at 1920x1080. Red, top right.
+    let (mx, my) =
+        r.win.client_to_screen(1657, 38).map_err(|e| format!("Menu coords: {e}"))?;
+    diggle_solver::win::input::click_at(mx, my).map_err(|e| format!("Menu click: {e}"))?;
+    r.park();
+    std::thread::sleep(Duration::from_millis(1500));
+    r.pump();
+
+    // Park before scoring, or we fingerprint our own cursor. The click that opened this menu leaves
+    // the pointer wherever it landed, and the main menu's `Continue` carries a hover state — a
+    // brighter button (`hover_alpha`, `ui/elements/button.lua:83`) plus a "Load previously saved
+    // data." tooltip drawn underneath it. Neither is in the template, which was captured cold, so a
+    // hovered button scored 0.5726 against a 0.90 bar and `click_exact` refused a button that was
+    // genuinely there. The refusal was correct — `Restart` is the neighbour and it eulogises the run
+    // — but the reading was ours to get right.
+    //
+    // `NEUTRAL` is empty backdrop on this screen as well as on the map, which is the only property
+    // required of it here.
+    if let Ok((px, py)) = r.win.client_to_screen(NEUTRAL.0, NEUTRAL.1) {
+        let _ = diggle_solver::win::input::warp_cursor(px, py);
+        std::thread::sleep(Duration::from_millis(400));
+    }
+
+    // Verified, not blind: this slot reads `Restart` when it is not `Continue`, and `Restart`
+    // eulogises the run.
+    diggle_solver::act::click_exact(
+        r.win,
+        &diggle_solver::act::CONTINUE,
+        diggle_solver::act::CONTINUE_PRESENT,
+    )
+    .map_err(|e| format!("no Continue on the main menu: {e}"))?;
+    std::thread::sleep(Duration::from_millis(1500));
+    r.pump();
+    Ok(())
+}
+
 fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
     /// Enough Returns for the unlock chain, which is longer on a profile with unlocks pending.
     const MAX_RETURNS: usize = 16;
@@ -903,6 +1135,114 @@ fn drive(
             }
             continue;
         }
+        // The stats history page, which a live run reached by accident straight after finishing a
+        // shrine and clearing the text screen behind it. Like the character screen it is a dead end
+        // with no map, and the failure it produced was thoroughly misleading: four locate-me probes
+        // at 0.15 and a stop reading `no pan dump after locate-me`, which describes the map being
+        // unreadable rather than absent, and sends you looking at panning.
+        if screen == diggle_solver::act::Screen::StatsHistory {
+            match diggle_solver::act::click_exact(
+                r.win,
+                &diggle_solver::act::STATS_BACK,
+                diggle_solver::act::STATS_BACK_PRESENT,
+            ) {
+                Ok(q) => {
+                    r.park();
+                    std::thread::sleep(Duration::from_millis(900));
+                    r.pump();
+                    r.log.push_str(&format!("  left the stats history page ({q:.4})\n"));
+                }
+                Err(e) => return Stop::Failed(format!("stuck on the stats history page: {e}")),
+            }
+            continue;
+        }
+        // Still on a shrine screen — normally the moment after `Pray`, where the slot now holds a
+        // greyed `Consecrate` and the only thing left to do is leave. `shrineplay::play` deliberately
+        // stops at the Pray press and hands the aftermath back here, so this is the ordinary exit
+        // rather than an error path.
+        if screen == diggle_solver::act::Screen::Shrine {
+            match diggle_solver::act::click_exact(
+                r.win,
+                &diggle_solver::act::SHRINE_GOBACK,
+                diggle_solver::act::SHRINE_GOBACK_PRESENT,
+            ) {
+                Ok(q) => {
+                    r.park();
+                    std::thread::sleep(Duration::from_millis(900));
+                    r.pump();
+                    r.log.push_str(&format!("  left the shrine screen ({q:.4})\n"));
+                }
+                Err(e) => return Stop::Failed(format!("stuck on the shrine screen: {e}")),
+            }
+            continue;
+        }
+        // The main menu, which we reach on purpose (the cinematic skip reloads the world through it)
+        // and by accident (anything that strands us outside the game). Either way the way out is the
+        // same, and it belongs here rather than only inside `skip_cinematic`: that function owned the
+        // click, so when its one attempt was refused the run had no second look, fell through to the
+        // map path, and blind-probed a menu — which is how it kept opening the almanac.
+        //
+        // A second look is worth having because the refusal is often transient. Arriving from the
+        // options menu leaves `Continue` highlighted, and a highlighted button is not the button the
+        // template was cut from: it scored 0.5726 against a 0.90 bar on first arrival, and cleanly on
+        // the way back. `click_exact` refusing was right — `Restart` is the neighbour, and it
+        // eulogises the run — but a refusal is a reason to look again, not to stop.
+        if screen == diggle_solver::act::Screen::MainMenu {
+            r.park();
+            std::thread::sleep(Duration::from_millis(600));
+            r.pump();
+            // Both renderings, same origin and same click: whichever matches, the action is
+            // identical. The plain template is asked first because it is the ordinary case; the
+            // highlighted one exists because arriving through the options menu — the skip's own
+            // route — leaves the button lit, and that state had no template until it stalled a run.
+            let mut hit = diggle_solver::act::click_exact(
+                r.win,
+                &diggle_solver::act::CONTINUE,
+                diggle_solver::act::CONTINUE_PRESENT,
+            );
+            if hit.is_err() {
+                hit = diggle_solver::act::click_exact(
+                    r.win,
+                    &diggle_solver::act::CONTINUE_HOT,
+                    diggle_solver::act::CONTINUE_PRESENT,
+                );
+            }
+            match hit {
+                Ok(q) => {
+                    r.log.push_str(&format!("{step}. resumed from the main menu ({q:.4})
+"));
+                    std::thread::sleep(Duration::from_millis(1500));
+                    r.pump();
+                }
+                // Deliberately not a stop. The next iteration re-identifies and tries again, which is
+                // exactly what turns a highlighted button into an ordinary one.
+                Err(e) => {
+                    r.log.push_str(&format!("{step}. main menu, Continue refused: {e}
+"));
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+            continue;
+        }
+        // A class unlock, which arrives unannounced after a fight — a live run was handed "The
+        // Cultist class is now available." on the way back from a level 3 crypt. Dismissing it is the
+        // whole interaction; the unlock itself is a profile-wide reward that needs nothing from us.
+        if screen == diggle_solver::act::Screen::Unlock {
+            match diggle_solver::act::click_exact(
+                r.win,
+                &diggle_solver::act::UNLOCK_CONTINUE,
+                diggle_solver::act::UNLOCK_CONTINUE_PRESENT,
+            ) {
+                Ok(q) => {
+                    r.park();
+                    std::thread::sleep(Duration::from_millis(900));
+                    r.pump();
+                    r.log.push_str(&format!("  dismissed a class unlock ({q:.4})\n"));
+                }
+                Err(e) => return Stop::Failed(format!("stuck on the unlock screen: {e}")),
+            }
+            continue;
+        }
         // The combat pregame: recognised by its `Start`, and the click validated by that button
         // going away.
         //
@@ -932,6 +1272,21 @@ fn drive(
             }
             std::thread::sleep(Duration::from_millis(800));
             r.pump();
+            continue;
+        }
+        // Skipped here rather than at the call site that answered it, so any caller can arm it.
+        // Checked before the screen is identified because the cinematic is precisely a state where
+        // identification fails: `utils/events.lua:45-48` pans the camera to (0,0) and disables
+        // interaction, which leaves locate-me inert and the map unreadable. The run this came from
+        // spent its last four steps asking a panning, uninteractable map where it was.
+        if r.pending_cinematic {
+            r.pending_cinematic = false;
+            match skip_cinematic(r) {
+                Ok(()) => r.log.push_str(&format!("{step}. skipped the anomaly cinematic
+")),
+                Err(e) => r.log.push_str(&format!("{step}. could not skip the cinematic: {e}
+")),
+            }
             continue;
         }
         if Path::new(STOP_FILE).exists() {
@@ -1053,15 +1408,41 @@ fn drive(
             continue;
         }
 
+        // Dismissing something changes the screen, so go back to the top and look again rather than
+        // carrying on as if the map were underneath.
+        //
+        // This used to `continue` the *inner* loop, which only ever meant "clear another text
+        // screen" — the screen check at the top of the iteration was never re-run. A live run walked
+        // straight through that gap: it finished a shrine, cleared one text screen, and proceeded
+        // into the map path on the stats history page, failing four locate-me probes and stopping
+        // with `no pan dump after locate-me`. Both new screen handlers existed by then and neither
+        // was ever asked, because asking happens at the top and the run never got back there.
+        let mut dismissed = false;
         for _ in 0..10 {
             if r.clear_text_screen() {
                 r.log.push_str(&format!("{step}. cleared a text screen\n"));
-                continue;
+                dismissed = true;
+                break;
             }
             match r.handle_event() {
-                Some(title) => r.log.push_str(&format!("{step}. answered `{title}`\n")),
+                Some(title) => {
+                    r.log.push_str(&format!("{step}. answered `{title}`\n"));
+                    // Answering the rumble is what *starts* the cinematic, so this is the moment to
+                    // skip it — see `skip_cinematic`.
+                    if title.to_ascii_lowercase().contains("rumble") {
+                        match skip_cinematic(r) {
+                            Ok(()) => r.log.push_str("  skipped the anomaly cinematic\n"),
+                            Err(e) => r.log.push_str(&format!("  cinematic skip failed: {e}\n")),
+                        }
+                    }
+                    dismissed = true;
+                    break;
+                }
                 None => break,
             }
+        }
+        if dismissed {
+            continue;
         }
 
         // Locate-me is an overworld control and does not work in a subworld — confirmed live. It is
@@ -1096,18 +1477,118 @@ fn drive(
             }
         } else {
             match r.recentre() {
-                Some(a) => a,
-                None => return Stop::Failed("no pan dump after locate-me".into()),
+                Some(a) => {
+                    r.recentre_misses = 0;
+                    a
+                }
+                // **Not a stop on the first miss.** A failed locate-me means "no map answered", and
+                // the commonest reason by far is that a screen is still arriving — the run that
+                // produced this branch stopped on a stats history page caught mid-fade, with the
+                // previous screen's furniture still drawn over the top of it. Giving up on the first
+                // look diagnoses a transition as a dead end.
+                //
+                // So: wait a second and go round again. Going round is what matters more than the
+                // second — it re-runs `identify` at the top of the loop, which is where a screen
+                // that is not the map gets recognised and handled. Retrying the probe in place would
+                // only ask the same question of the same wrong screen.
+                None => {
+                    r.recentre_misses += 1;
+                    if r.recentre_misses <= RECENTRE_RETRIES {
+                        r.log.push_str(&format!(
+                            "{step}. no pan dump — waiting for a transition (miss {} of {})\n",
+                            r.recentre_misses, RECENTRE_RETRIES
+                        ));
+                        std::thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
+                    return Stop::Failed(format!(
+                        "no pan dump after locate-me, {} times over",
+                        r.recentre_misses
+                    ));
+                }
             }
         };
         let here = r.map.here().unwrap_or("?").to_string();
         let place = r.map.get(&here).cloned();
 
-        // A shrine we could finish: routing brought us here, but consecrating needs a capability
-        // this run does not have, so say so rather than pretend.
-        if r.map.worth_consecrating_here(&here) {
-            r.log.push_str(&format!("{step}. at **{here}** — consecrating is not implemented\n"));
-            return Stop::AtShrine(here);
+        // A shrine we are standing on whose fight is already won and whose blessing is unclaimed.
+        //
+        // Taken **on arrival, whatever the errand was**. An uncorrupted shrine is strictly
+        // beneficial: the walk is already paid for, and `Pray` hands over wildcard tiles
+        // (`doPray` -> `blessings.wildcardRewards`, `shrine.lua:126-131`) which are exactly what a
+        // hurt run wants before its next fight. The objective is not disturbed — this returns to the
+        // map and the next `next_target` picks up where it left off.
+        //
+        // `completed` is the shrine's *area*, i.e. its combat, and it is what decides whether the
+        // overworld slot holds `Visit` or `Combat` (`overworld/locations/shrine.lua:64,76`). It is
+        // NOT the word: `shrineView.hasWon()` is the guess list restored from
+        // `<key>subs` (`shrine.lua:495`), which is why a shrine can be `[done]` with the puzzle
+        // untouched — which is exactly the state the live run found shrine1 in.
+        //
+        // `used` is `<key>_used` (`overworldview.lua:215-218`), set by praying, and is the only
+        // thing that gates `Pray` once the word is solved (`showPrayButton`, `shrine.lua:98-102`).
+        // So "complete and unused" is precisely "there is something here worth doing".
+        // The greyed forms, which are the states a fingerprint is most likely to be fooled by: the
+        // verb is still drawn, just at half alpha over a different base image
+        // (`ui/elements/button.lua:128,131`). A threshold measured only against a live button would
+        // read "finished" as "ready" — the failure that a shared slot punishes hardest, because the
+        // coordinate that means `Visit` on one node means `Combat` on the next.
+        //
+        // "Spent" is a different flag for each verb, and conflating them produced two byte-identical
+        // captures labelled as opposites. A crypt's `Combat` greys out when its area is `completed`.
+        // A shrine's `Visit` does not: `completed` is the shrine's *combat*, and the shrine stays
+        // visitable until `used` records that something was prayed for.
+        if let Some((p, tag)) = place.as_ref().and_then(|p| {
+            if p.type_is("shrine") {
+                p.used.then_some((p, "visit-spent"))
+            } else {
+                p.completed.then_some((p, "combat-spent"))
+            }
+        }) {
+            let _ = p;
+            if !r.slots_captured.contains(tag) {
+                r.slots_captured.insert(tag.to_string());
+                r.snap_area_slot(tag);
+            }
+        }
+        if let Some(p) = place
+            .as_ref()
+            .filter(|p| p.type_is("shrine") && p.completed && !p.used)
+            .filter(|p| !r.shrines_tried.contains(&p.key))
+        {
+            let key = p.key.clone();
+            r.log.push_str(&format!("{step}. at **{key}** — playing the shrine\n"));
+            // Standing on an unused shrine, so the slot is showing a live `Visit`.
+            r.snap_area_slot("visit-live");
+            // Marked before the attempt, not after: a play that panics, times out, or leaves us on
+            // an unexpected screen must still count as having had its go, or the guard protects
+            // nothing in exactly the cases it exists for.
+            r.shrines_tried.insert(key.clone());
+            // The planner has to be told as well, and this is the whole reason `abandon` exists.
+            // `shrines_tried` only stops us *entering* the shrine again; it says nothing about
+            // whether the shrine is worth walking to, and a shrine left unprayed is still unused as
+            // far as the save is concerned. With only half the story, the planner kept choosing the
+            // one shrine the arrival branch would always decline, and the run ping-ponged between it
+            // and the cleared crypt on the way to the next.
+            r.map.abandon(&key);
+            match diggle_solver::shrineplay::play(r.win, &r.keys) {
+                Ok(played) => {
+                    let log = played.log.clone();
+                    r.log.push_str(&log);
+                    if !played.prayed {
+                        // Not fatal, and deliberately not a stop: the blessing is a bonus, and a run
+                        // that cannot claim it should still get on with the anomaly. It is logged
+                        // loudly because a shrine we walked to and failed to use is a wasted trip.
+                        r.log.push_str("  shrine: left unprayed\n");
+                    }
+                }
+                Err(e) => r.log.push_str(&format!("  shrine failed: {e}\n")),
+            }
+            // Re-read before anything plans on it. `_used` reaches the save when the shrine screen
+            // is *exited*, which the driver has just done, so this is the first moment the flag is
+            // readable — see the standing note that a stale read here is timing, not failure.
+            r.apply_save();
+            continue;
         }
 
         // Inside a subworld: walk to the exit rather than reaching for it.
@@ -1297,6 +1778,7 @@ fn drive(
             // put us in one" stay distinguishable. Inside a village they are not the same thing at
             // all, and conflating them is what stopped this run: see the loop below.
             let inside_before = r.map.inside().map(str::to_string);
+            r.snap_area_slot("combat-live");
             if !matches!(r.click_area_button("Combat"), Ok(true)) {
                 return Stop::Failed(format!("Combat did not open at {here}"));
             }
@@ -1423,20 +1905,74 @@ fn drive(
 
         // Select, and prove it: the lone area button is `affirmative`, and at a combat node that
         // button is Combat. Space without a confirmed selection starts a fight.
-        let Ok(before) = diggle_solver::win::capture::capture_window(r.win) else {
-            return Stop::Failed("capture failed".into());
-        };
-        let Ok((sx, sy)) = r.win.client_to_screen(target.x as i32, target.y as i32) else {
-            return Stop::Failed("coordinate conversion failed".into());
-        };
-        let _ = click_at_in(r.win, sx, sy);
-        std::thread::sleep(Duration::from_millis(900));
-        r.pump();
-        let Ok(after) = diggle_solver::win::capture::capture_window(r.win) else {
-            return Stop::Failed("capture failed".into());
-        };
-        if before.diff_fraction(&after, AREA_BUTTONS) <= 0.01 {
-            return Stop::Failed(format!("selecting {} did not register", hop.step));
+        //
+        // Retried, because a missed click is a *coordinate* failure and coordinates can be renewed.
+        // The node position comes from an adjacency dump, and a dump describes the map at the instant
+        // it was printed — see `recentre` for the three ways the map moves without announcing it. So
+        // when a click lands on empty ground the useful response is not to give up but to ask the
+        // game where things are now, which is exactly what pressing the arrow does.
+        //
+        // A miss is cheap to detect and ruinous to miss: `affirmative` acts on
+        // `overworldview.getMousePressedOn()` (`overworld.lua:1355-1357`), so with nothing selected
+        // the Space that follows has no subject and travel never starts. The run that taught us this
+        // then sat in the arrival wait for its full sixty seconds and died, having printed "the
+        // affirmative slot is empty" two hundred times on the way.
+        let mut selected = false;
+        let mut at = (target.x as i32, target.y as i32);
+        for attempt in 1..=SELECT_RETRIES {
+            let Ok(before) = diggle_solver::win::capture::capture_window(r.win) else {
+                return Stop::Failed("capture failed".into());
+            };
+            let Ok((sx, sy)) = r.win.client_to_screen(at.0, at.1) else {
+                return Stop::Failed("coordinate conversion failed".into());
+            };
+            let _ = click_at_in(r.win, sx, sy);
+            std::thread::sleep(Duration::from_millis(900));
+            r.pump();
+            let Ok(after) = diggle_solver::win::capture::capture_window(r.win) else {
+                return Stop::Failed("capture failed".into());
+            };
+            let moved = before.diff_fraction(&after, AREA_BUTTONS);
+            if moved > SELECT_MOVED {
+                selected = true;
+                break;
+            }
+            r.log.push_str(&format!(
+                "  selecting {} at ({}, {}) moved the strip {moved:.4}, attempt {attempt} of {SELECT_RETRIES}\n",
+                hop.step, at.0, at.1
+            ));
+            if attempt == SELECT_RETRIES {
+                break;
+            }
+            // Fresh coordinates, from a dump that is now required to be newer than the arrow press.
+            match r.recentre() {
+                Some(a) => match a.nodes.iter().find(|n| n.key == hop.step) {
+                    Some(n) => {
+                        at = (n.x as i32, n.y as i32);
+                        r.log.push_str(&format!(
+                            "  re-centred; `{}` is now at ({}, {})\n",
+                            hop.step, at.0, at.1
+                        ));
+                    }
+                    None => {
+                        r.log.push_str(&format!(
+                            "  re-centred, but `{}` is not in the new dump\n",
+                            hop.step
+                        ));
+                        break;
+                    }
+                },
+                None => {
+                    r.log.push_str("  re-centre produced no fresh dump\n");
+                    break;
+                }
+            }
+        }
+        if !selected {
+            return Stop::Failed(format!(
+                "selecting {} did not register after {SELECT_RETRIES} attempts",
+                hop.step
+            ));
         }
         r.keys.focus();
         std::thread::sleep(Duration::from_millis(200));
