@@ -282,6 +282,21 @@ impl Fight<'_> {
         // Wait for the turn to move on: any other state, a changed board, or the reward screen.
         let mark = feed.mark();
         let until = Instant::now() + Duration::from_secs(20);
+        // What this loop *saw*, not just what it concluded.
+        //
+        // A run stalled here for its full twenty seconds and reported
+        // `Stalled { turns: 10, state: "PlayerTurn" }` — a verdict with none of the evidence behind
+        // it. Ten observations were made and all ten discarded, so afterwards there was no way to
+        // tell "found no word" from "submitted and nothing moved" from "the save stopped being
+        // readable", and the diagnosis came down to guesswork against a single screenshot.
+        //
+        // Kept as a running summary rather than a line per poll: eighty near-identical lines is how
+        // the affirmative slot came to fill a report. The health and status go in because the run
+        // that prompted this was on 1 health with 3 stacks of toxin, which is a very different
+        // situation from a board that simply will not move.
+        let mut polls = 0usize;
+        let mut read_errors = 0usize;
+        let mut last = String::new();
         while Instant::now() < until {
             std::thread::sleep(Duration::from_millis(250));
             feed.pump();
@@ -290,14 +305,30 @@ impl Fight<'_> {
             }
             match save::load(&self.combat_path) {
                 Ok(next) => {
+                    polls += 1;
                     let s = next.str_at("rpg.player.turnState").unwrap_or("");
                     let now: String = tiles_of(&next).iter().map(|t| t.letter.clone()).collect();
+                    let hp = next.int_at("rpg.player.health").unwrap_or(-1);
+                    let toxin = next.int_at("rpg.player.statusEffects.toxin").unwrap_or(0);
+                    last = format!(
+                        "state {s}, board {now}, {hp}hp{}",
+                        if toxin > 0 { format!(", toxin {toxin}") } else { String::new() }
+                    );
                     if s != "PlayerTurn" || now != letters {
                         break;
                     }
                 }
-                Err(_) => break, // the file went away: combat is over
+                Err(_) => {
+                    read_errors += 1;
+                    break; // the file went away: combat is over
+                }
             }
+        }
+        if Instant::now() >= until {
+            log.push_str(&format!(
+                "  turn did not advance: {polls} looks over 20s, {read_errors} unreadable; last saw {last}
+"
+            ));
         }
         Ok(None)
     }
