@@ -830,14 +830,21 @@ pub fn identify(win: &GameWindow) -> Screen {
     // `CONTINUE_HOT` is asked as well, or the menu we reach by the skip's own route — highlighted,
     // because we came through the options menu — is not recognised as the main menu at all.
     //
-    // But asked **exactly**, not searched. `over` hunts the template anywhere inside the button's
-    // search box, and this box is the bottom-left corner, where a combat screen keeps its statistics
-    // panel — wood grain in a wooden frame, which is what the template largely is. Adding a second
-    // wooden-button template to a searched test was enough to tip it: a live fight, chest and all,
-    // was identified as the main menu, and the run spent its budget probing a map that was not there
-    // while a settled board sat waiting.
+    // Asked **exactly**, not searched, because the position is known — see below.
     //
-    // The exact test costs one template-sized capture at a fixed origin and has no such freedom.
+    // A correction, recorded because the wrong version of it was committed first: a run that logged
+    // `screen: MainMenu` and then refused `Continue` at 0.3223 was blamed on searched scoring
+    // matching a combat screen's statistics panel. Measurement says otherwise. On that exact frame
+    // (`tests/frames/combat-chest.png`) all three menu buttons score far under their thresholds —
+    // `Continue` 0.1509 searched / 0.1447 exact, `CONTINUE_HOT` 0.1080, `Start` 0.0984 — so
+    // `identify` cannot have reached `MainMenu` from it. What it saw was the real main menu still
+    // fading out after the launch click, which is also what 0.3223 is: a half-transparent button.
+    //
+    // The exact test stands on its own evidence rather than on that story. Searched scoring reports
+    // the best of 289 candidate offsets, and a maximum over background inflates: `Progress` gains
+    // 0.2062 on a death screen, `SHRINE_PRAY` 0.1266. On a button that is genuinely present the
+    // sweep adds nothing at all — it is already sitting at the argmax — so five of five measurable
+    // buttons score identically both ways. Free tightening, measured, not assumed.
     //
     // All three belong here. The main menu is a fixed layout: `Start`, `Continue` and `Restart` are
     // `default` 250x100 buttons at coordinates derived from the client size, so their positions are
