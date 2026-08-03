@@ -186,6 +186,14 @@ impl Place {
 #[derive(Debug, Default)]
 pub struct WorldMap {
     places: BTreeMap<String, Place>,
+    /// Places the driver has had its one go at and will not enter again this run.
+    ///
+    /// Distinct from `Place::used`, which is the *game's* record of a completed interaction. A shrine
+    /// whose puzzle could not be read is untouched as far as the game is concerned, so `used` stays
+    /// false and it remains a legitimate destination forever. This is the driver's own memory of
+    /// having tried, and it exists because the planner and the caller must not disagree about what is
+    /// still worth walking to — when they did, a run spent thirty steps crossing the same crypt.
+    abandoned: std::collections::HashSet<String>,
     /// Where the last dump said we were.
     here: Option<String>,
     /// `areaFlags.hell` — zero means the anomaly has not opened and the trigger is still live.
@@ -349,6 +357,14 @@ impl WorldMap {
 
     pub fn here(&self) -> Option<&str> {
         self.here.as_deref()
+    }
+
+    /// Records that we have had our one attempt at `key` and it should stop being a destination.
+    ///
+    /// Deliberately not folded into `apply_save`: the save is the game's view and would overwrite
+    /// this on the next read, which is precisely the disagreement that caused the bounce.
+    pub fn abandon(&mut self, key: &str) {
+        self.abandoned.insert(key.to_string());
     }
 
     pub fn get(&self, key: &str) -> Option<&Place> {
@@ -807,10 +823,39 @@ impl WorldMap {
         // by [`WorldMap::worth_consecrating_here`].
         let anomaly_open = !self.anomaly_available().unwrap_or(true);
         let dist = self.distances(here);
+        // **What is actually left to do at a shrine**, which `!consecrated` alone does not answer.
+        // Two actions live there and they have different gates:
+        //
+        // * `Pray` needs the word solved and the area **unused** (`showPrayButton`,
+        //   `shrine.lua:98-102`). Note what that condition does *not* require: for a major shrine the
+        //   clause `hell == 0 or isConsecrated or isDesecrated` is satisfied by `hell == 0` outright,
+        //   so praying is available **before** the anomaly opens, not after it. `areaUnused`
+        //   (`overworldview.lua:215-218`) is the only thing that ever retires it.
+        // * `Consecrate` needs `hell ~= 0` (`shrine.lua:93-96`, `activeIf` at `:244`), so it is
+        //   impossible until the anomaly is open.
+        //
+        // A shrine offering neither is finished and must stop being a destination. It used to not,
+        // and a live run showed what that costs: with `hell = 0` every shrine read as
+        // "unconsecrated" forever, so the nearest one was always a valid target — and because this
+        // branch excludes `here`, the node just left re-entered the candidate set at distance 1. The
+        // run bounced `shrine1 -> l10 -> shrine1` twenty times and stopped having done nothing,
+        // while the crypt it kept walking across never got fought because it was only ever a
+        // waypoint between two shrines that each dissolved on arrival.
+        //
+        // The same bounce came back wearing different clothes, and `worth_a_trip` could not stop it.
+        // A shrine whose puzzle we walked away from is genuinely unused — the game never set its
+        // `_used` flag, because nothing was ever prayed — so it stays a perfectly valid destination
+        // for a driver that has already decided never to enter it again. The caller marks the attempt
+        // as spent; without [`WorldMap::abandon`] telling the planner too, the two disagree and the
+        // run walks back and forth between the shrine it will not re-enter and the crypt on the way
+        // to the next one. Thirty steps of `l10 -> shrine2 -> l10` is what that looks like.
+        let worth_a_trip = |p: &Place| !p.used || (anomaly_open && !p.consecrated);
         if let Some(p) = self
             .places
             .values()
-            .filter(|p| p.key != here && !p.avoid && ok(p) && p.type_is("shrine") && !p.consecrated)
+            .filter(|p| p.key != here && !p.avoid && ok(p) && p.type_is("shrine"))
+            .filter(|p| !self.abandoned.contains(&p.key))
+            .filter(|p| worth_a_trip(p))
             .filter(|p| !(anomaly_open && p.corrupted))
             .min_by_key(|p| dist_or_far(&dist, &p.key))
         {
@@ -2060,9 +2105,123 @@ mod tests {
         assert_eq!(plan.reason, Goal::Shrine);
         assert_eq!(plan.target, "shrine2");
 
-        // Once consecrated it stops pulling us off course.
+        // Once there is nothing left to do there, it stops pulling us off course.
+        //
+        // This used to set `consecrated` alone, and that was not enough of a condition — it only
+        // looked sufficient while `Pray` was unimplemented. Consecrating and praying are separate
+        // actions with separate gates, and `showPrayButton` (`shrine.lua:98-102`) retires on
+        // `areaUnused`, so a consecrated shrine nobody has prayed at still has a blessing waiting.
         m.entry("shrine2").consecrated = true;
+        m.entry("shrine2").used = true;
         assert_ne!(m.next_target().unwrap().reason, Goal::Shrine);
+    }
+
+    #[test]
+    fn a_prayed_shrine_stops_being_a_destination_while_the_anomaly_is_shut() {
+        // The regression for a live stall. With `hell = 0` nothing can be consecrated, so a test of
+        // `!consecrated` can never be discharged and the shrine stays "outstanding" forever. Praying
+        // is the only thing available, and once it is done there is genuinely nothing left there.
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "shrine1",
+            "Swanland shrine",
+            vec![node("l10", "Trenwick — level 1 crypt")],
+        ));
+        m.entry("shrine1").completed = true;
+        m.fold(&dump("l10", "Trenwick — level 1 crypt", vec![node("shrine2", "Foggathorpe shrine")]));
+
+        // Standing at l10, the unprayed shrine1 next door is a fair target.
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Shrine);
+        assert_eq!(plan.target, "shrine1");
+
+        // Having prayed there, it must not pull us back.
+        m.entry("shrine1").used = true;
+        let plan = m.next_target().unwrap();
+        assert_ne!(plan.target, "shrine1", "a prayed shrine is finished while hell == 0");
+    }
+
+    #[test]
+    fn a_prayed_shrine_is_worth_returning_to_once_the_anomaly_opens() {
+        // The other half: `used` retires `Pray`, not `Consecrate`. Once `hell ~= 0` the same shrine
+        // has work again, and writing it off permanently would forfeit it.
+        let mut m = WorldMap::new();
+        m.fold(&dump("l10", "Trenwick — level 1 crypt", vec![node("shrine1", "Swanland shrine")]));
+        m.entry("shrine1").completed = true;
+        m.entry("shrine1").used = true;
+        // Asserted on the *reason*, not the target: an unvisited shrine is still a frontier, so
+        // exploration may legitimately route through it. What must not happen is going there
+        // *because it is a shrine*, which is the claim that there is shrine work to do.
+        assert_ne!(m.next_target().unwrap().reason, Goal::Shrine, "nothing to do there yet");
+
+        // `hell ~= 0` is the anomaly being open, which is what unlocks consecration.
+        m.hell = Some(0.1);
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Shrine);
+        assert_eq!(plan.target, "shrine1", "consecrating is now possible");
+    }
+
+    #[test]
+    fn two_finished_shrines_either_side_of_a_crypt_do_not_ping_pong() {
+        // The stall exactly as it was met: shrine1 and shrine2 with l10 between them, the run
+        // walking shrine1 -> l10 -> shrine1 -> l10 for twenty steps. The crypt was never fought
+        // because it was only ever a waypoint, and stepping *back* to a completed shrine is always
+        // legal, so departure was never blocked.
+        let mut m = WorldMap::new();
+        m.fold(&dump("shrine1", "Swanland shrine", vec![node("l10", "Trenwick — level 1 crypt")]));
+        m.fold(&dump(
+            "l10",
+            "Trenwick — level 1 crypt",
+            vec![node("shrine1", "Swanland shrine"), node("shrine2", "Foggathorpe shrine")],
+        ));
+        for k in ["shrine1", "shrine2"] {
+            m.entry(k).completed = true;
+            m.entry(k).used = true;
+            // Both have been stood on, so neither is a frontier and exploration has no reason to
+            // route through them either. That isolates the claim to the shrine branch.
+            m.entry(k).visited = true;
+        }
+        // Standing on the crypt, with both shrines finished, nothing may send us back to one.
+        let plan = m.next_target();
+        if let Some(plan) = plan {
+            assert_ne!(plan.reason, Goal::Shrine, "still treating a finished shrine as work");
+            assert!(
+                !plan.target.starts_with("shrine"),
+                "went back to a finished shrine: {plan:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shrine_we_walked_away_from_stops_being_a_destination() {
+        // The second bounce, which `worth_a_trip` could not catch. shrine2's puzzle could not be
+        // read, so the run left without praying — and because nothing was prayed, the game never set
+        // `_used`. The shrine is therefore genuinely unused, genuinely nearest, and genuinely one the
+        // driver will never enter again. The live run walked `l10 -> shrine2 -> l10` for thirty
+        // steps until its budget ran out.
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "l10",
+            "Trenwick — level 1 crypt",
+            vec![node("shrine2", "Foggathorpe shrine"), node("shrine3", "Skipsea shrine")],
+        ));
+        for k in ["shrine2", "shrine3"] {
+            m.entry(k).completed = true;
+            m.entry(k).visited = true;
+        }
+        // Standing on the crypt: with nothing abandoned, the nearest unused shrine is fair game.
+        assert_eq!(m.next_target().map(|p| p.reason), Some(Goal::Shrine));
+
+        m.abandon("shrine2");
+        let plan = m.next_target().expect("shrine3 is still worth the trip");
+        assert_eq!(plan.reason, Goal::Shrine);
+        assert_eq!(plan.target, "shrine3", "kept choosing the shrine it refuses to enter");
+
+        // And with both spent, the shrine branch must yield entirely rather than pick the least-bad.
+        m.abandon("shrine3");
+        if let Some(plan) = m.next_target() {
+            assert_ne!(plan.reason, Goal::Shrine, "no shrine is left to visit: {plan:?}");
+        }
     }
 
     #[test]
