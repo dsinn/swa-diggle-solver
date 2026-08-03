@@ -1096,6 +1096,50 @@ fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
 fn drive(
     r: &mut Run, fight: &Fight, health: &mut Option<diggle_solver::rest::Health>, deadline: Instant,
 ) -> Stop {
+    // Are we already in a fight? The save says so outright.
+    //
+    // `combatSaveData` exists only while a fight is live — the game deletes it when combat ends,
+    // which is why `fight.rs:306` reads an unreadable file as "combat is over". So its presence is
+    // the question answered, not a hint to be corroborated. `checkpoint.rs:131` already trusts it for
+    // exactly this, and `Fight` was built to join a fight in progress (`fight.rs:10`); the only thing
+    // missing was anyone asking at startup.
+    //
+    // Asked here, before a single frame is captured, because the alternative is inferring it from
+    // pixels *through* the main menu still fading out after the launch click — the transient that
+    // defeated two resumes, scoring 0.3223 one run and 0.5985 the next. A file on disk has no
+    // animation.
+    //
+    // Startup is also the safe end of the standing rule about this file: never read it while the
+    // game is deleting it, which is the moment a reward is confirmed or postgame is dismissed.
+    // Nothing is in flight here.
+    if fight.combat_path.is_file() {
+        r.log.push_str("0. resuming a fight already in progress
+");
+        let mut fl = String::new();
+        let outcome =
+            fight.run(&mut r.feed, &r.keys, &mut fl, deadline.min(Instant::now() + Duration::from_secs(300)));
+        r.log.push_str(&fl.lines().map(|l| format!("    {l}
+")).collect::<String>());
+        match outcome {
+            Ok(o) if o.cleared() => {
+                r.log.push_str(&format!("  resumed fight finished: {o:?}
+"));
+                let now = r.apply_save();
+                if let (Some(b), Some(a)) = (health.clone(), now) {
+                    r.map.note_health(b, a);
+                    r.map.rested(a);
+                    r.map.note_health_level(a);
+                }
+                *health = now;
+            }
+            // Not a stop dressed as success: an unresumable fight is worth reporting as itself, so a
+            // run that cannot rejoin says so rather than wandering onto the map path and failing to
+            // find a map that was never there.
+            Ok(other) => return Stop::Fought(format!("resumed: {other:?}")),
+            Err(e) => return Stop::Failed(format!("could not resume the fight: {e}")),
+        }
+    }
+
     for step in 1..=MAX_STEPS {
         if Instant::now() >= deadline {
             return Stop::Exhausted;
