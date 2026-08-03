@@ -829,10 +829,17 @@ pub fn identify(win: &GameWindow) -> Screen {
     }
     // `CONTINUE_HOT` is asked as well, or the menu we reach by the skip's own route — highlighted,
     // because we came through the options menu — is not recognised as the main menu at all.
-    if over(&MENU_START, MENU_START_PRESENT)
-        || over(&CONTINUE, CONTINUE_PRESENT)
-        || over(&CONTINUE_HOT, CONTINUE_PRESENT)
-    {
+    //
+    // But asked **exactly**, not searched. `over` hunts the template anywhere inside the button's
+    // search box, and this box is the bottom-left corner, where a combat screen keeps its statistics
+    // panel — wood grain in a wooden frame, which is what the template largely is. Adding a second
+    // wooden-button template to a searched test was enough to tip it: a live fight, chest and all,
+    // was identified as the main menu, and the run spent its budget probing a map that was not there
+    // while a settled board sat waiting.
+    //
+    // The exact test costs one template-sized capture at a fixed origin and has no such freedom.
+    let exactly = |b: &Button| matches!(score_exact(win, b), Ok(q) if q >= CONTINUE_PRESENT);
+    if over(&MENU_START, MENU_START_PRESENT) || exactly(&CONTINUE) || exactly(&CONTINUE_HOT) {
         return Screen::MainMenu;
     }
     // By the heading, never by the confirm button. [`HEROSELECT_CONFIRM`] answers "has a champion
