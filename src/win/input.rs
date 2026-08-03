@@ -296,6 +296,11 @@ pub fn inject_left_click(count: usize) -> Result<(), crate::Error> {
 
 pub const VK_RETURN: u16 = 0x0D;
 pub const SC_RETURN: u16 = 0x1C;
+/// Backspace. **Context-dependent, like every unqualified key here** — send it only on a screen
+/// whose handler is known. It is `shrineView.remove` on the shrine word screen (`shrine.lua:390`)
+/// and a tile deselection in combat, and those are the only two places this program sends it.
+pub const VK_BACK: u16 = 0x08;
+pub const SC_BACK: u16 = 0x0E;
 pub const VK_SPACE: u16 = 0x20;
 pub const SC_SPACE: u16 = 0x39;
 // Arrow keys are "extended" keys: bit 24 of lParam must be set on both
