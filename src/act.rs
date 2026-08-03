@@ -536,6 +536,235 @@ pub const PREGAME_START: Button = Button {
 /// The combat pregame is up. See [`PREGAME_START`].
 pub const PREGAME_START_PRESENT: f64 = 0.90;
 
+/// A solved shrine's `Pray`, which collects the blessing.
+///
+/// `ss(1.0, 0.9)` with `xOffset = -0.75` and the 250x100 `default` size (`shrine.lua:296-301`), so
+/// the rect is exactly (1608,922)-(1858,1022) and the centre is (1733,972). Confirmed live: the
+/// button rendered on that rect to the pixel.
+///
+/// ## The slot is shared, and the neighbour appears the moment you use it
+///
+/// `Consecrate` (`shrine.lua:241`), `Read` (`:302`) and `Desecrate` (`:320`) all sit at the same
+/// `ss(1.0, 0.9)`, `xOffset -0.75`. This is not a hypothetical: praying **immediately** swaps the
+/// slot to a greyed `Consecrate`, because `showConsecrateButton` (`shrine.lua:93-96`) admits the
+/// button once `areaHasBeenUsed(key)` is true, while `activeIf` keeps it inactive at `hell == 0`.
+/// A live capture one click apart shows `Pray`, then `Consecrate` in the same 250x100 rect.
+///
+/// So clicking this slot blind would press whatever happens to be there. Read it first.
+///
+/// ## Measured, one click apart on the same screen
+///
+/// ```text
+///   Pray vs itself                        1.0000
+///   Pray vs greyed Consecrate             0.8130   <- the real confusable
+///   Pray vs the empty slot, pre-win       0.3542
+///   Pray vs the empty slot, mid-puzzle    0.3552
+/// ```
+///
+/// The empty-slot figures matter as much as the confusable: before `shrineView.hasWon()` the slot
+/// holds nothing at all (`showPrayButton`, `shrine.lua:98-102`), so "no button" is the state we are
+/// in for the whole puzzle and it must not read as a match.
+pub const SHRINE_PRAY: Button = Button {
+    name: "shrine Pray",
+    template: "shrine-pray.png",
+    search: (1600, 914, 1866, 1030),
+    origin: (1608, 922),
+    click: (1733, 972),
+};
+
+/// The class-unlock screen's `Continue`.
+///
+/// `ui/unlockscreen.lua` announces itself on the console as `Unlock screen:`, and it appears
+/// mid-run — a live run finished a level 3 crypt and was shown *"The Cultist class is now
+/// available."* Until now that was handled only inside `start_new_run`, which sends Returns through
+/// the unlock chain on the way to hero select; encountered *during* a run it read as `Unknown`, which
+/// the loop treats as "probably the map".
+///
+/// ## A fourth tenant of `ss(1, 0.9)`
+///
+/// This slot is the busiest in the game. Measured against every other occupant on the same exact
+/// 250x100 rect:
+///
+/// ```text
+///   the hero select confirm      0.8300
+///   the shrine's `Pray`          0.8248
+///   a greyed `Consecrate`        0.6445
+///   the empty slot               0.1272
+/// ```
+///
+/// So the bar has to clear 0.83, and [`UNLOCK_CONTINUE_PRESENT`] does. What makes that safe rather
+/// than merely tight is that the *screens* are mutually exclusive and each is identified by something
+/// outside this slot: hero select by its heading, the shrine by its back plaque. This is the last
+/// question asked, not the first.
+pub const UNLOCK_CONTINUE: Button = Button {
+    name: "unlock Continue",
+    template: "unlock-continue.png",
+    search: (1600, 914, 1866, 1030),
+    origin: (1608, 922),
+    click: (1733, 972),
+};
+
+/// The class-unlock screen is up. See [`UNLOCK_CONTINUE`].
+///
+/// **0.90.** Above the 0.8300 hero-select confirm and the 0.8248 `Pray` that share the rect, and well
+/// under a genuine reading — the label is a fixed string on a fixed plank, so a real one scores near
+/// 1.0 the way `Pray` does. The margin below is 0.07, which is thinner than this project likes; it is
+/// acceptable only because the two impostors live on screens that are recognised by other means
+/// first, and it should be re-measured the moment a live unlock screen gives a real number.
+pub const UNLOCK_CONTINUE_PRESENT: f64 = 0.90;
+
+/// The hero select screen's heading, `Choose your champion:`.
+///
+/// `ui.objects.text.object("Choose your champion:", 0.5, 0.095, {font = 'title_type'})`
+/// (`ui/heroselect.lua:316`), so it is centred at (960, 103) at 1920x1080. The template is a 700x100
+/// band around it, cropped from a live capture.
+///
+/// ## Why the heading and not the button
+///
+/// [`HEROSELECT_CONFIRM`] cannot identify this screen, and the reason is measured rather than
+/// suspected. Its label changes with the champion's class, and the shrine's `Pray` sits in the same
+/// `ss(1, 0.9)` slot wearing the same plank:
+///
+/// ```text
+///   genuine confirm, the class the template came from   1.0000
+///   genuine confirm, a third class                      0.8751
+///   the shrine's Pray                                   0.8438   <- in between
+///   genuine confirm, a second class                     0.8156
+/// ```
+///
+/// `Pray` lands **strictly inside** the range of genuine confirms. Any threshold admitting the
+/// 0.8156 class admits `Pray` too, and any threshold rejecting `Pray` rejects that class — so no
+/// number exists that separates them, and raising the bar was not an available fix. A live run was
+/// told it was on hero select while standing in a shrine it had just prayed at.
+///
+/// The heading has none of that: it is a fixed string, drawn before any choice is made, and it does
+/// not share its region with a control.
+///
+/// ## Measured
+///
+/// ```text
+///   hero select, no champion chosen    1.0000
+///   hero select, second class          0.9989
+///   hero select, third class           0.9984
+///   hero select, first class           0.9152
+///   -------------------------------------------  gap
+///   stats history                      0.4218
+///   the main menu                      0.3519
+///   a shrine                           0.1037
+///   the overworld                      0.0225
+/// ```
+///
+/// Note the first row. The button reads 0.1414 with no champion selected — it is *absent* until one
+/// is chosen — so it could never have recognised the screen we most need to recognise: the one we
+/// have just arrived on and not yet acted upon.
+///
+/// **Never clicked.** This is a text object with no handler; `click` is filled in only because
+/// [`Button`] requires it, and the hero card click lives in `start_new_run`.
+pub const HEROSELECT_HEADER: Button = Button {
+    name: "hero select heading",
+    template: "heroselect-header.png",
+    search: (602, 47, 1318, 163),
+    origin: (610, 55),
+    click: (960, 105),
+};
+
+/// The hero select screen is up. See [`HEROSELECT_HEADER`].
+///
+/// **0.80**, in a gap 0.49 wide: 0.115 below the weakest genuine reading and 0.38 above the loudest
+/// impostor. Placed nearer the impostors deliberately, because the real readings cluster at 0.99 and
+/// the one outlier at 0.9152 is the sort of thing a cursor or a notification produces.
+pub const HEROSELECT_HEADER_PRESENT: f64 = 0.80;
+
+/// The shrine word screen's `Go back`, bottom left.
+///
+/// `button('', 0.0, 0.9, {type = 'small', xOffset = 1.13})` (`shrine.lua:231-240`) with `small` at
+/// 100x100 (`ui/elements/button.lua:19`), so the centre is `0 + 100*1.13 = 113`, `1080*0.9 = 972`
+/// and the rect is exactly (63,922)-(163,1022).
+///
+/// Replaces a blind click at (120,968), which worked but proved nothing. It is `activeIf backMode`
+/// and `showIf shrineLocation`, so it is absent on a shrine reached any other way — and leaving the
+/// run parked inside a shrine is how the next iteration reads a map that is not on screen.
+///
+/// ## What it does and does not prove
+///
+/// It proves **a back plaque is at the bottom left**, not that we are on a shrine. The art is the
+/// shared `ui/graphics/icons/back.png` on the shared `small` button, and `ss(0, 0.9)` is a popular
+/// place to put one. So this is a *confirmation* that the button we intend to press is really there,
+/// used only once we already believe we are on the shrine screen — never as a screen identifier.
+///
+/// ## Measured
+///
+/// ```text
+///   an independent shrine frame, mid-puzzle, keyboard up   1.0000
+///   the overworld at the same rect                         0.3437
+/// ```
+///
+/// The positive control is worth more than usual here: it is a *different frame* from a different
+/// moment — before the word was solved, with the on-screen keyboard up and a different scene state —
+/// rather than the template compared with itself. 1.0000 across that gap is what makes 0.90 safe.
+pub const SHRINE_GOBACK: Button = Button {
+    name: "shrine Go back",
+    template: "shrine-goback.png",
+    search: (55, 914, 171, 1030),
+    origin: (63, 922),
+    click: (113, 972),
+};
+
+/// The shrine's back plaque is on screen. See [`SHRINE_GOBACK`]. **0.90**, against 0.3437 absent.
+pub const SHRINE_GOBACK_PRESENT: f64 = 0.90;
+
+/// The stats history page's return plaque, top right.
+///
+/// Reached by accident, which is the whole reason it needs a fingerprint: a live run finished a
+/// shrine, cleared a text screen, and found itself here — then failed four locate-me probes at 0.15
+/// each and stopped with `no pan dump after locate-me`, because it was looking for a map on a screen
+/// that has none.
+///
+/// **Clipped by the top screen edge.** The visible face is (1756,0)-(1855,86); the button itself is
+/// `small`, i.e. 100x100, so its upper 13 px are off-screen. The template is the visible part and the
+/// click point is the centre of *that*, the same accommodation [`PROGRESS`] makes for being clipped
+/// on the right.
+///
+/// ## The slot belongs to the options menu everywhere else
+///
+/// This is not a quiet corner. The overworld draws its **options** button on almost exactly this
+/// rect, and the two are the same wood carrying different icons — measured at **0.6917** against each
+/// other. Options is a screen this project treats as a trap: `Escape` is normally never sent
+/// precisely because `backOptions` can strand a run in there with no map to read. So this button must
+/// never be pressed on the strength of position alone.
+///
+/// ```text
+///   the page's own return plaque       1.0000
+///   the overworld's options button     0.6917   <- same slot, same material, different icon
+/// ```
+pub const STATS_BACK: Button = Button {
+    name: "stats history back",
+    template: "stats-back.png",
+    search: (1748, 0, 1864, 95),
+    origin: (1756, 0),
+    click: (1806, 43),
+};
+
+/// The stats history page is up. See [`STATS_BACK`].
+///
+/// **0.90**, which is 0.21 clear of the options button that shares the slot. The project's rule of
+/// thumb is that swapping the glyph on an otherwise identical button costs 0.138-0.184, so 0.6917 is
+/// about what an icon swap should score and the bar is set above the whole band rather than just
+/// above the one measurement.
+pub const STATS_BACK_PRESENT: f64 = 0.90;
+
+/// `Pray` is on screen, so the word is solved and the blessing is unclaimed. See [`SHRINE_PRAY`].
+///
+/// **0.92**, placed in the measured gap between a real `Pray` at 1.0000 and the greyed `Consecrate`
+/// that replaces it at 0.8130 — 0.107 of margin below, nothing above.
+///
+/// One case is predicted rather than measured, and is recorded as such: an **active** `Consecrate`,
+/// which only exists once `hell ~= 0`. That would be a pure word swap with no greying, and the
+/// project's rule of thumb is that a swap costs 0.138-0.184 with the price scaling by *length* —
+/// `Pray` against `Consecrate` is the widest such gap available, so ~0.82 is the expectation and
+/// 0.92 still clears it. Re-measure on the first run that reaches an open anomaly.
+pub const SHRINE_PRAY_PRESENT: f64 = 0.92;
+
 /// Which screen the game is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -549,12 +778,18 @@ pub enum Screen {
     Postgame,
     /// The character/inventory screen — a dead end for the navigator.
     Character,
-    /// Hero select, with a champion already chosen.
+    /// Hero select, recognised by its heading rather than its button. See [`HEROSELECT_HEADER`].
     HeroSelect,
     /// The main menu, offering a new run.
     MainMenu,
     /// The combat pregame, waiting for `Start`.
     Pregame,
+    /// The stats history page — a dead end with no map, reachable by accident from a shrine.
+    StatsHistory,
+    /// A shrine's word screen, identified only by its back plaque. See [`SHRINE_GOBACK`].
+    Shrine,
+    /// A class-unlock announcement, which can interrupt a run after a fight. See [`UNLOCK_CONTINUE`].
+    Unlock,
     /// None of the above. Usually the map, but also any screen with no fingerprint yet.
     Unknown,
 }
@@ -592,11 +827,43 @@ pub fn identify(win: &GameWindow) -> Screen {
     if over(&POSTGAME_CONTINUE, POSTGAME_CONTINUE_PRESENT) {
         return Screen::Postgame;
     }
-    if over(&MENU_START, MENU_START_PRESENT) || over(&CONTINUE, CONTINUE_PRESENT) {
+    // `CONTINUE_HOT` is asked as well, or the menu we reach by the skip's own route — highlighted,
+    // because we came through the options menu — is not recognised as the main menu at all.
+    if over(&MENU_START, MENU_START_PRESENT)
+        || over(&CONTINUE, CONTINUE_PRESENT)
+        || over(&CONTINUE_HOT, CONTINUE_PRESENT)
+    {
         return Screen::MainMenu;
     }
-    if over(&HEROSELECT_CONFIRM, HEROSELECT_CONFIRM_PRESENT) {
+    // By the heading, never by the confirm button. [`HEROSELECT_CONFIRM`] answers "has a champion
+    // been chosen" on a screen already known to be hero select; it cannot answer "which screen is
+    // this", because `Pray` scores 0.8438 against it while genuine confirms in other classes score
+    // 0.8156 and 0.8751 — no threshold separates them. See [`HEROSELECT_HEADER`].
+    if over(&HEROSELECT_HEADER, HEROSELECT_HEADER_PRESENT) {
         return Screen::HeroSelect;
+    }
+
+    // Last, because its slot is the options button's on the overworld and the two are only 0.31
+    // apart. Anything with a fingerprint of its own should win before this is asked at all — the map
+    // itself has none, but every screen tested above does, so reaching here means "not one of those",
+    // which is exactly the condition under which the reading is trustworthy.
+    if over(&STATS_BACK, STATS_BACK_PRESENT) {
+        return Screen::StatsHistory;
+    }
+    // Also last, and for a weaker reason than the others: this is a back plaque at the bottom left,
+    // and `ss(0, 0.9)` with the shared `back.png` is a popular place to put one. It is a genuine
+    // screen identifier only because everything with a distinctive fingerprint has already been
+    // ruled out above — so what it really means is "not one of those, and something here still wants
+    // dismissing". Good enough to get off a screen, and explicitly not good enough to conclude a
+    // shrine is underfoot.
+    if over(&SHRINE_GOBACK, SHRINE_GOBACK_PRESENT) {
+        return Screen::Shrine;
+    }
+    // Last of all, because it shares `ss(1, 0.9)` with three other buttons and clears them by only
+    // 0.07. Every screen that could put something else in that rect has been ruled out by now — hero
+    // select by its heading, the shrine by its back plaque — so what remains in it is what it says.
+    if over(&UNLOCK_CONTINUE, UNLOCK_CONTINUE_PRESENT) {
+        return Screen::Unlock;
     }
     Screen::Unknown
 }
@@ -620,6 +887,11 @@ pub const ALL: &[&Button] =
     &CHARACTER_STATS,
     &CHARACTER_BACK,
     &PREGAME_START,
+    &SHRINE_PRAY,
+    &SHRINE_GOBACK,
+    &STATS_BACK,
+    &HEROSELECT_HEADER,
+    &UNLOCK_CONTINUE,
 ];
 
 /// Start menu `Continue`. Measured on 52.3 at 1920x1080; `Restart` is the adjacent button at
@@ -630,6 +902,29 @@ pub const CONTINUE: Button = Button {
     // `default` 250x100 centred at (190, 812) -> exactly (65,762)-(315,862), grown by 8 of slack.
     // Was a 205x63 hand-crop with a guessed "nominal" origin, which is why it could not use
     // `score_exact` and had to be searched for.
+    search: (57, 754, 323, 870),
+    origin: (65, 762),
+    click: (190, 812),
+};
+
+/// The same `Continue`, rendered highlighted.
+///
+/// Not a different button: identical origin, identical click. `default` buttons draw a hover layer
+/// over the base image (`ui/elements/button.lua:83,128`), and reaching the main menu *through the
+/// options menu* leaves this one highlighted — which is exactly the route the anomaly skip takes. So
+/// the state the run meets is the one state no template covered: it scored 0.5726 against
+/// [`CONTINUE`] on arrival, and matched cleanly only after a detour had cleared the highlight.
+///
+/// Alternative match rather than a lowered threshold. Dropping [`CONTINUE`] to 0.57 would admit
+/// anything vaguely button-shaped in a slot whose neighbour, `Restart`, eulogises the run. Two
+/// tight templates for two real renderings keeps the bar high for both.
+///
+/// Cut from `spike-frames-live/mainmenu-hover.png` at the button's own origin, so it is position-
+/// locked in the same way: `score_exact` compares only the 250x100 rect at (65, 762), which is why
+/// no threshold here can ever reach across to `Restart` at x≈500.
+pub const CONTINUE_HOT: Button = Button {
+    name: "menu Continue (highlighted)",
+    template: "continue-button-hot.png",
     search: (57, 754, 323, 870),
     origin: (65, 762),
     click: (190, 812),

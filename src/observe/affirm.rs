@@ -139,10 +139,41 @@ const SEARCH_SLACK: i32 = 6;
 
 /// Inlier fraction below which a state is not considered present.
 ///
-/// Chosen well under a clean match but well over an unrelated background, and applied to the *best*
-/// of the five states: the states differ from each other far less than any of them differs from
-/// arbitrary art, so the threshold's job is presence, and the argmax's job is which.
-const PRESENT: f64 = 0.55;
+/// Applied to the *best* of the five states: the states differ from each other far less than any of
+/// them differs from arbitrary art, so the threshold's job is presence and the argmax's job is which.
+///
+/// ## 0.80, raised from 0.55 after a live stall
+///
+/// The old value was chosen as "well under a clean match but well over an unrelated background". The
+/// second half of that was never measured against the background that matters. The **empty overworld
+/// slot** — the ordinary state of the screen this program spends most of its time on — scores 0.62,
+/// comfortably over 0.55, so the map reads as carrying a live affirmative.
+///
+/// What that cost, from one run's log:
+///
+/// ```text
+///   genuine affirmative, a real text screen   1.00   margin 0.11
+///   the empty map slot                        0.62   margin 0.07   <- read as `Up`
+///   other Absent readings on the map          0.27 - 0.43
+/// ```
+///
+/// The run reached the overworld after a fight, read the phantom, pressed `Space` six times, gave up,
+/// and did it again every iteration until the step budget ran out.
+///
+/// **The wasted presses were not the worst of it.** `Space` on the overworld is the affirmative, and
+/// it can activate the selected location's button. It was harmless only because the node underfoot
+/// was a cleared crypt whose `Combat` button was greyed out; on an uncleared one it would have
+/// started a fight nothing had chosen. This project's rule is that `Space` is never sent to a screen
+/// whose affirmative has not genuinely been read — and a 0.62 reading against a 0.55 bar is not
+/// genuinely reading it.
+///
+/// 0.80 sits in the measured gap: 0.20 below the genuine reading and 0.18 above the phantom.
+///
+/// **The genuine sample is small** — two readings, both 1.00, from one run. It is placed nearer the
+/// impostor than the midpoint for that reason, so a partially drawn affirmative has room to be
+/// recognised. If a real text screen is ever missed at this bar, its score is in the log and the fix
+/// is a measurement rather than a guess.
+const PRESENT: f64 = 0.80;
 
 /// How far the winner must beat the runner-up for the state to be called with confidence.
 ///
