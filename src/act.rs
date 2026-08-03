@@ -838,8 +838,18 @@ pub fn identify(win: &GameWindow) -> Screen {
     // while a settled board sat waiting.
     //
     // The exact test costs one template-sized capture at a fixed origin and has no such freedom.
-    let exactly = |b: &Button| matches!(score_exact(win, b), Ok(q) if q >= CONTINUE_PRESENT);
-    if over(&MENU_START, MENU_START_PRESENT) || exactly(&CONTINUE) || exactly(&CONTINUE_HOT) {
+    //
+    // All three belong here. The main menu is a fixed layout: `Start`, `Continue` and `Restart` are
+    // `default` 250x100 buttons at coordinates derived from the client size, so their positions are
+    // *known*, not to be discovered. Each still carries a `search` box, but it is only ever the
+    // origin grown by 8 — a vestige of when these were hand-crops with guessed origins and had to be
+    // hunted for. Searching a slack box for a button whose address we can compute buys nothing and
+    // costs exactly the false positive above.
+    let exactly = |b: &Button, t: f64| matches!(score_exact(win, b), Ok(q) if q >= t);
+    if exactly(&MENU_START, MENU_START_PRESENT)
+        || exactly(&CONTINUE, CONTINUE_PRESENT)
+        || exactly(&CONTINUE_HOT, CONTINUE_PRESENT)
+    {
         return Screen::MainMenu;
     }
     // By the heading, never by the confirm button. [`HEROSELECT_CONFIRM`] answers "has a champion
