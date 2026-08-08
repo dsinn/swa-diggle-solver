@@ -76,13 +76,49 @@ pub enum Outcome {
     /// Whatever screen the game left up is deliberately **not** dismissed here — see
     /// [`Fight::run`]. The caller's own loop presses it, the same way it presses a lore screen.
     ClearedWithoutReward { turns: usize },
+    /// The character died. The run is over and nothing after this means anything.
+    ///
+    /// Read from the console, never from the screen, and that is the whole point. The one existing
+    /// death check is `act::Screen::Dead` via `slot_is_eulogise` — a template read on the affirmative
+    /// slot at (1603,922). That slot is the worst-hit region under the hurt vignette (+58 measured),
+    /// and `rpgview.lua:1938` sets the vignette to its **maximum** at exactly zero health:
+    ///
+    /// ```lua
+    /// if healthN==0 then retinaPainValTarget = 1.5
+    /// ```
+    ///
+    /// So the pixel check is least trustworthy precisely when it is being asked the one question it
+    /// exists for. `game over` arrives as plain console text and no shader can touch it.
+    ///
+    /// A live run died at `l50` and reported `NoPlayableWord { turns: 9, board: "X" }` — true of the
+    /// board it was handed, and completely beside the point. The board had collapsed to a single
+    /// tile because the player was dying (`columns = {0,0,1,0,0}` in the game's own dump).
+    Died { turns: usize },
 }
 
 impl Outcome {
     pub fn cleared(&self) -> bool {
         matches!(self, Outcome::Cleared { .. } | Outcome::ClearedWithoutReward { .. })
     }
+
+    /// Is the save unusable from here on?
+    ///
+    /// Separate from "did we win", because every caller that branches on [`Outcome::cleared`] has a
+    /// not-cleared path that assumes another attempt is worth making. After death it is not.
+    pub fn fatal(&self) -> bool {
+        matches!(self, Outcome::Died { .. })
+    }
 }
+
+/// The console line the game prints when the run is over.
+///
+/// `rpg.lua:7-9` — a bare `print("game over")`, the first statement of `rpg.gameOver`, before it
+/// walks its objects. Unconditional, and it precedes any screen change, so it arrives before there
+/// is anything to recognise by sight.
+///
+/// Matched as a whole trimmed line rather than a substring, so an enemy or item whose name happens
+/// to contain the words cannot raise a false death.
+pub const GAME_OVER: &str = "game over";
 
 pub struct Fight<'a> {
     pub win: &'a GameWindow,
@@ -115,6 +151,14 @@ impl Fight<'_> {
 
         while Instant::now() < deadline && turns < MAX_TURNS {
             feed.pump();
+            // Before anything is read from the board, because after death the board is still there
+            // and still parses — it just no longer means anything. A live run played three more
+            // turns past this point against a board the game was collapsing under it, and reported
+            // `NoPlayableWord { board: "X" }` as though the word search had been the problem.
+            if feed.seen_line_since(began, GAME_OVER) {
+                log.push_str(&format!("  **`{GAME_OVER}` on the console after {turns} turns**\n"));
+                return Ok(Outcome::Died { turns });
+            }
             let cs = match save::load(&self.combat_path) {
                 Ok(cs) => {
                     unreadable_since = None;

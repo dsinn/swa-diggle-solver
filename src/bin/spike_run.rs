@@ -153,6 +153,16 @@ enum Stop {
     NoPlan,
     Failed(String),
     Fought(String),
+    /// The character died. Distinct from [`Stop::Fought`] because it is not a fight that went badly,
+    /// it is the end of the save — nothing after it can be retried, and the sandbox needs a
+    /// checkpoint restore before another run means anything.
+    Died(String),
+    /// Too hurt to start the fight in front of us, and no rest was found before we got here.
+    ///
+    /// A stop, not a failure: the run is intact and a checkpoint restore is not needed. It is the
+    /// deliberate alternative to [`Stop::Died`], which is what happened the one time this was not
+    /// checked — a run walked from `l41` onto a level-6 crypt at 1/20 and was killed by it.
+    TooHurtToFight(String),
     Exhausted,
 }
 
@@ -577,8 +587,43 @@ impl Run<'_> {
         }
         self.log.push_str(&format!("  event **{}**: {:?}\n", ev.title,
             ev.choices.iter().map(|c| c.text.clone()).collect::<Vec<_>>()));
-        // Never `choices[0]`: a corrupted village can put "Kill him" first.
-        let pick = ev.continue_choice().or_else(|| ev.safe_choice()).cloned();
+        // Read straight from the save rather than plumbed in, because `handle_event` is called from
+        // three places and only one of them is holding a health reading. A pure load: deliberately
+        // not `apply_save`, which would fold the save into the map as a side effect of answering a
+        // dialogue.
+        //
+        // `mainSaveData` is written on screen EXIT, so this can lag by a node — see
+        // [`Run::apply_save`]. That is tolerable here: the question is "are we badly hurt", which
+        // does not turn on the last few points, and the reading that mattered in the case this
+        // exists for was already `health = 1` two screens earlier.
+        let health = diggle_solver::game::save::load(&self.save_dir.join("mainSaveData"))
+            .ok()
+            .and_then(|s| diggle_solver::rest::Health::from_save(&s));
+        // Below half, by `rest::health_is_low` — the game's own `fear` line (`rpgview.lua:1643`),
+        // not a number invented here. Unknown health counts as hurt: the reading is missing exactly
+        // when the save is mid-rewrite, and guessing "fine" is how this went wrong the first time.
+        let hurt = health.map(diggle_solver::rest::health_is_low).unwrap_or(true);
+        // Never `choices[0]`: a corrupted village can put "Kill him" first. And never a `[Combat]`
+        // option while hurt, which is a different axis and needs asking separately.
+        let pick = ev
+            .continue_choice()
+            .or_else(|| ev.safe_choice_avoiding_combat(hurt))
+            .cloned();
+        if let Some(c) = &pick {
+            if hurt && diggle_solver::observe::event::starts_combat(&c.text) {
+                // The fallback fired: every option was a fight. Said out loud because it is a
+                // decision, not a default — see `Event::safe_choice_avoiding_combat`.
+                self.log.push_str(&format!(
+                    "  **taking a fight at {} — every option was `[Combat]`**\n",
+                    health.map(|h| format!("{}/{}", h.current, h.max)).unwrap_or("unknown health".into())
+                ));
+            } else if hurt {
+                self.log.push_str(&format!(
+                    "  hurt ({}), so avoiding any `[Combat]` option\n",
+                    health.map(|h| format!("{}/{}", h.current, h.max)).unwrap_or("health unreadable".into())
+                ));
+            }
+        }
         let Some(c) = pick else {
             self.log.push_str("  left alone: more than one real choice\n");
             return Some(ev.title);
@@ -1135,6 +1180,7 @@ fn drive(
             // Not a stop dressed as success: an unresumable fight is worth reporting as itself, so a
             // run that cannot rejoin says so rather than wandering onto the map path and failing to
             // find a map that was never there.
+            Ok(o) if o.fatal() => return Stop::Died(format!("resumed: {o:?}")),
             Ok(other) => return Stop::Fought(format!("resumed: {other:?}")),
             Err(e) => return Stop::Failed(format!("could not resume the fight: {e}")),
         }
@@ -1158,6 +1204,48 @@ fn drive(
         let screen = diggle_solver::act::identify(r.win);
         if screen != diggle_solver::act::Screen::Unknown {
             r.log.push_str(&format!("{step}. screen: {screen:?}\n"));
+        }
+        // A fight we did not know we were in. Tested first, because every branch below assumes there
+        // is a map underneath the screen, and in combat there is not.
+        //
+        // This is the gap that stranded a run at `l41`. `handle_event` answered a `Stump in the road`
+        // by taking `[Combat] - Cut it down.`, combat started, and nothing on the overworld path
+        // watches for that — so the navigator went on probing for a map, four blind locate-me clicks
+        // deep, on a combat screen. The console had said `Player turn 0 start` with the whole board
+        // in it; nobody was listening, and no button-shaped fingerprint could have helped, because
+        // the player was at 1/20 health and the hurt vignette had taken the affirmative slot with it.
+        //
+        // Recognised by the HUD instead, which the vignette does not reach. See [`act::COMBAT_HUD`].
+        if screen == diggle_solver::act::Screen::CombatEntered {
+            r.log.push_str("  in combat and had not noticed — playing it out\n");
+            let mut fl = String::new();
+            let outcome = fight.run(
+                &mut r.feed,
+                &r.keys,
+                &mut fl,
+                deadline.min(Instant::now() + Duration::from_secs(300)),
+            );
+            r.log.push_str(&fl.lines().map(|l| format!("    {l}\n")).collect::<String>());
+            match outcome {
+                Ok(o) if o.cleared() => {
+                    r.log.push_str(&format!("  unplanned fight finished: {o:?}\n"));
+                    // Same bookkeeping the planned paths do. Skipping it is how a run walks out of a
+                    // fight at 1/20 and never considers resting, because nothing recorded the loss.
+                    let now = r.apply_save();
+                    if let (Some(b), Some(a)) = (health.clone(), now) {
+                        r.map.note_health(b, a);
+                        r.map.rested(a);
+                        r.map.note_health_level(a);
+                    }
+                    *health = now;
+                    continue;
+                }
+                // Reported as a fight that went wrong, not as a map failure. The whole point of this
+                // branch is that "no pan dump after locate-me" was never the truth about this state.
+                Ok(o) if o.fatal() => return Stop::Died(format!("unplanned: {o:?}")),
+                Ok(other) => return Stop::Fought(format!("unplanned: {other:?}")),
+                Err(e) => return Stop::Failed(format!("could not play an unplanned fight: {e}")),
+            }
         }
         if screen == diggle_solver::act::Screen::Character {
             // A dead end: from here the area-button coordinate means `Stats`. The way out is the
@@ -1439,6 +1527,7 @@ fn drive(
             match outcome {
                 Ok(o) if o.cleared() => r.log.push_str(&format!("  {o:?}
 ")),
+                Ok(o) if o.fatal() => return Stop::Died(format!("{o:?}")),
                 Ok(other) => return Stop::Fought(format!("{other:?}")),
                 Err(e) => return Stop::Failed(e.to_string()),
             }
@@ -1805,6 +1894,34 @@ fn drive(
             // straight here, so losing is the likely outcome — and finding out how badly is the
             // point. A loss cannot be undone in the game, only by restoring a checkpoint.
             let is_anomaly = r.map.anomaly().map(|a| a.key == p.key).unwrap_or(false);
+            // Nothing used to ask how much health was left before starting a fight, and a run found
+            // out what that costs: it cleared `l41`, came out at **1 of 20**, and the planner — with
+            // no campfire or village anywhere in its 22 known places — fell through to its documented
+            // "get on with the objective" behaviour, walked to `l50`, and clicked Combat on a level-6
+            // crypt. Nine turns later the console printed `game over`.
+            //
+            // The health-first priority was not broken. It had nowhere to route to, and "nowhere to
+            // rest" is not a reason to fight anyway.
+            //
+            // Deliberately blunt: `rest::health_is_low` is below half, so this also refuses fights a
+            // healthier judgement would take. That is the safe direction while nothing here models
+            // enemy strength — the heading carries a level (`level 6 crypt`) and weighing it against
+            // health is the better rule, once something reads it. Unknown health counts as hurt, for
+            // the same reason it does when answering an event.
+            //
+            // The anomaly is exempt. It is the objective, it is level 8 against whoever arrives, and
+            // losing to it is a documented expected outcome rather than an accident to be prevented.
+            let too_hurt = health.map(diggle_solver::rest::health_is_low).unwrap_or(true);
+            if too_hurt && !is_anomaly {
+                let hp = health
+                    .map(|h| format!("{}/{}", h.current, h.max))
+                    .unwrap_or_else(|| "unreadable".into());
+                r.log.push_str(&format!(
+                    "{step}. **not fighting `{here}` ({}) at {hp}** — stopping instead of dying\n",
+                    p.heading
+                ));
+                return Stop::TooHurtToFight(format!("{here} ({}) at {hp}", p.heading));
+            }
             r.log.push_str(&format!(
                 "{step}. fighting {}`{here}` ({})\n",
                 if is_anomaly { "**THE ANOMALY** " } else { "" },
@@ -1925,6 +2042,7 @@ fn drive(
                 Ok(Outcome::Cleared { turns, reward }) => {
                     r.log.push_str(&format!("  cleared in {turns} turns, took {reward:?}\n"));
                 }
+                Ok(o) if o.fatal() => return Stop::Died(format!("{o:?}")),
                 Ok(other) => return Stop::Fought(format!("{other:?}")),
                 Err(e) => return Stop::Failed(e.to_string()),
             }

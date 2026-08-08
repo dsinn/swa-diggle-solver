@@ -81,6 +81,52 @@ impl Event {
     pub fn safe_choice(&self) -> Option<&Choice> {
         self.choices.iter().find(|c| !harmful(&c.text))
     }
+
+    /// [`safe_choice`], additionally declining to start a fight when `avoid_combat` is set.
+    ///
+    /// [`harmful`] screens on a **moral** axis — do not murder a villager — and that is the only axis
+    /// it was ever built for. `[Combat] - Cut it down.` is not murder, so it passed, and a live run
+    /// took it at **1 of 20 health**, walked into `Mourning wood`, and never came out
+    /// (`spike-run-raw.log:59-73`). Tactical risk is a second axis and needs its own screen.
+    ///
+    /// ## The fallback, and why it is not simply `None`
+    ///
+    /// When every surviving option starts a fight, this takes one anyway rather than returning
+    /// nothing. That is deliberate and it is the lesser of two bad outcomes: `handle_event`'s caller
+    /// treats an unanswered event as *dismissed* and walks on to the map path, leaving the event
+    /// dialogue on screen with no map underneath it — the exact stranding this whole area keeps
+    /// producing. A fight we are likely to lose is recoverable from a checkpoint; a run wedged on a
+    /// dialogue it will not answer burns its whole budget.
+    ///
+    /// The caller is expected to say so in the log when this happens, because it is a decision worth
+    /// seeing rather than a default worth hiding.
+    pub fn safe_choice_avoiding_combat(&self, avoid_combat: bool) -> Option<&Choice> {
+        self.choices
+            .iter()
+            .find(|c| !harmful(&c.text) && !(avoid_combat && starts_combat(&c.text)))
+            .or_else(|| self.safe_choice())
+    }
+}
+
+/// Does this option start a fight?
+///
+/// The game tags them itself, so this reads a marker rather than guessing at prose. Choice text is
+/// built as a table of coloured fragments with a literal `'[Combat]'` among them — 21 of them across
+/// six event files, e.g. `overworld/events/arrived/hidden_path.lua:27`:
+///
+/// ```lua
+/// {   text = {cost, '[Combat]', black, " - Cut it down."},
+/// ```
+///
+/// The tag survives into the console's `Choices` block verbatim, which is where we read it. Related
+/// markers exist and are deliberately not matched here: `[Murderer]` is [`harmful`]'s business, and
+/// `[Curse]` is neither. `[Murderer][Combat]` carries both and is caught by both.
+///
+/// Substring rather than a parse, because the tags are concatenated with no separator and always
+/// precede the prose. A choice whose *prose* contained the literal text `[Combat]` would be a false
+/// positive; nothing in the game writes one, and the cost would be declining an event.
+pub fn starts_combat(text: &str) -> bool {
+    text.contains("[Combat]")
 }
 
 /// Does this option's text describe harming someone?
@@ -213,6 +259,81 @@ Choices = {
     },
 }
 "#;
+
+    /// Verbatim from the run it cost. `spike-run-raw.log:59-72`, at 1 of 20 health.
+    const STUMP: &str = r#"Event:  Stump in the road
+One of the paths leaving the crossroads has a stump blocking the path.
+Choices = {
+    {
+        posY = 594,
+        text = "[Combat] - Cut it down.",
+        posX = 960,
+    },
+    {
+        posY = 756,
+        text = "Leave.",
+        posX = 960,
+    },
+}
+"#;
+
+    #[test]
+    fn a_combat_option_is_refused_while_hurt_and_taken_when_healthy() {
+        let e = parse_events(&lines(STUMP)).pop().expect("the event parses");
+        // What actually happened: `harmful` has no "cut", so the moral screen passed it through and
+        // the run started a fight it could not win.
+        assert!(!harmful("[Combat] - Cut it down."), "the moral screen is not the one that catches this");
+        assert_eq!(e.safe_choice().unwrap().text, "[Combat] - Cut it down.");
+
+        // Hurt: take the way out instead.
+        assert_eq!(e.safe_choice_avoiding_combat(true).unwrap().text, "Leave.");
+        // Healthy: unchanged, because declining every fight would refuse most of the game.
+        assert_eq!(e.safe_choice_avoiding_combat(false).unwrap().text, "[Combat] - Cut it down.");
+    }
+
+    #[test]
+    fn the_combat_tag_is_read_wherever_it_sits_among_the_other_markers() {
+        // `overworld/events/arrived/spider_forest.lua:62` and `dying_paladin.lua:259` both carry
+        // `[Murderer][Combat]`; `hidden_path.lua:49` carries `[Combat][Curse]`. The tags concatenate
+        // with no separator, so position cannot be assumed.
+        assert!(starts_combat("[Combat] - Cut it down."));
+        assert!(starts_combat(r#"[Murderer][Combat] - "Are you alone?""#));
+        assert!(starts_combat(r#"[Combat][Curse] - "I have a way with wood.""#));
+        assert!(!starts_combat("Leave."));
+        assert!(!starts_combat("[Curse] - Read the book."));
+        // `[Murderer]` alone is the moral screen's business, not this one.
+        assert!(!starts_combat("[Murderer] - Attack them."));
+    }
+
+    /// When every option is a fight, one gets taken rather than the event being left unanswered.
+    ///
+    /// Pins the trade-off deliberately, because the safer-*looking* behaviour is the worse one: an
+    /// unanswered event is treated as dismissed by the caller, which walks on to the map path with a
+    /// dialogue still on screen and no map beneath it.
+    #[test]
+    fn a_fight_is_still_taken_when_every_option_is_one() {
+        let src = r#"Event:  Ambushed
+They are already drawing steel.
+Choices = {
+    {
+        posY = 594,
+        text = "[Combat] - Stand and fight.",
+        posX = 960,
+    },
+    {
+        posY = 756,
+        text = "[Combat] - Charge them.",
+        posX = 960,
+    },
+}
+"#;
+        let e = parse_events(&lines(src)).pop().expect("the event parses");
+        let picked = e.safe_choice_avoiding_combat(true).expect("something must be picked");
+        assert!(
+            starts_combat(&picked.text),
+            "with no non-combat option, the fallback must still answer the dialogue"
+        );
+    }
 
     #[test]
     fn reads_a_single_choice_event() {

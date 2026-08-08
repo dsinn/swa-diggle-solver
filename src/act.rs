@@ -141,6 +141,76 @@ pub const COMBAT_FINISH: Button = Button {
 /// (0.6784) — without ever risking a true positive.
 pub const COMBAT_FINISH_PRESENT: f64 = 0.95;
 
+/// The combat HUD's top-left corner: the `?` button and the turn counter beside it.
+///
+/// Answers the question [`COMBAT_FINISH`] cannot — **"are we in a fight at all"**, rather than "is
+/// this fight waiting to be finished". `Finish` is drawn only in `WaitPhase`, so mid-`PlayerTurn`
+/// there is no combat fingerprint anywhere on the registry, and a run that lands in one has nothing
+/// to recognise. That is not hypothetical: a live run entered combat from an overworld event, never
+/// noticed, and spent its whole budget probing for a map (`spike-run-raw.log:59-73`).
+///
+/// **Recognition only — never clicked.** `?` opens a help overlay we have no way out of. `click` is
+/// the template centre because the field is not optional, not because anything should press it.
+///
+/// ## Why this corner, when everything else on that screen was unreadable
+///
+/// The frame that stranded that run had the hurt vignette at 1.4 of a 1.5 maximum
+/// (`rpgview.lua:1936-1945`, at `health = 1` of 20). That overlay is a *masked* blend — the shader
+/// discards below its cutoff (`shaders/retina-hurt.vs`) — so it eats inward from the edges and
+/// leaves a clean middle. Measured on that frame, in bands of distance from centre: nothing inside
+/// r≈0.38, then +31 to +40 mean redness outside it, and **+58 over the affirmative slot**, which is
+/// why six buttons sharing (1603,922) all became unreadable at once.
+///
+/// This region survives it completely. The `?` sub-rect scores **1.0000** on that same frame against
+/// a full-health combat frame from a different fight *and a different game version* — not one pixel
+/// over tolerance. The HUD layer draws over the overlay, not under it.
+///
+/// ## Measured, hurt frame vs the saved-frame corpus
+///
+/// ```text
+///   combat-chest.png (turn 11)              1.0000   the reference
+///   now.png                                 0.9750
+///   waitphase-with-fighton.png              0.9750
+///   gave-up.png (turn 1, vignette at 1.4)   0.9616   <- the state this exists for
+///   eulogise-at-death.png                   0.8894   <- dead, and usefully distinguishable
+///   16-selected.png                         0.4257   <- nearest non-combat
+///   post-crypt.png                          0.4194
+///   reward-selected.png                     0.4194
+///   overworld-campfire.png                  0.4041
+/// ```
+///
+/// A gap of **0.46** between the combat floor and the non-combat ceiling — the widest separation of
+/// any fingerprint in this registry.
+///
+/// ## The turn counter is inside the crop on purpose, and bounds its use
+///
+/// Including it is what buys the separation: the `?` alone drops to 0.61-0.63 on non-combat frames,
+/// against 0.4041-0.4257 for the pair. But it also means the crop is **turn-specific**. The template
+/// is cut at turn 1, so this is an *entry* signal — "we have just become a fight" — and the whole
+/// 0.9616-vs-1.0000 shortfall above is the numeral, `11` against `1`, nothing else.
+///
+/// Reusing it past turn 1 needs a lower bar than [`COMBAT_HUD_PRESENT`], or a crop with the numeral
+/// excluded. Do not simply relax the threshold and assume it still means the same thing.
+pub const COMBAT_HUD: Button = Button {
+    name: "combat HUD",
+    template: "combat-hud.png",
+    // The `?` button and the turn plaque, (60,0)-(285,100), grown by 8 px of slack. Clamped at the
+    // top edge: the plaque is flush with y=0, so there is no room to grow upwards.
+    search: (52, 0, 293, 108),
+    origin: (60, 0),
+    click: (172, 50),
+};
+
+/// A fight is in progress and on its **first turn**. See [`COMBAT_HUD`].
+///
+/// **0.99, not 1.00.** Turn 1 against a turn-1 template genuinely measures 1.0000, and the region is
+/// immune to the vignette that breaks everything else — so a perfect bar would cost nothing *if the
+/// HUD is truly static*. That has been checked on one frame, and one frame is not a steady state:
+/// if the `?` plaque so much as pulses, an exact bar fails intermittently, which is the worst way
+/// for a detector to be wrong. The 0.01 is slack for that, not tolerance for a changed numeral —
+/// the nearest thing below is 0.8894, so it costs no separation at all.
+pub const COMBAT_HUD_PRESENT: f64 = 0.99;
+
 /// `Finish` is not merely on screen but **drawn active**, i.e. clickable. See [`COMBAT_FINISH`].
 ///
 /// Separate from [`COMBAT_FINISH_PRESENT`] because it answers a harder question and gates a riskier
@@ -770,6 +840,13 @@ pub const SHRINE_PRAY_PRESENT: f64 = 0.92;
 pub enum Screen {
     /// A fight sitting in `WaitPhase`, waiting for `Finish`.
     CombatWaiting,
+    /// A fight in progress on its **first turn**, recognised by the HUD rather than by any button.
+    ///
+    /// Narrow on purpose. [`COMBAT_HUD`] carries the turn numeral, so this fires on entry and not
+    /// afterwards — it answers "we have just become a fight", which is the transition a run can
+    /// otherwise miss entirely. A later turn falls through to [`Screen::Unknown`] exactly as before,
+    /// so nothing that worked before behaves differently.
+    CombatEntered,
     /// The character is dead; that slot reads `Eulogise`.
     Dead,
     /// A "Choose one:" item screen, untouched.
@@ -817,6 +894,16 @@ pub fn identify(win: &GameWindow) -> Screen {
     }
     if over(&COMBAT_FINISH, COMBAT_FINISH_PRESENT) {
         return Screen::CombatWaiting;
+    }
+    // After the two combat states that name a *button*, because those are more actionable — a
+    // `WaitPhase` on turn 1 satisfies both, and `Finish` is the thing worth pressing.
+    //
+    // Placed this early despite being a HUD read rather than a button, because it is the most
+    // distinctive fingerprint in the registry: 0.484 between the combat floor and the non-combat
+    // ceiling, where the rest of this function works with margins near 0.1. It is also the only one
+    // that survives the hurt vignette, which is precisely when the checks above stop working.
+    if over(&COMBAT_HUD, COMBAT_HUD_PRESENT) {
+        return Screen::CombatEntered;
     }
     if over(&PREGAME_START, PREGAME_START_PRESENT) {
         return Screen::Pregame;
@@ -904,6 +991,7 @@ pub const ALL: &[&Button] =
     &PROGRESS,
     &COMBAT_FINISH,
     &COMBAT_EULOGISE,
+    &COMBAT_HUD,
     &REWARD_CONFIRM,
     &POSTGAME_CONTINUE,
     &MENU_START,
@@ -1514,6 +1602,61 @@ mod threshold_tests {
         assert!(real >= REWARD_SCREEN_PRESENT, "a real greyed Confirm scored {real:.4}");
         let ground = score(&REWARD_CONFIRM, "overworld-campfire.png").unwrap();
         assert!(ground < REWARD_SCREEN_PRESENT, "bare map ground scored {ground:.4}");
+    }
+
+    /// The combat HUD separates "in a fight" from every non-combat screen in the corpus, and does it
+    /// on the frame where every *other* fingerprint had failed.
+    ///
+    /// `combat-turn1-hurt.png` is that frame: the run that entered combat from an overworld event and
+    /// never noticed, at `health = 1` of 20, with the hurt vignette at 1.4 of 1.5. Six buttons
+    /// sharing the affirmative slot were unreadable on it. This corner was not.
+    #[test]
+    fn the_combat_hud_is_told_apart_from_every_screen_that_is_not_a_fight() {
+        let Some(hurt) = score(&COMBAT_HUD, "combat-turn1-hurt.png") else {
+            eprintln!("SKIP: frame corpus not present");
+            return;
+        };
+        assert!(
+            hurt >= COMBAT_HUD_PRESENT,
+            "turn 1 under a full-strength vignette scored {hurt:.4}, below the threshold — the one \
+             state this fingerprint exists for"
+        );
+
+        // The gap is the finding, so it is asserted rather than trusted. Every one of these is a
+        // screen the navigator can legitimately be sitting on, and none may read as a fight.
+        for name in ["16-selected.png", "post-crypt.png", "reward-selected.png", "overworld-campfire.png"] {
+            let q = score(&COMBAT_HUD, name).unwrap();
+            assert!(q < COMBAT_HUD_PRESENT, "{name} scored {q:.4}, at or above the threshold");
+            // Not merely under the bar — nowhere near it. A non-combat screen creeping up towards
+            // 0.99 would mean the crop had started matching wood grain rather than the HUD.
+            assert!(q < 0.75, "{name} scored {q:.4}, close enough to the bar to be worth re-measuring");
+        }
+    }
+
+    /// Pins the crop's **turn-specificity**, which is a limitation rather than a defect.
+    ///
+    /// The template carries the numeral `1`, so a fight on a later turn scores below
+    /// [`COMBAT_HUD_PRESENT`] — by design, since this is an entry signal. What must stay true is that
+    /// it lands far above the non-combat frames rather than falling in among them: that gap is what a
+    /// future "still in combat, any turn" check would be built on, and if it closes, the crop needs
+    /// the numeral excluded rather than the threshold lowered.
+    #[test]
+    fn a_later_turn_reads_below_the_entry_bar_but_far_above_any_non_combat_screen() {
+        let Some(turn_11) = score(&COMBAT_HUD, "combat-chest.png") else {
+            eprintln!("SKIP: frame corpus not present");
+            return;
+        };
+        assert!(
+            turn_11 < COMBAT_HUD_PRESENT,
+            "turn 11 scored {turn_11:.4}, at or above an entry-only bar — if the numeral has stopped \
+             mattering, say so here rather than leaving the doc claiming it does"
+        );
+        let nearest_non_combat = score(&COMBAT_HUD, "16-selected.png").unwrap();
+        assert!(
+            turn_11 - nearest_non_combat > 0.3,
+            "a later turn ({turn_11:.4}) should stand well clear of the nearest non-combat screen \
+             ({nearest_non_combat:.4}); the margin is what a turn-independent check would use"
+        );
     }
 
     /// Pins the inversion itself, because it is the reason [`REWARD_SCREEN_PRESENT`] cannot simply be

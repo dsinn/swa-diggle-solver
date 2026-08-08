@@ -63,6 +63,20 @@ impl Feed {
         self.lines[mark.min(self.lines.len())..].iter().any(|l| l.contains(needle))
     }
 
+    /// Has a line **equal to** `line` appeared since `mark`, ignoring surrounding whitespace?
+    ///
+    /// [`Feed::seen_since`] is a substring test, which is right for a block header like
+    /// `Item selection:` — it is a prefix and nothing else produces it. It is wrong for a short,
+    /// wordy announcement, because the console also carries item names, enemy names and event prose,
+    /// any of which could contain the phrase as ordinary text.
+    ///
+    /// [`crate::fight::GAME_OVER`] is the case that wanted this: two common words, and a false
+    /// positive would abandon a run that was doing fine.
+    pub fn seen_line_since(&self, mark: usize, line: &str) -> bool {
+        let want = line.trim();
+        self.lines[mark.min(self.lines.len())..].iter().any(|l| l.trim() == want)
+    }
+
     /// Has `needle` appeared at any point? Only safe for announcements that happen once.
     pub fn seen(&self, needle: &str) -> bool {
         self.lines.iter().any(|l| l.contains(needle))

@@ -30,6 +30,7 @@ fn buttons() -> Vec<(&'static Button, f64, &'static str)> {
         (&act::PROGRESS, act::MIN_INLIERS, "MIN_INLIERS"),
         (&act::COMBAT_FINISH, act::COMBAT_FINISH_PRESENT, "COMBAT_FINISH_PRESENT"),
         (&act::COMBAT_EULOGISE, act::COMBAT_EULOGISE_PRESENT, "COMBAT_EULOGISE_PRESENT"),
+        (&act::COMBAT_HUD, act::COMBAT_HUD_PRESENT, "COMBAT_HUD_PRESENT"),
         (&act::REWARD_CONFIRM, act::REWARD_SCREEN_PRESENT, "REWARD_SCREEN_PRESENT"),
         (&act::POSTGAME_CONTINUE, act::POSTGAME_CONTINUE_PRESENT, "POSTGAME_CONTINUE_PRESENT"),
         (&act::MENU_START, act::MENU_START_PRESENT, "MENU_START_PRESENT"),
@@ -70,6 +71,15 @@ fn truth(button: &Button, frame: &str) -> Truth {
         ("combat Eulogise", "eulogise-at-death.png") => Present,
         ("combat Eulogise", "now.png") => Variant,
         ("combat Eulogise", "waitphase-with-fighton.png") => Variant,
+        // The frame the template was cut from, and the state it exists to catch: turn 1 with the
+        // hurt vignette at 1.4.
+        ("combat HUD", "combat-turn1-hurt.png") => Present,
+        // Real fights, but on a later turn — the crop carries the numeral, so this is the same HUD
+        // rendered differently, which is exactly what `Variant` is for.
+        ("combat HUD", "combat-chest.png") => Variant,
+        ("combat HUD", "now.png") => Variant,
+        ("combat HUD", "waitphase-with-fighton.png") => Variant,
+        ("combat HUD", "eulogise-at-death.png") => Variant,
         ("reward Confirm", "post-crypt.png") => Present,
         // The active state of the same button.
         ("reward Confirm", "reward-selected.png") => Variant,
@@ -128,6 +138,9 @@ fn main() {
         // tiles settled, which `identify` called the main menu. Kept as a corpus frame so the claim
         // can be checked rather than asserted.
         "combat-chest.png",
+        // The frame that stranded a run: combat entered from an overworld event, turn 1, health 1/20,
+        // hurt vignette at 1.4. Every affirmative-slot fingerprint failed on it.
+        "combat-turn1-hurt.png",
         "16-selected.png",
         "eulogise-at-death.png",
         "now.png",
