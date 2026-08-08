@@ -132,6 +132,25 @@ impl Scorer {
         0.2 * (letters as f64 + 1.0)
     }
 
+    /// What material a tile actually is, by name.
+    ///
+    /// The same resolution [`Scorer::tile_score`] performs and for the same reason: **an explicit
+    /// `bg` wins, and otherwise the letter implies it** (`default.getMaterial`). Most tiles carry no
+    /// `bg` at all — it is written only when gear or an enemy has moved the tile off the material its
+    /// letter implies — so asking `quality.material` directly answers `None` for the ordinary wooden
+    /// tile and would make "is this wood" almost always false.
+    ///
+    /// Returns the name rather than the [`Material`], because callers asking this question are
+    /// asking about *kind* — is it wood, is it a bomb — not about score.
+    /// The lifetime is shared with `tile` rather than with `self`, because the answer can come from
+    /// either: an explicit `bg` is borrowed from the tile, the letter-implied name from the table.
+    pub fn material_name<'a>(&'a self, tile: &'a Tile) -> Option<&'a str> {
+        if let Some(bg) = tile.quality.material.as_deref() {
+            return Some(bg);
+        }
+        self.letter_material.get(&tile.letter.to_ascii_uppercase()).map(String::as_str)
+    }
+
     /// One tile's contribution, following `tiles.score` (`utils/tiles.lua:45-95`).
     pub fn tile_score(&self, tile: &Tile) -> f64 {
         // `materials[tile.extra.bg] or default` -- only `default` carries getScore/getMaterial.

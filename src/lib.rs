@@ -7,6 +7,8 @@ pub mod fight;
 pub mod game;
 pub mod geometry;
 pub mod layout;
+pub mod letters;
+pub mod pick;
 pub mod lexica;
 pub mod navigate;
 pub mod observe;
