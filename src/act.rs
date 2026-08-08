@@ -846,10 +846,35 @@ pub const HEROSELECT_HEADER: Button = Button {
 
 /// The hero select screen is up. See [`HEROSELECT_HEADER`].
 ///
-/// **0.80**, in a gap 0.49 wide: 0.115 below the weakest genuine reading and 0.38 above the loudest
-/// impostor. Placed nearer the impostors deliberately, because the real readings cluster at 0.99 and
-/// the one outlier at 0.9152 is the sort of thing a cursor or a notification produces.
-pub const HEROSELECT_HEADER_PRESENT: f64 = 0.80;
+/// ```text
+///   genuine readings    cluster at 0.99, weakest 0.9152
+///   the class unlock    0.8532                            tests/frames/unlock-woodsman.png
+///   loudest impostor known before that   0.42
+/// ```
+///
+/// **0.90**, raised from 0.80. The old bar sat in a gap 0.49 wide and was placed near the impostor
+/// end of it on purpose, since the genuine readings clustered at 0.99. Then the class-unlock screen
+/// turned up at **0.8532** — twice as loud as anything previously seen — and cleared it.
+///
+/// ## This is the second layer, and the weaker one
+///
+/// The real fix is ordering: [`identify`] asks about [`UNLOCK_CONTINUE`], which scores 1.0000 on
+/// that frame, before it asks about this. A threshold cannot be the fix, because impostors are
+/// unbounded — 0.8532 was unpredicted, and the next one could be 0.92. Raising the bar only removes
+/// the impostors we have actually met.
+///
+/// ## Why raising it is nearly free, and the margin below is not the usual worry
+///
+/// 0.90 leaves just **0.0152** below the weakest genuine reading, which would normally be
+/// unacceptably thin — and the doc for that outlier says it is "the sort of thing a cursor or a
+/// notification produces", so a real hero select *can* be depressed by a transient overlay and land
+/// under this bar.
+///
+/// That is affordable here, and only here, because the two errors are wildly unequal. Hero select is
+/// reached in exactly one way — [`crate::navigate::start_new_run`] clicks through it, knowing it is
+/// there from `Pregame screen:` on the console — so it is **never identified by sight**, and a false
+/// negative costs nothing at all. A false positive, as today proved, costs the run.
+pub const HEROSELECT_HEADER_PRESENT: f64 = 0.90;
 
 /// The shrine word screen's `Go back`, bottom left.
 ///
@@ -1895,7 +1920,7 @@ mod threshold_tests {
         }
     }
 
-    /// The class-unlock screen must not read as hero select, and ordering is what guarantees it.
+    /// The class-unlock screen must not read as hero select. **Both layers are asserted.**
     ///
     /// Met live: a road event unlocked the Woodsman mid-run, and every run that day reported
     /// `screen: HeroSelect` and then failed hunting for a map that was not there.
@@ -1906,22 +1931,26 @@ mod threshold_tests {
             return;
         };
         let hero = score(&HEROSELECT_HEADER, "unlock-woodsman.png").unwrap_or(0.0);
+        eprintln!("  unlock {unlock:.4} / hero-select heading {hero:.4}");
 
-        // The unlock's own button is exact; the heading is a false positive that clears its bar.
+        // Layer one: the unlock's own button is exact.
         assert!(unlock >= UNLOCK_CONTINUE_PRESENT, "the real Continue scored {unlock:.4}");
-        assert!(
-            hero >= HEROSELECT_HEADER_PRESENT,
-            "if the heading has stopped matching ({hero:.4}) this test is no longer testing anything              -- the ordering it guards is only load-bearing while both fire"
-        );
 
-        // So no threshold separates them, and the fix is not a threshold. `identify` asks about the
-        // unlock FIRST, and this pins that: raising the hero-select check back above it reintroduces
-        // the bug with both numbers unchanged.
+        // Layer two: the heading no longer clears its bar on this frame. It DID at the old 0.80 --
+        // 0.8532 -- which is why the bar moved. Asserted from both sides so neither the raise nor the
+        // measurement can be quietly undone.
+        assert!(hero > 0.80, "the impostor that forced the raise scored {hero:.4}, once above 0.80");
+        assert!(hero < HEROSELECT_HEADER_PRESENT, "still reads as hero select at {hero:.4}");
+
+        // Layer three, and the one that survives an impostor we have not met yet: ordering. Asserted
+        // on explicit booleans rather than on these scores, because the point is what `identify` does
+        // when BOTH fire -- which is the situation a louder future impostor puts us in.
         assert_eq!(
-            super::identify_from_scores(unlock >= UNLOCK_CONTINUE_PRESENT, hero >= HEROSELECT_HEADER_PRESENT),
+            super::identify_from_scores(true, true),
             Screen::Unlock,
-            "the more specific fingerprint has to win"
+            "with both firing, the more specific fingerprint has to win"
         );
+        assert_eq!(super::identify_from_scores(false, true), Screen::HeroSelect);
     }
 
     /// The event plaque separates "an event is still up" from every screen that has no event on it.
