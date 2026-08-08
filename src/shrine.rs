@@ -17,12 +17,15 @@
 //! list. Probe words that cannot be the answer are therefore legal, which is the tool that breaks
 //! endgame clusters like `?ills`.
 //!
+//! Sizes as of game v52.4, for a sense of scale only — nothing asserts them, because the game's
+//! lexica and dictionary move between versions. `gen_shrine_data` prints the current figures.
+//!
 //! | L | guesses | easy | hard | wild | legal guesses |
 //! |---|---|---|---|---|---|
 //! | 4 | 8 | 1,323 | 2,430 | 3,753 | 6,102 |
 //! | 5 | 6 | 1,677 | 5,514 | 7,191 | 13,865 |
 //! | 6 | 6 | 2,385 | 9,736 | 12,121 | 25,373 |
-//! | 7 | 6 | 2,614 | 13,660 | 16,274 | 38,110 |
+//! | 7 | 6 | 2,614 | 13,660 | 16,274 | 38,111 |
 //!
 //! The budget is comfortable: `maxGuesses = clamp(ceil(30/L), 6, 10)` (`shrineview.lua:39`). Longer
 //! words are *easier* despite the larger list, because 3^7 = 2,187 feedback patterns collapse a
@@ -854,16 +857,45 @@ mod tests {
     }
 
     #[test]
-    fn the_baked_lists_match_the_measured_sizes() {
-        // These are the counts read out of the game's own lexica; a mismatch means the baked data
-        // has drifted from the source it was generated from.
-        for (len, easy, hard, guesses) in
-            [(4, 1323, 2430, 6102), (5, 1677, 5514, 13865), (6, 2385, 9736, 25373), (7, 2614, 13660, 38110)]
-        {
-            assert_eq!(Baked.answers(len, Band::Easy).unwrap().len(), easy, "easy {len}");
-            assert_eq!(Baked.answers(len, Band::Hard).unwrap().len(), hard, "hard {len}");
-            assert_eq!(Baked.answers(len, Band::Wild).unwrap().len(), easy + hard, "wild {len}");
-            assert_eq!(Baked.guesses(len).unwrap().len(), guesses, "guesses {len}");
+    fn the_baked_lists_are_present_and_usable_at_every_length_and_band() {
+        // Deliberately no expected sizes. The game's lexica and dictionary move between versions —
+        // v52.4 added `clanker`, which shifted the 7-letter guess list by one — and pinning the
+        // counts here only ever asserted that `data/` agreed with a literal in this file. Neither
+        // side is the game, so the check could not detect the drift it looked like it was guarding,
+        // while every legitimate version bump forced an edit. Drift is caught by re-running
+        // `gen_shrine_data`, which reads the game and rewrites `data/`.
+        //
+        // What is worth asserting is that the embedded data is there and loads. `WordList::extend`
+        // (`shrine.rs:234-246`) already rejects a word of the wrong length or with a non-lowercase
+        // byte, so a load that succeeds and yields a non-empty list of the right width is the
+        // usable condition — and it catches the real risk, a truncated or absent `data/` file.
+        for len in MIN_LEN..=MAX_LEN {
+            let mut banded = Vec::new();
+            for band in [Band::Easy, Band::Hard] {
+                let list = Baked
+                    .answers(len, band)
+                    .unwrap_or_else(|e| panic!("answers {len} {band:?} did not load: {e}"));
+                assert!(!list.is_empty(), "answers {len} {band:?} loaded empty");
+                assert_eq!(list.length(), len, "answers {len} {band:?} has the wrong width");
+                banded.push(list.len());
+            }
+
+            let wild = Baked
+                .answers(len, Band::Wild)
+                .unwrap_or_else(|e| panic!("answers {len} Wild did not load: {e}"));
+            // Wild takes a second path through `answers` — it concatenates both files rather than
+            // reading one — so it is worth confirming it picks up every word and drops none.
+            assert_eq!(
+                wild.len(),
+                banded[0] + banded[1],
+                "wild {len} should be exactly easy plus hard"
+            );
+
+            let guesses = Baked
+                .guesses(len)
+                .unwrap_or_else(|e| panic!("guesses {len} did not load: {e}"));
+            assert!(!guesses.is_empty(), "guesses {len} loaded empty");
+            assert_eq!(guesses.length(), len, "guesses {len} has the wrong width");
         }
     }
 

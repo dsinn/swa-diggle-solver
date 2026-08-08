@@ -28,16 +28,21 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Total `key = value` entries in `utils/dictionary.lua` at v52.3.
+/// Total `key = value` entries in `utils/dictionary.lua` at v52.4.
 ///
 /// Not a checksum of the words we keep — a check that the *walk* still understands the file. If the
 /// serialiser changes quoting or line breaking, this moves and the generator refuses to run.
 ///
-/// 345,215 lines, less `return {` and `}`, less the 5 continuation lines belonging to the two
+/// 345,217 lines, less `return {` and `}`, less the 5 continuation lines belonging to the two
 /// multi-line definitions (`achalasia` at 2227 and `roon` at 255581). Counted directly:
 /// `awk '{if (substr($0, length($0), 1) == "\\") n++} END {print n}'` reports 5 backslash-terminated
 /// lines, so 5 of the following lines are string continuations rather than entries.
-const EXPECTED_DICT_ENTRIES: usize = 345_208;
+///
+/// Was 345,208 at v52.3. The bump to 345,210 is two added entries, not a format change: the line
+/// count rose by the same two, the continuation count is still 5, and the walk reported no duplicate
+/// keys. Re-derive those three before moving this number again — a serialiser change would shift the
+/// count without shifting the lines, and the walk would then be silently wrong.
+const EXPECTED_DICT_ENTRIES: usize = 345_210;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = diggle_solver::config::Config::load(Path::new("config.toml"))?;
