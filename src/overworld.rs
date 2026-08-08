@@ -119,6 +119,44 @@ impl Arrival {
     }
 }
 
+/// How bad a place is likely to be, ordered safest first.
+///
+/// This is the dev's ranking, and the source bears out each rung:
+///
+/// - [`Risk::Free`] — no fight at all. `AreaHeading` prints no level.
+/// - [`Risk::Forest`] — a fight, but the gentlest kind. A forest is a subworld whose interior nodes
+///   are individually peaceful or not (`competeOnVisit = subnodeIsPeaceful`, `forest.lua:109,123,
+///   137,…`), so a route across one can take **zero** fights, and the ones it does take are short.
+///   There is an upside too: an apple orchard is a forest until entered — `getTypeName` returns
+///   `'orchard'` only once `variant == 2`, which needs the area flagged or complete
+///   (`orchards.lua:23`, `in_forest.lua:8`).
+/// - [`Risk::Fight`] — a fight we cannot route around. A crypt is `basicCombatZone` with no
+///   `competeOnVisit`, so there is exactly one node and it is hostile.
+/// - [`Risk::Unseen`] — no heading, so no claim either way. Below the known fights because being
+///   unable to show something is safe is worse than knowing what it costs.
+/// - [`Risk::Corrupt`] — uncleared and reset by the hell radius, which also raises the level
+///   (`world.lua:499-502`). The worst on the map that is not the anomaly itself.
+///
+/// ## The bandit-camp gamble, priced
+///
+/// The reason a forest was previously lumped in with the worst of them: `world.lua:466-475` rewrites
+/// some forests into `bandit_camp_pine` / `bandit_camp_oak`, and a camp is a forest as far as
+/// anything outside it can tell. Inside one, `completeOnVisit` returns
+/// `areaIsComplete(parentNode.key)` (`bandit_camp_forest.lua:52-57`) — so **every** subnode fights
+/// until the camp is cleared, and the peaceful-route argument above evaporates.
+///
+/// What makes it a gamble worth taking rather than a wall is the count. It is
+/// `modifyDistributedLocations(forests, 3, …)` — **exactly three per world**, not a rate. With a
+/// dozen forests visible the prior is a quarter, and it falls as more are revealed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Risk {
+    Free,
+    Forest,
+    Fight,
+    Unseen,
+    Corrupt,
+}
+
 impl Place {
     /// Combat level from the heading, mirroring [`crate::observe::adjacency::Node::level`].
     pub fn level(&self) -> Option<u32> {
@@ -180,6 +218,28 @@ impl Place {
         }
     }
 
+    /// How much we would rather not go here, for ranking rather than for filtering.
+    ///
+    /// [`Arrival`] says whether a fight is owed; this says how bad it is likely to be, and the
+    /// ordering is the dev's, from playing the game. See [`Risk`] for what each rung is worth.
+    pub fn risk(&self) -> Risk {
+        if self.completed {
+            return Risk::Free;
+        }
+        // Ahead of the heading, because corruption rewrites the level upward without changing the
+        // type: `level = math.max(3, baseLevel, 7-baseLevel)` (`world.lua:499-502`). A corrupted
+        // level 1 forest is a level 6 fight wearing a forest's name.
+        if self.corrupted {
+            return Risk::Corrupt;
+        }
+        match self.arrival() {
+            Arrival::Free => Risk::Free,
+            Arrival::Unknown => Risk::Unseen,
+            Arrival::Fight { .. } if self.type_is("forest") => Risk::Forest,
+            Arrival::Fight { .. } => Risk::Fight,
+        }
+    }
+
     /// Would going in here commit us to a fight **to get back out**?
     ///
     /// One of two danger axes and not the more obvious one. [`Place::arrival`] answers "does landing
@@ -214,17 +274,15 @@ impl Place {
     /// container as hostile would block resting at the first quiet village we find, which is the
     /// opposite of what wanting a rest is for.
     ///
-    /// ## Known over-correction, out of scope for the MVP
+    /// ## The over-correction this used to carry, and where it went
     ///
-    /// Not every unvisited forest is a camp. An **apple orchard** is a perfectly peaceful one, and
-    /// under this rule a hurt run refuses it along with the genuine ambushes. The eventual shape is
-    /// to allow such a forest as a *last* choice — ranked below anywhere known safe, but above a
-    /// corrupted village that certainly costs a fight — rather than lumping it in with the camps.
-    ///
-    /// Deliberately not built yet. Telling an orchard from a camp before entering means finding a
-    /// signal the generator leaves behind, and the MVP is to reach the anomaly quickly; a run that
-    /// occasionally walks the long way round is cheaper than that research. Written down so the
-    /// crudeness here is a recorded decision and not an oversight.
+    /// Not every unvisited forest is a camp — an **apple orchard** is a perfectly peaceful one — and
+    /// while this was the only danger filter, refusing forests outright meant refusing the orchards
+    /// too. That is now [`Risk::Forest`]'s job: a forest is still *avoided* while we are hurt and
+    /// have a free alternative, but when everything left costs a fight it is **preferred** over a
+    /// crypt rather than lumped in with it. Telling an orchard from a camp before entering is still
+    /// impossible (`orchards.lua:23`), and still not worth researching; ranking makes it cost a
+    /// worse-first ordering instead of a wall.
     ///
     /// Cleared is safe, whichever way it got that way: corruption that has been fought off leaves
     /// `completed` set, and a camp we have already emptied is not going to refill.
@@ -779,6 +837,23 @@ impl WorldMap {
     /// towards a rest under any reading — it is the objective, and reaching it is what the whole
     /// first pass exists to defer.
     ///
+    /// ## [`Risk`] first, then level — **deferred as post-MVP, not settled**
+    ///
+    /// This used to sort on level alone, which cannot express the dev's ranking at all: a level 5
+    /// forest and a level 5 crypt are not the same errand, and the forest is much the better one.
+    /// See [`Risk`] for what separates them.
+    ///
+    /// Putting the class ahead of the level is a choice with a cost, and it is worth being plain
+    /// about it: **a level 7 forest outranks a level 1 crypt.** The argument for it is that the
+    /// forest's fights are individually declinable — a route across peaceful subnodes may cost
+    /// nothing at all — while the crypt's one fight is compulsory, so the forest's *expected* cost
+    /// can be zero where the crypt's never is. The argument against is that when it does bite, it
+    /// bites at level 7, and at 1/20 health any level is fatal.
+    ///
+    /// Neither argument wins on the evidence available, and settling it wants live data on what a
+    /// forest crossing actually costs — which no run has yet produced. The ordering follows the
+    /// dev's read of the game until then, deliberately and with this written down. Swapping the two
+    /// `.then` clauses is the whole change.
     fn easiest_hostile(&self) -> Option<Plan> {
         let here = self.here.as_deref().unwrap_or("");
         let mut candidates: Vec<&Place> = self
@@ -788,9 +863,9 @@ impl WorldMap {
             .filter(|p| p.key != ANOMALY_KEY && !p.type_is("anomaly"))
             .collect();
         candidates.sort_by(|a, b| {
-            a.level()
-                .unwrap_or(u32::MAX)
-                .cmp(&b.level().unwrap_or(u32::MAX))
+            a.risk()
+                .cmp(&b.risk())
+                .then(a.level().unwrap_or(u32::MAX).cmp(&b.level().unwrap_or(u32::MAX)))
                 .then(a.key.cmp(&b.key))
         });
         candidates
@@ -2011,6 +2086,11 @@ mod tests {
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::EasiestHostile { level: Some(1) });
         assert_eq!(plan.target, "l4");
+
+        // And the original claim, asserted where it actually lives now. Between the two triggers the
+        // corrupted village still loses -- `Risk::Corrupt` is the worst rung there is, so the crypt
+        // wins despite being level 9 to the village's 6.
+        assert!(m.get("c1").unwrap().risk() < m.get("v1").unwrap().risk());
     }
 
     /// ...but with genuinely nothing else to do, being hurt must not stop the run entirely.
@@ -2108,6 +2188,28 @@ mod tests {
         let shrine = Place { heading: "Gembling shrine".into(), ..Default::default() };
         assert!(!shrine.hostile_to_enter());
         assert!(shrine.arrival().is_free(), "free on both axes: somewhere a hurt run can go");
+    }
+
+    #[test]
+    fn a_forest_outranks_a_crypt_when_everything_costs_a_fight() {
+        // The dev's ranking, and the one place it changes an outcome. Both are level 6, so the old
+        // level-only sort split them by key -- `c1` before `f1`, the wrong way round.
+        let crypt = Place { key: "c1".into(), heading: "Yokefleet — level 6 crypt".into(), ..Default::default() };
+        let forest = Place { key: "f1".into(), heading: "Asselby Bush — level 6 forest".into(), ..Default::default() };
+        assert!(forest.risk() < crypt.risk());
+
+        // The full order, safest first. `Unseen` sits below the known fights because being unable to
+        // show something is safe is worse than knowing its price.
+        assert!(Risk::Free < Risk::Forest);
+        assert!(Risk::Fight < Risk::Unseen);
+        assert!(Risk::Unseen < Risk::Corrupt);
+
+        // Corruption is read ahead of the heading, because it rewrites the level upward without
+        // touching the type name (`world.lua:499-502`).
+        let corrupt_forest = Place { corrupted: true, ..forest.clone() };
+        assert_eq!(corrupt_forest.risk(), Risk::Corrupt, "still says 'forest'; is not one any more");
+        // Cleared is free on every axis, corruption included.
+        assert_eq!(Place { completed: true, ..corrupt_forest }.risk(), Risk::Free);
     }
 
     #[test]
