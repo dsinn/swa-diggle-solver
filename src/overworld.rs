@@ -1318,13 +1318,59 @@ impl WorldMap {
         // No known route. Fog means the interior is learned a hop at a time, so an unknown route is
         // the normal early state rather than an error — walk into the dark, preferring somewhere we
         // have not been so the walk cannot cycle.
+        //
+        // **This used to take any neighbour at all**, and none of the routing above applied to it:
+        // no chest shun, no paved preference, and — the one that hurt — no exclusion of the OTHER
+        // exits. Live in `l9`, crossing toward `l9_path_to_l19`, it stepped onto `l9_path_to_l1` and
+        // left the forest by the wrong door, straight into a level 7 corrupted crypt and a
+        // highwayman who took all 763 gold on the way.
+        //
+        // The logging hid it too: `Step` and `Explore` print the same line, so the report read like
+        // a considered route rather than a guess. That is worth knowing when reading old logs.
         let place = self.places.get(&here)?;
-        let unseen = place
-            .neighbours
+        let exits_elsewhere: BTreeSet<String> = exits
             .iter()
-            .filter(|n| !self.places.get(*n).map(|p| p.visited).unwrap_or(false))
-            .min_by(|a, b| a.cmp(b));
-        let step = unseen.or_else(|| place.neighbours.iter().min())?.clone();
+            .map(|e| exit_node_key(&parent, &e.to_key))
+            .filter(|k| k != &exit_key)
+            .collect();
+        let usable = |k: &String| {
+            // Another exit road is not a step into the dark, it is a way out of the subworld — and
+            // out is where we are trying to get to, just not by that door.
+            !exits_elsewhere.contains(k)
+                && !self.abandoned.contains(k)
+                && self.places.get(k).map(|p| {
+                    !p.avoid && !(self.wants_rest && p.is_chest() && !p.completed)
+                }).unwrap_or(true)
+        };
+        // Same order the real router uses, so exploring does not undo what routing was for: paved
+        // first, then anywhere; unvisited first within each, so the walk cannot cycle.
+        let pick = |paved_only: bool| {
+            let mut best: Option<&String> = None;
+            for n in place.neighbours.iter().filter(|n| usable(n)) {
+                let p = self.places.get(n);
+                if paved_only && !p.map(|p| p.is_paved()).unwrap_or(false) {
+                    continue;
+                }
+                let seen = p.map(|p| p.visited).unwrap_or(false);
+                let better = match best {
+                    None => true,
+                    Some(b) => {
+                        let b_seen = self.places.get(b).map(|p| p.visited).unwrap_or(false);
+                        (!seen, n) < (!b_seen, b)
+                    }
+                };
+                if better {
+                    best = Some(n);
+                }
+            }
+            best.cloned()
+        };
+        // Falls all the way through to an unfiltered neighbour rather than returning `None`: being
+        // stuck in a subworld with nowhere to step is worse than any single bad step, and the health
+        // gate still gets its say on whatever we land on.
+        let step = pick(true)
+            .or_else(|| pick(false))
+            .or_else(|| place.neighbours.iter().min().cloned())?;
         Some(Crossing::Explore { to: step, toward: exit_key })
     }
 
@@ -2703,6 +2749,41 @@ mod tests {
         m.abandon("shrine3");
         if let Some(plan) = m.next_target() {
             assert_ne!(plan.reason, Goal::Shrine, "no shrine is left to visit: {plan:?}");
+        }
+    }
+
+    /// Exploring the dark must not step out of the subworld by the wrong door.
+    #[test]
+    fn walking_into_the_dark_still_avoids_the_other_exits() {
+        // `l9`, live: crossing toward `l9_path_to_l19` with no known route, the fallback took any
+        // neighbour and chose `l9_path_to_l1`. The run left the forest, arrived at a level 7
+        // corrupted crypt, and was robbed of all 763 gold by a highwayman on the way.
+        let exits = vec![
+            Exit { x: 0.0, y: 0.0, to_key: "l19".into(), to_heading: "Dane village".into() },
+            Exit { x: 0.0, y: 0.0, to_key: "l1".into(), to_heading: "Cowlam — level 7 crypt".into() },
+        ];
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump(
+            "l9",
+            "here",
+            "Saltagh Park crossroads",
+            vec![
+                node("l9_path_to_l1", "Road to Cowlam"),
+                node("l9sub26", "Saltagh Park road"),
+                node("l9sub21", "Saltagh Park forest"),
+            ],
+            exits.clone(),
+        ));
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+
+        // No route to `l9_path_to_l19` is known -- it is not even on the map yet -- so this is the
+        // explore fallback, which is the code under test.
+        match m.cross_toward(&exits) {
+            Some(Crossing::Explore { to, .. }) => {
+                assert_ne!(to, "l9_path_to_l1", "that is a way OUT, by the wrong door");
+                assert_eq!(to, "l9sub26", "the road, and unvisited");
+            }
+            other => panic!("expected an explore step, got {other:?}"),
         }
     }
 

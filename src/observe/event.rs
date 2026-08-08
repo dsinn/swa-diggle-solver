@@ -129,7 +129,7 @@ impl Event {
     /// harmless option costs us an event, while taking a harmful one cannot be undone. If nothing
     /// survives, the caller is expected to leave the event alone rather than guess.
     pub fn safe_choice(&self) -> Option<&Choice> {
-        self.choices.iter().find(|c| !harmful(&c.text))
+        self.choices.iter().find(|c| !harmful(&c.text) && !costs_everything(&c.text))
     }
 
     /// [`safe_choice`], additionally declining to start a fight when `avoid_combat` is set.
@@ -153,8 +153,21 @@ impl Event {
     pub fn safe_choice_avoiding_combat(&self, avoid_combat: bool) -> Option<&Choice> {
         self.choices
             .iter()
-            .find(|c| !harmful(&c.text) && !(avoid_combat && starts_combat(&c.text)))
+            .find(|c| {
+                !harmful(&c.text)
+                    && !costs_everything(&c.text)
+                    && !(avoid_combat && starts_combat(&c.text))
+            })
             .or_else(|| self.safe_choice())
+            // Nothing left that is neither harmful nor ruinous, so the fight it is. This is the
+            // highwayman: "your money or your life", with the money screened out.
+            //
+            // **And a fight with a highwayman is not a fight to the death.** `Goal::for_enemy`
+            // returns `Goal::Scare` when the enemy has nerve to break, so the search aims for a
+            // damage band that routs them rather than a kill — the dev's rule for the MVP, and
+            // already built. Nothing here needs to ask for it; declining to pay is enough to reach
+            // the code that does.
+            .or_else(|| self.choices.iter().find(|c| starts_combat(&c.text)))
     }
 }
 
@@ -183,6 +196,25 @@ pub fn starts_combat(text: &str) -> bool {
 ///
 /// Deliberately over-broad. A false positive means an event goes unanswered and gets reported; a
 /// false negative means the run murders a villager.
+/// Does this choice hand over everything we own?
+///
+/// The highwayman's first option, `[-All gold] - Your money`
+/// (`overworld/events/arrived/highwaymen.lua:37`), whose handler is
+/// `cost = -overworld.getPlayerGold()` — the whole purse, not a price.
+///
+/// Screened because a live run took it. `harmful` covers *moral* harm and `starts_combat` covers
+/// tactical risk; being robbed blind is neither, so it read as the safe option and 763 gold went in
+/// one keystroke. The damage is not the gold as such: the run was walking to `l19 Dane village` to
+/// rest, and an inn charges ten (`crate::rest::INN_COST`). The guard that kept the character alive
+/// spent the thing the journey was for.
+///
+/// Matched on the `[-All gold]` tag rather than on prose. The game builds choice text from coloured
+/// fragments and that bracketed tag is one of them, so it is as close to a machine-readable marker
+/// as this interface offers — and it does not need translating, unlike "Your money".
+pub fn costs_everything(text: &str) -> bool {
+    text.contains("[-All gold]")
+}
+
 pub fn harmful(text: &str) -> bool {
     const WORDS: &[&str] = &[
         "kill", "murder", "slay", "attack", "strike", "stab", "shoot", "execute", "behead",
@@ -534,5 +566,40 @@ Choices = {
         // 1600x900 -> s = 0.8333, so the shift is 1000*0.5*0.8333 = 417 rather than 500.
         let c = Choice { text: "x".into(), x: 120, y: 495 };
         assert_eq!(c.click_point(1600, 900), (537, 495));
+    }
+
+    /// The highwayman: "your money or your life", and we choose neither the money nor dying.
+    #[test]
+    fn the_highwayman_is_fought_rather_than_paid() {
+        // Real choices from `overworld/events/arrived/highwaymen.lua:37,52`, as the console printed
+        // them live. A run at 1/20 took the first and lost all 763 gold -- and with it the ten an
+        // inn charges, which was the entire point of the journey it was on.
+        let ev = Event {
+            title: "Highwayman near Cowlam crypt".into(),
+            text: "Stand and deliver! Your money or your life.".into(),
+            choices: vec![
+                Choice { text: "[-All gold] - Your money".into(), x: 960, y: 594 },
+                Choice { text: "[Combat] - \"No, your life\"".into(), x: 960, y: 756 },
+            ],
+        };
+
+        assert!(costs_everything(&ev.choices[0].text));
+        // Hurt, which is when the combat screen is active and the bug fired.
+        let picked = ev.safe_choice_avoiding_combat(true).expect("an event must be answerable");
+        assert!(starts_combat(&picked.text), "picked {:?}", picked.text);
+        // And at full health too -- paying everything is never the cheap option.
+        assert!(starts_combat(&ev.safe_choice_avoiding_combat(false).unwrap().text));
+        assert!(starts_combat(&ev.safe_choice().unwrap().text));
+    }
+
+    /// The screen is for *all* our gold, not for prices.
+    #[test]
+    fn an_ordinary_price_is_not_a_shakedown() {
+        // Shops and tolls quote a number. Only the highwayman's tag means "everything you have",
+        // and screening on a number would refuse every purchase the run ever wants to make.
+        assert!(!costs_everything("[-50 gold] - Pay the toll"));
+        assert!(!costs_everything("Pay 50 gold"));
+        assert!(!costs_everything("[Shop] - \"Show me what you've got.\""));
+        assert!(costs_everything("[-All gold] - Your money"));
     }
 }
