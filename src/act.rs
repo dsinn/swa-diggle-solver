@@ -1065,6 +1065,18 @@ impl Screen {
 /// **Order is by distinctiveness, not by likelihood.** `Dead` is tested before `CombatWaiting`
 /// because they share a slot and `Eulogise` must never be mistaken for `Finish`; `Character` is
 /// early because it is the one that strands a run.
+/// The ordering rule between the two screens that can both claim a frame, split out so a test can
+/// assert it without a window. See `tests::the_unlock_screen_is_not_hero_select`.
+pub fn identify_from_scores(unlock: bool, hero_select: bool) -> Screen {
+    if unlock {
+        Screen::Unlock
+    } else if hero_select {
+        Screen::HeroSelect
+    } else {
+        Screen::Unknown
+    }
+}
+
 pub fn identify(win: &GameWindow) -> Screen {
     let over = |b: &Button, t: f64| matches!(score_exact(win, b), Ok(q) if q >= t);
     if over(&CHARACTER_STATS, CHARACTER_STATS_PRESENT) {
@@ -1127,14 +1139,6 @@ pub fn identify(win: &GameWindow) -> Screen {
     {
         return Screen::MainMenu;
     }
-    // By the heading, never by the confirm button. [`HEROSELECT_CONFIRM`] answers "has a champion
-    // been chosen" on a screen already known to be hero select; it cannot answer "which screen is
-    // this", because `Pray` scores 0.8438 against it while genuine confirms in other classes score
-    // 0.8156 and 0.8751 — no threshold separates them. See [`HEROSELECT_HEADER`].
-    if over(&HEROSELECT_HEADER, HEROSELECT_HEADER_PRESENT) {
-        return Screen::HeroSelect;
-    }
-
     // Last, because its slot is the options button's on the overworld and the two are only 0.31
     // apart. Anything with a fingerprint of its own should win before this is asked at all — the map
     // itself has none, but every screen tested above does, so reaching here means "not one of those",
@@ -1151,11 +1155,36 @@ pub fn identify(win: &GameWindow) -> Screen {
     if over(&SHRINE_GOBACK, SHRINE_GOBACK_PRESENT) {
         return Screen::Shrine;
     }
-    // Last of all, because it shares `ss(1, 0.9)` with three other buttons and clears them by only
-    // 0.07. Every screen that could put something else in that rect has been ruled out by now — hero
-    // select by its heading, the shrine by its back plaque — so what remains in it is what it says.
+    // Shares `ss(1, 0.9)` with three other buttons and clears them by only 0.07, so everything with
+    // a fingerprint elsewhere on the screen has been ruled out before this is asked.
     if over(&UNLOCK_CONTINUE, UNLOCK_CONTINUE_PRESENT) {
         return Screen::Unlock;
+    }
+
+    // **Hero select goes last, and is the weakest reading here.**
+    //
+    // It used to sit above the three checks before this one, on the reasoning that a heading is more
+    // distinctive than a shared button slot. That is true in general and was false in the case that
+    // mattered: the class-unlock screen scores **0.8532** against this heading, over its 0.80 bar,
+    // while the unlock's own `Continue` scores **1.0000** against its 0.90 bar. Ordered the old way
+    // the weaker, wrong answer won. `tests/frames/unlock-woodsman.png` is that frame — *The Woodsman
+    // class is now available*, met mid-run after a road event — and every live run today reported
+    // `screen: HeroSelect` on it and then failed hunting for a map.
+    //
+    // Demoting it costs nothing, which is the part worth stating. Hero select is reached in exactly
+    // one way — [`crate::navigate::start_new_run`] clicks through it, knowing it is there because
+    // `Pregame screen:` follows on the console — so it is **never identified by sight** anyway. The
+    // check earns nothing where it stood and cost a run every time it fired.
+    //
+    // Kept rather than deleted because a run that somehow lands here needs a name for what it is
+    // looking at, and by this point everything with a real fingerprint has been excluded.
+    //
+    // By the heading, never by the confirm button. [`HEROSELECT_CONFIRM`] answers "has a champion
+    // been chosen" on a screen already known to be hero select; it cannot answer "which screen is
+    // this", because `Pray` scores 0.8438 against it while genuine confirms in other classes score
+    // 0.8156 and 0.8751 — no threshold separates them. See [`HEROSELECT_HEADER`].
+    if over(&HEROSELECT_HEADER, HEROSELECT_HEADER_PRESENT) {
+        return Screen::HeroSelect;
     }
     Screen::Unknown
 }
@@ -1864,6 +1893,35 @@ mod threshold_tests {
             // 0.99 would mean the crop had started matching wood grain rather than the HUD.
             assert!(q < 0.75, "{name} scored {q:.4}, close enough to the bar to be worth re-measuring");
         }
+    }
+
+    /// The class-unlock screen must not read as hero select, and ordering is what guarantees it.
+    ///
+    /// Met live: a road event unlocked the Woodsman mid-run, and every run that day reported
+    /// `screen: HeroSelect` and then failed hunting for a map that was not there.
+    #[test]
+    fn the_unlock_screen_is_not_hero_select() {
+        let Some(unlock) = score(&UNLOCK_CONTINUE, "unlock-woodsman.png") else {
+            eprintln!("SKIP: frame corpus not present");
+            return;
+        };
+        let hero = score(&HEROSELECT_HEADER, "unlock-woodsman.png").unwrap_or(0.0);
+
+        // The unlock's own button is exact; the heading is a false positive that clears its bar.
+        assert!(unlock >= UNLOCK_CONTINUE_PRESENT, "the real Continue scored {unlock:.4}");
+        assert!(
+            hero >= HEROSELECT_HEADER_PRESENT,
+            "if the heading has stopped matching ({hero:.4}) this test is no longer testing anything              -- the ordering it guards is only load-bearing while both fire"
+        );
+
+        // So no threshold separates them, and the fix is not a threshold. `identify` asks about the
+        // unlock FIRST, and this pins that: raising the hero-select check back above it reintroduces
+        // the bug with both numbers unchanged.
+        assert_eq!(
+            super::identify_from_scores(unlock >= UNLOCK_CONTINUE_PRESENT, hero >= HEROSELECT_HEADER_PRESENT),
+            Screen::Unlock,
+            "the more specific fingerprint has to win"
+        );
     }
 
     /// The event plaque separates "an event is still up" from every screen that has no event on it.
