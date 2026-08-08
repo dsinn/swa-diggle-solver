@@ -70,6 +70,17 @@ impl Preferences {
     }
 }
 
+/// Everything the ranking needs that does not change between candidates.
+///
+/// Built once per turn and borrowed by every thread. The [`Target`] in particular is worth hoisting:
+/// a board cannot change size mid-fight, so its target is computed once and read by every one of the
+/// tens of thousands of candidates a scan considers.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Context {
+    pub target: Target,
+    pub prefs: Preferences,
+}
+
 /// How good a lethal candidate is, beyond the fact that it kills.
 ///
 /// Compared in field order: wood-only first, then hazard fall, then deviation. Not `Ord`, because

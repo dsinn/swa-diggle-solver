@@ -279,7 +279,27 @@ impl Outcome {
 pub enum Goal {
     /// Kill the enemy. The **first** lethal word wins and the rest stop — optimal play is not the
     /// point, ending the exchange is.
+    ///
+    /// **Parked for the ordinary kill, and still live for one branch.** [`Goal::RankedKill`] has
+    /// taken over the general case while it is being evaluated against this; if the ranking does not
+    /// earn the full dictionary scan it costs, this is what we come back to.
+    ///
+    /// The exception is deliberate and is `killing_blow`'s [`crate::rested::Aim::HealFully`]: a
+    /// player who heals on overkill wants the *deepest* overkill that still lands, and ranking a
+    /// board's leftover letters would pull against that. That branch is outside the ranking's remit
+    /// anyway — it is the well-rested case, and the ranking was asked for on the general one.
     FirstKill { need: i64 },
+    /// Kill the enemy, and among the words that do, play the best one.
+    ///
+    /// Scans the whole dictionary rather than stopping at the first kill, because "best" is not
+    /// knowable until the candidates are in hand. That is the same cost [`Goal::MaxDamage`] already
+    /// pays, which is what makes it affordable rather than merely desirable.
+    ///
+    /// What "best" means is [`crate::pick::Rank`]: a wood-only kill, then hazard tiles driven toward
+    /// the bottom of the board, then the letters left behind. Damage beyond the kill is deliberately
+    /// **not** a criterion — overkill is worth gold only when the enemy carries it, and that case is
+    /// [`Goal::MaxDamage`]'s.
+    RankedKill { need: i64 },
     /// Hit as hard as possible. Required when overkill pays gold (`rpgview.lua:1211-1214`): the
     /// excess damage *is* the reward, so stopping at the first kill leaves money on the table.
     MaxDamage,
@@ -340,7 +360,10 @@ impl Goal {
         // What we AIM for to kill. Overshooting a kill costs nothing but a slightly worse word;
         // undershooting costs a whole turn, and a turn of being hit back.
         let need = lethal + DAMAGE_BUFFER;
-        let kill = Goal::FirstKill { need };
+        // Ranked rather than first-past-the-post: among the words that kill, which one leaves the
+        // best board and collects whatever the gear pays. See [`Goal::RankedKill`], and
+        // [`Goal::FirstKill`] for what this replaced and why it is still here.
+        let kill = Goal::RankedKill { need };
         if mods.overkill_gold {
             // Gold scales with the excess, so this one really does want the corpse.
             return Goal::MaxDamage;
@@ -454,16 +477,147 @@ pub fn search(
     geometry: &Geometry,
     mods: &Modifiers,
     goal: Goal,
+    picking: &crate::pick::Context,
     threads: usize,
 ) -> Outcome {
     match goal {
         Goal::FirstKill { need } => {
             race_for_band(dict, scorer, tiles, geometry, mods, need, None, threads)
         }
+        Goal::RankedKill { need } => {
+            ranked_kill(dict, scorer, tiles, geometry, mods, need, picking, threads)
+        }
         Goal::Scare { need, below } => {
             race_for_band(dict, scorer, tiles, geometry, mods, need, Some(below), threads)
         }
         Goal::MaxDamage => max_damage(dict, scorer, tiles, geometry, mods, threads),
+    }
+}
+
+/// Every lethal word, ranked; plus the fallbacks for when none is.
+///
+/// Structured as [`max_damage`] is — the same work-stealing scan over the whole dictionary — because
+/// the question is the same shape: nothing can be concluded until every word has been seen. What
+/// differs is only what is kept. `best` and `longest` are still collected on the way past, because
+/// the caller needs them when nothing kills and the scan that produced them is already paid for.
+///
+/// The ranking runs **only on lethal candidates**. It is a tiebreak among words that end the fight,
+/// never a reason to prefer one that does not, and evaluating it on every word would spend the
+/// board-walk in [`crate::pick::hazard_fall`] on the overwhelming majority that are irrelevant.
+#[allow(clippy::too_many_arguments)]
+pub fn ranked_kill(
+    dict: &Dictionary,
+    scorer: &Scorer,
+    tiles: &[Tile],
+    geometry: &Geometry,
+    mods: &Modifiers,
+    need: i64,
+    picking: &crate::pick::Context,
+    threads: usize,
+) -> Outcome {
+    let typist = Typist::new(tiles, geometry);
+    let corner_count = geometry.corner_count();
+    let words = dict.words();
+    let threads = threads.max(1).min(words.len().max(1));
+
+    // The winner and the rank it won with, together: comparing a candidate needs the incumbent's
+    // rank, and recomputing it per comparison would walk the board again for nothing.
+    let lethal: Mutex<Option<(Found, crate::pick::Rank)>> = Mutex::new(None);
+    let best: Mutex<Option<Found>> = Mutex::new(None);
+    let longest: Mutex<Option<Found>> = Mutex::new(None);
+    let considered = std::sync::atomic::AtomicUsize::new(0);
+    let cursor = std::sync::atomic::AtomicUsize::new(0);
+
+    std::thread::scope(|scope| {
+        for slice in 0..threads {
+            let (lethal, best, longest, considered, cursor, typist) =
+                (&lethal, &best, &longest, &considered, &cursor, &typist);
+            scope.spawn(move || {
+                let mut seen = 0usize;
+                let mut local_lethal: Option<(Found, crate::pick::Rank)> = None;
+                let mut local_best: Option<Found> = None;
+                let mut local_longest: Option<Found> = None;
+                loop {
+                    let start = cursor.fetch_add(CLAIM, Ordering::Relaxed);
+                    if start >= words.len() {
+                        break;
+                    }
+                    for word in &words[start..(start + CLAIM).min(words.len())] {
+                        seen += 1;
+                        if mods.excluded.contains(word) {
+                            continue;
+                        }
+                        let Some(typed) = typist.type_word(word) else { continue };
+                        let consumed: Vec<Tile> =
+                            typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
+                        let score = scorer.score_typed(
+                            &consumed,
+                            word.chars().count(),
+                            mods.modifier_for(word, typed.corners_used, corner_count),
+                        );
+                        if score >= need {
+                            let rank = crate::pick::rank(
+                                tiles,
+                                geometry,
+                                &typed.tiles,
+                                scorer,
+                                &picking.target,
+                                picking.prefs,
+                            );
+                            let take = match &local_lethal {
+                                Some((_, cur)) => rank.better_than(cur),
+                                None => true,
+                            };
+                            if take {
+                                local_lethal =
+                                    Some((Found { word: word.clone(), score, slice }, rank));
+                            }
+                        }
+                        if local_best.as_ref().map(|b| score > b.score).unwrap_or(true) {
+                            local_best = Some(Found { word: word.clone(), score, slice });
+                        }
+                        if local_longest
+                            .as_ref()
+                            .map(|b| word.chars().count() > b.word.chars().count())
+                            .unwrap_or(true)
+                        {
+                            local_longest = Some(Found { word: word.clone(), score, slice });
+                        }
+                    }
+                }
+                considered.fetch_add(seen, Ordering::Relaxed);
+                if let Some((found, rank)) = local_lethal {
+                    let mut l = lethal.lock().unwrap();
+                    // Same comparison across threads as within one. A thread's local winner is only
+                    // the best of the slice it happened to claim.
+                    if l.as_ref().map(|(_, cur)| rank.better_than(cur)).unwrap_or(true) {
+                        *l = Some((found, rank));
+                    }
+                }
+                if let Some(lb) = local_best {
+                    let mut b = best.lock().unwrap();
+                    if b.as_ref().map(|cur| lb.score > cur.score).unwrap_or(true) {
+                        *b = Some(lb);
+                    }
+                }
+                if let Some(ll) = local_longest {
+                    let mut g = longest.lock().unwrap();
+                    if g.as_ref()
+                        .map(|cur| ll.word.chars().count() > cur.word.chars().count())
+                        .unwrap_or(true)
+                    {
+                        *g = Some(ll);
+                    }
+                }
+            });
+        }
+    });
+
+    Outcome {
+        lethal: lethal.into_inner().unwrap().map(|(f, _)| f),
+        best: best.into_inner().unwrap(),
+        longest: longest.into_inner().unwrap(),
+        words_considered: considered.into_inner(),
     }
 }
 
@@ -928,10 +1082,12 @@ mod tests {
         let (mods, _) = Modifiers::from_save(&game_dir(), &save, 16).unwrap();
         assert!(mods.overkill_gold);
         assert_eq!(Goal::for_enemy(&mods, 3, 0, None, None), Goal::MaxDamage);
-        // An ordinary enemy still races for the first kill -- speed matters when gold does not.
+        // An ordinary enemy ranks its kills instead of racing for the first. Gold does not scale
+        // with the excess here, so there is nothing to spend the extra damage on and the board the
+        // word leaves behind is what the choice is for.
         assert_eq!(
             Goal::for_enemy(&Modifiers::none(), 3, 2, None, None),
-            Goal::FirstKill { need: 6 }
+            Goal::RankedKill { need: 6 }
         );
     }
 
@@ -963,8 +1119,8 @@ mod tests {
         let geom = Geometry::default();
         let mods = Modifiers::none();
 
-        let kill = search(&dict, &scorer, &board, &geom, &mods, Goal::FirstKill { need: 3 }, 8);
-        let hardest = search(&dict, &scorer, &board, &geom, &mods, Goal::MaxDamage, 8);
+        let kill = search(&dict, &scorer, &board, &geom, &mods, Goal::FirstKill { need: 3 }, &crate::pick::Context::default(), 8);
+        let hardest = search(&dict, &scorer, &board, &geom, &mods, Goal::MaxDamage, &crate::pick::Context::default(), 8);
 
         let first = kill.lethal.expect("a 3-health enemy is killable here");
         let best = hardest.best.expect("max damage must report something");
@@ -1006,6 +1162,71 @@ mod tests {
         let dict = Dictionary::load(&game_dir()).unwrap();
         assert!(dict.words().iter().any(|w| w.chars().count() == 1), "no 1-letter words survived");
         assert!(dict.words().iter().any(|w| w.chars().count() == 2), "no 2-letter words survived");
+    }
+
+    /// The ranked goal kills, and picks a word the ranking actually endorses.
+    ///
+    /// Worth its own test because the wiring can be inert without anything noticing: a `RankedKill`
+    /// that quietly behaved like `FirstKill` would still kill, still pass every other test, and never
+    /// once consult [`crate::pick`]. What pins it is comparing the winner's rank against every other
+    /// lethal word on the board — if the ranking is being applied, nothing beats the winner.
+    #[test]
+    fn the_ranked_goal_picks_a_kill_that_nothing_else_lethal_beats() {
+        if !present() {
+            eprintln!("SKIP: game source not present");
+            return;
+        }
+        let dict = Dictionary::load(&game_dir()).unwrap();
+        let scorer = Scorer::new(&game_dir()).unwrap();
+        let board = crypt_board();
+        let geom = Geometry::default();
+        let mods = Modifiers::none();
+        let picking = crate::pick::Context {
+            target: crate::letters::Weights::load(&game_dir()).unwrap().target(board.len()),
+            prefs: crate::pick::Preferences::default(),
+        };
+        let need = 3;
+
+        let out =
+            search(&dict, &scorer, &board, &geom, &mods, Goal::RankedKill { need }, &picking, 8);
+        let won = out.lethal.expect("a 3-health enemy must be killable from this board");
+
+        let typist = Typist::new(&board, &geom);
+        let rank_of = |word: &str| {
+            let typed = typist.type_word(word)?;
+            let consumed: Vec<Tile> = typed.tiles.iter().map(|&i| board[i].clone()).collect();
+            let score = scorer.score_typed(
+                &consumed,
+                word.chars().count(),
+                mods.modifier_for(word, typed.corners_used, geom.corner_count()),
+            );
+            (score >= need).then(|| {
+                crate::pick::rank(
+                    &board,
+                    &geom,
+                    &typed.tiles,
+                    &scorer,
+                    &picking.target,
+                    picking.prefs,
+                )
+            })
+        };
+        let winner = rank_of(&won.word).expect("the winning word must itself be lethal");
+        let mut rivals = 0usize;
+        for word in dict.words() {
+            if mods.excluded.contains(word) {
+                continue;
+            }
+            let Some(other) = rank_of(word) else { continue };
+            rivals += 1;
+            assert!(
+                !other.better_than(&winner),
+                "{word} ranks above the chosen {}: {other:?} vs {winner:?}",
+                won.word
+            );
+        }
+        // Without this the assertion above is vacuous -- it passes trivially if nothing else kills.
+        assert!(rivals > 1, "only {rivals} lethal word(s); the comparison proves nothing");
     }
 
     #[test]
@@ -1163,12 +1384,12 @@ mod scare_goal_tests {
         // rpgview.lua:1646 -- the flee branch requires `not currentEnemy.immobile`. Trying to scare
         // one would leave it alive and still attacking.
         let m = Modifiers { immobile: true, ..feared() };
-        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12), None), Goal::FirstKill { need: 13 });
+        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12), None), Goal::RankedKill { need: 13 });
     }
 
     #[test]
     fn without_a_known_maximum_we_do_not_guess() {
-        assert_eq!(Goal::for_enemy(&feared(), 12, 0, None, None), Goal::FirstKill { need: 13 });
+        assert_eq!(Goal::for_enemy(&feared(), 12, 0, None, None), Goal::RankedKill { need: 13 });
     }
 
     #[test]
@@ -1181,7 +1402,7 @@ mod scare_goal_tests {
     #[test]
     fn a_one_health_maximum_offers_no_non_lethal_scare() {
         // leaves_at_or_below is None below 2 max health, so there is no room to hurt without killing.
-        assert_eq!(Goal::for_enemy(&feared(), 1, 0, Some(1), None), Goal::FirstKill { need: 2 });
+        assert_eq!(Goal::for_enemy(&feared(), 1, 0, Some(1), None), Goal::RankedKill { need: 2 });
     }
 }
 
@@ -1218,26 +1439,26 @@ mod rested_goal_tests {
 
     #[test]
     fn full_health_kills_normally() {
-        assert_eq!(goal(Some(&player(12, true))), Goal::FirstKill { need: 11 });
+        assert_eq!(goal(Some(&player(12, true))), Goal::RankedKill { need: 11 });
     }
 
     #[test]
     fn a_free_heal_is_never_conserved() {
         // A gear flag grants the heal without spending anything (the decrement at :1204-1210 only
         // touches statusEffects), so there is no reason to avoid a scratch top-up.
-        assert_eq!(goal(Some(&player(10, false))), Goal::FirstKill { need: 11 });
+        assert_eq!(goal(Some(&player(10, false))), Goal::RankedKill { need: 11 });
     }
 
     #[test]
     fn bleeding_kills_normally_because_no_heal_can_happen() {
         let p = PlayerState { bleeding: true, ..player(4, true) };
-        assert_eq!(goal(Some(&p)), Goal::FirstKill { need: 11 });
+        assert_eq!(goal(Some(&p)), Goal::RankedKill { need: 11 });
     }
 
     #[test]
     fn a_cancelled_heal_kills_normally() {
         let p = PlayerState { heals: false, ..player(4, true) };
-        assert_eq!(goal(Some(&p)), Goal::FirstKill { need: 11 });
+        assert_eq!(goal(Some(&p)), Goal::RankedKill { need: 11 });
     }
 
     #[test]

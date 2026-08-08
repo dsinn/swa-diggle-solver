@@ -71,6 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let scorer = diggle_solver::score::Scorer::new(&cfg.game_dir)?;
     let dict = diggle_solver::search::Dictionary::load(&cfg.game_dir)?;
+    let letters = diggle_solver::letters::Weights::load(&cfg.game_dir)?;
 
     let console = Console::take()?;
     let mirror = LogMirror::create(Path::new("spike-run-raw.log"))?;
@@ -200,6 +201,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         win: &win,
         dict: &dict,
         scorer: &scorer,
+        letters: &letters,
         game_dir: cfg.game_dir.clone(),
         combat_path: save_dir.join("combatSaveData"),
         frames: Some(PathBuf::from(FRAMES)),

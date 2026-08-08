@@ -31,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut log = String::from("# Spike: the combat loop\n\n");
     let scorer = diggle_solver::score::Scorer::new(&cfg.game_dir)?;
     let dict = Dictionary::load(&cfg.game_dir)?;
+    let letters = diggle_solver::letters::Weights::load(&cfg.game_dir)?;
     log.push_str(&format!("loaded {} words\n\n", dict.len()));
 
     let console = Console::take()?;
@@ -61,6 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         win: &win,
         dict: &dict,
         scorer: &scorer,
+        letters: &letters,
         game_dir: cfg.game_dir.clone(),
         combat_path: save_dir.join("combatSaveData"),
         frames: Some(PathBuf::from(FRAMES)),

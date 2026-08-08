@@ -117,7 +117,11 @@ fn read_row(line: &str) -> Option<(char, f64)> {
 }
 
 /// The letter counts a board of a given size ought to have.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Default` is every target at zero, which is not a board any size wants — it exists so callers
+/// that do not rank (a `FirstKill` or `MaxDamage` search) can supply a context without loading the
+/// game's tables for one they will never read.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Target {
     want: [f64; ALPHABET],
 }

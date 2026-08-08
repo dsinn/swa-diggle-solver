@@ -124,6 +124,11 @@ pub struct Fight<'a> {
     pub win: &'a GameWindow,
     pub dict: &'a Dictionary,
     pub scorer: &'a crate::score::Scorer,
+    /// The game's letter frequencies, for the target distribution a played word is judged against.
+    ///
+    /// Loaded once and held, like [`Fight::dict`] and [`Fight::scorer`]: it is a parse of a file in
+    /// the game's source, and re-reading it per turn would be the same waste.
+    pub letters: &'a crate::letters::Weights,
     pub game_dir: PathBuf,
     pub combat_path: PathBuf,
     /// Where to drop diagnostic PNGs, if anywhere.
@@ -275,7 +280,32 @@ impl Fight<'_> {
                 mods.nerve
             ));
         }
-        let out = search::search(self.dict, self.scorer, &tiles, &geom, &mods, goal, 8);
+        // Built per turn rather than per fight, because the board's tile count is what the target is
+        // scaled to and a board can lose tiles mid-fight — the run that died at `l50` watched its
+        // board collapse from 16 tiles to one. A target built once at 16 would have been describing a
+        // board that no longer existed.
+        let picking = crate::pick::Context {
+            target: self.letters.target(tiles.len()),
+            prefs: crate::pick::Preferences::from_flags(
+                |f| cs.path(&format!("rpg.player.gearFlags.{f}")).is_some(),
+                // Any missing health counts as injured: the buckler heals 4, so at 19/20 the payout
+                // is real and merely smaller than its cap. No threshold is invented here.
+                //
+                // TODO: handle bleeding. Both bucklers heal "unless you're bleeding"
+                // (`items/woodaugmentgear.lua:164`, `items/idoltarge.lua:24`), and `rpgview.lua:1080`
+                // skips the heal branch outright while it is set. So a bleeding player gets nothing
+                // from the plain Wooden idol buckler at any health, and it should stop driving
+                // wood-only exactly as full health does — while the Braced buckler keeps paying
+                // through `onWoodKillQueueWoodbraced`, which is not a heal.
+                //
+                // Cheaper than it looks: `PlayerState::bleeding` (`search.rs:443`) already reads it,
+                // so this is `injured && !bleeding` here plus a `Preferences` test. Left undone
+                // deliberately rather than folded in unmeasured — it narrows when wood-only fires,
+                // and the ranking has not yet been watched doing anything at all.
+                player.as_ref().map(|p| p.vitals.missing() > 0).unwrap_or(false),
+            ),
+        };
+        let out = search::search(self.dict, self.scorer, &tiles, &geom, &mods, goal, &picking, 8);
         let letters: String = tiles.iter().map(|t| t.letter.as_str()).collect();
         let Some(found) = out.choice().cloned() else {
             log.push_str(&format!("turn {turns}: nothing playable on {letters}\n"));
