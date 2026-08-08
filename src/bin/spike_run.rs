@@ -96,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         recentre_misses: 0,
         shrines_tried: std::collections::HashSet::new(),
         slots_captured: std::collections::HashSet::new(),
+        committed_to: None,
         pending_cinematic: false,
         pregame_seen: false,
     };

@@ -761,18 +761,48 @@ impl Run<'_> {
         // `onActive` announces a screen at the start of its transition, so settle before clicking
         // and verify, or the click lands on a screen that is still fading in.
         let _ = crate::observe::settle::wait_for_quiescence(self.win, 0.02, Duration::from_secs(8));
+        // **Verified by the plaque going away, not by the screen changing.**
+        //
+        // This loop used to accept `diff_fraction > 0.05` as proof the answer landed. That is an
+        // indirect proxy for the wrong thing — plenty moves on this screen without the event being
+        // answered — and a live run at `l9sub22` showed what it costs. It logged `answered
+        // Woodsman at Saltagh Park road`, both plaques were still on screen, and the run went off
+        // looking for a map dump that could not come because it was not on the map. It failed eight
+        // seconds later with `inside a subworld with no settled dump`: a symptom three steps
+        // downstream of the cause, pointing at a function that was working correctly.
+        //
+        // `act::EVENT_CHOICE` answers the question directly. The count comes from the console's own
+        // choice list, which is what fixes the plaque's position.
+        let options = ev.choices.len();
+        let mut answered = false;
         if let Ok((cx, cy)) = self.win.client_to_screen(c.x, c.y) {
-            for _ in 0..4 {
-                let before = crate::win::capture::capture_window(self.win).ok()?;
+            for attempt in 1..=4 {
                 let _ = click_at_in(self.win, cx, cy);
                 self.park();
                 std::thread::sleep(Duration::from_millis(900));
                 self.pump();
-                let after = crate::win::capture::capture_window(self.win).ok()?;
-                if before.diff_fraction(&after, crate::observe::settle::FULL) > 0.05 {
-                    break;
+                match crate::act::event_plaque_score(self.win, options) {
+                    Ok(q) if q < crate::act::EVENT_CHOICE_PRESENT => {
+                        self.log.push_str(&format!(
+                            "  answer took on attempt {attempt} (plaque {q:.4})\n"
+                        ));
+                        answered = true;
+                        break;
+                    }
+                    Ok(q) => self
+                        .log
+                        .push_str(&format!("  attempt {attempt}: still on the event ({q:.4})\n")),
+                    // A capture fault is not evidence either way, so it neither confirms nor
+                    // retries into a loop — one more go, and the count runs out honestly.
+                    Err(e) => self.log.push_str(&format!("  attempt {attempt}: {e}\n")),
                 }
             }
+        }
+        if !answered {
+            // Deliberately not a stop: the caller's next move is to look at the screen, and an event
+            // we could not dismiss will be found there. What must not happen is this reporting
+            // success, which is the whole bug.
+            self.log.push_str("  **the event is still on screen** — four attempts, none took\n");
         }
         Some(ev.title)
     }

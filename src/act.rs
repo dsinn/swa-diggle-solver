@@ -606,6 +606,106 @@ pub const PREGAME_START: Button = Button {
 /// The combat pregame is up. See [`PREGAME_START`].
 pub const PREGAME_START_PRESENT: f64 = 0.90;
 
+/// An event's choice plaque — the fingerprint for **"an event is still on screen"**.
+///
+/// Answering an event is a click, and until now nothing checked that the click landed. `handle_event`
+/// pressed a choice and logged `answered`, and a live run at `l9sub22` proved what that is worth: the
+/// press did not take, the Woodsman's two options stayed up, and the run went looking for a map dump
+/// that could not come because it was not on the map. It waited eight seconds and failed with
+/// `inside a subworld with no settled dump` — a symptom three steps downstream of the cause. The
+/// frame is `tests/frames/event-woodsman.png`, and both plaques are plainly still there.
+///
+/// This is the project's most repeated bug, in its usual costume: announcement taken for readiness.
+///
+/// ## Why a strip of bare wood, and not the button
+///
+/// The plaque carries the choice text, which is different on every event, so a whole-button template
+/// would match one event and nothing else. What is constant is the artwork: `type = 'event'`
+/// (`ui/eventscreen.lua:96`) is 1000x150 (`ui/elements/button.lua:18`), and the top ~50 px of it sit
+/// above the text on every event. This is a 400x34 strip out of that band.
+///
+/// **400 wide is a deliberate choice, not a round number.** Every other wooden control in the game is
+/// a `default` at 250 px or a `small` at 100, so a template wider than 250 cannot fit inside one —
+/// which is what stops a strip of bare wood from matching the `Visit`/`Combat` area button, the one
+/// confusion that would matter. Narrowing this crop reintroduces that risk.
+///
+/// ## Position is not fixed, and is **computed rather than searched for**
+///
+/// `ui/eventscreen.lua:117-119` puts a choice at `buttonX = img and 0.075 or 0.5` with
+/// `xOffset = img and 0.5 or 0`, and `buttonY = 0.55 + optionOffset + actualI*0.15`, where
+/// `optionOffset = -(visibleChoices*0.075)` (`:17`). So neither axis is fixed: the left edge is 144
+/// px with a portrait and 460 px without, and the stack slides upward as options are added.
+///
+/// The first draft handed that to [`locate`] as an 800x660 box, which is 251,000 candidate positions
+/// of a 13,600-pixel template — three billion comparisons, and it did not finish. The box is not a
+/// place to put ignorance.
+///
+/// Substituting `optionOffset` collapses the vertical unknown to arithmetic:
+///
+/// ```text
+///   choice i of n:  y = 1080 * (0.55 - 0.075n + 0.15i)
+///   the first:      y = 1080 * (0.70 - 0.075n)
+/// ```
+///
+/// and **n is known** — the console prints the choice list, which is where the answer comes from in
+/// the first place. So [`event_choice_search`] takes the count and returns a band 16 px tall.
+/// Only `x` is genuinely unknown, and it has two possible values; the box spans both.
+pub const EVENT_CHOICE: Button = Button {
+    name: "event choice",
+    template: "event-choice.png",
+    // A placeholder for the two-option case, so the struct is complete and
+    // `every_search_box_can_contain_its_template` covers it. Live code calls
+    // `event_choice_search` instead, because the real box depends on the option count.
+    search: (400, 517, 1210, 567),
+    origin: (444, 523),
+    // Unused. The answer goes through the console's choice list, which knows which option is which,
+    // and nothing should ever pick a plaque by this coordinate.
+    click: (644, 592),
+};
+
+/// Where the **first** choice plaque's strip sits, given how many options the console listed.
+///
+/// See [`EVENT_CHOICE`] for the derivation. The band is the computed position plus 8 px of slack
+/// each way, which covers rounding in the game's own layout without reopening the search.
+///
+/// `x` spans both columns: 400 is left of the portrait layout's 444, and 1210 is right of the
+/// no-portrait layout's 760 plus the template's 400 width.
+pub fn event_choice_search(options: usize) -> (i32, i32, i32, i32) {
+    let n = options.max(1) as f64;
+    // The template was cut 71 px above the plaque's centre line — see `origin`, 523 against the
+    // 594 that `n = 2` puts the first plaque at.
+    let y = (1080.0 * (0.70 - 0.075 * n)) as i32 - 71;
+    (400, y - 8, 1210, y + 34 + 8)
+}
+
+/// An event's plaque is still painted. See [`EVENT_CHOICE`].
+///
+/// ```text
+///   the Woodsman's own event, n=2            1.0000
+///   overworld-campfire.png, worst of n=1..4  0.8065
+///   combat-turn1-hurt.png,  worst of n=1..4  0.7982
+///   post-crypt.png,         worst of n=1..4  0.4906
+/// ```
+///
+/// **0.90**, in the 0.19 gap. Two honest caveats, because this is thinner than it looks:
+///
+/// 1. **The 1.0000 is a self-match.** The template was cut from that very frame, so it is an upper
+///    bound and not a typical score. A different event, on a different backdrop, will read lower —
+///    how much lower is unmeasured. The next run to meet an event should re-measure.
+/// 2. **0.8065 is bare wood matching bare wood.** The overworld's location banner is a wide wooden
+///    plank, which is exactly what this crop is. Being 400 px wide keeps it clear of the 250 px
+///    `default` buttons, but not of the banner.
+///
+/// ## Which is why this is used to verify, and not to identify
+///
+/// Those two caveats are survivable for the question *"is the plaque we were just looking at still
+/// there?"* — asked twice on the same screen, seconds apart, where the backdrop is constant and only
+/// the plaque changes. They are **not** good enough for "which screen is this?", where a 0.8065
+/// against the map would freeze a run for ever. So [`event_plaque_score`] is called from
+/// `handle_event` to confirm a press, and [`Screen`] deliberately has no `Event` variant yet. It can
+/// have one when there is a second event frame to calibrate against.
+pub const EVENT_CHOICE_PRESENT: f64 = 0.90;
+
 /// A solved shrine's `Pray`, which collects the blessing.
 ///
 /// `ss(1.0, 0.9)` with `xOffset = -0.75` and the 250x100 `default` size (`shrine.lua:296-301`), so
@@ -1264,6 +1364,20 @@ pub fn locate(win: &GameWindow, button: &Button) -> Result<Option<f64>, crate::E
         .map(|m| m.inliers))
 }
 
+/// Is an event's choice plaque still painted?
+///
+/// The direct form of "did answering it take". `options` is how many choices the console listed,
+/// which is what fixes the vertical position — see [`event_choice_search`].
+///
+/// Returns the score rather than a verdict, so a caller can log the figure it acted on. Compare it
+/// against [`EVENT_CHOICE_PRESENT`].
+pub fn event_plaque_score(win: &GameWindow, options: usize) -> Result<f64, crate::Error> {
+    let tpl = cached_template(&EVENT_CHOICE)?;
+    let (x0, y0, x1, y1) = event_choice_search(options);
+    let frame = crate::win::capture::capture_client_rect(win, x0, y0, x1 - x0, y1 - y0)?;
+    Ok(find_at_scale_in(&frame, &tpl, 1.0, 1, None).map(|m| m.inliers).unwrap_or(0.0))
+}
+
 /// Verifies a button at its known origin, then clicks it — no search.
 ///
 /// [`click`] goes through [`locate`], which sweeps the template across a slack region. For a button
@@ -1686,6 +1800,43 @@ mod threshold_tests {
             // Not merely under the bar — nowhere near it. A non-combat screen creeping up towards
             // 0.99 would mean the crop had started matching wood grain rather than the HUD.
             assert!(q < 0.75, "{name} scored {q:.4}, close enough to the bar to be worth re-measuring");
+        }
+    }
+
+    /// The event plaque separates "an event is still up" from every screen that has no event on it.
+    #[test]
+    fn the_event_plaque_is_told_apart_from_every_screen_without_one() {
+        // Scored through the computed band, the way live code does it -- two options on that frame.
+        let scan = |name: &str, options: usize| -> Option<f64> {
+            let f = frame(name)?;
+            let tpl = Template::load(&PathBuf::from("templates").join(EVENT_CHOICE.template)).ok()?;
+            find_at_scale_in(&crop(&f, event_choice_search(options)), &tpl, 1.0, 1, None)
+                .map(|m| m.inliers)
+        };
+        let Some(real) = scan("event-woodsman.png", 2) else {
+            eprintln!("SKIP: frame corpus not present");
+            return;
+        };
+        assert!(real >= EVENT_CHOICE_PRESENT, "the Woodsman's own event scored {real:.4}");
+        eprintln!("  event-woodsman.png (n=2): {real:.4}");
+
+        // `overworld-campfire.png` is the one that matters. The map's area button is wood too, so a
+        // bare-wood template is exactly the crop that could match it -- and would then report an
+        // event on every overworld screen, freezing the run for ever. 400 px is wider than the 250 px
+        // `default` button, which is what makes that impossible rather than merely unlikely.
+        for name in
+            ["overworld-campfire.png", "post-crypt.png", "combat-turn1-hurt.png", "16-selected.png"]
+        {
+            // Every option count the band can take, since a run asks this question with whatever
+            // count the console last reported -- including on a screen that has no event at all.
+            for n in 1..=4 {
+                let q = scan(name, n).unwrap_or(0.0);
+                assert!(
+                    q < EVENT_CHOICE_PRESENT,
+                    "{name} scored {q:.4} at n={n}, at or above the threshold"
+                );
+                eprintln!("  {name} (n={n}): {q:.4}");
+            }
         }
     }
 
