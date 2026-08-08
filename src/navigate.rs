@@ -113,7 +113,9 @@ const SELECT_MOVED: f64 = 0.01;
 /// fade several times over while still failing promptly when the map really is not there.
 const RECENTRE_RETRIES: usize = 3;
 
-#[derive(Debug)]
+/// `PartialEq` is for the tests: comparing what [`precheck`] returns against what it should is the
+/// only way to check `drive`'s wiring without a running game in front of it.
+#[derive(Debug, PartialEq)]
 pub enum Stop {
     /// Someone asked us to stop, via [`STOP_FILE`].
     Requested,
@@ -130,6 +132,14 @@ pub enum Stop {
     /// it is the end of the save — nothing after it can be retried, and the sandbox needs a
     /// checkpoint restore before another run means anything.
     Died(String),
+    /// A screen [`crate::act::identify`] recognises and nothing answers. See [`Answer::Unanswered`].
+    ///
+    /// Deliberately a stop and not a `todo!()`. Panicking is the idiomatic Rust for "not written
+    /// yet", and it is the wrong tool while this process holds the real mouse and keyboard: an
+    /// unwind skips [`Stop`]'s whole shutdown — the report, the `gave-up.png` capture of the screen
+    /// that beat us, and closing the game — and leaves the window foregrounded silently eating
+    /// whatever the user types next. A named stop loses nothing and keeps all of it.
+    Unanswered(Screen),
     /// Too hurt to start the fight in front of us, and no rest was found before we got here.
     ///
     /// A stop, not a failure: the run is intact and a checkpoint restore is not needed. It is the
@@ -253,6 +263,22 @@ pub const fn answer_for(screen: Screen) -> Answer {
         // Left honest rather than quietly mapped to `Bespoke`. It is a real gap and the test below
         // makes sure it stays visible.
         Screen::Dead => Answer::Unanswered,
+    }
+}
+
+/// What [`drive`] must do about a screen before anything else looks at it.
+///
+/// Split out as a pure function so the wiring is testable: without it, "an unanswered screen stops
+/// the run" would be a claim about a loop that needs a live game to enter. [`answer_for`] is a map,
+/// and a map nothing reads is a comment.
+///
+/// Only [`Answer::Unanswered`] stops. [`Answer::Elsewhere`] deliberately does not: seeing one of
+/// those in `drive` means the component that owns it has already finished — a reward screen still up
+/// after a fight, say — and those resolve on the next iteration rather than being errors.
+pub fn precheck(screen: Screen) -> Option<Stop> {
+    match answer_for(screen) {
+        Answer::Unanswered => Some(Stop::Unanswered(screen)),
+        Answer::Escape | Answer::Fight | Answer::Bespoke | Answer::Elsewhere(_) | Answer::Map => None,
     }
 }
 
@@ -1102,6 +1128,17 @@ pub fn drive(
         let screen = crate::act::identify(r.win);
         if screen != crate::act::Screen::Unknown {
             r.log.push_str(&format!("{step}. screen: {screen:?}\n"));
+        }
+        // A screen we can name and cannot act on. Stopping here is the whole point: the alternative
+        // is what this loop used to do with one, which is fall through to the map path and spend the
+        // remaining budget probing for a map that is not there, then report the probing as the
+        // failure. `Screen::Dead` is the one that qualifies today.
+        if let Some(stop) = precheck(screen) {
+            r.log.push_str(&format!(
+                "  **`{screen:?}` is recognised and nothing answers it** — stopping here rather \
+                 than treating it as the map\n"
+            ));
+            return stop;
         }
         // A fight we did not know we were in. Tested first, because every branch below assumes there
         // is a map underneath the screen, and in combat there is not.
@@ -2113,6 +2150,47 @@ mod tests {
             vec![Screen::Dead],
             "the set of screens nothing answers has changed; if that is deliberate, say so here"
         );
+    }
+
+    /// The map has to be *read* by something, or it is a comment that looks like a control.
+    ///
+    /// This is the half [`answer_for`] could not give on its own: it can be exhaustive and correct
+    /// and still change nothing about what the run does. `precheck` is what `drive` actually calls,
+    /// so testing it tests the wiring rather than the intention.
+    #[test]
+    fn an_unanswered_screen_stops_the_run_and_every_other_screen_does_not() {
+        for &s in Screen::ALL {
+            match answer_for(s) {
+                Answer::Unanswered => assert_eq!(
+                    precheck(s),
+                    Some(Stop::Unanswered(s)),
+                    "{s:?} is unanswered but `drive` would carry on past it"
+                ),
+                _ => assert!(
+                    precheck(s).is_none(),
+                    "{s:?} has an answer, so `drive` must not stop on it"
+                ),
+            }
+        }
+    }
+
+    /// `Elsewhere` screens must never stop the run.
+    ///
+    /// Worth its own assertion rather than leaving it to the sweep above, because it is the tempting
+    /// mistake: they are not handled *here*, which reads like "not handled". Seeing one in `drive`
+    /// means the component that owns it has just finished — a reward screen still up after a fight —
+    /// and the next iteration clears it. Stopping would turn ordinary transitions into dead runs.
+    #[test]
+    fn a_screen_answered_elsewhere_is_not_a_reason_to_stop() {
+        let elsewhere: Vec<Screen> = Screen::ALL
+            .iter()
+            .copied()
+            .filter(|&s| matches!(answer_for(s), Answer::Elsewhere(_)))
+            .collect();
+        assert!(!elsewhere.is_empty(), "the sweep is vacuous if nothing is answered elsewhere");
+        for s in elsewhere {
+            assert!(precheck(s).is_none(), "{s:?} is answered elsewhere but `drive` stops on it");
+        }
     }
 
     /// Every point we are willing to click looking for empty map must actually be map.
