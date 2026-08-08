@@ -828,11 +828,16 @@ pub const STATS_BACK_PRESENT: f64 = 0.90;
 /// **0.92**, placed in the measured gap between a real `Pray` at 1.0000 and the greyed `Consecrate`
 /// that replaces it at 0.8130 — 0.107 of margin below, nothing above.
 ///
-/// One case is predicted rather than measured, and is recorded as such: an **active** `Consecrate`,
-/// which only exists once `hell ~= 0`. That would be a pure word swap with no greying, and the
-/// project's rule of thumb is that a swap costs 0.138-0.184 with the price scaling by *length* —
-/// `Pray` against `Consecrate` is the widest such gap available, so ~0.82 is the expectation and
-/// 0.92 still clears it. Re-measure on the first run that reaches an open anomaly.
+/// The last open case is now **measured**, and the prediction held. An **active** `Consecrate`,
+/// which only exists once `hell ~= 0`, was estimated at ~0.82 from the rule of thumb that a pure
+/// word swap costs 0.138-0.184 scaling by length. Consecrating `shrine2` and `shrine3` on
+/// 2026-08-08 scored **0.8560** on both — 0.036 above the estimate, and 0.064 below this threshold,
+/// so `Pray` and an active `Consecrate` are correctly told apart here.
+///
+/// That margin is thinner than the others on this slot, which is why nothing consecrates on the
+/// strength of it: identifying `Consecrate` positively needs its own artwork, and
+/// [`SHRINE_SLOT_OCCUPIED`] plus a save-derived gate is what stands in until there is a template.
+/// `spike-frames-live/slot-consecrate-live.png` is the capture to cut one from.
 pub const SHRINE_PRAY_PRESENT: f64 = 0.92;
 
 /// **Something** is in the shared right-hand slot, without claiming which button it is.

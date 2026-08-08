@@ -1033,8 +1033,35 @@ impl WorldMap {
         }
         // Nothing qualifying is known yet, so grow the map. Unvisited places first — standing on one
         // is what produces a dump — and among those prefer the ones still hiding neighbours.
-        let mut frontier: Vec<&Place> =
-            self.places.values().filter(|p| p.key != here && p.is_frontier() && !p.avoid && ok(p)).collect();
+        // **Somewhere we have never stood**, which is narrower than [`Place::is_frontier`] and
+        // deliberately so.
+        //
+        // A frontier is either unvisited *or* visited with neighbours the game refused to name. The
+        // second half is worth remembering — "there is no shrine adjacent" is not a conclusion while
+        // that count is nonzero — but it is **not worth walking back to**, and treating it as a
+        // destination is a loop. Standing on a node again produces the same dump: the hidden count
+        // is a cloud count, and clouds are cleared by `clearFogAroundPoint` (`wizard_tower.lua:61`),
+        // never by arriving.
+        //
+        // Live, on 2026-08-08: `l41` was visited with hidden neighbours, so it stayed a frontier for
+        // ever. Standing on `l35` the planner explored to `l41`; standing on `l41` the branch
+        // excludes `here`, found no other free frontier, fell through to `easiest_hostile`, and
+        // routed to `l9` — whose first hop is `l35`. `l35 -> l41 -> l35` until the run failed.
+        //
+        // Abandoned places drop out here too, matching the shrine branch. Same reason: the planner
+        // and the driver must not disagree about what is still worth walking to.
+        //
+        // What this gives up, and it is real: after a wizard's tower clears fog, a node we have
+        // already stood on may genuinely have new neighbours. Nothing clears fog yet
+        // (`tower::press_reveal` is a stub), so there is no such case to lose today — and when there
+        // is, the honest fix is to clear `visited` on the nodes the reveal touched rather than to
+        // walk back to every one of them on spec.
+        let mut frontier: Vec<&Place> = self
+            .places
+            .values()
+            .filter(|p| p.key != here && !p.visited && !p.avoid && ok(p))
+            .filter(|p| !self.abandoned.contains(&p.key))
+            .collect();
         // Order matters, and a live run showed why. From l10 with l1 and l18 both adjacent and both
         // unvisited, sorting by key chose `l1` — already **completed**, so it revealed nothing — and
         // the run then had to walk back through l10 to reach l18. Two of three hops wasted, on an
@@ -2559,6 +2586,42 @@ mod tests {
         if let Some(plan) = m.next_target() {
             assert_ne!(plan.reason, Goal::Shrine, "no shrine is left to visit: {plan:?}");
         }
+    }
+
+    /// The fourth bounce, live on 2026-08-08: `l35 -> l41 -> l35`, until the run failed.
+    #[test]
+    fn a_node_we_have_already_stood_on_is_not_somewhere_to_explore() {
+        // Rebuilt from that run's map. `l41` is visited and complete, with neighbours still under
+        // cloud, so `is_frontier` was true for ever -- and standing there cannot change it, because
+        // the hidden count is a cloud count and arriving does not lift clouds.
+        //
+        // The loop needed both halves. From `l35` the planner explored to `l41`; from `l41` the
+        // branch excludes `here`, found nothing else free, fell through to `easiest_hostile` and
+        // routed to `l9` -- whose first hop is `l35`. Neither plan was wrong on its own.
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "l35",
+            "Thorpe crypt",
+            vec![node("l41", "Grimston crossroads"), node("l9", "Saltagh Park — level 1 forest")],
+        ));
+        for k in ["l35", "l41"] {
+            let p = m.entry(k);
+            p.completed = true;
+            p.visited = true;
+            p.hidden = Some(2); // neighbours the game refused to name
+        }
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+
+        // `l41` is still a frontier in the sense that matters for conclusions -- we cannot say what
+        // is next to it -- and that stays true.
+        assert!(m.get("l41").unwrap().is_frontier(), "hidden neighbours are still unknown");
+        // But it is not somewhere to go. The only plan left is the cheapest fight, and crucially it
+        // is the SAME plan from either end of the old cycle, so the run makes progress.
+        let from_l35 = m.next_target().unwrap();
+        assert_eq!(from_l35.reason, Goal::EasiestHostile { level: Some(1) });
+        assert_eq!(from_l35.target, "l9");
+        m.here = Some("l41".into());
+        assert_eq!(m.next_target().unwrap().target, "l9", "the plan must not flip when we move");
     }
 
     /// The third bounce, live on 2026-08-08: `l10 -> shrine2 -> l10`, twelve times.
