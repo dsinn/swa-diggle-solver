@@ -878,6 +878,25 @@ pub const HEROSELECT_HEADER_PRESENT: f64 = 0.80;
 /// The positive control is worth more than usual here: it is a *different frame* from a different
 /// moment — before the word was solved, with the on-screen keyboard up and a different scene state —
 /// rather than the template compared with itself. 1.0000 across that gap is what makes 0.90 safe.
+/// The shop's back arrow, which is how a run that buys nothing gets out again.
+///
+/// `shop.lua:180-187`: `button('', 0.5, 0.85, { type = 'small', icon = back.png, xOffset = 7.67 })`,
+/// and `small` is 100x100 (`ui/elements/button.lua:19`). So the centre is
+/// `0.5*1920 + 100*7.67 = 1727`, `0.85*1080 = 918`.
+///
+/// A bare coordinate rather than a [`Button`] with a template, because there is nothing here worth
+/// matching: the icon is a 100x100 arrow shared with several screens, and the screen it sits on is
+/// identified from the console instead — `core.onActive` prints `Opened shop UI` (`shop.lua:253`),
+/// which is unambiguous and free.
+///
+/// **`activeIf = backMode`** (`:184`), and `backMode` is set when the shop was opened from somewhere
+/// to go back to. Reached through a road event's `[Shop]` choice that is satisfied, so this is
+/// pressable — but it is why the press is confirmed rather than assumed.
+pub const SHOP_BACK: (i32, i32) = (1727, 918);
+
+/// The console line `core.onActive` prints when a shop UI opens (`shop.lua:253`).
+pub const SHOP_OPENED: &str = "Opened shop UI";
+
 pub const SHRINE_GOBACK: Button = Button {
     name: "shrine Go back",
     template: "shrine-goback.png",
@@ -1370,18 +1389,56 @@ pub fn locate(win: &GameWindow, button: &Button) -> Result<Option<f64>, crate::E
         .map(|m| m.inliers))
 }
 
-/// Is an event's choice plaque still painted?
+/// Where the first choice plaque is, and how well it matched.
 ///
-/// The direct form of "did answering it take". `options` is how many choices the console listed,
-/// which is what fixes the vertical position — see [`event_choice_search`].
+/// `options` is how many choices the console listed, which is what fixes the vertical band — see
+/// [`event_choice_search`]. The centre is in **client** pixels.
 ///
-/// Returns the score rather than a verdict, so a caller can log the figure it acted on. Compare it
-/// against [`EVENT_CHOICE_PRESENT`].
-pub fn event_plaque_score(win: &GameWindow, options: usize) -> Result<f64, crate::Error> {
+/// ## The position is the point, not a by-product
+///
+/// The first version of this returned only a score, and the click went to a coordinate derived from
+/// the console's `posX`. That coordinate was wrong — see [`crate::observe::event::Choice::click_point`]
+/// — and the derivation needed to know whether the event had a portrait, which nothing on the console
+/// says.
+///
+/// None of that inference is necessary. **The template match already knows where the button is**: it
+/// is a picture of the plaque, so finding it is finding the plaque. Reading `cx`/`cy` off the match
+/// closes the loop the same way every other press in this project is closed — the thing that confirms
+/// the control is present is the same thing that says where to press it. No layout arithmetic, no
+/// portrait detection, and it cannot drift from the game's own positioning because it is measured
+/// from the pixels the game drew.
+///
+/// The centre is offset by the crop's own padding, which is the one piece of bookkeeping left: the
+/// template is the plaque plus 15 px on every side, so its centre and the plaque's centre coincide.
+pub fn event_plaque_find(
+    win: &GameWindow, options: usize,
+) -> Result<Option<crate::observe::template::Match>, crate::Error> {
     let tpl = cached_template(&EVENT_CHOICE)?;
     let (x0, y0, x1, y1) = event_choice_search(options);
     let frame = crate::win::capture::capture_client_rect(win, x0, y0, x1 - x0, y1 - y0)?;
-    Ok(find_at_scale_in(&frame, &tpl, 1.0, 1, None).map(|m| m.inliers).unwrap_or(0.0))
+    // `find_at_scale_in` reports inside the cropped frame, so the box origin goes back on.
+    Ok(find_at_scale_in(&frame, &tpl, 1.0, 1, None).map(|mut m| {
+        m.x += x0;
+        m.y += y0;
+        m.cx += x0;
+        m.cy += y0;
+        m
+    }))
+}
+
+/// Just the score, for callers that only need to know whether the plaque is there.
+pub fn event_plaque_score(win: &GameWindow, options: usize) -> Result<f64, crate::Error> {
+    Ok(event_plaque_find(win, options)?.map(|m| m.inliers).unwrap_or(0.0))
+}
+
+/// How far apart two choice plaques sit, in client pixels at a given client height.
+///
+/// `buttonY` advances by `actualI*0.15` per visible choice (`ui/eventscreen.lua:119`), so the pitch
+/// is 15% of the client height — 162 px at 1080. This is what turns "where is the first plaque" into
+/// "where is the n-th", which is all the position bookkeeping that remains once the match supplies
+/// the anchor.
+pub fn event_choice_pitch(client_h: i32) -> i32 {
+    (client_h as f64 * 0.15).round() as i32
 }
 
 /// Verifies a button at its known origin, then clicks it — no search.

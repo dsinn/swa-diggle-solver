@@ -21,6 +21,7 @@ pub mod search;
 pub mod shrine;
 pub mod shrineplay;
 pub mod subworld;
+pub mod buyer;
 pub mod tables;
 pub mod tower;
 pub mod typist;

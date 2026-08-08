@@ -761,6 +761,10 @@ impl Run<'_> {
         // `onActive` announces a screen at the start of its transition, so settle before clicking
         // and verify, or the click lands on a screen that is still fading in.
         let _ = crate::observe::settle::wait_for_quiescence(self.win, 0.02, Duration::from_secs(8));
+        // Taken BEFORE the click, because the shop announces itself inside the wait that follows it.
+        // A mark taken afterwards is already past its own answer — the same mistake this project has
+        // now made in four places, so it is called out rather than left to be rediscovered.
+        let mark = self.feed.mark();
         // **Verified by the plaque going away, not by the screen changing.**
         //
         // This loop used to accept `diff_fraction > 0.05` as proof the answer landed. That is an
@@ -784,7 +788,8 @@ impl Run<'_> {
         // So: unless the plaque is *seen* first, its later absence proves nothing, and this falls
         // back to the old screen-diff and says which one it used. An unverifiable answer is reported
         // as unverified rather than as success.
-        let watched = crate::act::event_plaque_score(self.win, options).unwrap_or(0.0);
+        let found = crate::act::event_plaque_find(self.win, options).ok().flatten();
+        let watched = found.as_ref().map(|m| m.inliers).unwrap_or(0.0);
         let verifiable = watched >= crate::act::EVENT_CHOICE_PRESENT;
         if !verifiable {
             self.log.push_str(&format!(
@@ -792,12 +797,33 @@ impl Run<'_> {
             ));
         }
         let mut answered = false;
-        // **Not `(c.x, c.y)`** — the console prints the choice's anchor, and on an event with a
-        // portrait that is the plaque's left edge rather than its middle. See `Choice::click_point`.
-        let (click_x, click_y) = match self.win.client_size() {
-            Ok((cw, ch)) => c.click_point(cw, ch),
-            Err(_) => (c.x, c.y),
+        // **Where to click, measured rather than derived.**
+        //
+        // The console's `posX` is the button's anchor and omits `xOffset`, so on an event with a
+        // portrait it names the plaque's left edge — outside the hit test, which is strict. See
+        // `Choice::click_point` for that derivation and the live evidence.
+        //
+        // But deriving it at all is the weaker move. The template match above *is* a picture of the
+        // plaque, so it already knows where the plaque is; `cx`/`cy` come straight off the pixels the
+        // game drew. That needs no portrait detection, no layout arithmetic, and cannot drift from
+        // the game's own positioning. The console still supplies the ORDER of the choices — which is
+        // what it is good at — and the pitch between plaques converts that to the n-th one.
+        //
+        // The derived coordinate stays as the fallback for events we have no template for, where
+        // there is nothing to measure.
+        let index = ev.choices.iter().position(|k| k.text == c.text).unwrap_or(0);
+        let (click_x, click_y) = match (found.as_ref(), self.win.client_size()) {
+            (Some(m), Ok((_, ch))) => {
+                (m.cx, m.cy + index as i32 * crate::act::event_choice_pitch(ch))
+            }
+            (_, Ok((cw, ch))) => c.click_point(cw, ch),
+            (_, Err(_)) => (c.x, c.y),
         };
+        self.log.push_str(&format!(
+            "  clicking choice {} at ({click_x},{click_y}) — {}\n",
+            index + 1,
+            if found.is_some() { "located" } else { "derived from the console" }
+        ));
         if let Ok((cx, cy)) = self.win.client_to_screen(click_x, click_y) {
             for attempt in 1..=4 {
                 let before = crate::win::capture::capture_window(self.win).ok();
@@ -835,6 +861,53 @@ impl Run<'_> {
                         break;
                     }
                 }
+            }
+        }
+        // A `[Shop]` choice is often the *safe* branch — the Woodsman's alternative was
+        // `[Combat] - "The book hungers for blood."` — so answering an event correctly can land us in
+        // a shop UI, which is not the map and does not become the map on its own. A live run stalled
+        // exactly there.
+        //
+        // Nothing here buys: `crate::buyer::wanted` returns an empty list on purpose, so the shop is
+        // a pass-through. Leaving is the whole interaction.
+        if self.feed.seen_since(mark, crate::act::SHOP_OPENED) {
+            let stock = Vec::new();
+            let gold = crate::game::save::load(&self.save_dir.join("mainSaveData"))
+                .ok()
+                .and_then(|s| s.int_at("player.gold"))
+                .unwrap_or(0);
+            let buying = crate::buyer::wanted(gold, &stock);
+            self.log.push_str(&format!(
+                "  shop opened with {gold} gold — buying {} item(s), leaving\n",
+                buying.len()
+            ));
+            let (bx, by) = crate::act::SHOP_BACK;
+            let mut left = false;
+            for attempt in 1..=3 {
+                if let Ok((sx, sy)) = self.win.client_to_screen(bx, by) {
+                    let before = crate::win::capture::capture_window(self.win).ok();
+                    let _ = click_at_in(self.win, sx, sy);
+                    self.park();
+                    std::thread::sleep(Duration::from_millis(700));
+                    self.pump();
+                    // The shop's own backdrop is a full-screen shelf, so leaving moves most of the
+                    // window. A weak proxy, and said to be one — the strong check would be a
+                    // template for the shelf, which is worth cutting the first time this misbehaves.
+                    let moved = before
+                        .as_ref()
+                        .zip(crate::win::capture::capture_window(self.win).ok())
+                        .map(|(b, a)| b.diff_fraction(&a, crate::observe::settle::FULL))
+                        .unwrap_or(0.0);
+                    if moved > 0.05 {
+                        self.log
+                            .push_str(&format!("  left the shop on attempt {attempt} ({moved:.3})\n"));
+                        left = true;
+                        break;
+                    }
+                }
+            }
+            if !left {
+                self.log.push_str("  **could not leave the shop**\n");
             }
         }
         if !answered && verifiable {
