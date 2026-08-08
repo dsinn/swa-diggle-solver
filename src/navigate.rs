@@ -1612,6 +1612,35 @@ pub fn drive(
             continue;
         }
 
+        // A wizard's tower we are standing on that still has fog to sell. **Placeholder** —
+        // `tower::press_reveal` is a stub, so this logs the opportunity and walks on.
+        //
+        // Wired up now, ahead of the press, because the decision is the part that can be got wrong
+        // silently. `Reveal` and `Teleport` share a coordinate (`wizard_tower.lua:52,71`), so the
+        // gate has to be computed rather than clicked at — see `tower::Offer`.
+        //
+        // `used` is a bool here and the flag is a number there, which loses the one case
+        // `tower::Offer` can otherwise recover: a tower used before we picked up `towerRange+` is
+        // offered again at the wider range (`wizard_tower.lua:56-59`). Mapping true to `Some(0)`
+        // with `range = 0` collapses that to `Spent`, which is the safe direction and the same one
+        // `Offer::of` documents — we skip a free map rather than press the mode change.
+        if let Some(p) = place.as_ref().filter(|p| p.type_is(crate::tower::TYPE_NAME)) {
+            let offer = crate::tower::Offer::of(true, p.used.then_some(0), 0);
+            if offer == crate::tower::Offer::Available {
+                r.log.push_str(&format!(
+                    "{step}. at **{}** — `Reveal` is on offer here (NOT IMPLEMENTED, walking on)\n",
+                    p.key
+                ));
+                match crate::tower::press_reveal(r.win) {
+                    Ok(true) => {
+                        r.apply_save();
+                    }
+                    Ok(false) => {}
+                    Err(e) => r.log.push_str(&format!("  reveal failed: {e}\n")),
+                }
+            }
+        }
+
         // Inside a subworld: walk to the exit rather than reaching for it.
         //
         // A `Fight` verdict deliberately falls through to the combat handling below, because it is

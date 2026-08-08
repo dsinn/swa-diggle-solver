@@ -22,6 +22,7 @@ pub mod shrine;
 pub mod shrineplay;
 pub mod subworld;
 pub mod tables;
+pub mod tower;
 pub mod typist;
 pub mod win;
 
