@@ -98,6 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         slots_captured: std::collections::HashSet::new(),
         committed_to: None,
         dump_misses: 0,
+        retreats_running: 0,
         pending_cinematic: false,
         pregame_seen: false,
     };

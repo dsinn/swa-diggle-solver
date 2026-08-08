@@ -293,6 +293,31 @@ impl Place {
         self.corrupted || (self.type_is("forest") && !self.visited)
     }
 
+    /// A treasure chest node. `typeName = 'chest'` (`overworld/generators/forest.lua:178`).
+    ///
+    /// **Opening one is a fight, not a reward.** `chestOpenButton` calls
+    /// `overworld.startNewRun(scenarios.chest(location))` (`:30-38`), which builds a chest enemy with
+    /// `maxHealth = level + 3` (`utils/enemies.lua:205-209`) — four at level 1.
+    ///
+    /// And it can be a **mimic**, which is worse than it looks. `Open` produces a lone chest, so it
+    /// takes the second of the two mimic paths (`utils/combat.lua:442`):
+    ///
+    /// ```lua
+    /// if #enemies==1 and enemies[1].type=='chest' and seedDigits%30 < scenario.level then
+    /// ```
+    ///
+    /// So the chance is `level/30`: **0% only at level 0**, 1 in 30 at level 1, and upward from
+    /// there. A level 1 forest is the lowest non-zero risk rather than a safe one, and
+    /// `combat.calculateLevel` (`:456-468`) floors curse reductions at `min(1, startLevel)`, so a
+    /// level 1 node cannot be cursed down to the safe case. The other path
+    /// (`:422-425`) needs `level >= 3` and a boss to disguise as, so it never applies here.
+    ///
+    /// It is deterministic per seed rather than a die roll — `seedNormal` decides it — so a chest
+    /// either is or is not a mimic before we touch it. We just cannot see which.
+    pub fn is_chest(&self) -> bool {
+        self.type_is("chest")
+    }
+
     pub fn type_is(&self, type_name: &str) -> bool {
         self.heading.trim_end().ends_with(type_name)
     }
@@ -1261,6 +1286,12 @@ impl WorldMap {
         // ahead is the thing we are trying to avoid, and taking it because we walked one node too
         // far is the worst version of that.
         if self.blocks_departure(&here) {
+            // Retreating is a *preference*, and the caller is what stops it becoming a habit — see
+            // `Run::retreats_running`. Deciding it here was tried and is wrong: the obvious test,
+            // "is there another route to the exit", cannot tell "the fight ahead is unavoidable"
+            // from "the interior is still fogged and we have not learned the route yet", and the
+            // second is the normal state on arrival. `hurt_and_blocked_we_back_out_instead_of_
+            // fighting` is exactly that case and says so.
             if self.wants_rest {
                 if let Some(back) = self.retreat_step(&here) {
                     return Some(Crossing::Retreat { to: back });
@@ -1405,7 +1436,32 @@ impl WorldMap {
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         seen.insert(from);
         // Each queue entry carries the first step that led to it, which is all we need back.
-        let blocked = |k: &str| shun && self.places.get(k).map(|p| p.avoid).unwrap_or(false) && k != to;
+        // Two independent reasons to route around a node, and the destination itself is exempt from
+        // both — refusing to path to where we were told to go is not avoidance, it is failure.
+        //
+        // `shun` is the lost-woods rule. The second is the dev's: **while a rest is the objective,
+        // treasure chests are skipped.** Opening one is a fight (see [`Place::is_chest`]) and it
+        // carries a `level/30` chance of being a mimic, which is a gamble worth nothing at all when
+        // the errand is to stop being hurt. Note this shuns them as *waypoints* too, which is the
+        // point: an unopened chest is incomplete, and `canTravelToDirect` will not let us step off it
+        // onto another incomplete node, so crossing one is not something we can plan on.
+        //
+        // A chest whose fight is already **compulsory** is untouched by this. That case never reaches
+        // here: `getAreaButtons` shows `combatButton` instead of `Open` when the subnode has enemies
+        // (`forest.lua:186-188`), and `blocks_departure` catches it underfoot. Non-negotiable either
+        // way, whatever the objective.
+        let blocked = |k: &str| {
+            k != to
+                && self
+                    .places
+                    .get(k)
+                    .map(|p| {
+                        (shun && p.avoid)
+                            || (self.wants_rest && p.is_chest() && !p.completed)
+                            || self.abandoned.contains(&p.key)
+                    })
+                    .unwrap_or(false)
+        };
         let mut queue: std::collections::VecDeque<(&str, String)> = self
             .places
             .get(from)?
@@ -2586,6 +2642,47 @@ mod tests {
         if let Some(plan) = m.next_target() {
             assert_ne!(plan.reason, Goal::Shrine, "no shrine is left to visit: {plan:?}");
         }
+    }
+
+    /// The fifth bounce, and the first inside a subworld: `l9sub13 -> l9sub11 -> l9sub13`.
+    #[test]
+    fn a_chest_is_not_on_the_way_to_anywhere_while_we_are_hurt() {
+        // `l9sub13` is `Saltagh Park — level 1 chest`. Opening one is a fight, not a reward
+        // (`forest.lua:30-38`), and at level 1 it carries a 1-in-30 chance of being a mimic
+        // (`utils/combat.lua:442`). An unopened chest is also incomplete, so `canTravelToDirect`
+        // will not let us step off it onto another incomplete node -- which is what turned a route
+        // through one into a cycle.
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump(
+            "l9",
+            "l9sub11",
+            "Saltagh Park spider nest",
+            vec![
+                node("l9sub13", "Saltagh Park — level 1 chest"),
+                node("l9sub16", "Saltagh Park road"),
+            ],
+            vec![Exit { x: 0.0, y: 0.0, to_key: "l19".into(), to_heading: "Dane village".into() }],
+        ));
+        m.entry("l9sub11").completed = true;
+        m.entry("l9sub16").neighbours.insert("l9_path_to_l19".into());
+        m.entry("l9_path_to_l19").heading = "Road to Dane village".into();
+
+        // Healthy, a chest is just another node and may be routed through.
+        assert!(m.get("l9sub13").unwrap().is_chest());
+        let healthy = m.first_step_toward("l9sub11", "l9_path_to_l19", false);
+        assert!(healthy.is_some(), "a route exists at full health");
+
+        // Hurt, it is skipped -- as a WAYPOINT, which is the case that bit us. The route goes round.
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+        assert_eq!(
+            m.first_step_toward("l9sub11", "l9_path_to_l19", false).as_deref(),
+            Some("l9sub16"),
+            "the road, not the chest"
+        );
+
+        // And a chest already opened is an ordinary cleared node again.
+        m.entry("l9sub13").completed = true;
+        assert!(!m.get("l9sub13").unwrap().is_chest() || m.get("l9sub13").unwrap().completed);
     }
 
     /// The fourth bounce, live on 2026-08-08: `l35 -> l41 -> l35`, until the run failed.

@@ -339,6 +339,21 @@ pub struct Run<'a> {
     pub shrines_tried: std::collections::HashSet<String>,
     /// Area-slot captures already taken, so a template is photographed once rather than every step.
     pub slots_captured: std::collections::HashSet<String>,
+    /// Consecutive retreats inside a subworld, reset by any other crossing.
+    ///
+    /// `WorldMap::cross_toward` prefers backing out to fighting while hurt, and that is right once.
+    /// Repeated, it is a cycle: live in `l9`, the route to the exit ran through `l9sub13` — a level 1
+    /// chest — so the run stepped on, found departure blocked, retreated to `l9sub11`, re-routed to
+    /// `l9sub13`, and went round four times before dying on a mistimed click.
+    ///
+    /// The map cannot settle this on its own. The obvious test there — "is there another route to
+    /// the exit" — cannot tell an unavoidable fight from an interior we have simply not explored yet,
+    /// and on arrival the second is the normal state.
+    ///
+    /// So the run counts instead. A second consecutive retreat means backing out is not finding us
+    /// anything, and the fight we are pacing in front of gets taken. The dev's rule: a forest whose
+    /// combat nodes completely block progress has to be fought through.
+    pub retreats_running: usize,
     /// Consecutive turns inside a subworld with no usable adjacency dump.
     ///
     /// Reset on every dump that does arrive, so this counts a *run* of misses rather than a total.
@@ -1933,6 +1948,32 @@ pub fn drive(
         }
         if let Some((container, mv)) = crossing {
             use crate::overworld::Crossing;
+            // **A second consecutive retreat means retreating is not working.** See
+            // `Run::retreats_running`. The map prefers backing out to fighting while hurt, which is
+            // right once and a cycle repeated — `l9sub13 -> l9sub11 -> l9sub13`, four laps, live.
+            //
+            // Converted to the fight rather than to a stop, because stopping is the outcome the
+            // whole rest objective exists to avoid and the node underfoot is the only way on.
+            if matches!(mv, Crossing::Retreat { .. }) {
+                r.retreats_running += 1;
+                if r.retreats_running > 1 {
+                    r.log.push_str(&format!(
+                        "{step}. backing out of `{here}` is going nowhere ({} in a row) — taking the fight\n",
+                        r.retreats_running
+                    ));
+                    r.retreats_running = 0;
+                    // Retire the node we keep bouncing off, so the next route goes round it. Same
+                    // remedy as the shrine and explore bounces: the planner and the driver must not
+                    // disagree about what is still worth walking to, and `abandon` is how the driver
+                    // says "I have had my go at that one".
+                    if let Crossing::Retreat { .. } = mv {
+                        r.map.abandon(&here);
+                    }
+                    continue;
+                }
+            } else {
+                r.retreats_running = 0;
+            }
             let (what, at) = match &mv {
                 Crossing::Leave { to } => {
                     match fresh.exits.iter().find(|e| &e.to_key == to) {
