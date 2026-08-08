@@ -98,6 +98,27 @@ pub struct Place {
     pub avoid: bool,
 }
 
+/// What standing on a place would cost us. See [`Place::arrival`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrival {
+    /// Nothing. `competeOnVisit` holds, or the area is already cleared, so walking on finishes it.
+    Free,
+    /// A fight at this level, which we may not decline.
+    Fight { level: u32 },
+    /// We have a key and no heading, so we cannot say. **Not** free — see [`Place::arrival`].
+    Unknown,
+}
+
+impl Arrival {
+    /// May a hurt run walk onto this without picking a fight?
+    ///
+    /// Deliberately false for [`Arrival::Unknown`]. "We have not seen it" is not "it is safe", and
+    /// reading the two as the same thing is what let a run at 1/20 be routed onto a level 6 crypt.
+    pub fn is_free(self) -> bool {
+        matches!(self, Arrival::Free)
+    }
+}
+
 impl Place {
     /// Combat level from the heading, mirroring [`crate::observe::adjacency::Node::level`].
     pub fn level(&self) -> Option<u32> {
@@ -109,7 +130,64 @@ impl Place {
         self.level().is_some()
     }
 
-    /// Would going in here commit us to a fight we cannot decline?
+    /// **What arriving costs**, which is not the same question as [`Place::hostile_to_enter`].
+    ///
+    /// The game answers this one for us and we were not listening. `AreaHeading`
+    /// (`overworldview.lua:383-392`) branches on `locationHasCombat`:
+    ///
+    /// ```lua
+    /// if core.locationHasCombat(location) then
+    ///     return location.name..' — level '..location.level..' '..typeName
+    /// else
+    ///     return location.name..' '..typeName
+    /// end
+    ///
+    /// -- :305-310
+    /// function core.locationHasCombat(location)
+    ///     if core.areaIsComplete(location.key) then return false end
+    ///     return not core.locationIsCompleteOnVisit(location)
+    /// end
+    /// ```
+    ///
+    /// So **`— level N` in a heading means arriving costs a fight, and its absence means it does
+    /// not** — evaluated live, so it already accounts for corruption and for shrine karma. No type
+    /// table to mirror and no drift to maintain. An uncorrupted shrine prints `Gembling shrine`
+    /// (`shrine.lua:37-45`); a wizards' tower prints `<name> wizards' tower`, unconditionally
+    /// (`wizard_tower.lua:18`); a crypt always carries a level (`crypt.lua`, no `competeOnVisit`,
+    /// `basicCombatZone = true`).
+    ///
+    /// ## Why [`Arrival::Unknown`] has to exist
+    ///
+    /// A place we know only by key — learned from `completedAreas` or an `areaFlags` suffix, never
+    /// seen in a dump — has an empty heading, and an empty heading has no level in it. Read as a
+    /// plain boolean that is indistinguishable from "free", so every unheaded node advertised itself
+    /// as safe. It is also a **frontier** by [`Place::is_frontier`], since we have not stood on it,
+    /// so it is eligible to be chosen. Eleven of the twenty-two places in the last live run's map
+    /// were in that state.
+    pub fn arrival(&self) -> Arrival {
+        // `locationHasCombat` short-circuits on completion before it looks at anything else, so a
+        // cleared node is free however it got that way -- and our stored heading may predate the
+        // clearing, which is the case this ordering protects against.
+        if self.completed {
+            return Arrival::Free;
+        }
+        if self.heading.trim().is_empty() {
+            return Arrival::Unknown;
+        }
+        match self.level() {
+            Some(level) => Arrival::Fight { level },
+            None => Arrival::Free,
+        }
+    }
+
+    /// Would going in here commit us to a fight **to get back out**?
+    ///
+    /// One of two danger axes and not the more obvious one. [`Place::arrival`] answers "does landing
+    /// here cost a fight"; this answers "having landed, can we leave". They are independent, and
+    /// conflating them is what put a run at 1/20 on a level 6 crypt: this predicate was the
+    /// planner's only danger filter, so it blocked unvisited *forests* — where the fights are short
+    /// and often avoidable — while waving through *crypts*, where a fight is guaranteed. Exactly
+    /// backwards, because it was never asking the arrival question at all.
     ///
     /// Being hurt is no reason to avoid a subworld as such — a quiet village is somewhere to *rest*.
     /// The thing to avoid is a **hostile** one, because a subworld's exit is gated the same way its
@@ -670,7 +748,17 @@ impl WorldMap {
         self.plan(false)
     }
 
-    /// The lowest-level hostile area, for when being hurt has run out of safe options.
+    /// Does going here cost a fight, on **either** axis?
+    ///
+    /// The exact complement of `plan`'s `ok`, so that the two passes of [`WorldMap::next_target`]
+    /// tile the map with no gap and no overlap: everywhere `plan(true)` refuses,
+    /// [`WorldMap::easiest_hostile`] will consider, and nowhere is refused by both.
+    /// `the_two_passes_between_them_consider_every_place` pins that.
+    fn owes_a_fight(p: &Place) -> bool {
+        p.hostile_to_enter() || !p.arrival().is_free()
+    }
+
+    /// The cheapest fight on the map, for when being hurt has run out of safe options.
     ///
     /// Two reasons this beats going at the objective while hurt, and the second is the better one:
     ///
@@ -690,12 +778,13 @@ impl WorldMap {
     /// So: unknown means unknown, and goes to the back. And the anomaly is not a stepping stone
     /// towards a rest under any reading — it is the objective, and reaching it is what the whole
     /// first pass exists to defer.
+    ///
     fn easiest_hostile(&self) -> Option<Plan> {
         let here = self.here.as_deref().unwrap_or("");
         let mut candidates: Vec<&Place> = self
             .places
             .values()
-            .filter(|p| p.key != here && !p.avoid && p.hostile_to_enter())
+            .filter(|p| p.key != here && !p.avoid && Self::owes_a_fight(p))
             .filter(|p| p.key != ANOMALY_KEY && !p.type_is("anomaly"))
             .collect();
         candidates.sort_by(|a, b| {
@@ -709,10 +798,16 @@ impl WorldMap {
             .map(|p| Plan { target: p.key.clone(), reason: Goal::EasiestHostile { level: p.level() } })
     }
 
-    /// The planner proper. `skip_hostile` excludes anywhere [`Place::hostile_to_enter`] flags.
+    /// The planner proper. `skip_hostile` excludes anywhere a fight is owed, on either axis.
+    ///
+    /// **Both axes, and that is the fix.** It used to consult [`Place::hostile_to_enter`] alone,
+    /// which asks whether a subworld will hold us in — so a crypt, which is not a subworld and
+    /// cannot trap anybody, sailed through the hurt pass and a run at 1/20 was routed onto a level 6
+    /// one under [`Goal::Explore`]. Meanwhile `shrine5` sat on the same map printing
+    /// `Gembling shrine` with no level at all, free to walk onto.
     fn plan(&self, skip_hostile: bool) -> Option<Plan> {
         let here = self.here.as_deref().unwrap_or("");
-        let ok = |p: &Place| !(skip_hostile && p.hostile_to_enter());
+        let ok = |p: &Place| !(skip_hostile && Self::owes_a_fight(p));
 
         // **Health first, ahead of everything including a live anomaly.**
         //
@@ -1895,11 +1990,27 @@ mod tests {
             v.corrupted = true;
             v.completed = false;
         }
-        // Both trigger the anomaly (level > 3); the village is the lower level and would otherwise
-        // be preferred by the sort.
+        // Both trigger the anomaly (level > 3), and while hurt we take NEITHER. The crypt used to be
+        // chosen here, on the reading that only the corrupted village was dangerous -- which was the
+        // whole bug: a level 9 crypt is not a safe consolation prize, it is the worse fight of the
+        // two. Exploring is preferred while any free frontier remains, because a frontier might hold
+        // the rest site that fixes the actual problem.
         let plan = m.next_target().unwrap();
-        assert_eq!(plan.reason, Goal::OpenTheAnomaly);
-        assert_eq!(plan.target, "c1", "the corrupted village costs a fight to leave");
+        assert_eq!(plan.reason, Goal::Explore);
+        assert_ne!(plan.target, "v1");
+        assert_ne!(plan.target, "c1");
+
+        // With the map fully explored there is no such escape, and the choice moves to the
+        // cheapest-fight ranking. It takes neither of the two anomaly triggers: the fixture's `l4`
+        // is a level 1 forest, and a level 1 anything is a better place to bleed than a level 6
+        // village or a level 9 crypt.
+        for p in m.places.values_mut() {
+            p.visited = true;
+            p.hidden = Some(0);
+        }
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::EasiestHostile { level: Some(1) });
+        assert_eq!(plan.target, "l4");
     }
 
     /// ...but with genuinely nothing else to do, being hurt must not stop the run entirely.
@@ -1927,12 +2038,136 @@ mod tests {
             v.completed = false;
         }
         let plan = m.next_target().unwrap();
-        assert_eq!(plan.target, "v1", "a preference must not strand the run");
         assert_eq!(
             plan.reason,
-            Goal::EasiestHostile { level: Some(6) },
+            Goal::EasiestHostile { level: Some(1) },
             "with nowhere safe, the reason is 'cheapest fight', not 'objective'"
         );
+        // `l4` is `Bainton Clump — level 1 forest` from the fixture, and it only became a candidate
+        // when the filter started asking the arrival question: it is visited, so `hostile_to_enter`
+        // says nothing about it, but its heading carries a level so a fight is still owed. Taking a
+        // level 1 forest over a corrupted level 6 village is the point of the whole ranking.
+        assert_eq!(plan.target, "l4", "a preference must not strand the run, nor pick the worst fight");
+    }
+
+    /// The heading alone answers "does arriving cost a fight", because the game builds it that way.
+    #[test]
+    fn a_missing_level_in_a_heading_is_the_games_own_all_clear() {
+        let free = |heading: &str| Place { heading: heading.into(), ..Default::default() };
+        // `AreaHeading` omits the level exactly when `locationHasCombat` is false
+        // (`overworldview.lua:383-392`). Real headings, and the two that matter most:
+        assert_eq!(free("Gembling shrine").arrival(), Arrival::Free, "uncorrupted shrine");
+        assert_eq!(free("Wetwang wizards' tower").arrival(), Arrival::Free, "competeOnVisit = true");
+        assert_eq!(free("Cottam campfire").arrival(), Arrival::Free);
+        assert_eq!(free("Ulrome village").arrival(), Arrival::Free);
+        // And carries it exactly when a fight is owed.
+        assert_eq!(
+            free("Burtonfields — level 6 crypt").arrival(),
+            Arrival::Fight { level: 6 },
+            "the node the last live run walked onto at 1/20"
+        );
+        assert_eq!(free("Bainton Coppice — level 5 forest").arrival(), Arrival::Fight { level: 5 });
+    }
+
+    #[test]
+    fn a_place_we_have_never_seen_a_heading_for_is_not_safe() {
+        // The trap this was written to close. Eleven of the twenty-two places in the last live run's
+        // map were `(unheaded)` -- known by key from `completedAreas` or an `areaFlags` suffix, never
+        // seen in a dump. An empty heading has no `— level N` in it, so a plain boolean test read
+        // every one of them as free to walk onto.
+        let unseen = Place { key: "l1".into(), ..Default::default() };
+        assert_eq!(unseen.arrival(), Arrival::Unknown);
+        assert!(!unseen.arrival().is_free(), "unseen is not safe");
+        // And it is eligible to be chosen, which is what makes the distinction matter rather than
+        // being pedantry: never visited, so it counts as a frontier.
+        assert!(unseen.is_frontier());
+
+        // Completion is checked first, so a cleared node is free even if its heading is stale or
+        // was never read -- mirroring `locationHasCombat`'s own short-circuit (`:306-308`).
+        let done = Place { completed: true, ..unseen.clone() };
+        assert_eq!(done.arrival(), Arrival::Free);
+    }
+
+    #[test]
+    fn the_two_danger_questions_are_independent() {
+        // The conflation that caused the bug, stated as a table. A crypt cannot trap anyone -- it is
+        // not a subworld -- but it always fights. An unvisited forest may trap us and may not fight.
+        let crypt = Place {
+            heading: "Burtonfields — level 6 crypt".into(),
+            visited: true,
+            ..Default::default()
+        };
+        assert!(!crypt.hostile_to_enter(), "nothing to be held inside");
+        assert!(!crypt.arrival().is_free(), "but a fight is compulsory");
+
+        let forest =
+            Place { heading: "Bainton Coppice — level 5 forest".into(), ..Default::default() };
+        assert!(forest.hostile_to_enter(), "might be one of the three bandit camps");
+        assert!(!forest.arrival().is_free());
+
+        let shrine = Place { heading: "Gembling shrine".into(), ..Default::default() };
+        assert!(!shrine.hostile_to_enter());
+        assert!(shrine.arrival().is_free(), "free on both axes: somewhere a hurt run can go");
+    }
+
+    #[test]
+    fn the_two_passes_between_them_consider_every_place() {
+        // `plan(true)` and `easiest_hostile` must tile the map: a place refused by both is a place
+        // the planner can never reach, and a run that found only those would stop with `NoPlan`
+        // while somewhere perfectly reachable sat on the map.
+        //
+        // Exercised rather than asserted about, by building a map on which EVERY place owes a fight
+        // -- so the first pass has nothing at all and the second has to carry all of it.
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "here",
+            "Somewhere crossroads",
+            vec![
+                node("c1", "Yokefleet — level 6 crypt"),
+                node("f1", "Asselby Bush — level 4 forest"),
+                node("v1", "Ulrome — level 6 village"),
+            ],
+        ));
+        m.entry("v1").corrupted = true;
+        m.entry("unheaded").key = "unheaded".into(); // known by key only, so `Arrival::Unknown`
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+        for p in m.places.values_mut() {
+            p.used = true; // no rest available anywhere
+        }
+        assert!(
+            m.places.values().filter(|p| p.key != "here").all(WorldMap::owes_a_fight),
+            "fixture must leave the first pass nothing"
+        );
+        let plan = m.next_target().expect("the second pass must catch what the first refused");
+        assert_eq!(plan.reason, Goal::EasiestHostile { level: Some(4) });
+        assert_eq!(plan.target, "f1", "the forest, over two level 6s and an unknown");
+    }
+
+    /// The live failure of 2026-08-08, rebuilt from the map that run printed.
+    #[test]
+    fn a_free_shrine_beats_exploring_onto_a_level_6_crypt() {
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "l41",
+            "Grimston crossroads",
+            vec![
+                node("l50", "Burtonfields — level 6 crypt"),
+                node("shrine5", "Gembling shrine"),
+            ],
+        ));
+        // 1/20 -- below half, so `health_is_low` sets the intent however we arrived.
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+        assert!(m.wants_rest());
+        // No campfire and no village anywhere, which was the real map's situation: of 22 places, not
+        // one was a rest site. So the `Rest` branch finds nothing and falls through -- and what it
+        // falls through to used to be `Explore`, which had no danger term at all and picked the
+        // crypt. The run walked onto it at 1/20 and stopped with `TooHurtToFight`.
+        let plan = m.next_target().unwrap();
+        assert_ne!(plan.target, "l50", "a level 6 crypt is not an exploration");
+        assert_eq!(plan.target, "shrine5");
+        // A shrine, not merely a safe square: `Gembling shrine` has no level, so arriving is free,
+        // and an uncorrupted shrine pays in wildcard tiles -- which is what a hurt run wants most.
+        assert_eq!(plan.reason, Goal::Shrine);
     }
 
     /// An unvisited subworld container counts as hostile, because a bandit camp is an ordinary
