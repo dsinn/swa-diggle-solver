@@ -8,6 +8,7 @@ pub mod game;
 pub mod geometry;
 pub mod layout;
 pub mod lexica;
+pub mod navigate;
 pub mod observe;
 pub mod overworld;
 pub mod score;
