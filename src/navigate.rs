@@ -792,7 +792,13 @@ impl Run<'_> {
             ));
         }
         let mut answered = false;
-        if let Ok((cx, cy)) = self.win.client_to_screen(c.x, c.y) {
+        // **Not `(c.x, c.y)`** — the console prints the choice's anchor, and on an event with a
+        // portrait that is the plaque's left edge rather than its middle. See `Choice::click_point`.
+        let (click_x, click_y) = match self.win.client_size() {
+            Ok((cw, ch)) => c.click_point(cw, ch),
+            Err(_) => (c.x, c.y),
+        };
+        if let Ok((cx, cy)) = self.win.client_to_screen(click_x, click_y) {
             for attempt in 1..=4 {
                 let before = crate::win::capture::capture_window(self.win).ok();
                 let _ = click_at_in(self.win, cx, cy);

@@ -28,8 +28,12 @@
 //!   [`crate::game::save::parse`] reads it directly rather than by inventing a second parser for a
 //!   format we already understand.
 //!
-//! Positions are screen coordinates computed at print time (`buttonX*getWidth()`), so they are
-//! aimable as-is — the same deal as the reward screen's item list.
+//! Positions are screen coordinates computed at print time — but they are **not aimable as-is**,
+//! which is what this comment used to claim. `buttonX*getWidth()` is the button's *anchor* and omits
+//! `xOffset`, so on an event with a portrait it lands on the plaque's left edge, where the hit test
+//! rejects it. [`Choice::click_point`] has the derivation and the live evidence. The `posX = 960`
+//! above is the centred layout, where anchor and centre coincide — which is why the mistake survived
+//! this long.
 
 use crate::game::save::parse;
 
@@ -37,8 +41,54 @@ use crate::game::save::parse;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Choice {
     pub text: String,
+    /// The **anchor** the console printed, which is not the button's centre. See [`Choice::click_point`].
     pub x: i32,
     pub y: i32,
+}
+
+impl Choice {
+    /// Where to actually click, which is not where the console says the choice is.
+    ///
+    /// `ui/eventscreen.lua:126-128` prints
+    ///
+    /// ```lua
+    /// posX = buttonX*love.graphics.getWidth(),
+    /// posY = buttonY*love.graphics.getHeight(),
+    /// ```
+    ///
+    /// — the screen-space anchor, with **`xOffset` left out**. The button's real centre is
+    /// `ss_x*W + s*w*os_x` ([`crate::win::window::button_center`]), so the printed figure is short by
+    /// a full half-width whenever `xOffset` is nonzero.
+    ///
+    /// There are exactly two layouts (`:117-118`), and which one is used turns on whether the event
+    /// has a portrait:
+    ///
+    /// ```text
+    ///   img:     buttonX = 0.075, xOffset = 0.5   printed 144, centre 644, left edge 144
+    ///   no img:  buttonX = 0.5,   xOffset = 0     printed 960, centre 960, left edge 460
+    /// ```
+    ///
+    /// So on a **portrait** event the printed coordinate is the plaque's own left edge — and
+    /// `ui/elements/button.lua:93` tests `x > 0 and y > 0 and x < width and y < height`, strictly, so
+    /// a click landing at local x = 0 is rejected. Off by one pixel, and a full 500 from the middle.
+    ///
+    /// This is why every event worked until one did not. The doc example at the top of this module,
+    /// `posX = 960`, is the centred layout, where anchor and centre coincide by accident. A live run
+    /// met the Woodsman — the project's first portrait event — clicked its left edge four times, and
+    /// each time `act::EVENT_CHOICE` scored the plaque at **1.0000**, still there. Before that check
+    /// existed the run had simply logged `answered` and walked on.
+    pub fn click_point(&self, client_w: i32, client_h: i32) -> (i32, i32) {
+        let s = crate::win::window::raw_scale(client_w, client_h);
+        let w = client_w as f64;
+        let anchor = self.x as f64;
+        // Which layout printed this? Nearest of the two candidates, rather than a magic cut point --
+        // both are exact multiples of the width, so they are never close together.
+        let portrait = (anchor - 0.075 * w).abs() < (anchor - 0.5 * w).abs();
+        // `event` buttons are 1000 wide (`ui/elements/button.lua:18`).
+        let x = if portrait { anchor + s * 1000.0 * 0.5 } else { anchor };
+        // `y` needs no correction: the layout passes no `yOffset`, so the anchor is the centre.
+        (x.round() as i32, self.y)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -462,5 +512,27 @@ Choices = {
     fn two_events_in_one_batch_both_come_back() {
         let src = format!("{LOST}{LOST}");
         assert_eq!(parse_events(&lines(&src)).len(), 2);
+    }
+
+    #[test]
+    fn a_portrait_events_choice_is_clicked_in_the_middle_not_on_its_edge() {
+        // The Woodsman, live: the console printed 144 and the plaque spans 144..1144, so the anchor
+        // IS the left edge. `ui/elements/button.lua:93` tests `x > 0` strictly, so a click there is
+        // rejected -- which is exactly what four attempts at 1.0000 measured.
+        let c = Choice { text: "[Shop] - \"Show me what you've got.\"".into(), x: 144, y: 594 };
+        assert_eq!(c.click_point(1920, 1080), (644, 594), "half a button width to the right");
+
+        // The layout with no portrait prints the true centre, which is why every earlier event
+        // worked and this bug stayed hidden.
+        let centred = Choice { text: "Continue".into(), x: 960, y: 745 };
+        assert_eq!(centred.click_point(1920, 1080), (960, 745), "anchor and centre coincide here");
+    }
+
+    #[test]
+    fn the_correction_scales_with_the_window() {
+        // `xOffset` is multiplied by the scale, so a smaller client moves the centre by less.
+        // 1600x900 -> s = 0.8333, so the shift is 1000*0.5*0.8333 = 417 rather than 500.
+        let c = Choice { text: "x".into(), x: 120, y: 495 };
+        assert_eq!(c.click_point(1600, 900), (537, 495));
     }
 }
