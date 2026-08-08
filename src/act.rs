@@ -606,105 +606,111 @@ pub const PREGAME_START: Button = Button {
 /// The combat pregame is up. See [`PREGAME_START`].
 pub const PREGAME_START_PRESENT: f64 = 0.90;
 
-/// An event's choice plaque — the fingerprint for **"an event is still on screen"**.
+/// An event's choice plaque — the fingerprint for **"this event is still on screen"**.
 ///
-/// Answering an event is a click, and until now nothing checked that the click landed. `handle_event`
-/// pressed a choice and logged `answered`, and a live run at `l9sub22` proved what that is worth: the
-/// press did not take, the Woodsman's two options stayed up, and the run went looking for a map dump
-/// that could not come because it was not on the map. It waited eight seconds and failed with
-/// `inside a subworld with no settled dump` — a symptom three steps downstream of the cause. The
-/// frame is `tests/frames/event-woodsman.png`, and both plaques are plainly still there.
+/// Answering an event is a click, and until now nothing checked that the click landed.
+/// `handle_event` pressed a choice and logged `answered`, and a live run at `l9sub22` proved what
+/// that is worth: the press did not take, the Woodsman's two options stayed up, and the run went
+/// looking for a map dump that could not come because it was not on the map. It waited eight seconds
+/// and failed with `inside a subworld with no settled dump` — a symptom three steps downstream of the
+/// cause, naming a function that was working correctly. The frame is
+/// `tests/frames/event-woodsman.png`, and both plaques are plainly still there.
 ///
-/// This is the project's most repeated bug, in its usual costume: announcement taken for readiness.
+/// This is the project's most repeated bug in its usual costume: announcement taken for readiness.
 ///
-/// ## Why a strip of bare wood, and not the button
+/// ## Scene-specific, and that is the design rather than a shortcut
 ///
-/// The plaque carries the choice text, which is different on every event, so a whole-button template
-/// would match one event and nothing else. What is constant is the artwork: `type = 'event'`
-/// (`ui/eventscreen.lua:96`) is 1000x150 (`ui/elements/button.lua:18`), and the top ~50 px of it sit
-/// above the text on every event. This is a 400x34 strip out of that band.
+/// Three things vary independently on this screen, and between them they rule out every generic
+/// crop:
 ///
-/// **400 wide is a deliberate choice, not a round number.** Every other wooden control in the game is
-/// a `default` at 250 px or a `small` at 100, so a template wider than 250 cannot fit inside one —
-/// which is what stops a strip of bare wood from matching the `Visit`/`Combat` area button, the one
-/// confusion that would matter. Narrowing this crop reintroduces that risk.
+/// - **The choice text** is different on every event (`ui/eventscreen.lua:119`).
+/// - **The backdrop** is `bgblurry` of the player's own location (`:31-36`), so it changes with where
+///   the character is standing, not with which event fired.
+/// - **An icon** may occupy a plaque's left end — `icon = icon, textAlign = icon and 'left'`
+///   (`:101,104`), as the `[Combat]` choice does in that very frame.
 ///
-/// ## Position is not fixed, and is **computed rather than searched for**
+/// What is left that is text-free, backdrop-free and icon-free is flat wood, and flat wood carries
+/// no information: the first cut was a 400x34 strip of it and scored **0.8065** against
+/// `overworld-campfire.png`, because `INLIER_TOLERANCE` is a per-pixel budget of 90 across three
+/// channels and the map's brown dirt is about as smooth and about as brown. Adding the plaque's top
+/// edge brought that to 0.5936 but bought the backdrop problem with it.
+///
+/// So this is the **whole first plaque of one named event**, 1000x150 plus 15 px of padding. Every
+/// one of those variables is nailed down by being specific, and the crop is 40x the area of the
+/// strip it replaces. It answers "is the Woodsman's shop offer still up", not "is some event up".
+///
+/// ## Which is safe only because absence is never trusted on its own
+///
+/// A template this specific scores near zero on a *different* event — and "no plaque" would then read
+/// as "answered", which is the original bug wearing the fix's clothes. [`event_plaque_score`] is
+/// therefore called **before** the click as well as after: the before-score is the positive control,
+/// and unless it clears the bar, the after-score proves nothing and `handle_event` says so instead of
+/// claiming success. Adding a template per event widens what can be verified; nothing silently
+/// degrades in the meantime.
+///
+/// ## Position is computed, not searched for
 ///
 /// `ui/eventscreen.lua:117-119` puts a choice at `buttonX = img and 0.075 or 0.5` with
 /// `xOffset = img and 0.5 or 0`, and `buttonY = 0.55 + optionOffset + actualI*0.15`, where
-/// `optionOffset = -(visibleChoices*0.075)` (`:17`). So neither axis is fixed: the left edge is 144
-/// px with a portrait and 460 px without, and the stack slides upward as options are added.
-///
-/// The first draft handed that to [`locate`] as an 800x660 box, which is 251,000 candidate positions
-/// of a 13,600-pixel template — three billion comparisons, and it did not finish. The box is not a
-/// place to put ignorance.
-///
+/// `optionOffset = -(visibleChoices*0.075)` (`:17`). The first draft handed that to [`locate`] as an
+/// 800x660 box — 251,000 candidate positions of a 13,600-pixel template, and it did not finish.
 /// Substituting `optionOffset` collapses the vertical unknown to arithmetic:
 ///
 /// ```text
-///   choice i of n:  y = 1080 * (0.55 - 0.075n + 0.15i)
-///   the first:      y = 1080 * (0.70 - 0.075n)
+///   the first choice of n:  y = 1080 * (0.70 - 0.075n)
 /// ```
 ///
 /// and **n is known** — the console prints the choice list, which is where the answer comes from in
-/// the first place. So [`event_choice_search`] takes the count and returns a band 16 px tall.
-/// Only `x` is genuinely unknown, and it has two possible values; the box spans both.
+/// the first place. See [`event_choice_search`].
 pub const EVENT_CHOICE: Button = Button {
-    name: "event choice",
-    template: "event-choice.png",
-    // A placeholder for the two-option case, so the struct is complete and
-    // `every_search_box_can_contain_its_template` covers it. Live code calls
-    // `event_choice_search` instead, because the real box depends on the option count.
-    search: (400, 517, 1210, 567),
-    origin: (444, 523),
+    name: "Woodsman shop plaque",
+    template: "event-woodsman-shop.png",
+    // The two-option case, so the struct is complete and
+    // `every_search_box_can_contain_its_template` covers it. Live code calls `event_choice_search`.
+    search: (121, 500, 1167, 688),
+    origin: (129, 504),
     // Unused. The answer goes through the console's choice list, which knows which option is which,
     // and nothing should ever pick a plaque by this coordinate.
-    click: (644, 592),
+    click: (644, 594),
 };
 
-/// Where the **first** choice plaque's strip sits, given how many options the console listed.
+/// Where the **first** choice plaque sits, given how many options the console listed.
 ///
 /// See [`EVENT_CHOICE`] for the derivation. The band is the computed position plus 8 px of slack
 /// each way, which covers rounding in the game's own layout without reopening the search.
-///
-/// `x` spans both columns: 400 is left of the portrait layout's 444, and 1210 is right of the
-/// no-portrait layout's 760 plus the template's 400 width.
 pub fn event_choice_search(options: usize) -> (i32, i32, i32, i32) {
     let n = options.max(1) as f64;
-    // The template was cut 71 px above the plaque's centre line — see `origin`, 523 against the
-    // 594 that `n = 2` puts the first plaque at.
-    let y = (1080.0 * (0.70 - 0.075 * n)) as i32 - 71;
-    (400, y - 8, 1210, y + 34 + 8)
+    // The crop starts 90 px above the plaque's centre line: 75 for half its height, 15 of padding.
+    let y = (1080.0 * (0.70 - 0.075 * n)) as i32 - 90;
+    // Slack of 8 px in x and 4 in y, not a region to search. Both axes are known: the plaque's
+    // left edge is fixed for a named event (this one has a portrait, so `buttonX = 0.075`), and the
+    // count fixes y. The slack is for the game's own rounding, nothing more -- 99 candidate
+    // positions rather than the 1,207 a lazier box costs, and every one of those extra positions is
+    // another chance for a wrong alignment to score well.
+    (129 - 8, y - 4, 129 + 1030 + 8, y + 180 + 4)
 }
 
-/// An event's plaque is still painted. See [`EVENT_CHOICE`].
+/// The Woodsman's shop plaque is painted. See [`EVENT_CHOICE`].
+///
+/// Worst case over n = 1..4, since a run asks with whatever count the console last reported:
 ///
 /// ```text
-///   the Woodsman's own event, n=2            1.0000
-///   overworld-campfire.png, worst of n=1..4  0.8065
-///   combat-turn1-hurt.png,  worst of n=1..4  0.7982
-///   post-crypt.png,         worst of n=1..4  0.4906
+///   the Woodsman's own event, n=2   1.0000
+///   overworld-campfire.png          0.6389
+///   combat-turn1-hurt.png           0.5085
+///   post-crypt.png                  0.2658
 /// ```
 ///
-/// **0.90**, in the 0.19 gap. Two honest caveats, because this is thinner than it looks:
+/// The same event scored at the **wrong** n lands under 0.75 as well, which is asserted rather than
+/// assumed: the band misses the plaque entirely, so the console's choice count is load-bearing and
+/// not incidental.
 ///
-/// 1. **The 1.0000 is a self-match.** The template was cut from that very frame, so it is an upper
-///    bound and not a typical score. A different event, on a different backdrop, will read lower —
-///    how much lower is unmeasured. The next run to meet an event should re-measure.
-/// 2. **0.8065 is bare wood matching bare wood.** The overworld's location banner is a wide wooden
-///    plank, which is exactly what this crop is. Being 400 px wide keeps it clear of the 250 px
-///    `default` buttons, but not of the banner.
-///
-/// ## Which is why this is used to verify, and not to identify
-///
-/// Those two caveats are survivable for the question *"is the plaque we were just looking at still
-/// there?"* — asked twice on the same screen, seconds apart, where the backdrop is constant and only
-/// the plaque changes. They are **not** good enough for "which screen is this?", where a 0.8065
-/// against the map would freeze a run for ever. So [`event_plaque_score`] is called from
-/// `handle_event` to confirm a press, and [`Screen`] deliberately has no `Event` variant yet. It can
-/// have one when there is a second event frame to calibrate against.
-pub const EVENT_CHOICE_PRESENT: f64 = 0.90;
+/// **0.75**. The 1.0000 is a self-match — the template was cut from that frame — so it is an
+/// upper bound rather than a typical score, and the same event at a different location will read
+/// lower because of the backdrop in the padding. The bar is placed low in the gap for that reason,
+/// and because the two errors are not equal: reading a real plaque as gone is the original bug, while
+/// reading a non-event as a plaque costs four retries and a log line.
+pub const EVENT_CHOICE_PRESENT: f64 = 0.75;
 
 /// A solved shrine's `Pray`, which collects the blessing.
 ///
@@ -1819,6 +1825,13 @@ mod threshold_tests {
         };
         assert!(real >= EVENT_CHOICE_PRESENT, "the Woodsman's own event scored {real:.4}");
         eprintln!("  event-woodsman.png (n=2): {real:.4}");
+        // The count has to be right for the band to land on the plaque. A wrong `n` is a miss, not a
+        // near-miss, and that is worth pinning: it is what makes the console's choice list load-
+        // bearing rather than incidental.
+        for n in [1, 3, 4] {
+            let q = scan("event-woodsman.png", n).unwrap_or(0.0);
+            assert!(q < EVENT_CHOICE_PRESENT, "the right plaque at the wrong n={n} scored {q:.4}");
+        }
 
         // `overworld-campfire.png` is the one that matters. The map's area button is wood too, so a
         // bare-wood template is exactly the crop that could match it -- and would then report an

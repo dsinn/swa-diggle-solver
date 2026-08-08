@@ -774,31 +774,64 @@ impl Run<'_> {
         // `act::EVENT_CHOICE` answers the question directly. The count comes from the console's own
         // choice list, which is what fixes the plaque's position.
         let options = ev.choices.len();
+        // **The positive control, taken before anything is clicked.**
+        //
+        // `act::EVENT_CHOICE` is one named event's plaque, for the reasons its doc gives, so it
+        // scores near zero on a different event — and an absence read without a matching presence
+        // would say "answered" for every event we have no template for. That is the original bug
+        // wearing the fix's clothes.
+        //
+        // So: unless the plaque is *seen* first, its later absence proves nothing, and this falls
+        // back to the old screen-diff and says which one it used. An unverifiable answer is reported
+        // as unverified rather than as success.
+        let watched = crate::act::event_plaque_score(self.win, options).unwrap_or(0.0);
+        let verifiable = watched >= crate::act::EVENT_CHOICE_PRESENT;
+        if !verifiable {
+            self.log.push_str(&format!(
+                "  no template for this event's plaque ({watched:.4}) — answering unverified\n"
+            ));
+        }
         let mut answered = false;
         if let Ok((cx, cy)) = self.win.client_to_screen(c.x, c.y) {
             for attempt in 1..=4 {
+                let before = crate::win::capture::capture_window(self.win).ok();
                 let _ = click_at_in(self.win, cx, cy);
                 self.park();
                 std::thread::sleep(Duration::from_millis(900));
                 self.pump();
-                match crate::act::event_plaque_score(self.win, options) {
-                    Ok(q) if q < crate::act::EVENT_CHOICE_PRESENT => {
-                        self.log.push_str(&format!(
-                            "  answer took on attempt {attempt} (plaque {q:.4})\n"
-                        ));
+                if verifiable {
+                    match crate::act::event_plaque_score(self.win, options) {
+                        Ok(q) if q < crate::act::EVENT_CHOICE_PRESENT => {
+                            self.log.push_str(&format!(
+                                "  answer took on attempt {attempt} ({watched:.4} -> {q:.4})\n"
+                            ));
+                            answered = true;
+                            break;
+                        }
+                        Ok(q) => self
+                            .log
+                            .push_str(&format!("  attempt {attempt}: still on the event ({q:.4})\n")),
+                        // A capture fault is not evidence either way, so it neither confirms nor
+                        // retries into a loop — the count runs out honestly.
+                        Err(e) => self.log.push_str(&format!("  attempt {attempt}: {e}\n")),
+                    }
+                } else {
+                    // The old proxy, kept only for events we cannot yet watch. It is weak — plenty
+                    // moves on this screen without the event being answered — which is exactly why
+                    // it is no longer the primary check.
+                    let moved = before
+                        .as_ref()
+                        .zip(crate::win::capture::capture_window(self.win).ok())
+                        .map(|(b, a)| b.diff_fraction(&a, crate::observe::settle::FULL))
+                        .unwrap_or(0.0);
+                    if moved > 0.05 {
                         answered = true;
                         break;
                     }
-                    Ok(q) => self
-                        .log
-                        .push_str(&format!("  attempt {attempt}: still on the event ({q:.4})\n")),
-                    // A capture fault is not evidence either way, so it neither confirms nor
-                    // retries into a loop — one more go, and the count runs out honestly.
-                    Err(e) => self.log.push_str(&format!("  attempt {attempt}: {e}\n")),
                 }
             }
         }
-        if !answered {
+        if !answered && verifiable {
             // Deliberately not a stop: the caller's next move is to look at the screen, and an event
             // we could not dismiss will be found there. What must not happen is this reporting
             // success, which is the whole bug.
