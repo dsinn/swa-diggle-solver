@@ -835,6 +835,33 @@ pub const STATS_BACK_PRESENT: f64 = 0.90;
 /// 0.92 still clears it. Re-measure on the first run that reaches an open anomaly.
 pub const SHRINE_PRAY_PRESENT: f64 = 0.92;
 
+/// **Something** is in the shared right-hand slot, without claiming which button it is.
+///
+/// A deliberately weaker question than [`SHRINE_PRAY_PRESENT`], and the only one a template can
+/// honestly answer for `Consecrate`: we have never captured one, so there is nothing to match it
+/// against. What [`SHRINE_PRAY`]'s artwork *can* separate is occupied from empty, because a
+/// same-size `default` button in the same rect scores far above bare background:
+///
+/// ```text
+///   greyed `Consecrate`                   0.8130   measured
+///   the empty slot, pre-win               0.3542   measured
+///   the empty slot, mid-puzzle            0.3552   measured
+///   an ACTIVE `Consecrate`                ~0.82    PREDICTED, see SHRINE_PRAY_PRESENT
+/// ```
+///
+/// **0.60**, in the middle of a 0.458 gap between the two measured states. Wide enough that the
+/// predicted figure being wrong by a lot still lands on the right side.
+///
+/// ## This is half a check, and the other half is the save
+///
+/// Occupancy alone must never authorise a click here — the slot's whole hazard is that four buttons
+/// share it. It is paired with a save-derived gate in [`crate::shrineplay::consecrate`]: the game's
+/// own `showPrayButton` requires `areaUnused` (`shrine.lua:98-102`), so at a shrine whose `_used`
+/// flag is set, `Pray` **cannot** be the occupant; `Read` and `Desecrate` both need the
+/// `spellSwears` gear flag (`:107,113`). The save says which button must be there; this says a
+/// button is there at all. Neither is sufficient alone.
+pub const SHRINE_SLOT_OCCUPIED: f64 = 0.60;
+
 /// Which screen the game is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {

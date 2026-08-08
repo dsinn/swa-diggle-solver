@@ -2561,6 +2561,54 @@ mod tests {
         }
     }
 
+    /// The third bounce, live on 2026-08-08: `l10 -> shrine2 -> l10`, twelve times.
+    #[test]
+    fn a_used_but_unconsecrated_shrine_is_a_real_errand_and_ends_when_it_is_done() {
+        // Both shrines prayed at in an earlier run and neither consecrated -- straight out of the
+        // sandbox save, which carries `shrine2_used = true` and `shrine3_used = true` with no
+        // `_consecrated` flag for either. `worth_a_trip`'s second clause is therefore true forever,
+        // and the planner kept routing to them while `drive` declined every arrival, because the
+        // branch that acts on a shrine needed `!used`.
+        //
+        // The clause was right and the driver was missing. Consecrating is now implemented, so what
+        // this pins is that the errand EXISTS -- and that it ends.
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "l10",
+            "Trenwick crypt",
+            vec![node("shrine2", "Foggathorpe shrine"), node("shrine3", "Skipsea shrine")],
+        ));
+        for k in ["shrine2", "shrine3"] {
+            let p = m.entry(k);
+            p.completed = true;
+            p.visited = true;
+            p.used = true;
+            p.consecrated = false;
+        }
+        m.hell = Some(0.1); // the anomaly is open, so consecrating is possible at all
+        assert!(!m.anomaly_available().unwrap(), "fixture must have the door open");
+
+        // There is something to do at both, and `worth_consecrating_here` is what says so -- the
+        // function that existed and was called from nowhere while the run bounced.
+        assert!(m.worth_consecrating_here("shrine2"));
+        assert!(m.worth_consecrating_here("shrine3"));
+        assert_eq!(m.next_target().map(|p| p.reason), Some(Goal::Shrine));
+
+        // Each one is spent by arriving, whether or not the press worked. Standing on a shrine and
+        // doing nothing now abandons it, so a decline can no longer feed the loop.
+        m.abandon("shrine2");
+        assert_eq!(m.next_target().unwrap().target, "shrine3");
+        m.abandon("shrine3");
+        if let Some(plan) = m.next_target() {
+            assert_ne!(plan.reason, Goal::Shrine, "the errand must end: {plan:?}");
+        }
+
+        // Consecrating is what actually retires one, and it retires it for good.
+        let mut m2 = m;
+        m2.entry("shrine2").consecrated = true;
+        assert!(!m2.worth_consecrating_here("shrine2"), "nothing left to do here");
+    }
+
     #[test]
     fn once_the_anomaly_is_open_only_shrines_already_underfoot_are_worth_it() {
         // A corrupted shrine has to be fought through again, and corruption is invisible in the

@@ -603,6 +603,122 @@ pub fn play(
     Ok(out)
 }
 
+/// What a consecration attempt did.
+#[derive(Debug, Clone, Default)]
+pub struct Consecrated {
+    /// The shrine screen closed after the click, which is the game's own confirmation.
+    pub done: bool,
+    /// What [`crate::act::SHRINE_PRAY`]'s artwork scored against whatever was in the slot.
+    ///
+    /// Recorded on every attempt because this is the **first measurement of an active
+    /// `Consecrate`** this project has ever taken — see [`crate::act::SHRINE_PRAY_PRESENT`], which
+    /// predicts ~0.82 and asks to be re-measured at the first open anomaly. This is that run.
+    pub slot_score: f64,
+    pub log: String,
+}
+
+/// Consecrates the shrine we are standing on.
+///
+/// Assumes the overworld is showing, the shrine's area is complete (so the slot holds `Visit`), and
+/// that the **caller has checked the save**: [`crate::overworld::WorldMap::worth_consecrating_here`]
+/// is the gate, and it is not optional. See below.
+///
+/// ## Why this is a separate function from [`play`]
+///
+/// They are different errands at different times. `play` solves the word and prays, and it only
+/// applies to a shrine that is `completed && !used`. Consecrating applies to one that is *already*
+/// used — the word solved and the blessing taken, on an earlier visit or in an earlier run — and
+/// needs only that the anomaly be open. A shrine can want one, the other, or neither.
+///
+/// ## The slot, and why the save has to vote
+///
+/// `Consecrate` sits at `ss(1.0, 0.9)`, `xOffset -0.75` — the same 250x100 rect as `Pray`, `Read`
+/// and `Desecrate` (`shrine.lua:241,296,302,320`). We have no template for it, and one cannot be
+/// fabricated: an *active* `Consecrate` is green-tinted `up` artwork
+/// (`backgroundColor = 0.75, 1, 0.75`) that no run has ever seen. So the identification is done
+/// where it can be done honestly — from the save:
+///
+/// ```lua
+/// -- shrine.lua:98-102
+/// showPrayButton = ... and overworldview.areaUnused(shrineLocation.key)
+/// -- shrine.lua:93-95
+/// showConsecrateButton = ShowAGoodButton() and majorShrine
+///                        and (not (hell == 0 or isConsecrated(loc)) or areaHasBeenUsed(loc.key))
+/// ```
+///
+/// At a shrine with `<key>_used` set and no `<key>_consecrated`, with `hell ~= 0`: `Pray` is
+/// excluded by `areaUnused`, `Read` and `Desecrate` need the `spellSwears` gear flag, and
+/// `Consecrate` both shows and is active. **One button can be there.** The screen then confirms that
+/// a button is there at all, at [`crate::act::SHRINE_SLOT_OCCUPIED`].
+///
+/// `ShowAGoodButton` needs `shrineView.hasWon()`, which is not directly readable — but `_used` is
+/// only ever set by `doPray` (`shrine.lua:271`), and `doPray` is only reachable behind
+/// `showPrayButton`, which itself requires `hasWon()`. So **used implies solved**, and the gate
+/// stands on that rather than on a guess.
+///
+/// ## Confirmation is the screen closing, not the button changing
+///
+/// `Consecrate`'s handler ends in `setActiveMode(overworld)` (`shrine.lua:288`), so a successful
+/// press takes the whole shrine screen away. That is a far stronger signal than watching the slot,
+/// which is exactly the kind of in-place swap this project has been fooled by before. The
+/// authoritative check is the `<key>_consecrated` flag reaching the save, and the caller does that
+/// by re-reading afterwards — `overworld:save()` runs in the beam's `onDecay` callback (`:281`), so
+/// it is not instant, which is the standing save-flush caveat rather than a failure.
+pub fn consecrate(
+    win: &crate::win::window::GameWindow,
+    input: &dyn crate::win::input::Input,
+) -> Result<Consecrated, crate::Error> {
+    use std::time::Duration;
+
+    let mut out = Consecrated::default();
+
+    // 1. Open the shrine screen. Same plain click `play` uses, and confirmed the same way it
+    //    confirms everything on this screen -- by the back plaque, which is what `identify` reads.
+    input.click(VISIT_CLICK.0, VISIT_CLICK.1)?;
+    std::thread::sleep(TRANSITION_WAIT);
+    let opened = crate::act::wait_for(
+        win,
+        &crate::act::SHRINE_GOBACK,
+        crate::act::SHRINE_GOBACK_PRESENT,
+        Duration::from_secs(6),
+    );
+    if !opened.found() {
+        out.log.push_str(&format!(
+            "  consecrate: the shrine screen did not open (back plaque best {:.4})\n",
+            opened.best
+        ));
+        return Ok(out);
+    }
+
+    // 2. Is anything in the slot? The save has already said *which* button it must be; this asks
+    //    only whether it is painted, so we never click an empty rect.
+    out.slot_score = crate::act::score_exact(win, &crate::act::SHRINE_PRAY)?;
+    if out.slot_score < crate::act::SHRINE_SLOT_OCCUPIED {
+        out.log.push_str(&format!(
+            "  consecrate: slot empty ({:.4} < {:.2}) — not clicking it blind\n",
+            out.slot_score,
+            crate::act::SHRINE_SLOT_OCCUPIED
+        ));
+        return Ok(out);
+    }
+    out.log.push_str(&format!(
+        "  consecrate: slot occupied, scored {:.4} against the `Pray` artwork\n",
+        out.slot_score
+    ));
+
+    // 3. Press it, and confirm by the screen going away.
+    let (cx, cy) = crate::act::SHRINE_PRAY.click;
+    input.click(cx, cy)?;
+    out.done = crate::act::wait_until_gone(
+        win,
+        &crate::act::SHRINE_GOBACK,
+        crate::act::SHRINE_GOBACK_PRESENT,
+        Duration::from_secs(10),
+    );
+    out.log.push_str(&format!("  consecrate: shrine screen closed={}\n", out.done));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

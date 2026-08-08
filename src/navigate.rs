@@ -1612,6 +1612,51 @@ pub fn drive(
             continue;
         }
 
+        // A shrine we are standing on that is already used but not consecrated.
+        //
+        // This branch is why `worth_a_trip`'s `!consecrated` clause is honest. It used to promise a
+        // trip that nothing could fulfil: `WorldMap::worth_consecrating_here` existed and was called
+        // from nowhere, so the planner routed to a used shrine, `drive` declined it — the play
+        // branch above needs `!used` — and the planner sent it straight back. A live run bounced
+        // `l10 -> shrine2 -> l10` twelve times and died of it.
+        //
+        // An uncorrupted shrine is strictly worth it: consecrating costs no fight and is what the
+        // `shrineKarma` economy pays out on. The gate is the map's, not this function's, because it
+        // is the map that knows whether a *corrupted* one is merely on the way.
+        if r.map.worth_consecrating_here(&here) && !r.shrines_tried.contains(&here) {
+            r.log.push_str(&format!("{step}. at **{here}** — consecrating\n"));
+            // Same discipline as the play branch: marked before the attempt, both here and on the
+            // planner, so an attempt that panics or times out still counts as having had its go.
+            r.shrines_tried.insert(here.clone());
+            r.map.abandon(&here);
+            // The artwork of an active `Consecrate`, which no run has ever captured. Taken before
+            // the click so there is something to cut a template from next time.
+            r.snap_area_slot("consecrate-live");
+            match crate::shrineplay::consecrate(r.win, &r.keys) {
+                Ok(did) => {
+                    r.log.push_str(&did.log.clone());
+                    if !did.done {
+                        r.log.push_str("  shrine: left unconsecrated\n");
+                    }
+                }
+                Err(e) => r.log.push_str(&format!("  consecrate failed: {e}\n")),
+            }
+            r.apply_save();
+            continue;
+        }
+
+        // **Standing on a shrine and doing nothing is the end of it as a destination.**
+        //
+        // The structural backstop, and the more important half of the fix above. `abandon` existed
+        // already but was only ever called from inside the branches that *act*, so any shrine the
+        // driver declined stayed a perfectly good target forever and the planner kept re-choosing
+        // it. That is a loop whatever the reason for declining, so the guard belongs here — where
+        // "we arrived and nothing happened" is known — rather than being added case by case as each
+        // new reason to decline appears.
+        if place.as_ref().map(|p| p.type_is("shrine")).unwrap_or(false) {
+            r.map.abandon(&here);
+        }
+
         // A wizard's tower we are standing on that still has fog to sell. **Placeholder** —
         // `tower::press_reveal` is a stub, so this logs the opportunity and walks on.
         //
