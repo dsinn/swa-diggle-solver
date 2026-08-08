@@ -158,6 +158,12 @@ pub enum Stop {
 /// Not every screen fits here and none is forced to. A fight has to be played, the main menu needs a
 /// retry because a highlighted `Continue` scores differently from the template it was cut from. Those
 /// stay as their own branches; this covers the ones where leaving *is* the whole response.
+/// How many consecutive dumpless turns inside a subworld to tolerate before stopping.
+///
+/// Each one costs a screen-identification pass, which is cheap, so this is generous. It exists only
+/// so that a screen nothing recognises ends the run instead of spinning.
+const MAX_DUMP_MISSES: usize = 6;
+
 pub struct Escape {
     /// What [`crate::act::identify`] calls it.
     pub screen: Screen,
@@ -325,6 +331,12 @@ pub struct Run<'a> {
     pub shrines_tried: std::collections::HashSet<String>,
     /// Area-slot captures already taken, so a template is photographed once rather than every step.
     pub slots_captured: std::collections::HashSet<String>,
+    /// Consecutive turns inside a subworld with no usable adjacency dump.
+    ///
+    /// Reset on every dump that does arrive, so this counts a *run* of misses rather than a total.
+    /// See where it is incremented for why a miss is a reason to look at the screen rather than to
+    /// give up.
+    pub dump_misses: usize,
     /// The destination the last hop was taken **for**, as opposed to the node it stepped to.
     ///
     /// Exists to close a blind spot that every planner branch shares: [`WorldMap::next_target`]
@@ -788,9 +800,18 @@ impl Run<'_> {
         // So: unless the plaque is *seen* first, its later absence proves nothing, and this falls
         // back to the old screen-diff and says which one it used. An unverifiable answer is reported
         // as unverified rather than as success.
-        let found = crate::act::event_plaque_find(self.win, options).ok().flatten();
+        // **Filtered by the threshold, not merely by `Some`.** `find_at_scale_in` returns the best
+        // alignment it found, however bad — 0.6154 on an event we have no template for — and the
+        // first version of this took its position whenever it was `Some`. So the log said `located`
+        // while the coordinate came from a wrong alignment of the Woodsman's plaque against a
+        // different event's. It happened to land somewhere plausible, which is worse than landing
+        // nowhere: a lucky coordinate is indistinguishable from a correct one until it is not.
+        let found = crate::act::event_plaque_find(self.win, options)
+            .ok()
+            .flatten()
+            .filter(|m| m.inliers >= crate::act::EVENT_CHOICE_PRESENT);
         let watched = found.as_ref().map(|m| m.inliers).unwrap_or(0.0);
-        let verifiable = watched >= crate::act::EVENT_CHOICE_PRESENT;
+        let verifiable = found.is_some();
         if !verifiable {
             self.log.push_str(&format!(
                 "  no template for this event's plaque ({watched:.4}) — answering unverified\n"
@@ -1649,8 +1670,42 @@ pub fn drive(
         let inside_now = r.map.inside().is_some();
         let fresh = if inside_now {
             match r.settled_dump(Duration::from_secs(8)).or_else(|| r.recentre()) {
-                Some(a) => a,
-                None => return Stop::Failed("inside a subworld with no settled dump".into()),
+                Some(a) => {
+                    r.dump_misses = 0;
+                    a
+                }
+                // **A missing dump is evidence we are not on the map, not a failure.**
+                //
+                // This used to stop the run outright, and it has misattributed every stall it has
+                // ever reported. A dump cannot arrive while an event dialogue is up, or a shop, or a
+                // class unlock, or — the case that finally made it obvious — while a **fight** is in
+                // progress. In each of those the message named `settled_dump`, which was working
+                // perfectly, and said nothing about the screen actually in front of us.
+                //
+                // Live: answering `Encounter at Saltagh Park forest!` (one choice, `[Combat]`)
+                // started a fight, and the run failed here with a combat board on screen and
+                // `act::COMBAT_HUD` — the fingerprint built for exactly this — never consulted,
+                // because the dump is demanded before `identify` gets a turn.
+                //
+                // So: go round again and let the screen checks have their say. Bounded, because if
+                // nothing recognises the screen either then we really are stuck and the run should
+                // say so rather than spin.
+                None => {
+                    r.dump_misses += 1;
+                    if r.dump_misses > MAX_DUMP_MISSES {
+                        return Stop::Failed(format!(
+                            "inside a subworld, no dump and no screen we recognise, {} times over",
+                            r.dump_misses
+                        ));
+                    }
+                    r.log.push_str(&format!(
+                        "{step}. no dump inside `{}` — looking at the screen instead (miss {} of {})\n",
+                        r.map.inside().unwrap_or("?"),
+                        r.dump_misses,
+                        MAX_DUMP_MISSES
+                    ));
+                    continue;
+                }
             }
         } else {
             match r.recentre() {

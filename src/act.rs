@@ -1920,6 +1920,32 @@ mod threshold_tests {
         }
     }
 
+    /// The HUD crop is **biome-independent**, which is what makes it a screen fingerprint rather
+    /// than a picture of one fight.
+    ///
+    /// `combat-turn1-hurt.png` is a crypt at 1/20 under a full vignette — the frame the template was
+    /// cut from. `combat-forest-turn1.png` is a spider forest, a different parallax, different
+    /// lighting, red vines across the backdrop, a different enemy. Both score 1.0000, so the crop
+    /// carries only the `?` button and the turn plaque and none of the scene behind them.
+    ///
+    /// Worth pinning because 0.99 is the tightest bar in this module, and a crop that had picked up
+    /// any backdrop would pass on its own biome and fail everywhere else — which would look exactly
+    /// like the bug this frame came from, and is not it.
+    #[test]
+    fn the_combat_hud_reads_the_same_in_a_different_biome() {
+        let Some(forest) = score(&COMBAT_HUD, "combat-forest-turn1.png") else {
+            eprintln!("SKIP: frame corpus not present");
+            return;
+        };
+        let crypt = score(&COMBAT_HUD, "combat-turn1-hurt.png").unwrap_or(0.0);
+        assert!(forest >= COMBAT_HUD_PRESENT, "a forest fight scored {forest:.4}");
+        assert!(crypt >= COMBAT_HUD_PRESENT, "the crypt frame scored {crypt:.4}");
+
+        // And nothing else claims that frame, so `identify` reaching it returns `CombatEntered`.
+        assert!(score(&COMBAT_FINISH, "combat-forest-turn1.png").unwrap_or(0.0) < COMBAT_FINISH_PRESENT);
+        assert!(score(&CHARACTER_STATS, "combat-forest-turn1.png").unwrap_or(0.0) < CHARACTER_STATS_PRESENT);
+    }
+
     /// The class-unlock screen must not read as hero select. **Both layers are asserted.**
     ///
     /// Met live: a road event unlocked the Woodsman mid-run, and every run that day reported
