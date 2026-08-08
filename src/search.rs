@@ -226,9 +226,56 @@ pub struct Found {
 }
 
 /// The result of a search.
+///
+/// ## Open, post-MVP: these three fields should probably be one ranked candidate
+///
+/// Recorded because it is a real design argument that was had and deferred, not an oversight.
+///
+/// The shape below tracks three things separately, and each costs a local, a `Mutex` and a merge
+/// block in every search function — which is most of what makes [`ranked_kill`] long. The claim
+/// against it: lethality is being expressed as a **branch** (`if score >= need { rank it }`) when it
+/// could be a **field**, leaving one comparable key and no special case.
+///
+/// The defence offered at the time was cost — ranking every candidate rather than only lethal ones.
+/// That was overstated. [`crate::pick::rank`] is only reachable once [`crate::typist`] has already
+/// accepted the word, so the real comparison is "every typeable word" against "every lethal word",
+/// which is a far smaller ratio than the dictionary's size suggests, on a function that is roughly
+/// `tiles × removed`. It was never measured.
+///
+/// What does survive the argument is that the two regimes optimise **different things**, not the
+/// same thing either side of a threshold:
+///
+/// - lethal → rank by payout and board hygiene; score past the threshold is irrelevant
+/// - not lethal → [`Outcome::best`], which is highest **score**, because if we cannot kill we want
+///   to hit hardest
+///
+/// So a flat uniform key does not express the intent: put `lethal` on top and let the existing terms
+/// fall through, and non-lethal words end up ranked by board tidiness, which is wrong.
+///
+/// The shape that takes both points is one `Rank` carrying `lethal` plus both sub-orderings, with
+/// `better_than` switching on it:
+///
+/// ```text
+/// Rank { lethal, wood_only, hazard_fall, deviation,  // when lethal
+///                score }                             // when not
+/// ```
+///
+/// That collapses `lethal` and `best` into one tracked candidate and one mutex, keeps the differing
+/// objectives visible rather than hidden in a branch, and takes the special case out of the hot loop.
+/// [`Outcome::longest`] stays separate regardless — the refresh rule is about word *length*, which is
+/// a third question and not an ordering of the same kind.
+///
+/// Deferred rather than done because it touches [`Outcome::choice`], [`Outcome::should_refresh`] and
+/// every test that reads these fields, and the ranking it would restructure has not yet been watched
+/// working in a real fight. Restructuring an unproven thing is how you end up unable to tell which
+/// change broke it.
 #[derive(Debug, Clone, Default)]
 pub struct Outcome {
-    /// The first lethal word any thread found. Not the best — deliberately.
+    /// The lethal word the search settled on.
+    ///
+    /// **Which one that is depends on the goal**, and the difference matters:
+    /// [`Goal::FirstKill`] reports whichever thread got there first and stops everything, while
+    /// [`Goal::RankedKill`] reports the best by [`crate::pick::Rank`] after seeing them all.
     pub lethal: Option<Found>,
     /// Highest-scoring word seen, for when nothing is lethal.
     pub best: Option<Found>,
