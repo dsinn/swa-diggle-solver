@@ -706,6 +706,25 @@ pub fn consecrate(
         out.slot_score
     ));
 
+    // The artwork itself, so the next run can have a real template instead of this two-part gate.
+    //
+    // It has to be taken **here** — on the shrine screen, at `SHRINE_PRAY`'s rect, after the slot
+    // has been read and before it is clicked. The first attempt at this called the driver's
+    // `snap_area_slot` from `navigate`, which photographs the *overworld* area slot: the capture
+    // came back a picture of `Visit`, labelled `consecrate-live`, and the log line said "captured
+    // the area slot" exactly as it should have. The name was mine and the code was honest.
+    let (sx, sy, sw, sh) = crate::act::SHRINE_PRAY.search;
+    match crate::win::capture::capture_client_rect(win, sx, sy, sw - sx, sh - sy) {
+        Ok(f) => {
+            let path = std::path::Path::new("spike-frames-live").join("shrine-consecrate-live.png");
+            match f.write_png(&path) {
+                Ok(()) => out.log.push_str("  consecrate: captured the live slot artwork\n"),
+                Err(e) => out.log.push_str(&format!("  consecrate: could not write it: {e}\n")),
+            }
+        }
+        Err(e) => out.log.push_str(&format!("  consecrate: could not capture it: {e}\n")),
+    }
+
     // 3. Press it, and confirm by the screen going away.
     let (cx, cy) = crate::act::SHRINE_PRAY.click;
     input.click(cx, cy)?;

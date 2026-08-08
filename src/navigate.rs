@@ -325,6 +325,20 @@ pub struct Run<'a> {
     pub shrines_tried: std::collections::HashSet<String>,
     /// Area-slot captures already taken, so a template is photographed once rather than every step.
     pub slots_captured: std::collections::HashSet<String>,
+    /// The destination the last hop was taken **for**, as opposed to the node it stepped to.
+    ///
+    /// Exists to close a blind spot that every planner branch shares: [`WorldMap::next_target`]
+    /// excludes `here`, so the moment we arrive somewhere, that place stops being a reason to be
+    /// there. For a node whose whole value is the thing we do on it — a fight — that means arriving
+    /// and immediately re-planning to somewhere else, then being sent straight back.
+    ///
+    /// `must_fight_here` did not catch it, because it asks whether leaving is *legal*
+    /// (`canTravelToDirect` needs one endpoint complete, `overworldview.lua:1316-1321`) and leaving a
+    /// level 1 forest with two cleared neighbours is perfectly legal. Legal to leave and pointless to
+    /// leave are different questions, and only the first was being asked.
+    ///
+    /// So the run remembers what it set out for. Arriving at it means acting on it.
+    pub committed_to: Option<String>,
     /// An answered event has started the anomaly cinematic and it has not been skipped yet.
     ///
     /// A flag rather than a return value, because *which* caller answers the rumble is an accident of
@@ -1629,9 +1643,9 @@ pub fn drive(
             // planner, so an attempt that panics or times out still counts as having had its go.
             r.shrines_tried.insert(here.clone());
             r.map.abandon(&here);
-            // The artwork of an active `Consecrate`, which no run has ever captured. Taken before
-            // the click so there is something to cut a template from next time.
-            r.snap_area_slot("consecrate-live");
+            // The artwork capture lives inside `consecrate`, not here: `snap_area_slot` photographs
+            // the OVERWORLD slot, and `Consecrate` is on the shrine screen. Calling it from here
+            // produced a picture of `Visit` filed under `consecrate-live`.
             match crate::shrineplay::consecrate(r.win, &r.keys) {
                 Ok(did) => {
                     r.log.push_str(&did.log.clone());
@@ -1844,10 +1858,19 @@ pub fn drive(
         // and the node behind us always is -- so leaving was legal all along, and the fight it
         // picked was one it walked into for nothing.
         let hop = r.map.next_hop();
-        let must_fight_here = match hop.as_ref() {
-            Some(h) => !r.map.can_step(&here, &h.step),
-            None => true,
-        };
+        // Two ways this node has to be dealt with rather than walked past.
+        //
+        // 1. Leaving is illegal -- the original test, and the one that matters inside a subworld.
+        // 2. **We came here on purpose.** `next_target` excludes `here`, so a node's own reason for
+        //    existing evaporates the instant we stand on it; without this the run arrives at the
+        //    fight it chose, re-plans to somewhere else, and is routed back. Legal to leave and
+        //    pointless to leave are different questions and only the first was being asked.
+        let arrived_at_target = r.committed_to.as_deref() == Some(here.as_str());
+        let must_fight_here = arrived_at_target
+            || match hop.as_ref() {
+                Some(h) => !r.map.can_step(&here, &h.step),
+                None => true,
+            };
         if let Some(p) = place
             .as_ref()
             .filter(|p| p.has_combat() && !p.completed && must_fight_here)
@@ -1873,7 +1896,26 @@ pub fn drive(
             //
             // The anomaly is exempt. It is the objective, it is level 8 against whoever arrives, and
             // losing to it is a documented expected outcome rather than an accident to be prevented.
-            let too_hurt = health.map(crate::rest::health_is_low).unwrap_or(true);
+            // **A forest is an exception, because entering one is not committing to a fight.**
+            //
+            // The dev's call, and the source is on its side. A forest is a subworld whose interior
+            // nodes are peaceful or not individually (`competeOnVisit = subnodeIsPeaceful`,
+            // `forest.lua:109,123,137,…`), so crossing one can cost nothing; and if the way onward
+            // does turn out to fight, `WorldMap::cross_toward` already backs out —
+            // `Crossing::Retreat` exists for exactly this, and is legal because the node behind us is
+            // complete by definition. Clicking `Combat` on a crypt is irreversible in a way that
+            // stepping through a door is not.
+            //
+            // Without this the run has no legal move at all once every rest site is exhausted:
+            // `easiest_hostile` nominates the cheapest fight on the map and this gate then refuses
+            // it, so the planner and the driver disagree and the run stops with somewhere perfectly
+            // sensible to go. A level 1 forest at 1/20 was the case that made it concrete.
+            //
+            // `Risk::Forest` and not `type_is("forest")`: a **corrupted** forest ranks `Corrupt`, and
+            // corruption puts the interior under attack (`village.lua:371-395`) — which is precisely
+            // the state where retreating is not available.
+            let enterable = p.risk() == crate::overworld::Risk::Forest;
+            let too_hurt = health.map(crate::rest::health_is_low).unwrap_or(true) && !enterable;
             if too_hurt && !is_anomaly {
                 let hp = health
                     .map(|h| format!("{}/{}", h.current, h.max))
@@ -2026,6 +2068,9 @@ pub fn drive(
             "{step}. {here} -> **{}** (for {}, {:?})\n",
             hop.step, hop.plan.target, hop.plan.reason
         ));
+        // What this hop is *for*, so that arriving there is recognised as arriving. See
+        // [`Run::committed_to`].
+        r.committed_to = Some(hop.plan.target.clone());
 
         // Select, and prove it: the lone area button is `affirmative`, and at a combat node that
         // button is Combat. Space without a confirmed selection starts a fight.
