@@ -290,19 +290,11 @@ impl Fight<'_> {
                 |f| cs.path(&format!("rpg.player.gearFlags.{f}")).is_some(),
                 // Any missing health counts as injured: the buckler heals 4, so at 19/20 the payout
                 // is real and merely smaller than its cap. No threshold is invented here.
-                //
-                // TODO: handle bleeding. Both bucklers heal "unless you're bleeding"
-                // (`items/woodaugmentgear.lua:164`, `items/idoltarge.lua:24`), and `rpgview.lua:1080`
-                // skips the heal branch outright while it is set. So a bleeding player gets nothing
-                // from the plain Wooden idol buckler at any health, and it should stop driving
-                // wood-only exactly as full health does — while the Braced buckler keeps paying
-                // through `onWoodKillQueueWoodbraced`, which is not a heal.
-                //
-                // Cheaper than it looks: `PlayerState::bleeding` (`search.rs:443`) already reads it,
-                // so this is `injured && !bleeding` here plus a `Preferences` test. Left undone
-                // deliberately rather than folded in unmeasured — it narrows when wood-only fires,
-                // and the ranking has not yet been watched doing anything at all.
                 player.as_ref().map(|p| p.vitals.missing() > 0).unwrap_or(false),
+                // Bleeding cancels the heal (`rpgview.lua:1080`), and with it the reason to chase a
+                // wood-only word. Read from the same `PlayerState` the rested goals already use, so
+                // there is one reading of the status per turn rather than two that could disagree.
+                player.as_ref().map(|p| p.bleeding).unwrap_or(false),
             ),
         };
         let out = search::search(self.dict, self.scorer, &tiles, &geom, &mods, goal, &picking, 8);
