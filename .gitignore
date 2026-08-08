@@ -4,3 +4,7 @@
 /diggle-verbose.log
 /diggle-decisions.log
 /checkpoints
+
+# Run control and run artefacts, never source.
+.diggle-stop
+spike-run.md
