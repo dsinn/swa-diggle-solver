@@ -871,6 +871,30 @@ pub enum Screen {
     Unknown,
 }
 
+impl Screen {
+    /// Every variant, so callers can ask a question of all of them.
+    ///
+    /// Rust cannot enumerate an enum, so this is hand-written and could fall out of step. What keeps
+    /// it honest is [`crate::navigate::answer_for`], whose exhaustive `match` will not compile until
+    /// a newly added variant is given an answer — and whose test then checks that answer against this
+    /// list. So the compiler catches the variant, and the test catches the omission from here.
+    pub const ALL: &'static [Screen] = &[
+        Screen::CombatWaiting,
+        Screen::CombatEntered,
+        Screen::Dead,
+        Screen::ItemChoice,
+        Screen::Postgame,
+        Screen::Character,
+        Screen::HeroSelect,
+        Screen::MainMenu,
+        Screen::Pregame,
+        Screen::StatsHistory,
+        Screen::Shrine,
+        Screen::Unlock,
+        Screen::Unknown,
+    ];
+}
+
 /// Asks the screen what it is, before anything acts on an assumption about it.
 ///
 /// The navigator assumes "map" and discovers otherwise several steps later, by failing. Four

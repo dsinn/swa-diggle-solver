@@ -193,6 +193,69 @@ pub const ESCAPES: &[Escape] = &[
     },
 ];
 
+/// Where a recognised screen gets answered.
+///
+/// The point of naming this at all is [`answer_for`]'s `match`, which is exhaustive: a variant added
+/// to [`Screen`] does not compile until somebody decides what happens when the game shows it.
+///
+/// That is the check this project was missing. `Screen` had no in-combat variant, so a run that
+/// entered a fight from an overworld event fell through to "assume map" and spent its whole budget
+/// probing for one; the fix cost a live run and a dead character to find. Under an exhaustive match
+/// the same omission is a build failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// One of the [`ESCAPES`]: press its button and look again.
+    Escape,
+    /// [`drive`] hands it to [`crate::fight::Fight::run`].
+    Fight,
+    /// [`drive`] has a branch of its own for it.
+    Bespoke,
+    /// Answered before `drive`'s screen check ever sees it. The string names what does it, so that
+    /// "handled" is a claim with an address rather than a shrug.
+    Elsewhere(&'static str),
+    /// The ordinary case: no fingerprint, so get on with planning a hop.
+    Map,
+    /// Recognised by [`crate::act::identify`] and answered by nobody.
+    ///
+    /// Not a placeholder to be filled in silently — [`tests::the_unanswered_screens_are_only_the_ones
+    /// _we_have_admitted_to`] pins the list, so shrinking it is deliberate and growing it is loud.
+    Unanswered,
+}
+
+/// What answers each screen, as of now.
+///
+/// Exhaustive by construction. Prefer `Elsewhere` with a name over `Bespoke` when the answer is not
+/// in [`drive`] at all: several screens never reach the screen check because something upstream has
+/// already dealt with them, and recording *where* is the difference between this being a map and
+/// being a wish.
+pub const fn answer_for(screen: Screen) -> Answer {
+    match screen {
+        Screen::Character | Screen::StatsHistory | Screen::Shrine => Answer::Escape,
+        // The one `drive` plays out itself, because nothing else is watching for it.
+        Screen::CombatEntered => Answer::Fight,
+        // Reached through the affirmative slot rather than through `identify`: `drive` waits on
+        // `Finish` and hands the fight over on `waited.found()`.
+        Screen::CombatWaiting => Answer::Elsewhere("drive's wait on the Finish slot"),
+        // Both are inside a fight's own loop -- `take_reward` for the item screen, and the postgame
+        // dismissal after it. `drive` never sees either.
+        Screen::ItemChoice => Answer::Elsewhere("Fight::take_reward"),
+        Screen::Postgame => Answer::Elsewhere("Fight::run, after the reward"),
+        // Clicked through by `start_new_run`, which knows it is there because `Pregame screen:`
+        // arrives on the console afterwards. It is never identified by sight.
+        Screen::HeroSelect => Answer::Elsewhere("start_new_run"),
+        Screen::MainMenu | Screen::Pregame | Screen::Unlock => Answer::Bespoke,
+        Screen::Unknown => Answer::Map,
+        // Death has no answer in the navigator. `Outcome::Died` catches it from the console *during*
+        // a fight (`fight.rs`), which is where it has always happened so far -- but a run standing on
+        // a death screen outside one would fall through to the map path and probe for a map that is
+        // not there. The fingerprint for it exists (`slot_is_eulogise`); nothing consults it.
+        //
+        // Left honest rather than quietly mapped to `Bespoke`. It is a real gap and the test below
+        // makes sure it stays visible.
+        Screen::Dead => Answer::Unanswered,
+    }
+}
+
 pub struct Run<'a> {
     pub win: &'a GameWindow,
     pub keys: PostMessageInput,
@@ -1961,6 +2024,96 @@ pub fn drive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Screen::ALL` has to actually list every variant, or every test below silently checks less
+    /// than it claims.
+    ///
+    /// The compiler cannot prove this — Rust will not enumerate an enum — so what it proves instead
+    /// is the half that matters: `answer_for` is an exhaustive match, so a new variant cannot reach
+    /// this test without someone having decided what answers it. This catches the *other* omission,
+    /// forgetting to add it here afterwards, by requiring the two to agree in size.
+    #[test]
+    fn every_screen_is_listed_exactly_once() {
+        let mut seen: Vec<Screen> = Vec::new();
+        for &s in Screen::ALL {
+            assert!(!seen.contains(&s), "{s:?} appears twice in Screen::ALL");
+            seen.push(s);
+        }
+        // Every escape's screen must be in the list, which is the cheapest way to notice the list
+        // going stale in the direction that matters.
+        for e in ESCAPES {
+            assert!(Screen::ALL.contains(&e.screen), "{:?} is escapable but not in Screen::ALL", e.screen);
+        }
+    }
+
+    /// The escape table and the answer map must agree about which screens are escapable.
+    ///
+    /// They are two statements of the same fact written in different places, which is exactly the
+    /// shape that drifts. Either one alone would be believed.
+    #[test]
+    fn the_escape_table_and_the_answer_map_agree() {
+        for e in ESCAPES {
+            assert_eq!(
+                answer_for(e.screen),
+                Answer::Escape,
+                "{:?} is in ESCAPES but answer_for does not call it an escape",
+                e.screen
+            );
+        }
+        for &s in Screen::ALL {
+            if answer_for(s) == Answer::Escape {
+                assert!(
+                    ESCAPES.iter().any(|e| e.screen == s),
+                    "{s:?} is answered as an escape but has no ESCAPES entry, so `drive` will fall \
+                     through it to the map path"
+                );
+            }
+        }
+    }
+
+    /// No two escapes may claim the same screen: the lookup takes the first and the second would be
+    /// dead code that reads as though it were live.
+    #[test]
+    fn no_two_escapes_claim_the_same_screen() {
+        for (i, a) in ESCAPES.iter().enumerate() {
+            for b in &ESCAPES[i + 1..] {
+                assert_ne!(a.screen, b.screen, "{:?} is claimed twice", a.screen);
+            }
+        }
+    }
+
+    /// Every escape's button must be in `act::ALL`, which is what subjects it to the registry's own
+    /// invariants — chiefly that its search box can contain its template, the mismatch that once let
+    /// a button measure perfectly offline while never matching in a live run.
+    #[test]
+    fn every_escape_button_is_in_the_registry() {
+        for e in ESCAPES {
+            assert!(
+                crate::act::ALL.iter().any(|b| std::ptr::eq(*b, e.button)),
+                "{} is escaped by a button outside act::ALL",
+                e.what
+            );
+        }
+    }
+
+    /// The screens nothing answers, written down.
+    ///
+    /// This is the test the project actually needed. `Screen` had no in-combat variant, so a run that
+    /// entered a fight from an overworld event fell through to "assume map", spent its budget probing
+    /// for one, and the gap was found by a live run and a dead character. A list that has to be
+    /// edited on purpose turns that into a failing assertion.
+    ///
+    /// Shrinking this list is the goal. Growing it should require saying so here.
+    #[test]
+    fn the_unanswered_screens_are_only_the_ones_we_have_admitted_to() {
+        let unanswered: Vec<Screen> =
+            Screen::ALL.iter().copied().filter(|&s| answer_for(s) == Answer::Unanswered).collect();
+        assert_eq!(
+            unanswered,
+            vec![Screen::Dead],
+            "the set of screens nothing answers has changed; if that is deliberate, say so here"
+        );
+    }
 
     /// Every point we are willing to click looking for empty map must actually be map.
     ///
