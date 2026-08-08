@@ -158,11 +158,19 @@ pub enum Stop {
 /// Not every screen fits here and none is forced to. A fight has to be played, the main menu needs a
 /// retry because a highlighted `Continue` scores differently from the template it was cut from. Those
 /// stay as their own branches; this covers the ones where leaving *is* the whole response.
-/// How many consecutive dumpless turns inside a subworld to tolerate before stopping.
+/// How many looks to take inside a subworld before concluding we are stuck.
 ///
-/// Each one costs a screen-identification pass, which is cheap, so this is generous. It exists only
-/// so that a screen nothing recognises ends the run instead of spinning.
-const MAX_DUMP_MISSES: usize = 6;
+/// Each look is a full [`crate::act::identify`] pass plus a console pump, so three of them across
+/// two seconds is a real search of the screen rather than a formality. If none of them recognises
+/// anything and no dump arrives, the run genuinely has nothing to go on and should say so.
+const MAX_DUMP_MISSES: usize = 3;
+
+/// How long to leave between looks. See [`MAX_DUMP_MISSES`].
+///
+/// A second, because what we are waiting out is a screen transition -- a fight rendering, a dialogue
+/// fading in -- and those resolve in well under that. Long enough not to spin, short enough that a
+/// screen appearing mid-wait is caught almost immediately rather than after eight seconds.
+const DUMP_RETRY_PAUSE: Duration = Duration::from_secs(1);
 
 pub struct Escape {
     /// What [`crate::act::identify`] calls it.
@@ -1668,42 +1676,53 @@ pub fn drive(
         // (`core:mousereleased`, `:1479-1485`), and that branch tests only whether a location was
         // under the release, not which world we are in.
         let inside_now = r.map.inside().is_some();
+        // **Poll, do not wait.** Ask for a dump with no timeout at all, and if there is not one, go
+        // back to the top of the loop — where [`crate::act::identify`] gets another look — after a
+        // second. Three times, then give up.
+        //
+        // The eight-second block this replaces is what made the observer useless at exactly the
+        // wrong moment. `identify` runs at the top of each iteration and is perfectly stateless;
+        // `act::COMBAT_HUD` scores **1.0000** on the frame the last run died holding. But the fight
+        // had not rendered when the screen was checked, and by the time it had, the iteration was
+        // committed to waiting for a dump that could never come and then exiting. One look, taken
+        // too early, and no second chance for eight seconds.
+        //
+        // A dump also cannot arrive while an event dialogue is up, or a shop, or a class unlock —
+        // every stall `inside a subworld with no settled dump` has ever reported was one of those,
+        // and the message named `settled_dump`, which was working correctly every time.
+        //
+        // Polling makes the observer the thing that runs often and the dump the thing that is merely
+        // checked for. A screen that appears mid-wait is now seen within a second instead of being
+        // missed entirely.
         let fresh = if inside_now {
-            match r.settled_dump(Duration::from_secs(8)).or_else(|| r.recentre()) {
+            // `Duration::ZERO` is one pump and one look — see `settled_dump`, which tests its
+            // deadline after checking, so a zero budget still gets a full attempt.
+            let polled = r.settled_dump(Duration::ZERO).or_else(|| {
+                // `recentre` clicks the map to force a pan dump, so it is worth one try rather than
+                // three: a run that is not on the map at all should not be clicking at it repeatedly.
+                (r.dump_misses + 1 >= MAX_DUMP_MISSES).then(|| r.recentre()).flatten()
+            });
+            match polled {
                 Some(a) => {
                     r.dump_misses = 0;
                     a
                 }
-                // **A missing dump is evidence we are not on the map, not a failure.**
-                //
-                // This used to stop the run outright, and it has misattributed every stall it has
-                // ever reported. A dump cannot arrive while an event dialogue is up, or a shop, or a
-                // class unlock, or — the case that finally made it obvious — while a **fight** is in
-                // progress. In each of those the message named `settled_dump`, which was working
-                // perfectly, and said nothing about the screen actually in front of us.
-                //
-                // Live: answering `Encounter at Saltagh Park forest!` (one choice, `[Combat]`)
-                // started a fight, and the run failed here with a combat board on screen and
-                // `act::COMBAT_HUD` — the fingerprint built for exactly this — never consulted,
-                // because the dump is demanded before `identify` gets a turn.
-                //
-                // So: go round again and let the screen checks have their say. Bounded, because if
-                // nothing recognises the screen either then we really are stuck and the run should
-                // say so rather than spin.
                 None => {
                     r.dump_misses += 1;
-                    if r.dump_misses > MAX_DUMP_MISSES {
+                    if r.dump_misses >= MAX_DUMP_MISSES {
                         return Stop::Failed(format!(
-                            "inside a subworld, no dump and no screen we recognise, {} times over",
+                            "inside `{}`: no dump, and no screen we recognise, {} looks over",
+                            r.map.inside().unwrap_or("?"),
                             r.dump_misses
                         ));
                     }
                     r.log.push_str(&format!(
-                        "{step}. no dump inside `{}` — looking at the screen instead (miss {} of {})\n",
+                        "{step}. no dump inside `{}` — asking the screen again (look {} of {})\n",
                         r.map.inside().unwrap_or("?"),
-                        r.dump_misses,
+                        r.dump_misses + 1,
                         MAX_DUMP_MISSES
                     ));
+                    std::thread::sleep(DUMP_RETRY_PAUSE);
                     continue;
                 }
             }
