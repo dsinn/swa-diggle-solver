@@ -293,6 +293,19 @@ impl Place {
         self.corrupted || (self.type_is("forest") && !self.visited)
     }
 
+    /// A made road: the paved way through a subworld's interior.
+    ///
+    /// `forest.lua:117-130` gives `road` and `:107-116` `crossroads`, both with
+    /// `competeOnVisit = subnodeIsPeaceful` — so a paved node is peaceful unless something is
+    /// standing on it, and the generator strings them into a route from entrance to exit.
+    ///
+    /// One subtlety worth stating rather than discovering: [`Place::type_is`] is a suffix test and
+    /// `"crossroads"` ends with `"road"`, so the first check already covers the second. Both are
+    /// written out because a reader should not have to notice that.
+    pub fn is_paved(&self) -> bool {
+        self.type_is("road") || self.type_is("crossroads")
+    }
+
     /// A treasure chest node. `typeName = 'chest'` (`overworld/generators/forest.lua:178`).
     ///
     /// **Opening one is a fight, not a reward.** `chestOpenButton` calls
@@ -1429,7 +1442,55 @@ impl WorldMap {
     /// First move on a shortest known path from `from` to `to`, or `None` if we know of no route.
     ///
     /// With `shun`, places marked [`Place::avoid`] are treated as walls.
+    /// The first hop of a route, **preferring the paved path**.
+    ///
+    /// The dev's rule, from playing the game: inside a forest, stick to the road unless a combat
+    /// node sits on it and there is a combat-free way round. Four passes, first match wins:
+    ///
+    /// ```text
+    ///   1. paved, and no fight on it        the ordinary crossing
+    ///   2. any type, and no fight on it     the "combat-less pathway" the rule allows
+    ///   3. paved, fight and all             the road is blocked and nothing else is clear
+    ///   4. anything at all                  never stall; see below
+    /// ```
+    ///
+    /// The order encodes the rule exactly: 2 only ever beats 3 when the road has a fight on it and
+    /// the detour does not, because otherwise 1 would have matched already.
+    ///
+    /// **Pass 4 is the one that must not be removed.** Forest combat nodes can block progress
+    /// outright — a spider forest is generated with nests across the interior — and a run that
+    /// refuses every route because they all cost a fight has stalled, which is worse than fighting.
+    /// Whether the fight is then *taken* is not decided here: `cross_toward` and the health gate in
+    /// `navigate` have their own say, and this only reports that a way exists.
+    ///
+    /// Paved nodes are still subject to `blocked`, so an abandoned or shunned road is skipped by
+    /// every pass — those are hard exclusions, this is a preference.
     fn first_step_toward(&self, from: &str, to: &str, shun: bool) -> Option<String> {
+        let costs_a_fight = |p: &Place| !p.completed && heading_has_combat(&p.heading);
+        // Ordered least to most tolerant. `to` is exempt from the preference for the same reason it
+        // is exempt from `blocked`: refusing to path to where we were told to go is not routing.
+        let passes: [&dyn Fn(&Place) -> bool; 4] = [
+            &|p: &Place| !p.is_paved() || costs_a_fight(p),
+            &|p: &Place| costs_a_fight(p),
+            &|p: &Place| !p.is_paved(),
+            &|_: &Place| false,
+        ];
+        for avoid in passes {
+            if let Some(step) = self.step_avoiding(from, to, shun, avoid) {
+                return Some(step);
+            }
+        }
+        None
+    }
+
+    /// Breadth-first over the edges we have recorded, skipping anything `blocked` or `avoid` rejects.
+    ///
+    /// `blocked` is the hard exclusion — lost woods, chests while resting, abandoned nodes — and
+    /// `avoid` is the caller's preference for this pass. Split so that [`first_step_toward`] can run
+    /// several preferences over one set of exclusions.
+    fn step_avoiding(
+        &self, from: &str, to: &str, shun: bool, avoid: &dyn Fn(&Place) -> bool,
+    ) -> Option<String> {
         if from == to {
             return None;
         }
@@ -1459,6 +1520,7 @@ impl WorldMap {
                         (shun && p.avoid)
                             || (self.wants_rest && p.is_chest() && !p.completed)
                             || self.abandoned.contains(&p.key)
+                            || avoid(p)
                     })
                     .unwrap_or(false)
         };
@@ -2642,6 +2704,89 @@ mod tests {
         if let Some(plan) = m.next_target() {
             assert_ne!(plan.reason, Goal::Shrine, "no shrine is left to visit: {plan:?}");
         }
+    }
+
+    /// The dev's crossing rule, one pass at a time. The ordering IS the rule, so each layer is
+    /// exercised by making the one above it unavailable.
+    #[test]
+    fn a_forest_is_crossed_by_the_road_unless_the_road_is_blocked() {
+        // Two ways from `here` to the exit: a paved one through `road1`, and a wooded one through
+        // `wood1`. Everything peaceful to start with.
+        let build = |road_fights: bool, wood_fights: bool| {
+            let mut m = WorldMap::new();
+            m.fold(&inside_dump(
+                "l9",
+                "here",
+                "Saltagh Park crossroads",
+                vec![
+                    node("road1", if road_fights { "Saltagh Park — level 4 road" } else { "Saltagh Park road" }),
+                    node("wood1", if wood_fights { "Saltagh Park — level 4 forest" } else { "Saltagh Park forest" }),
+                ],
+                vec![Exit { x: 0.0, y: 0.0, to_key: "l19".into(), to_heading: "Dane village".into() }],
+            ));
+            for k in ["road1", "wood1"] {
+                m.entry(k).neighbours.insert("exit".into());
+                m.entry("exit").neighbours.insert(k.into());
+            }
+            m.entry("exit").heading = "Road to Dane village".into();
+            m
+        };
+
+        // 1. Both clear: the road wins on preference alone.
+        assert_eq!(
+            build(false, false).first_step_toward("here", "exit", false).as_deref(),
+            Some("road1"),
+            "paved and peaceful is the ordinary crossing"
+        );
+
+        // 2. A fight on the road and a clear way round: take the detour. This is the ONLY case the
+        //    rule allows leaving the path, and it is the whole reason the second pass exists.
+        assert_eq!(
+            build(true, false).first_step_toward("here", "exit", false).as_deref(),
+            Some("wood1"),
+            "a combat-less pathway beats a blocked road"
+        );
+
+        // 3. A fight on the road and a fight in the woods too: stay on the road. Nothing is gained
+        //    by wandering off it to pay the same price.
+        assert_eq!(
+            build(true, true).first_step_toward("here", "exit", false).as_deref(),
+            Some("road1"),
+            "if both cost a fight, the road is still the road"
+        );
+
+        // 4. And the detour is not preferred merely for being clear when the road is clear too --
+        //    that would be pass 2 beating pass 1, which would make the preference meaningless.
+        assert_eq!(
+            build(false, true).first_step_toward("here", "exit", false).as_deref(),
+            Some("road1")
+        );
+    }
+
+    /// **Never stall.** A forest whose every route costs a fight still has a route.
+    #[test]
+    fn every_way_out_being_a_fight_is_still_a_way_out() {
+        // A spider forest generates nests across the interior, so this is not a contrived shape: it
+        // is what `l9` looked like. A router that returns `None` here has stalled the run, which is
+        // worse than the fight it was avoiding -- and worse than saying so, because `cross_toward`
+        // and the health gate both get their own say afterwards.
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump(
+            "l9",
+            "here",
+            "Saltagh Park crossroads",
+            vec![node("nest1", "Saltagh Park — level 4 spider nest")],
+            vec![Exit { x: 0.0, y: 0.0, to_key: "l19".into(), to_heading: "Dane village".into() }],
+        ));
+        m.entry("nest1").neighbours.insert("exit".into());
+        m.entry("exit").heading = "Road to Dane village".into();
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+
+        assert_eq!(
+            m.first_step_toward("here", "exit", false).as_deref(),
+            Some("nest1"),
+            "the last pass tolerates anything, because stalling is not an option"
+        );
     }
 
     /// The fifth bounce, and the first inside a subworld: `l9sub13 -> l9sub11 -> l9sub13`.

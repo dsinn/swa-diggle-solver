@@ -45,38 +45,50 @@ pub struct Preferences {
 }
 
 impl Preferences {
-    /// Reads the two buckler behaviours out of `gearFlags`, and decides whether either is worth
-    /// anything right now.
+    /// Reads the wood-kill gear out of `gearFlags` and decides whether any of it is worth
+    /// constraining the word for **right now**.
     ///
-    /// **Flags, not item names.** Both bucklers set `onWoodKillGainArmour` and `onWoodKillGainHealth`
-    /// four times each (`items/woodaugmentgear.lua:154`, `items/idoltarge.lua:4`), and flags are what
-    /// the save carries. The Targe is deliberately *not* included: it sets only
-    /// `tileRefillSpecialWoodbraced` / `tileQueueSpecialWoodbraced` and pays for **ending a word on a
-    /// braced wooden tile**, which is a different objective and not modelled here.
+    /// **Flags, not item names**, because flags are what the save carries. Five items touch this and
+    /// they are not interchangeable:
     ///
-    /// ## Why full health switches the plain buckler off
+    /// ```text
+    ///   Wooden idol          woodenIdol             health
+    ///   Wooden buckler       armourBucklerWood              armour
+    ///   Wooden idol buckler  armourBucklerIdolWood  health  armour
+    ///   Braced buckler       armourTargeIdol        health  armour  braced
+    ///   Targe                armourTarge                            braced
+    /// ```
     ///
-    /// The Wooden idol buckler's payout is *"heals you for an additional 4, unless you're bleeding,
-    /// and gives you 4 armour"*. At full health the heal is thrown away, and constraining the word to
-    /// wood costs damage — so it stops being worth chasing.
+    /// (`items/woodaugmentgear.lua:85,117,154`, `items/idoltarge.lua:4`,
+    /// `items/specialtilegear.lua:4`.)
     ///
-    /// The Braced buckler keeps its value regardless, because it also carries
-    /// `onWoodKillQueueWoodbraced`: it queues a braced wooden tile on the kill, and that does not
-    /// care how much health is missing. That flag is the only thing separating the two in the save.
-    /// ## Bleeding cancels the heal, so it cancels the reason to chase it
+    /// ## Three payouts, three different reasons they might be worthless
     ///
-    /// Both bucklers say the heal lands *"unless you're bleeding"*, and `rpgview.lua:1080` skips the
-    /// heal branch outright while `bleed` is set. So a bleeding player gets nothing from the plain
-    /// Wooden idol buckler however much health is missing — the armour is still paid, but it is the
-    /// heal this priority exists to collect — and wood-only stops being worth the damage it costs.
+    /// This used to treat health and armour as one thing behind a single "would the heal land"
+    /// gate, which is wrong for every item that grants armour without health — including the
+    /// **Wooden buckler**, the one a live run was actually carrying. Its description is
+    /// *"Defeating an enemy with a word that only contains wooden tiles gives you 4 armour"*: no
+    /// heal is involved, so gating it on being injured and not bleeding withheld it for two reasons
+    /// that do not apply.
     ///
-    /// The Braced buckler is unaffected, for the same reason full health does not stop it:
-    /// `onWoodKillQueueWoodbraced` is not a heal and does not care.
-    pub fn from_flags(has_flag: impl Fn(&str) -> bool, injured: bool, bleeding: bool) -> Self {
-        let wood_kill_gear = has_flag("onWoodKillGainHealth") || has_flag("onWoodKillGainArmour");
-        let pays_regardless = has_flag("onWoodKillQueueWoodbraced");
-        let heal_would_land = injured && !bleeding;
-        Preferences { wood_only_pays: wood_kill_gear && (heal_would_land || pays_regardless) }
+    /// - **`onWoodKillGainHealth`** heals 4 *"unless you're bleeding"*, and `rpgview.lua:1080` skips
+    ///   the heal branch outright while `bleed` is set. At full health the heal is thrown away. So
+    ///   it pays only when **injured and not bleeding**.
+    /// - **`onWoodKillGainArmour`** is not a heal. Bleeding does not cancel it and full health does
+    ///   not waste it — but armour caps at `maxHealth / (maxArmourHalved and 2 or 1)`
+    ///   (`overworld.lua:18`), so it pays only while there is **room for more armour**.
+    /// - **`onWoodKillQueueWoodbraced`** queues a braced wooden tile and cares about none of the
+    ///   above. It pays **always**.
+    ///
+    /// Any one of the three is reason enough, so they are OR-ed rather than ranked: the word is
+    /// constrained the same way whichever payout is collecting.
+    pub fn from_flags(
+        has_flag: impl Fn(&str) -> bool, injured: bool, bleeding: bool, armour_room: bool,
+    ) -> Self {
+        let heals = has_flag("onWoodKillGainHealth") && injured && !bleeding;
+        let armours = has_flag("onWoodKillGainArmour") && armour_room;
+        let braced = has_flag("onWoodKillQueueWoodbraced");
+        Preferences { wood_only_pays: heals || armours || braced }
     }
 }
 
@@ -279,32 +291,60 @@ mod tests {
         assert!(!wood_only(&tiles, &[], &sc), "an empty word cannot have killed anything");
     }
 
+    /// The five wood items, each by the flags it actually carries. Named after the items rather
+    /// than after "plain" and "braced", because lumping them cost a live run its buckler.
     #[test]
-    fn the_plain_buckler_stops_mattering_at_full_health_and_the_braced_one_does_not() {
-        let plain = |f: &str| f == "onWoodKillGainHealth" || f == "onWoodKillGainArmour";
-        let braced = |f: &str| plain(f) || f == "onWoodKillQueueWoodbraced";
+    fn each_wood_item_pays_for_its_own_reasons() {
+        let idol = |f: &str| f == "onWoodKillGainHealth";
+        let buckler = |f: &str| f == "onWoodKillGainArmour";
+        let idol_buckler = |f: &str| idol(f) || buckler(f);
+        let braced = |f: &str| idol_buckler(f) || f == "onWoodKillQueueWoodbraced";
+        // (injured, bleeding, armour_room)
+        let hurt = (true, false, true);
+        let full = (false, false, true);
+        let bleeding = (true, true, true);
+        let capped = (false, false, false);
+        // Injured, so the heal would land, but armour has nowhere to go. The state that separates
+        // the two payouts -- without it, "armour full" and "not injured" are never seen apart.
+        let capped_but_hurt = (true, false, false);
+        let pays = |g: &dyn Fn(&str) -> bool, (i, b, a): (bool, bool, bool)| {
+            Preferences::from_flags(g, i, b, a).wood_only_pays
+        };
 
-        // Injured and not bleeding: both pay, because the heal lands.
-        assert!(Preferences::from_flags(plain, true, false).wood_only_pays);
-        assert!(Preferences::from_flags(braced, true, false).wood_only_pays);
-        // Unhurt: the plain buckler's heal is thrown away, so constraining the word is not worth it.
-        assert!(!Preferences::from_flags(plain, false, false).wood_only_pays);
-        // The braced one still queues a braced wooden tile, which does not care about health.
-        assert!(Preferences::from_flags(braced, false, false).wood_only_pays);
+        // The **Wooden idol** is a heal and only a heal: injured and not bleeding, or nothing.
+        assert!(pays(&idol, hurt));
+        assert!(!pays(&idol, full), "a heal at full health is thrown away");
+        assert!(!pays(&idol, bleeding), "rpgview.lua:1080 skips the heal branch");
+        assert!(pays(&idol, capped_but_hurt), "armour being full says nothing about a heal");
+
+        // The **Wooden buckler** is armour and only armour -- the one a live run was carrying, and
+        // the case the old single gate got wrong in both directions.
+        assert!(pays(&buckler, full), "4 armour is worth having at full health");
+        assert!(pays(&buckler, bleeding), "bleeding does not cancel armour");
+        assert!(!pays(&buckler, capped), "but a full armour bar does");
+
+        // The **Wooden idol buckler** has both, so either reason is enough.
+        assert!(pays(&idol_buckler, full), "the armour still pays");
+        assert!(pays(&idol_buckler, capped_but_hurt), "and at full armour the heal does");
+        assert!(!pays(&idol_buckler, capped), "neither payout is available: no heal wanted, no room");
+
+        // The **Braced buckler** adds a queued tile, which cares about none of it.
+        for state in [hurt, full, bleeding, capped] {
+            assert!(pays(&braced, state), "onWoodKillQueueWoodbraced always pays");
+        }
     }
 
-    /// Bleeding cancels the heal outright (`rpgview.lua:1080`), so it cancels the plain buckler's
-    /// reason to exist however hurt the player is — and leaves the Braced one untouched, because
-    /// what that one adds is a queued tile rather than a heal.
+    /// The single case that made the split necessary, stated on its own.
+    ///
+    /// A live run carried `armourBucklerWood` at 1/20 and the preference *was* on -- but only
+    /// because it happened to be injured. At full health, or while bleeding, the old rule would have
+    /// declined 4 free armour for reasons that belong to a heal the item does not grant.
     #[test]
-    fn bleeding_switches_the_plain_buckler_off_at_any_health() {
-        let plain = |f: &str| f == "onWoodKillGainHealth" || f == "onWoodKillGainArmour";
-        let braced = |f: &str| plain(f) || f == "onWoodKillQueueWoodbraced";
-
-        assert!(!Preferences::from_flags(plain, true, true).wood_only_pays, "hurt but bleeding");
-        assert!(!Preferences::from_flags(plain, false, true).wood_only_pays, "unhurt and bleeding");
-        assert!(Preferences::from_flags(braced, true, true).wood_only_pays, "the queue still pays");
-        assert!(Preferences::from_flags(braced, false, true).wood_only_pays);
+    fn armour_is_not_a_heal_and_is_not_gated_like_one() {
+        let buckler = |f: &str| f == "onWoodKillGainArmour";
+        assert!(Preferences::from_flags(buckler, false, true, true).wood_only_pays);
+        // The only thing that switches it off is having nowhere to put the armour.
+        assert!(!Preferences::from_flags(buckler, true, false, false).wood_only_pays);
     }
 
     /// The Targe pays for ending a word on braced wood, not for a wood-only word, so it must not
@@ -316,7 +356,9 @@ mod tests {
         // No combination of health and bleeding makes it pay, because it has no wood-kill flag at all.
         for injured in [true, false] {
             for bleeding in [true, false] {
-                assert!(!Preferences::from_flags(targe, injured, bleeding).wood_only_pays);
+                for room in [true, false] {
+                    assert!(!Preferences::from_flags(targe, injured, bleeding, room).wood_only_pays);
+                }
             }
         }
     }

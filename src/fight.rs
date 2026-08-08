@@ -284,6 +284,23 @@ impl Fight<'_> {
         // scaled to and a board can lose tiles mid-fight — the run that died at `l50` watched its
         // board collapse from 16 tiles to one. A target built once at 16 would have been describing a
         // board that no longer existed.
+        // Room for more armour, which is what decides whether `onWoodKillGainArmour` is worth
+        // constraining a word for. The cap is `maxHealth / (maxArmourHalved and 2 or 1)`
+        // (`overworld.lua:18`), read from the same `combatSaveData` the gear flags come from.
+        //
+        // Unknown counts as **room available**, the opposite of how unknown health is treated when
+        // deciding whether to fight. The asymmetry is deliberate: guessing wrong about health can
+        // end the save, while guessing wrong here costs a slightly worse word.
+        let armour_room = {
+            let now = cs.int_at("rpg.player.armour");
+            let max = cs.int_at("rpg.player.maxHealth").map(|m| {
+                if cs.path("rpg.player.gearFlags.maxArmourHalved").is_some() { m / 2 } else { m }
+            });
+            match (now, max) {
+                (Some(a), Some(m)) => a < m,
+                _ => true,
+            }
+        };
         let picking = crate::pick::Context {
             target: self.letters.target(tiles.len()),
             prefs: crate::pick::Preferences::from_flags(
@@ -295,6 +312,7 @@ impl Fight<'_> {
                 // wood-only word. Read from the same `PlayerState` the rested goals already use, so
                 // there is one reading of the status per turn rather than two that could disagree.
                 player.as_ref().map(|p| p.bleeding).unwrap_or(false),
+                armour_room,
             ),
         };
         let out = search::search(self.dict, self.scorer, &tiles, &geom, &mods, goal, &picking, 8);
