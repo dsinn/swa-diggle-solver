@@ -855,16 +855,31 @@ impl Run<'_> {
     /// back on the inn, which says so on the console. That gives the sequence a checkpoint in the
     /// middle instead of two blind clicks in a row.
     fn leave_inn(&mut self, screens: usize) {
-        for i in 0..screens {
+        for _ in 0..screens {
+            // **Look before pressing.** Counting screens was wrong and a run showed exactly how:
+            // three presses filled the bar, the rest screen closed *itself*, and the `leave_inn(1)`
+            // that expected to be standing on it walked out of the inn as well. The next round then
+            // hunted for `Rest` in the village, and the inn screen it had left behind was read by
+            // the screen identifier as a shrine.
+            //
+            // Now the two screens are recognised rather than assumed, using the same templates the
+            // presses use. `None` from both means we are already out and another press would land
+            // on the map — which is the failure this replaces, one screen further on.
+            let on_rest = matches!(crate::act::locate(self.win, &crate::act::REST_CONFIRM), Ok(Some(_)));
+            let on_inn = matches!(crate::act::locate(self.win, &crate::act::INN_REST), Ok(Some(_)));
+            if !on_rest && !on_inn {
+                self.log.push_str("  rest: already out of the inn\n");
+                break;
+            }
             let mark = self.feed.mark();
             if !self.click_button(&crate::innplay::BACK) {
                 self.log.push_str("  rest: could not click the back plaque\n");
                 return;
             }
-            // Only the first press has something to confirm. The second lands on the overworld,
-            // which announces nothing until it is asked for a dump — the main loop's job.
-            if i + 1 < screens && !self.wait_for_line(mark, crate::innplay::ENTERED, Duration::from_secs(6))
-            {
+            // Leaving the rest screen lands on the inn, which announces itself. Leaving the inn
+            // lands on the map, which announces nothing until asked — so only the first is
+            // confirmable, and which one we just did is now known rather than counted.
+            if on_rest && !self.wait_for_line(mark, crate::innplay::ENTERED, Duration::from_secs(6)) {
                 self.log.push_str("  rest: the rest screen did not close\n");
                 return;
             }

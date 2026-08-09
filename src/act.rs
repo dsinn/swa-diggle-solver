@@ -922,6 +922,17 @@ pub const SHOP_BACK: (i32, i32) = (1727, 918);
 /// The console line `core.onActive` prints when a shop UI opens (`shop.lua:253`).
 pub const SHOP_OPENED: &str = "Opened shop UI";
 
+/// A back plaque at `ss(0, 0.9)` — **and the shrine is only one of the screens that has one**.
+///
+/// The inn declares the same button from the same `back.png` (`ui/inn.lua:68-71`), so does the rest
+/// screen (`ui/rest.lua:517-520`), and the click points land a pixel apart at (113, 972) and
+/// (112, 972) — `100*1.13` is `112.99999999999999` and `button_center` truncates. Two routes to one
+/// button, which is a useful cross-check (`innplay::the_two_buttons_we_press_are_where_the_game_puts
+/// _them` pins it) and a warning: **this template cannot tell a shrine from an inn.**
+///
+/// That is why `identify` asks it last, below everything that names a screen. It is a generic
+/// "take me back" matcher — the answer to *there is nothing else to do here, how do I leave* — and
+/// never evidence about what the screen is. See the comment at its call site.
 pub const SHRINE_GOBACK: Button = Button {
     name: "shrine Go back",
     template: "shrine-goback.png",
@@ -1226,15 +1237,6 @@ pub fn identify(win: &GameWindow) -> Screen {
     if over(&STATS_BACK, STATS_BACK_PRESENT) {
         return Screen::StatsHistory;
     }
-    // Also last, and for a weaker reason than the others: this is a back plaque at the bottom left,
-    // and `ss(0, 0.9)` with the shared `back.png` is a popular place to put one. It is a genuine
-    // screen identifier only because everything with a distinctive fingerprint has already been
-    // ruled out above — so what it really means is "not one of those, and something here still wants
-    // dismissing". Good enough to get off a screen, and explicitly not good enough to conclude a
-    // shrine is underfoot.
-    if over(&SHRINE_GOBACK, SHRINE_GOBACK_PRESENT) {
-        return Screen::Shrine;
-    }
     // Shares `ss(1, 0.9)` with three other buttons and clears them by only 0.07, so everything with
     // a fingerprint elsewhere on the screen has been ruled out before this is asked.
     if over(&UNLOCK_CONTINUE, UNLOCK_CONTINUE_PRESENT) {
@@ -1265,6 +1267,31 @@ pub fn identify(win: &GameWindow) -> Screen {
     // 0.8156 and 0.8751 — no threshold separates them. See [`HEROSELECT_HEADER`].
     if over(&HEROSELECT_HEADER, HEROSELECT_HEADER_PRESENT) {
         return Screen::HeroSelect;
+    }
+
+    // **Dead last, on purpose: this is a generic "take me back" matcher, not a screen.**
+    //
+    // **The shrine and the inn share this plaque.** Both declare it at `ss(0, 0.9)` with the same
+    // `back.png` — `ui/inn.lua:68-71` and `ui/rest.lua:517-520` against the shrine's — and the two
+    // click points are (112, 972) and (113, 972), a pixel apart because `100*1.13` truncates. They
+    // are the same artwork in the same slot, so nothing can tell them apart here, and half the
+    // game's other screens are built the same way.
+    //
+    // So it is placed last deliberately, below everything that answers *which screen is this*. What
+    // a match means is only: **nothing above recognised this, and there is a way back from it** —
+    // which is the whole intent. When there is nothing else to do, return where you came from.
+    //
+    // It used to sit above [`Screen::Unlock`] and [`Screen::HeroSelect`], and that was wrong in the
+    // same way hero select being high was wrong: a check that answers "is there a back plaque" was
+    // pre-empting two that answer "which screen is this". Live 2026-08-09 it fired on an **inn** and
+    // the run logged `screen: Shrine` and `left the shrine screen`. Pressing back was the right
+    // move; the label was fiction.
+    //
+    // The variant is still named `Shrine`, which is a worse name than the check deserves. Nothing
+    // may read it as evidence that a shrine is underfoot — `WorldMap::worth_consecrating_here`
+    // answers that from the save and should stay the only thing that does.
+    if over(&SHRINE_GOBACK, SHRINE_GOBACK_PRESENT) {
+        return Screen::Shrine;
     }
     Screen::Unknown
 }
