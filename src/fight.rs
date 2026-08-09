@@ -54,23 +54,31 @@ fn announces_murder_dialog(line: &str) -> bool {
     line.contains("Okay dialogue:") && line.contains("avoidable murder")
 }
 
-/// How many avoidable-murder refusals to absorb before taking the kill.
+/// Is there a weaker word left to aim for, or is this kill unavoidable?
 ///
-/// Each refusal drops the ceiling by one and re-searches, so a handful walks the band from a typical
-/// `below` down to its floor of "deal exactly 1". Past that there is nothing left to lower and the
-/// same word comes back for ever — a live run submitted `VENEPUNCTURE` thirty times before it was
-/// stopped by hand, and every one of those cost a turn (`turns += 1` runs on this path, so the only
-/// bound was `MAX_TURNS`).
+/// The condition for confirming an avoidable-murder warning rather than backing off again. **The
+/// question is whether a lower band exists, not how many times we have been refused.** A count is
+/// wrong at both ends: starting from a ceiling of 3 the band reaches its floor on the first refusal
+/// and any further attempts replay the same word, while from a ceiling of 12 a count of six would
+/// confirm the kill with genuinely weaker words still unexplored.
 ///
-/// **The dev's call, recorded as an accepted risk:** a kill we did not intend is the price of not
-/// looping. Our damage model does not carry status, so a word inside the direct-damage band can
-/// still kill through the bleed or toxin it applies, and no amount of aiming lower fixes a model
-/// that is missing a term. Backing off a few times catches the cases where one point was the
-/// difference; after that the murder is treated as unavoidable and confirmed.
+/// A goal that is not a scare is already trying to kill, so a warning on one is not a disagreement —
+/// it is the game asking whether we meant it, and we did.
 ///
-/// Six, because the widest band seen live was `4..=5` against a lethal of 6, and the floor is 1 —
-/// so six steps is one more than the longest walk the backoff can usefully make.
-const MURDER_REFUSALS_BEFORE_ACCEPTING: i64 = 6;
+/// **The dev's call, recorded as an accepted risk:** at minimum damage, take the murder. Our model
+/// carries no status, so a word inside the direct-damage band can still kill through the bleed or
+/// toxin it applies, and no amount of aiming lower fixes a model that is missing a term. The cost is
+/// a `Murder` flag; the alternative is replaying one word until `MAX_TURNS` — `turns += 1` runs on
+/// this path, and a live run reached thirty attempts before it was stopped by hand.
+fn nothing_left_to_lower(goal: Goal) -> bool {
+    match goal {
+        Goal::Scare { need, below } => {
+            need <= crate::search::MIN_MEANINGFUL_DAMAGE
+                && below <= crate::search::MIN_MEANINGFUL_DAMAGE + 1
+        }
+        _ => true,
+    }
+}
 
 /// How many times to press Backspace at the avoidable-murder modal before giving up on it.
 ///
@@ -574,11 +582,11 @@ impl Fight<'_> {
             if feed.since(mark).iter().any(|l| announces_murder_dialog(l)) {
                 log.push_str("  the game says this would be avoidable murder — backing out\n");
                 self.shot("murder-warning");
-                // Enough. See `MURDER_REFUSALS_BEFORE_ACCEPTING`: the backoff has run out of room
-                // and the alternative to confirming is repeating this until `MAX_TURNS`.
-                if *murder_backoff >= MURDER_REFUSALS_BEFORE_ACCEPTING {
+                // Already at minimum damage, so backing off again would submit the same word. See
+                // `nothing_left_to_lower`.
+                if nothing_left_to_lower(goal) {
                     log.push_str(&format!(
-                        "  refused {murder_backoff} times with nothing left to lower — taking the kill\n"
+                        "  {goal:?} has nothing weaker to aim for — taking the kill\n"
                     ));
                     self.accept_murder(keys, log)?;
                     return Ok(None);
@@ -691,8 +699,8 @@ impl Fight<'_> {
     /// key that submits a word on the board, which is why this is only ever called with the dialog
     /// confirmed present on the console.
     ///
-    /// Only reached when the backoff has nothing left to lower; see
-    /// [`MURDER_REFUSALS_BEFORE_ACCEPTING`] for why a kill is preferred to another twenty turns.
+    /// Only reached when the band is already at minimum damage; see [`nothing_left_to_lower`] for
+    /// why a kill is preferred to replaying the same word.
     fn accept_murder(
         &self, keys: &PostMessageInput, log: &mut String,
     ) -> Result<(), crate::Error> {
@@ -1035,6 +1043,37 @@ fn tiles_of(save: &Table) -> Vec<crate::observe::board::Tile> {
 ///
 /// `ui/itemselection.lua:419-430` prints each item with its name and **screen coordinates**, so the
 /// row never has to be located visually.
+#[cfg(test)]
+mod murder_accept_tests {
+    use super::*;
+    use crate::search::MIN_MEANINGFUL_DAMAGE as MIN;
+
+    /// The narrowest band there is means the backoff is spent.
+    #[test]
+    fn a_band_at_minimum_damage_has_nowhere_left_to_go() {
+        assert!(nothing_left_to_lower(Goal::Scare { need: MIN, below: MIN + 1 }));
+    }
+
+    /// Anything wider still has a weaker word to try, however many times we have been refused.
+    ///
+    /// The rule this replaced counted refusals, which confirmed the kill after six even when the
+    /// band still had room — from a ceiling of 12 that abandons five untried steps.
+    #[test]
+    fn a_band_with_room_keeps_backing_off() {
+        assert!(!nothing_left_to_lower(Goal::Scare { need: 4, below: 6 }));
+        assert!(!nothing_left_to_lower(Goal::Scare { need: 1, below: 12 }));
+        assert!(!nothing_left_to_lower(Goal::Scare { need: MIN, below: MIN + 2 }));
+    }
+
+    /// A goal that is not a scare already intends the kill, so the warning is not a disagreement.
+    #[test]
+    fn a_kill_goal_confirms_immediately() {
+        assert!(nothing_left_to_lower(Goal::FirstKill { need: 9 }));
+        assert!(nothing_left_to_lower(Goal::RankedKill { need: 9 }));
+        assert!(nothing_left_to_lower(Goal::MaxDamage));
+    }
+}
+
 #[cfg(test)]
 mod murder_dialog_tests {
     use super::*;
