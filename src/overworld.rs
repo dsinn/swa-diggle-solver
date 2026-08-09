@@ -451,6 +451,8 @@ pub struct WorldMap {
     /// Kinny & Georgeff's result applied to a world with two rates of change, since within a
     /// crossing the layout is static and only fog lifts.
     crossing_to: Option<(String, Goal)>,
+    /// Why the door in `crossing_to` was chosen, for the log. Set wherever the choice is made.
+    door_reason: Option<Door>,
 }
 
 /// Where to head, and why. The reason is carried so a route can be explained rather than just taken.
@@ -479,6 +481,39 @@ pub struct Plan {
 /// the portal there. [`WorldMap::anomaly`] prefers a seen `anomaly` heading over this whenever it
 /// has one.
 pub const ANOMALY_KEY: &str = "start";
+
+/// Why a subworld crossing is heading for the door it picked.
+///
+/// Carried into the run's log because three live runs turned on this and none of them recorded it.
+/// The branches look alike in the report — every one prints `crossing X toward Y` — and telling them
+/// apart afterwards meant rebuilding the map by hand and reasoning about what the code must have
+/// done. That reasoning was wrong twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Door {
+    /// The exit whose far side is fewest hops from the target, over edges we have recorded. The
+    /// answer we want, and the rarest: it needs the target to be in a component we can reach.
+    NearestToTarget,
+    /// The nearest was the door we came in by, and something unvisited was on offer instead.
+    NotBackOutAgain,
+    /// No exit had a measurable distance, but the target has a position — so the safest door, and
+    /// among equally safe ones the one that points at it. On an open anomaly the position is
+    /// usually the corruption centroid rather than a sighting; see [`WorldMap::pos_for`].
+    TowardTheCorruption,
+    /// No distance and no bearing either. Safest door, then whatever sorts first — a real answer,
+    /// but the weakest one, and the state a fresh launch starts in.
+    SafestOfWhatIsLeft,
+}
+
+impl Door {
+    pub fn why(self) -> &'static str {
+        match self {
+            Door::NearestToTarget => "nearest to the target",
+            Door::NotBackOutAgain => "not back out the way we came",
+            Door::TowardTheCorruption => "safest, and toward the anomaly",
+            Door::SafestOfWhatIsLeft => "safest available; no bearing",
+        }
+    }
+}
 
 /// `completedAreas` entry that means the anomaly has been beaten — the run's whole objective.
 ///
@@ -734,6 +769,11 @@ impl WorldMap {
     /// Everything here is additive except the fields a dump is authoritative for. A neighbour's
     /// entry is created if unseen, but its `hidden` count and `visited` flag are left alone: only a
     /// dump taken *at* a node can speak to those.
+    /// Why the door we are crossing toward was chosen. `None` before any choice this crossing.
+    pub fn door_reason(&self) -> Option<Door> {
+        self.door_reason
+    }
+
     /// Straight-line distance between two places, when both have been placed in the frame.
     ///
     /// The units are the run's own and mean nothing on their own; only comparisons between two
@@ -1477,6 +1517,19 @@ impl WorldMap {
     /// every distance in this file means, including `next_target`'s. Until then, read the ranking as
     /// what happens on the surface, and the fallback as what happens while crossing.
     pub fn exit_toward(&self, exits: &[crate::observe::adjacency::Exit]) -> Option<String> {
+        self.choose_exit(exits).map(|(k, _)| k)
+    }
+
+    /// [`WorldMap::exit_toward`], and **which of its three answers produced the door**.
+    ///
+    /// Split out because the log could not say. Three live runs in a row turned on which branch had
+    /// chosen an exit — the ranked one, the risk fallback, or the entrance rule — and every time the
+    /// only way to find out was to reconstruct the map by hand from `spike-run-raw.log` and reason
+    /// about what it must have done. Twice that reasoning was wrong.
+    ///
+    /// A decision worth making is worth being able to read afterwards. `Door` is carried to
+    /// [`WorldMap::door_reason`] and printed with the crossing.
+    fn choose_exit(&self, exits: &[crate::observe::adjacency::Exit]) -> Option<(String, Door)> {
         if exits.is_empty() {
             return None;
         }
@@ -1507,10 +1560,10 @@ impl WorldMap {
                         Some(&e.to_key) != entrance.as_ref()
                             && !self.places.get(&e.to_key).map(|p| p.visited).unwrap_or(false)
                     }) {
-                        return Some(onward.to_key.clone());
+                        return Some((onward.to_key.clone(), Door::NotBackOutAgain));
                     }
                 }
-                return Some(best.to_key.clone());
+                return Some((best.to_key.clone(), Door::NearestToTarget));
             }
         }
         // No target, or none of the exits lead anywhere we can measure.
@@ -1576,7 +1629,12 @@ impl WorldMap {
             let risk = self.places.get(&e.to_key).map(|p| p.risk()).unwrap_or(Risk::Unseen);
             (Some(&e.to_key) == entrance.as_ref(), risk, toward(&e.to_key), &e.to_key)
         });
-        ranked.first().map(|e| e.to_key.clone())
+        let best = ranked.first()?;
+        let why = match toward(&best.to_key) {
+            i64::MAX => Door::SafestOfWhatIsLeft,
+            _ => Door::TowardTheCorruption,
+        };
+        Some((best.to_key.clone(), why))
     }
 
     /// The door this crossing already chose, if it is still worth believing in.
@@ -1656,7 +1714,11 @@ impl WorldMap {
                 let errand = self.next_target().map(|p| p.reason);
                 let to = match self.committed_exit(&parent, errand) {
                     Some(to) => to,
-                    None => self.exit_toward(exits)?,
+                    None => {
+                        let (to, why) = self.choose_exit(exits)?;
+                        self.door_reason = Some(why);
+                        to
+                    }
                 };
                 // Nothing to be single-minded *about* when there is no errand: `exit_toward` is down
                 // to its own fallback, and recording that as a commitment would freeze a guess.

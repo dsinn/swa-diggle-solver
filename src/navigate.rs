@@ -2316,7 +2316,15 @@ pub fn drive(
                 }
                 Crossing::Step { to, toward } | Crossing::Explore { to, toward } => {
                     match fresh.nodes.iter().find(|n| &n.key == to) {
-                        Some(n) => (format!("crossing `{container}` toward `{toward}` via `{to}`"), (n.x, n.y)),
+                        // The door's reason is printed because three runs in a row turned on which
+                        // branch chose it, and the line looked identical in all of them.
+                        Some(n) => (
+                            format!(
+                                "crossing `{container}` toward `{toward}` ({}) via `{to}`",
+                                r.map.door_reason().map(|d| d.why()).unwrap_or("held from earlier")
+                            ),
+                            (n.x, n.y),
+                        ),
                         None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
                     }
                 }
