@@ -54,6 +54,17 @@ pub struct Place {
     pub hidden: Option<usize>,
     /// The subworld this sits inside, if any. Anomaly eligibility turns on this being `None`.
     pub parent: Option<String>,
+    /// Where this sits on the overworld, in the run's own frame. `None` until a dump places it.
+    ///
+    /// Not the numbers the dump printed: those are screen space and move with every pan. See
+    /// [`WorldMap::registration`] for how they are put into one frame, and what that frame is worth
+    /// (everything up to a global translation and scale, which is all a *comparison* needs).
+    ///
+    /// **A position is not a route.** It says which way a place lies, never whether we can get
+    /// there — the two are different questions and this project has an expensive habit of answering
+    /// the second with the first. Use it where a route is unavailable and a direction is better than
+    /// a coin toss, which is what [`WorldMap::exit_toward`]'s fallback does.
+    pub pos: Option<(f64, f64)>,
     /// Have we stood on it and taken a dump?
     pub visited: bool,
     /// From `mainSaveData.overworld.completedAreas`.
@@ -723,6 +734,73 @@ impl WorldMap {
     /// Everything here is additive except the fields a dump is authoritative for. A neighbour's
     /// entry is created if unseen, but its `hidden` count and `visited` flag are left alone: only a
     /// dump taken *at* a node can speak to those.
+    /// Straight-line distance between two places, when both have been placed in the frame.
+    ///
+    /// The units are the run's own and mean nothing on their own; only comparisons between two
+    /// answers from the same run are meaningful, which is all any caller wants.
+    ///
+    /// This is the **potential function** `docs/superpowers/notes/navigation-loops.md` says every
+    /// one of our navigation bugs came down to lacking. A ranking cannot stop a cycle, because a
+    /// stable preference between two alternating states *is* a cycle; a quantity that strictly
+    /// decreases as we approach can, and this is one. It is only a heuristic about *direction* —
+    /// walls, water and fights are invisible to it — so it belongs where a real route is unavailable
+    /// and never in place of one.
+    pub fn gap(&self, from: &str, to: &str) -> Option<f64> {
+        let (ax, ay) = self.places.get(from)?.pos?;
+        let (bx, by) = self.places.get(to)?.pos?;
+        Some(((ax - bx).powi(2) + (ay - by).powi(2)).sqrt())
+    }
+
+    /// Where this dump's coordinates sit relative to the frame we are assembling, if we can tell.
+    ///
+    /// ## The numbers in a dump are screen space, and they move
+    ///
+    /// `overworldview.lua:1033` prints
+    ///
+    /// ```lua
+    /// posX = xoffset + location.posX*zoomMult
+    /// posY = yoffset + location.posY*zoomMult + (typeData.offsetY or 0)*scale*zoomMult
+    /// ```
+    ///
+    /// so one node reads differently in two dumps of the same place — the pan offset changed. What
+    /// is underneath (`location.posX`) is a stable world coordinate, and the transform is affine, so
+    /// **within a single dump every node shares one offset**. Two dumps can therefore be put in the
+    /// same frame by any node they have in common: the difference between its known position and its
+    /// reading here is the shift for everything else in that dump.
+    ///
+    /// Consecutive dumps always share nodes — we arrive somewhere adjacent to where we were — so the
+    /// map assembles into one frame, up to a global translation and scale nobody needs to know.
+    ///
+    /// ## Surface only, deliberately
+    ///
+    /// `zoomMult` is a *shared* factor, so mixing frames at different zooms would silently rescale
+    /// distances, and nothing here checks the zoom. Subworld interiors are excluded rather than
+    /// assumed safe: they already route by BFS over recorded edges, which works, so they have
+    /// nothing to gain and a wrong scale to lose. The exits printed inside a subworld are road nodes
+    /// in the *subworld's* frame anyway — the surface node each one names is learned from a surface
+    /// dump, which is where the useful position comes from.
+    ///
+    /// Returns `None` when this dump shares no placed node with the frame, which is not an error: it
+    /// is what an unregistered island looks like, and those get placed the first time a dump links
+    /// them to something we have already seen.
+    fn registration(&self, a: &Adjacency) -> Option<(f64, f64)> {
+        if a.subworld.is_some() {
+            return None;
+        }
+        // A node already in the frame anchors this dump against it.
+        for n in &a.nodes {
+            if let Some((px, py)) = self.places.get(&n.key).and_then(|p| p.pos) {
+                return Some((px - n.x, py - n.y));
+            }
+        }
+        // Nothing placed yet anywhere: this dump *defines* the frame, so its own numbers are the
+        // frame and the shift is zero. Only ever taken once per run.
+        match self.places.values().any(|p| p.pos.is_some()) {
+            false => Some((0.0, 0.0)),
+            true => None,
+        }
+    }
+
     pub fn fold(&mut self, a: &Adjacency) {
         let parent = a.subworld.as_ref().map(|(k, _)| k.clone());
         // Crossing into a subworld: remember the surface node we came from, because leaving by the
@@ -774,6 +852,10 @@ impl WorldMap {
             here.parent = parent.clone();
         }
 
+        // Where this dump's coordinates sit relative to the frame we are building. `None` means we
+        // cannot place anything from it — see [`WorldMap::registration`].
+        let shift = self.registration(a);
+
         for n in &a.nodes {
             // Connections of a node inside a subworld are inside the same subworld: the dump lists
             // `locationData[playerLocation].connections` here and reaches the parent's connections
@@ -784,6 +866,14 @@ impl WorldMap {
             place.connections = n.connections;
             if place.parent.is_none() {
                 place.parent = p;
+            }
+            // First fix wins. Averaging repeated sightings would be defensible, but a position that
+            // never moves is easier to reason about and the registration below is exact, not
+            // approximate — every reading of one node in one frame differs only by the shift.
+            if place.pos.is_none() {
+                if let Some((dx, dy)) = shift {
+                    place.pos = Some((n.x + dx, n.y + dy));
+                }
             }
             place.neighbours.insert(a.here_key.clone());
             self.entry(&a.here_key).neighbours.insert(n.key.clone());
@@ -1186,6 +1276,12 @@ impl WorldMap {
         // node over a finished one, and a better-connected node over a dead end.
         let far = usize::MAX;
         let dist = self.distances(here);
+        // No direction heuristic here, and the reason is worth recording so nobody adds one.
+        // `gap` would need something to head toward, and the only candidate is the anomaly — but
+        // this branch is reached *only* when `anomaly()` found nothing to target, because the
+        // anomaly branch above returns first whenever there is one. A direction toward a place that
+        // by construction is not known is not a direction. The branch that needed this is
+        // `next_hop`'s no-route fallback, where the target is known and the route is not.
         frontier.sort_by(|a, b| {
             a.visited
                 .cmp(&b.visited)
@@ -1232,6 +1328,22 @@ impl WorldMap {
         // The plan is carried through unchanged. Replacing it with the frontier node would make the
         // goal follow the footsteps — every hop would re-derive a nearby target and the run would
         // wander instead of working toward the trigger.
+        //
+        // **And this is where a direction is worth having.** We know where we are going and have no
+        // way to get there, so the graph has nothing to say and the choice used to come down to the
+        // lowest key — a run heading for the anomaly stepping whichever way the alphabet pointed.
+        //
+        // [`WorldMap::gap`] answers it whenever the target has been placed by some dump, which is
+        // the one thing a route needs and a direction does not: the target may sit in a component we
+        // cannot reach and its position is still true. This is the potential function
+        // `docs/superpowers/notes/navigation-loops.md` says every navigation bug here came down to
+        // lacking, and this is the branch that most needed one.
+        //
+        // Its limit is worth stating next to it. A place no dump has ever shown us has **no position
+        // either**, so a target learned only from `completedAreas` — which is how the anomaly key
+        // arrives on a fresh launch — gets `None` here and the ordering falls back to what it always
+        // did. Coordinates speak about places we have seen, never about places we have merely heard
+        // of. Getting direction on the anomaly before meeting it would need a different source.
         let me = self.places.get(here)?;
         let mut options: Vec<&Place> = me
             .neighbours
@@ -1239,9 +1351,16 @@ impl WorldMap {
             .filter_map(|k| self.places.get(k))
             .filter(|p| p.is_frontier())
             .collect();
+        let toward = |p: &Place| -> i64 {
+            self.gap(&p.key, &plan.target).map(|d| d as i64).unwrap_or(i64::MAX)
+        };
         // Avoided places sort last rather than out, so they remain a last resort.
         options.sort_by(|a, b| {
-            a.avoid.cmp(&b.avoid).then(a.visited.cmp(&b.visited)).then(a.key.cmp(&b.key))
+            a.avoid
+                .cmp(&b.avoid)
+                .then(a.visited.cmp(&b.visited))
+                .then(toward(a).cmp(&toward(b)))
+                .then(a.key.cmp(&b.key))
         });
         options.first().map(|p| Hop { step: p.key.clone(), plan })
     }
@@ -1311,8 +1430,8 @@ impl WorldMap {
         }
         let entrance = self.entered_from.clone();
         let target = self.next_target().map(|p| p.target);
-        if let Some(target) = target {
-            let dist = self.distances(&target);
+        if let Some(target) = target.as_ref() {
+            let dist = self.distances(target);
             if let Some(best) = exits
                 .iter()
                 .filter(|e| dist.contains_key(&e.to_key))
@@ -1365,8 +1484,21 @@ impl WorldMap {
         // puts a cleared exit ahead of an unfought one and a forest ahead of a crypt. Still avoiding
         // the entrance where there is any alternative, since that part was never the problem.
         //
-        // This is a *tiebreak among doors*, not a route. It cannot know which way the objective is;
-        // it can only decline to pay for a fight when a free door is standing open.
+        // ## Then which way the target actually lies
+        //
+        // `Risk` alone still leaves a coin toss between equally safe doors, and it was the dev who
+        // pointed out we already have the answer and throw it away: every dump prints each node's
+        // position, and [`WorldMap::gap`] turns those into straight-line distance. So among doors
+        // that cost the same, take the one whose far side lies nearest the target.
+        //
+        // **Below `Risk` on purpose.** A heuristic that knows direction and not terrain will happily
+        // point through a level 6 crypt because the objective is on the other side of it, and this
+        // fallback runs precisely when we have no route to check that against. Safety first, then
+        // direction, then a stable key so the choice never flaps. Promoting direction above risk is
+        // a tuning decision, and it wants evidence from a run rather than an argument.
+        //
+        // Doors with no position sort last among their risk band rather than first: an unplaced node
+        // is unmeasured, and guessing it is nearby is exactly the move that put a run in a crypt.
         //
         // Abandoned roads drop out first. Without this the memory in [`WorldMap::committed_exit`]
         // was decorative: it releases a commitment whose road we have written off, and then this
@@ -1382,9 +1514,15 @@ impl WorldMap {
             .collect();
         let mut ranked: Vec<&crate::observe::adjacency::Exit> =
             if live.is_empty() { exits.iter().collect() } else { live };
+        // `f64` has no `Ord`, so the heuristic is bucketed into integers rather than compared as a
+        // float. Rounding is harmless here — the question is which door points the right way, not
+        // by how many pixels — and it keeps the whole key sortable and total.
+        let toward = |k: &String| -> i64 {
+            target.as_ref().and_then(|t| self.gap(k, t)).map(|d| d as i64).unwrap_or(i64::MAX)
+        };
         ranked.sort_by_key(|e| {
             let risk = self.places.get(&e.to_key).map(|p| p.risk()).unwrap_or(Risk::Unseen);
-            (Some(&e.to_key) == entrance.as_ref(), risk, &e.to_key)
+            (Some(&e.to_key) == entrance.as_ref(), risk, toward(&e.to_key), &e.to_key)
         });
         ranked.first().map(|e| e.to_key.clone())
     }
@@ -3102,6 +3240,85 @@ mod tests {
             vec![node("l9sub1", "Saltagh Park road"), node("l9sub2", "Saltagh Park road")],
             both.clone()));
         (m, dane, cowlam)
+    }
+
+    /// A node seen in two dumps of different places lands in one frame.
+    ///
+    /// The whole trick: the printed numbers are `xoffset + world*zoomMult` (`overworldview.lua:1033`)
+    /// so they move with the pan, but one node in common fixes the shift for everything else in the
+    /// dump. These readings are the shape of the real thing — `l38`'s neighbours were printed three
+    /// times in one run at (586.95, 813.93), (693.12, 664.22) and (713.70, 635.20).
+    #[test]
+    fn two_dumps_of_different_places_agree_on_one_map() {
+        let mut m = WorldMap::new();
+        // First dump defines the frame: `a` at (100, 100), `b` at (200, 100).
+        m.fold(&dump("here", "Somewhere", vec![
+            Node { key: "a".into(), heading: "A".into(), x: 100.0, y: 100.0, connections: 2 },
+            Node { key: "b".into(), heading: "B".into(), x: 200.0, y: 100.0, connections: 2 },
+        ]));
+        // Walk to `a` and pan: every number shifts by (+50, -30). `b` is the node in common.
+        m.fold(&dump("a", "A", vec![
+            Node { key: "b".into(), heading: "B".into(), x: 250.0, y: 70.0, connections: 2 },
+            Node { key: "c".into(), heading: "C".into(), x: 350.0, y: 70.0, connections: 2 },
+        ]));
+        // `c` is 100 beyond `b` in the second frame, so 300 in the first — the pan cancels.
+        assert_eq!(m.get("c").unwrap().pos, Some((300.0, 100.0)), "registered through `b`");
+        assert_eq!(m.gap("a", "c").map(|d| d as i64), Some(200), "and distances survive the pan");
+    }
+
+    /// Positions come from the surface only, so a subworld's own frame cannot contaminate it.
+    #[test]
+    fn a_subworld_dump_places_nothing() {
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump("l9", "l9sub1", "Saltagh Park road",
+            vec![Node { key: "l9sub2".into(), heading: "road".into(), x: 5.0, y: 5.0, connections: 2 }],
+            vec![exit("l19")]));
+        assert_eq!(m.get("l9sub2").unwrap().pos, None, "zoomMult is unchecked inside a subworld");
+    }
+
+    /// Heading for a target we cannot route to, step the way it lies.
+    ///
+    /// This is the branch coordinates were wanted for. `next_hop` finds no route — the normal state
+    /// early on, and the permanent state for anything across a fog gap — and steps to an adjacent
+    /// frontier instead. That choice used to come down to the lowest key, so a run heading for the
+    /// anomaly stepped whichever way the alphabet pointed.
+    ///
+    /// **Not** the case that sent a run into a level 5 crypt, and the difference matters. There the
+    /// anomaly key came from `completedAreas`, so it had no edges *and no position*: nothing
+    /// directional existed to use. Coordinates speak about places some dump has shown us, never
+    /// about places we have only heard of.
+    #[test]
+    fn with_no_route_we_step_the_way_the_target_lies() {
+        let mut m = WorldMap::new();
+        // Two unvisited neighbours, and the anomaly off to the west — placed, but in a component
+        // this node cannot reach.
+        m.fold(&dump("here", "The Wold crossroads", vec![
+            Node { key: "west".into(), heading: "West Field".into(),
+                   x: -100.0, y: 0.0, connections: 3 },
+            Node { key: "east".into(), heading: "East Field".into(),
+                   x: 100.0, y: 0.0, connections: 3 },
+        ]));
+        m.fold(&dump("far-off", "Somewhere else", vec![
+            Node { key: "start".into(), heading: "The Rift anomaly".into(),
+                   x: -500.0, y: 0.0, connections: 2 },
+            Node { key: "west".into(), heading: "West Field".into(),
+                   x: -100.0, y: 0.0, connections: 3 },
+        ]));
+        m.apply_save(&crate::game::save::parse(
+            "return { overworld = { areaFlags = { hell = 0.1 } } }",
+        ).unwrap());
+        m.fold(&dump("here", "The Wold crossroads", vec![
+            Node { key: "west".into(), heading: "West Field".into(),
+                   x: -100.0, y: 0.0, connections: 3 },
+            Node { key: "east".into(), heading: "East Field".into(),
+                   x: 100.0, y: 0.0, connections: 3 },
+        ]));
+
+        let hop = m.next_hop().expect("a step");
+        assert_eq!(hop.plan.reason, Goal::Anomaly, "the errand is unchanged by not knowing the way");
+        assert_eq!(hop.plan.target, "start");
+        assert!(m.gap("west", "start").unwrap() < m.gap("east", "start").unwrap());
+        assert_eq!(hop.step, "west", "toward the anomaly, not the lower key");
     }
 
     #[test]
