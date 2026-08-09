@@ -46,25 +46,39 @@
 //! simulation collide, so there is no duration to wait out and nothing to match against until it
 //! arrives — but we know which screen we are on, and it is the only thing in that slot.
 //!
-//! ## Known blocker: in this save, a rest crashes the game
+//! ## There is no crash here. This section used to say there was.
 //!
-//! `requireCheck` for the Physics dream (`overworld/events/rested.lua:12-17`) indexes two values it
-//! does not guard:
+//! **RETRACTED 2026-08-08, by a live rest.** The dream ran, `Physics dream:` printed, and the game
+//! carried on. Kept as a worked example of a measurement that was confidently wrong, because the
+//! shape of the mistake is one this project keeps making.
+//!
+//! The claim was that `requireCheck` (`overworld/events/rested.lua:12-16`) indexes two unguarded
+//! nils and takes the game down on the first press:
 //!
 //! ```lua
+//! and (overworldview.areaFlag'shrinePremonition' and overworldview.areaFlag'shrinePremonitionParallax')
 //! and (not persistent.unlockedModes.physicsDream or love.math.random(1,4)==1)
 //! and not overworldview.areaFlag'shrinePremonitionData'.gameover
 //! ```
 //!
-//! `persistent.unlockedModes` is never initialised anywhere in the game (`main.lua:11` loads the
-//! file or `{version=47}`), and `shrinePremonitionData` is only ever written from *inside* the dream
-//! (`:103-105`) — while `shrinePremonition` is set by an ordinary major-shrine visit
-//! (`shrine.lua:557-559`). The sandbox save has `shrinePremonition = "shrine1"` and neither of the
-//! other two, so the guard at `:13` passes and the next line indexes a nil.
+//! It was reproduced offline in vendored LuaJIT against the real save files — and reproduced only
+//! because the harness built `persistent` wrongly. **`persistentSaveData` on disk contains
+//! `unlockedModes`.** The reading behind it, "`persistent.unlockedModes` is never initialised
+//! anywhere in the game", came from `main.lua:11` plus a grep for assignments, and never from
+//! opening the file the line loads. `shrinePremonitionData` is likewise present in `mainSaveData`,
+//! so `.gameover` indexes fine too.
 //!
-//! `FindValidEvents` calls `requireCheck` unprotected (`overworld/event.lua:6`), and `doRest` calls
-//! `getEvent` on **every** rest, inn or campfire. So the first press lands in a Lua error. Nothing
-//! in this module can avoid it; the fix is the game's.
+//! Two lessons, and the second is the one worth carrying:
+//!
+//! 1. **A grep for writes cannot tell you what a save contains.** The state came from a file, not
+//!    from code, so no amount of reading code was going to find it.
+//! 2. **The positive control masked the bug.** Seeding `unlockedModes` and watching the error clear
+//!    "confirmed" the diagnosis — but it confirms the same thing whether the field was missing in
+//!    the game or only in the harness. A control has to distinguish the hypothesis from the way the
+//!    experiment could be broken, and that one could not.
+//!
+//! The dev rejected the offline reproduction as insufficient at the time and asked for an in-game
+//! one. That instinct was right and the delay cost nothing.
 
 use crate::game::save::{Table, Value};
 use crate::win::window::ButtonSpec;

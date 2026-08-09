@@ -636,18 +636,38 @@ impl Run<'_> {
         }
     }
 
-    /// Enters the inn we are standing on, rests until the bar is full, and comes back out.
+    /// Enters the inn we are standing on, rests until full or out of money, and comes back out.
     ///
     /// Every step is confirmed by the console rather than by pixels — see [`crate::innplay`] for the
     /// three lines the game prints and why one press is not one rest. Returns whether any gold was
     /// actually spent on health; the caller re-reads the save either way, because "it did not work"
     /// and "we were already full" both end here and only the save can tell them apart.
     ///
-    /// **This will not survive its first live press in the current sandbox save.** `doRest` calls
-    /// `getEvent` on every rest, and the Physics dream's `requireCheck` indexes two unguarded nils
-    /// (`overworld/events/rested.lua:14-15`). The module docs have the details. Nothing here can
-    /// route around it; it is logged loudly instead of failing quietly, because a Lua error takes
-    /// the whole game with it and the next thing this run does would otherwise look like a mystery.
+    /// ## Why this is a loop of rounds and not a loop of presses
+    ///
+    /// **A dream ends the rest screen.** `doRest` can queue an event, and the event's `back` returns
+    /// to the *inn*, not to the screen we were pressing on — so every press after a dream lands on
+    /// nothing. Live 2026-08-08: 1/20, four presses planned, the first one dreamt, and the run left
+    /// at 7/20 with 775 gold still in its pocket and `1 of 4 press(es) landed` in the log. The dream
+    /// was detected and woken from correctly; it was treated as the end of the errand rather than an
+    /// interruption to it.
+    ///
+    /// So each **round** opens the rest screen fresh, reads a block, and presses until it is done or
+    /// something takes the screen away. Waking from a dream starts another round.
+    ///
+    /// ## The stop condition is the game's own, not our arithmetic
+    ///
+    /// "Until full or broke" is `canRest && healthNeed > 0` read from a **freshly opened** rest
+    /// screen, which is the one place that block can be trusted: `doRest` logs before its caller
+    /// runs `payRestCost`/`updateHealthArmour` (`ui/rest.lua:387-401`), so the block printed *after*
+    /// a rest is one step behind, while the one printed on opening is current. `canRest` is the
+    /// game's own `getPlayerGold() >= 10` (`:49`), so the money question is answered by the inn
+    /// rather than by a gold figure of ours — which matters, because the save is only written on
+    /// screen exit and ours goes stale the moment we start spending.
+    ///
+    /// That staleness can still make [`crate::innplay::presses_needed`] over-count *within* a round.
+    /// It is bounded: the button goes inactive, no `Rested` arrives, the round stops, and the next
+    /// round's `canRest` answers false.
     fn rest_at_inn(&mut self) -> bool {
         use crate::innplay;
 
@@ -659,60 +679,89 @@ impl Run<'_> {
             return false;
         }
 
-        // 2. `Rest`, which is a button on the inn screen rather than an area button.
-        let mark = self.feed.mark();
-        if !self.click_button(&innplay::INN_REST) {
-            self.log.push_str("  rest: could not click `Rest`\n");
-            self.leave_inn(1);
-            return false;
-        }
-        if !self.wait_for_line(mark, innplay::REST_SCREEN, Duration::from_secs(8)) {
-            self.log.push_str("  rest: the rest screen did not open\n");
-            self.leave_inn(1);
-            return false;
-        }
-        let Some(data) = innplay::parse_rest_data(self.feed.since(mark)) else {
-            self.log.push_str("  rest: the rest screen printed no `Rest data` block\n");
-            self.leave_inn(2);
-            return false;
-        };
-        let gold = self.map.gold();
-        let presses = innplay::presses_needed(&data, gold);
-        self.log.push_str(&format!(
-            "  rest: {} missing, {} a press, {gold} gold — pressing {presses} time(s)\n",
-            data.health_need, data.health_give
-        ));
-
-        // 3. Press. Space rather than the button: `Rest` declares
-        //    `userFunctionName = 'affirmative'` (`ui/rest.lua:513`) and `space = 'affirmative'`
-        //    (`utils/defaultbinds/keyboard.lua:13`), and reading the binding beats trusting a
-        //    coordinate on a screen we have never photographed.
+        // 2. Rounds. Each opens the rest screen from the inn — so each gets a block that is current
+        //    — and each ends back on the inn, the dream path included, since the dream's own `back`
+        //    lands there.
         let mut done = 0;
-        for _ in 0..presses {
+        while done < innplay::MAX_PRESSES {
             let mark = self.feed.mark();
-            if self.keys.press_key(VK_SPACE, SC_SPACE).is_err() {
-                self.log.push_str("  rest: the Space press failed\n");
+            if !self.click_button(&innplay::INN_REST) {
+                self.log.push_str("  rest: could not click `Rest`\n");
                 break;
             }
-            if !self.wait_for_line(mark, innplay::RESTED, Duration::from_secs(8)) {
-                // The press was swallowed, the button went inactive, or the game is no longer
-                // there. Stopping beats pressing harder at something that is not answering.
-                self.log.push_str("  rest: no `Rested` after the press — stopping here\n");
+            if !self.wait_for_line(mark, innplay::REST_SCREEN, Duration::from_secs(8)) {
+                self.log.push_str("  rest: the rest screen did not open\n");
                 break;
             }
-            done += 1;
-            // The only field in a `Rested` block that is current, and it is a two-second warning.
-            if innplay::parse_rest_data(self.feed.since(mark)).map(|d| d.doing_event).unwrap_or(false)
-            {
-                self.log.push_str("  rest: a dream is queued — waking from it\n");
-                self.wake_from_dream();
+            let Some(data) = innplay::parse_rest_data(self.feed.since(mark)) else {
+                self.log.push_str("  rest: the rest screen printed no `Rest data` block\n");
+                self.leave_inn(1);
                 break;
+            };
+            let gold = self.map.gold();
+            let presses = innplay::presses_needed(&data, gold).min(innplay::MAX_PRESSES - done);
+            self.log.push_str(&format!(
+                "  rest: {} missing, {} a press, {gold} gold — pressing {presses} time(s)\n",
+                data.health_need, data.health_give
+            ));
+            // Nothing left to buy. The only exit from this loop that is not a failure, and the
+            // answer comes from the inn rather than from our own arithmetic.
+            if presses == 0 {
+                self.log.push_str(match data.can_rest {
+                    false => "  rest: done — the inn will not serve us\n",
+                    true => "  rest: done — nothing left to heal\n",
+                });
+                self.leave_inn(1);
+                break;
+            }
+
+            // 3. Press. Space rather than the button: `Rest` declares
+            //    `userFunctionName = 'affirmative'` (`ui/rest.lua:513`) and `space = 'affirmative'`
+            //    (`utils/defaultbinds/keyboard.lua:13`), and reading the binding beats trusting a
+            //    coordinate on a screen we have never photographed.
+            let mut dreamt = false;
+            let mut stalled = false;
+            for _ in 0..presses {
+                let mark = self.feed.mark();
+                if self.keys.press_key(VK_SPACE, SC_SPACE).is_err() {
+                    self.log.push_str("  rest: the Space press failed\n");
+                    stalled = true;
+                    break;
+                }
+                if !self.wait_for_line(mark, innplay::RESTED, Duration::from_secs(8)) {
+                    // The press was swallowed, the button went inactive, or the game is no longer
+                    // there. Stopping beats pressing harder at something that is not answering.
+                    self.log.push_str("  rest: no `Rested` after the press — stopping here\n");
+                    stalled = true;
+                    break;
+                }
+                done += 1;
+                // The only field in a `Rested` block that is current, and it is a two-second
+                // warning that the screen is about to be taken away from us.
+                if innplay::parse_rest_data(self.feed.since(mark))
+                    .map(|d| d.doing_event)
+                    .unwrap_or(false)
+                {
+                    self.log.push_str("  rest: a dream is queued — waking from it\n");
+                    self.wake_from_dream();
+                    dreamt = true;
+                    break;
+                }
+            }
+            if stalled {
+                self.leave_inn(1);
+                break;
+            }
+            // The dream has already put us back on the inn. Otherwise we are still on the rest
+            // screen, and the next round's `Rest` press needs something to hit.
+            if !dreamt {
+                self.leave_inn(1);
             }
         }
-        self.log.push_str(&format!("  rest: {done} of {presses} press(es) landed\n"));
+        self.log.push_str(&format!("  rest: {done} press(es) landed\n"));
 
-        // 4. Out. Two screens, one plaque: the rest screen, then the inn.
-        self.leave_inn(2);
+        // 4. Out of the inn itself.
+        self.leave_inn(1);
         done > 0
     }
 
