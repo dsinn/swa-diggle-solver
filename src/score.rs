@@ -39,9 +39,29 @@
 //!   the half that can reach zero).
 //! - **`bonusBurnTileMult` gear is not read**, so a burning tile is scored at zero rather than half.
 //!
-//! Every one of those pushes the same way: this can under-rate a word, not over-rate one. That
-//! direction is chosen deliberately. An over-estimate types a word that fails to kill and hands the
-//! enemy a free turn; an under-estimate only costs search.
+//! Every one of those pushes the same way: this can under-rate a word, not over-rate one.
+//!
+//! ## That direction is only safe for goals with a floor
+//!
+//! It was chosen deliberately, and the reasoning was: an over-estimate types a word that fails to
+//! kill and hands the enemy a free turn, while an under-estimate only costs search. True of
+//! [`crate::search::Goal::FirstKill`] and friends, which ask for *at least* so much damage.
+//!
+//! **It is exactly backwards for [`crate::search::Goal::Scare`]**, which has a ceiling.
+//! Under-rating a word there means playing something that hits harder than we believe, which kills
+//! the enemy we were trying to frighten away — the one outcome that goal exists to avoid.
+//!
+//! Measured live, 2026-08-09. The player was wearing `wordScoreBonusPreLength456 = 3`
+//! (`items/lengthgear.lua:36-38` grants three stacks; the modifier is `scorePreAdd = 1` for any word
+//! of length 4, 5 or 6 — `rpg/effects/modifiers/wordScoreBonusPreLength456.lua`). We scored `AAPA`
+//! at 4; the game scored it 7. Against a highwayman on 5 health behind 1 armour that is 6 through,
+//! so `enemyDiesNow` (`rpgview.lua:1024`) was true and the game raised the avoidable-murder warning.
+//! Three-letter `AAM` took no bonus and was accepted, which is what pins the cause to the length
+//! band rather than to anything else on the board.
+//!
+//! So the divergence is no longer only a cost in search. Until the `wordBonus` modifiers are read,
+//! `Goal::Scare` is aiming with a ruler it knows is short, and `murder_backoff`
+//! ([`crate::fight`]) is what keeps that survivable.
 
 use crate::game::save::{parse, parse_module, Table};
 use crate::observe::board::Tile;

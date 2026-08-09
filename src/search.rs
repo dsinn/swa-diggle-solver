@@ -279,6 +279,17 @@ pub struct Outcome {
     pub lethal: Option<Found>,
     /// Highest-scoring word seen, for when nothing is lethal.
     pub best: Option<Found>,
+    /// Lowest-scoring word seen, for when nothing fits a band and hitting hard is the wrong miss.
+    ///
+    /// A goal with a ceiling cannot fall back on [`Outcome::best`]. Undershooting a scare costs a
+    /// turn; overshooting it kills the thing we were trying to frighten away — so when no word lands
+    /// inside the band, the nearest safe answer is the *smallest* hit available, not the largest.
+    ///
+    /// Live, 2026-08-09: a murder warning backed the band down to `need 0, below 1`, which no word
+    /// can satisfy because no word scores zero. `choice` fell through to `best` and played the
+    /// hardest-hitting word on the board, which raised the warning again — thirty times, until the
+    /// run was stopped by hand. Aiming as low as possible produced the most murderous word possible.
+    pub least: Option<Found>,
     /// Longest makeable word seen. Tracked separately because the refresh rule is about LENGTH, and
     /// the highest-scoring word is not necessarily the longest — a short word of gold tiles can
     /// outscore a long one of wood. Free to collect: the only time it matters is when no lethal word
@@ -308,8 +319,24 @@ impl Outcome {
     }
 
     /// What to actually play: the lethal word if there is one, else the best found.
+    ///
+    /// Only correct for goals with **no upper bound**. See [`Outcome::choice_for`] — a band goal
+    /// that misses its band must not fall back on the hardest hit available.
     pub fn choice(&self) -> Option<&Found> {
         self.lethal.as_ref().or(self.best.as_ref())
+    }
+
+    /// What to play given the goal that was searched for.
+    ///
+    /// The fallback direction is a property of the goal, not of the search, and reading it off the
+    /// goal is what keeps the two from disagreeing. A ceiling means missing upward is the dangerous
+    /// miss, so [`Goal::Scare`] falls back to [`Outcome::least`]; everything else is trying to do as
+    /// much damage as it can and falls back to [`Outcome::best`].
+    pub fn choice_for(&self, goal: Goal) -> Option<&Found> {
+        match goal {
+            Goal::Scare { .. } => self.lethal.as_ref().or(self.least.as_ref()),
+            _ => self.choice(),
+        }
     }
 }
 
@@ -675,6 +702,10 @@ pub fn ranked_kill(
     Outcome {
         lethal: lethal.into_inner().unwrap().map(|(f, _)| f),
         best: best.into_inner().unwrap(),
+        // No ceiling on this goal, so nothing ever asks for the gentlest word — see
+        // `Outcome::choice_for`. Left unset rather than collected, so that a goal which *did* want
+        // it and came through here would fail loudly instead of quietly playing the hardest hit.
+        least: None,
         longest: longest.into_inner().unwrap(),
         words_considered: considered.into_inner(),
     }
@@ -763,6 +794,9 @@ pub fn max_damage(
         // plays `best`, which is lethal too whenever anything is.
         lethal: None,
         best: best.into_inner().unwrap(),
+        // `MaxDamage` is the one goal that explicitly wants the hardest hit, so the gentlest word is
+        // not merely unused here — asking for it would be a contradiction.
+        least: None,
         longest: longest.into_inner().unwrap(),
         words_considered: considered.into_inner(),
     }
@@ -804,16 +838,18 @@ pub fn race_for_band(
     let stop = AtomicBool::new(false);
     let lethal: Mutex<Option<Found>> = Mutex::new(None);
     let best: Mutex<Option<Found>> = Mutex::new(None);
+    let least: Mutex<Option<Found>> = Mutex::new(None);
     let longest: Mutex<Option<Found>> = Mutex::new(None);
     let considered = std::sync::atomic::AtomicUsize::new(0);
 
     std::thread::scope(|scope| {
         for (slice, part) in words.chunks(chunk).enumerate() {
-            let (stop, lethal, best, longest, considered, typist, mods) =
-                (&stop, &lethal, &best, &longest, &considered, &typist, mods);
+            let (stop, lethal, best, least, longest, considered, typist, mods) =
+                (&stop, &lethal, &best, &least, &longest, &considered, &typist, mods);
             scope.spawn(move || {
                 let mut seen = 0usize;
                 let mut local_best: Option<Found> = None;
+                let mut local_least: Option<Found> = None;
                 let mut local_longest: Option<Found> = None;
                 for word in part {
                     // Checked periodically rather than every word: an atomic load per word would
@@ -849,6 +885,9 @@ pub fn race_for_band(
                     if local_best.as_ref().map(|b| score > b.score).unwrap_or(true) {
                         local_best = Some(Found { word: word.clone(), score, slice });
                     }
+                    if local_least.as_ref().map(|b| score < b.score).unwrap_or(true) {
+                        local_least = Some(Found { word: word.clone(), score, slice });
+                    }
                     if local_longest
                         .as_ref()
                         .map(|b| word.chars().count() > b.word.chars().count())
@@ -862,6 +901,12 @@ pub fn race_for_band(
                     let mut b = best.lock().unwrap();
                     if b.as_ref().map(|cur| lb.score > cur.score).unwrap_or(true) {
                         *b = Some(lb);
+                    }
+                }
+                if let Some(lst) = local_least {
+                    let mut l = least.lock().unwrap();
+                    if l.as_ref().map(|cur| lst.score < cur.score).unwrap_or(true) {
+                        *l = Some(lst);
                     }
                 }
                 if let Some(ll) = local_longest {
@@ -880,6 +925,7 @@ pub fn race_for_band(
     Outcome {
         lethal: lethal.into_inner().unwrap(),
         best: best.into_inner().unwrap(),
+        least: least.into_inner().unwrap(),
         longest: longest.into_inner().unwrap(),
         words_considered: considered.into_inner(),
     }
@@ -911,11 +957,67 @@ mod tests {
         race_for_kill(dict, scorer, tiles, &Geometry::default(), mods, need, 8)
     }
 
+    /// A band nothing can satisfy must fall back DOWNWARD.
+    ///
+    /// The live failure this reproduces, 2026-08-09: a murder warning backed `Goal::Scare` down to
+    /// `need 0, below 1`, and on a board where nothing scored zero the band came up empty.
+    /// `Outcome::choice` handed back `best` — `VENEPUNCTURE`, 40 points, against an enemy on 2
+    /// health. The game refused it as murder, the backoff lowered the ceiling again, and the same
+    /// word came back thirty times until the run was stopped by hand. "Aim as low as you can" had
+    /// come to mean "hit as hard as you can".
+    ///
+    /// The band here is unreachable by construction rather than by score-zero, because the first
+    /// draft of this test assumed no word can score 0 and the crypt board disproved it — single
+    /// letters on plain tiles score nothing, and the run played `A` and `O` quite happily. What
+    /// makes the bug fire is an empty band, whatever emptied it.
+    #[test]
+    fn a_scare_that_cannot_be_satisfied_plays_the_gentlest_word_not_the_hardest() {
+        if !present() {
+            return;
+        }
+        let dict = Dictionary::load(&game_dir()).unwrap();
+        let scorer = Scorer::new(&game_dir()).unwrap();
+        let tiles = crypt_board();
+        let mods = Modifiers::none();
+        let goal = Goal::Scare { need: 1000, below: 1001 };
+        let out =
+            race_for_band(&dict, &scorer, &tiles, &Geometry::default(), &mods, 1000, Some(1001), 8);
+
+        assert!(out.lethal.is_none(), "no word on this board scores 1000, so the band is empty");
+        let best = out.best.as_ref().expect("the scan still collects a best word");
+        let least = out.least.as_ref().expect("and must now collect a least one");
+        assert!(
+            least.score < best.score,
+            "this board has words of different scores, or the test proves nothing: \
+             least {} ({}), best {} ({})",
+            least.word,
+            least.score,
+            best.word,
+            best.score
+        );
+
+        let played = out.choice_for(goal).expect("something is playable");
+        assert_eq!(
+            played.score, least.score,
+            "a missed scare band must fall back to the gentlest word, not to {} at {}",
+            best.word, best.score
+        );
+
+        // And the ordinary kill goals must be unaffected — they have no ceiling, so hitting hard is
+        // still the right miss.
+        assert_eq!(
+            out.choice_for(Goal::MaxDamage).map(|f| f.score),
+            Some(best.score),
+            "only a band goal changes direction"
+        );
+    }
+
     #[test]
     fn refresh_only_when_nothing_good_and_nothing_lethal() {
         let lethal = Outcome {
             lethal: Some(Found { word: "CAT".into(), score: 9, slice: 0 }),
             best: Some(Found { word: "CAT".into(), score: 9, slice: 0 }),
+            least: None,
             longest: Some(Found { word: "CAT".into(), score: 9, slice: 0 }),
             words_considered: 1,
         };
@@ -925,6 +1027,7 @@ mod tests {
         let weak = Outcome {
             lethal: None,
             best: Some(Found { word: "CAT".into(), score: 4, slice: 0 }),
+            least: None,
             longest: Some(Found { word: "CAT".into(), score: 4, slice: 0 }),
             words_considered: 1,
         };
@@ -943,6 +1046,7 @@ mod tests {
         let out = Outcome {
             lethal: None,
             best: Some(Found { word: "JAY".into(), score: 20, slice: 0 }),
+            least: None,
             longest: Some(Found { word: "OATMEALS".into(), score: 12, slice: 1 }),
             words_considered: 10,
         };

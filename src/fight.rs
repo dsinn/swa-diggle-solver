@@ -173,6 +173,9 @@ impl Fight<'_> {
         // How far below our own ceiling to aim, after the game has called an attempt murder. One
         // point per refusal; see where it is applied.
         let mut murder_backoff = 0i64;
+        // The enemy health and armour the backoff above was measured against. Impossible as a real
+        // reading, so the first turn always records rather than compares.
+        let mut last_seen_at = (i64::MIN, i64::MIN);
         let mut last_change = Instant::now();
         let mut finished = false;
         // When `combatSaveData` first became unreadable, cleared on every successful read.
@@ -277,7 +280,16 @@ impl Fight<'_> {
                 }
                 "PlayerTurn" => {
                     turns += 1;
-                    match self.play_turn(feed, keys, log, &cs, turns, &mut peak_health, &mut murder_backoff)? {
+                    match self.play_turn(
+                        feed,
+                        keys,
+                        log,
+                        &cs,
+                        turns,
+                        &mut peak_health,
+                        &mut murder_backoff,
+                        &mut last_seen_at,
+                    )? {
                         Some(bad) => return Ok(bad),
                         None => {}
                     }
@@ -301,6 +313,7 @@ impl Fight<'_> {
     fn play_turn(
         &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, cs: &Table, turns: usize,
         peak_health: &mut std::collections::HashMap<String, i64>, murder_backoff: &mut i64,
+        last_seen_at: &mut (i64, i64),
     ) -> Result<Option<Outcome>, crate::Error> {
         let tiles = tiles_of(cs);
         if tiles.is_empty() {
@@ -335,9 +348,29 @@ impl Fight<'_> {
         // model is wrong by at least the amount we have backed off. Re-searching with the same
         // ceiling would choose the same word and be refused again, forever; each refusal takes one
         // more point off the top. `need` moves with it, or a band one point wide inverts.
+        //
+        // ## The backoff is discarded when the enemy's state changes
+        //
+        // It is a correction to a disagreement measured at *one* health and armour, not a standing
+        // opinion about the enemy. A live run carried a backoff of 2 from a 5hp reading down to a
+        // 2hp one, where the honest goal was already `Scare { 1, 3 }` — a single point of damage,
+        // absorbed by armour, with the enemy at its flee threshold. The stale backoff dragged that
+        // to `Scare { 0, 1 }`, which nothing can satisfy.
+        if *murder_backoff > 0 && (health, armour) != *last_seen_at {
+            log.push_str(&format!(
+                "  {name} is now {health}+{armour}hp; dropping the murder backoff of {murder_backoff}\n"
+            ));
+            *murder_backoff = 0;
+        }
+        *last_seen_at = (health, armour);
         if *murder_backoff > 0 {
             if let Goal::Scare { need, below } = goal {
-                let dropped = (below - *murder_backoff).max(1);
+                // Never below a band of `0..=0`. Word scores start at 1, so a ceiling of 1 admits
+                // nothing and the search falls through to its fallback — which is the whole reason
+                // this loop ran thirty times. Stopping at 2 keeps the band satisfiable by the
+                // smallest word there is; if even that is called murder, no amount of further
+                // lowering can help and the backoff is the wrong tool.
+                let dropped = (below - *murder_backoff).max(2);
                 goal = Goal::Scare { need: need.min(dropped - 1).max(0), below: dropped };
                 log.push_str(&format!(
                     "  aiming {} lower after a murder warning: {goal:?}
@@ -408,7 +441,7 @@ impl Fight<'_> {
         };
         let out = search::search(self.dict, self.scorer, &tiles, &geom, &mods, goal, &picking, 8);
         let letters: String = tiles.iter().map(|t| t.letter.as_str()).collect();
-        let Some(found) = out.choice().cloned() else {
+        let Some(found) = out.choice_for(goal).cloned() else {
             log.push_str(&format!("turn {turns}: nothing playable on {letters}\n"));
             return Ok(Some(Outcome::NoPlayableWord { turns, board: letters }));
         };
