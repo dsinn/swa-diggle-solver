@@ -365,4 +365,28 @@ Rest data = {
         // `Wake up` shares the overworld's area slot: x = 0 + 250*0.75, y = 1080*0.85.
         assert_eq!(button_center(&WAKE_UP, 1920, 1080), (187, 918));
     }
+
+    /// The arithmetic and the artwork have to agree about where `Rest` is.
+    ///
+    /// Two independent routes to one coordinate: this file derives it from the game's own
+    /// declaration (`ui/inn.lua:55`), while `act::INN_REST` carries a template cut from a
+    /// screenshot at a measured offset. Neither was computed from the other, so agreement is
+    /// evidence and disagreement means one of them is wrong about the screen.
+    ///
+    /// It is the template that gets clicked — recognition beats arithmetic, and `click_when_ready`
+    /// will not fire at all if the plaque is not there. This keeps the spec honest anyway, because
+    /// it is what says *which* button the template is supposed to be showing.
+    #[test]
+    fn the_template_sits_where_the_arithmetic_says_it_should() {
+        use crate::win::window::button_center;
+        let (cx, cy) = button_center(&INN_REST, 1920, 1080);
+        assert_eq!(crate::act::INN_REST.click, (cx, cy));
+        // The template's top-left is the click point less half a `default` button (250x100).
+        assert_eq!(crate::act::INN_REST.origin, (cx - 125, cy - 50));
+        // The rest screen's own button is a different one on a different screen: `(0.5, 0.9)`
+        // (`ui/rest.lua:504`). That separation is what makes a stray press at the inn's coordinate
+        // harmless once the rest screen is up — 460 px apart, so it lands on nothing.
+        assert_eq!(crate::act::REST_CONFIRM.click, (960, 972));
+        assert!((crate::act::INN_REST.click.0 - crate::act::REST_CONFIRM.click.0).abs() > 250);
+    }
 }

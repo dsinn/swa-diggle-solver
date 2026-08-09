@@ -933,6 +933,61 @@ pub const SHRINE_GOBACK: Button = Button {
 /// The shrine's back plaque is on screen. See [`SHRINE_GOBACK`]. **0.90**, against 0.3437 absent.
 pub const SHRINE_GOBACK_PRESENT: f64 = 0.90;
 
+/// The inn's `Rest`, on the inn screen.
+///
+/// `button('Rest', 1, 0.9, { xOffset = -2 })` (`ui/inn.lua:55`) with the 250x100 `default` size, so
+/// the centre is (1420, 972) and the template's top-left is (1295, 922). Cross-checked against
+/// [`crate::innplay::INN_REST`], which computes the same centre from the same declaration — two
+/// routes to one coordinate, the way [`SHRINE_GOBACK`] is cross-checked against `innplay::BACK`.
+///
+/// **Why this exists at all.** The press used to be blind: compute the centre, fire, and hope. It
+/// failed live on 2026-08-09 and the log could not say whether the button was absent, not yet live,
+/// or somewhere else — "were we clicking blindly rather than letting the observer tell us the button
+/// exists" was the dev's question, and the answer was yes. [`click_when_ready`] is the primitive
+/// that was always the right one here: it separates *not there yet* from *not there*, which is
+/// precisely the distinction that failure turned on.
+///
+/// Cut from a screenshot the dev took by hand, because the state cannot be summoned on demand from
+/// a test — same provenance as `continue-button-hot.png`, and the reason `crop_template` exists. The
+/// plaque is opaque, so the inn's interior behind it does not reach the template.
+pub const INN_REST: Button = Button {
+    name: "inn Rest",
+    template: "inn-rest.png",
+    search: (1287, 914, 1553, 1030),
+    origin: (1295, 922),
+    click: (1420, 972),
+};
+
+/// The rest screen's own `Rest`, which is a **readiness check** and not just a location.
+///
+/// `button('Rest', 0.5, 0.9)` (`ui/rest.lua:504`) — screen centre, (960, 972). Note this is a
+/// different button from [`INN_REST`] on a different screen, which is what makes a stray press at
+/// the inn's coordinate harmless once the rest screen is up: (1420, 972) is empty here.
+///
+/// Unlike most buttons in this file, this one has a live `activeIf`:
+///
+/// ```lua
+/// activeIf = function()
+///     if doingEvent then return end
+///     return canRest
+/// end
+/// ```
+///
+/// So it is drawn inactive while a dream is running and whenever the inn will not serve us — and
+/// matching the *active* artwork answers "may we press Space now", which nothing else can. The
+/// console says a rest screen exists; it does not say the button on it is live.
+///
+/// The `-10` in the template is the inn's fixed price (`crate::rest::INN_COST`, `ui/rest.lua:49`),
+/// so it is part of the artwork rather than a variable. A campfire charges fuel and would need its
+/// own template; this is only ever used at an inn.
+pub const REST_CONFIRM: Button = Button {
+    name: "rest Rest",
+    template: "rest-confirm.png",
+    search: (827, 914, 1093, 1030),
+    origin: (835, 922),
+    click: (960, 972),
+};
+
 /// The stats history page's return plaque, top right.
 ///
 /// Reached by accident, which is the whole reason it needs a fingerprint: a live run finished a
@@ -1239,6 +1294,8 @@ pub const ALL: &[&Button] =
     &STATS_BACK,
     &HEROSELECT_HEADER,
     &UNLOCK_CONTINUE,
+    &INN_REST,
+    &REST_CONFIRM,
 ];
 
 /// Start menu `Continue`. Measured on 52.3 at 1920x1080; `Restart` is the adjacent button at
@@ -1729,14 +1786,48 @@ mod tests {
         }
     }
 
+    /// Buttons allowed within the forbidden radius, and the reason each is allowed.
+    ///
+    /// **`inn Rest` — (1420, 972), 38 px from the slot.** The game puts it there; `ui/inn.lua:55`
+    /// is `('Rest', 1, 0.9, { xOffset = -2 })` and combat's `Hint`/`Fight on!` is normalized
+    /// (0.72, 0.9). Nothing about that is ours to move.
+    ///
+    /// What makes it safe is that this button is **only ever clicked through
+    /// [`click_when_ready`]**, which will not fire until the `Rest` plaque itself matches at
+    /// [`MIN_INLIERS`]. A combat screen cannot produce that match: the artwork is a different
+    /// plaque with different lettering. So the coordinate is only reached on a screen that has
+    /// already identified itself, which is the property this test is a blunt proxy for.
+    ///
+    /// **What would invalidate this.** Any caller that clicks `INN_REST.click` directly, or reaches
+    /// that coordinate through `Run::click_button`, which fires at arithmetic and recognises
+    /// nothing. If you are adding one, you are removing this exemption's only justification.
+    const RECOGNISED_ONLY: &[&str] = &["inn Rest"];
+
     #[test]
     fn the_forbidden_slot_is_not_reachable_through_any_button() {
         // Normalized (0.72, 0.9) is `Hint` or `Fight on!` depending on state, and Fight on commits
         // to another enemy. No Button may target it. At 1920x1080 that is about (1382, 972).
         const FORBIDDEN: (i32, i32) = (1382, 972);
         for b in ALL {
+            if RECOGNISED_ONLY.contains(&b.name) {
+                continue;
+            }
             let d = ((b.click.0 - FORBIDDEN.0).pow(2) + (b.click.1 - FORBIDDEN.1).pow(2)) as f64;
             assert!(d.sqrt() > 120.0, "{} clicks too close to the Fight on! slot", b.name);
+        }
+    }
+
+    /// The exemption list is not a place to park a button that merely fails the test.
+    ///
+    /// Every name on it must exist, so a rename cannot silently turn an exemption into a
+    /// no-op — which would leave the guard passing for a button nobody is checking.
+    #[test]
+    fn every_exempt_button_still_exists() {
+        for name in RECOGNISED_ONLY {
+            assert!(
+                ALL.iter().any(|b| &b.name == name),
+                "{name} is exempt from the forbidden-slot check but is not a Button any more"
+            );
         }
     }
 }

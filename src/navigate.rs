@@ -728,38 +728,36 @@ impl Run<'_> {
             // Press `Rest` until the screen says it opened. See [`innplay::REST_TRIES`] for why one
             // press is not enough: the inn announces itself from `onActive`, before it can take a
             // click, and a run lost an inn to that and walked to the next village at 7/20.
+            // **Wait for the button, then press it.** Not "press at the arithmetic centre and hope":
+            // `click_when_ready` polls `locate` until the artwork is actually on screen, which is
+            // the one thing that separates *not there yet* from *not there*. The blind version
+            // failed live on 2026-08-09 and could say nothing about why.
             let mut opened = None;
             for try_n in 1..=innplay::REST_TRIES {
                 let mark = self.feed.mark();
-                // Photographed before the press so a failure can say whether the click *did*
-                // anything. `click_button` fires at an arithmetic coordinate and reports only that
-                // the input was sent — so on its own, "no rest screen" cannot distinguish a button
-                // that was not live yet from a click that landed on nothing from the wrong screen
-                // being up. That ambiguity is what made this failure need a human with a
-                // screenshot. A diff is not a fingerprint, but it splits the three apart.
-                let before = crate::win::capture::capture_window(self.win).ok();
-                if !self.click_button(&innplay::INN_REST) {
-                    self.log.push_str("  rest: could not click `Rest`\n");
-                    break;
+                match crate::act::click_when_ready(self.win, &crate::act::INN_REST, innplay::REST_WAIT)
+                {
+                    Ok(q) => self.log.push_str(&format!("  rest: `Rest` found at {q:.4}\n")),
+                    Err(e) => {
+                        // The button never rendered. That is a real answer now rather than an
+                        // ambiguity, so say it and photograph the screen that disagreed with us.
+                        self.log.push_str(&format!("  rest: `Rest` never appeared — {e}\n"));
+                        self.snap_screen("rest-no-button");
+                        break;
+                    }
                 }
                 if self.wait_for_line(mark, innplay::REST_SCREEN, innplay::REST_WAIT) {
                     opened = Some(mark);
                     break;
                 }
-                let moved = match (&before, crate::win::capture::capture_window(self.win)) {
-                    (Some(b), Ok(a)) => {
-                        format!("{:.3}", b.diff_fraction(&a, crate::observe::settle::FULL))
-                    }
-                    _ => "unreadable".into(),
-                };
+                // Recognised and pressed, and the screen still did not open. A different failure
+                // from the one above and worth its own picture: the click landed on the artwork we
+                // matched, so the button was there and did not take.
                 self.log.push_str(&format!(
-                    "  rest: the rest screen did not open (try {try_n} of {}); screen moved {moved}\n",
+                    "  rest: pressed a `Rest` that was on screen, but no rest screen (try {try_n} \
+                     of {})\n",
                     innplay::REST_TRIES
                 ));
-                // The first failure and the last, not every one: the first catches a screen still
-                // arriving, the last shows what it settled into, and the ones between are the same
-                // picture at 1.5 MB each. The console cannot tell those two explanations apart,
-                // which is why there is a photograph at all.
                 if try_n == 1 || try_n == innplay::REST_TRIES {
                     self.snap_screen(&format!("rest-no-screen-{try_n}"));
                 }
@@ -796,6 +794,17 @@ impl Run<'_> {
             let mut dreamt = false;
             let mut stalled = false;
             for _ in 0..presses {
+                // **Is the button live?** This one has an `activeIf` — inactive while a dream runs
+                // and whenever the inn will not serve us (`ui/rest.lua:507-510`) — so unlike every
+                // other press in this file, "the screen is up" genuinely does not imply "the press
+                // will do something". The console can report a rest screen; only the artwork can
+                // report a live button. Matching the active version is the difference.
+                if matches!(crate::act::locate(self.win, &crate::act::REST_CONFIRM), Ok(None)) {
+                    self.log.push_str("  rest: `Rest` is not live on the rest screen — stopping\n");
+                    self.snap_screen("rest-button-inactive");
+                    stalled = true;
+                    break;
+                }
                 let mark = self.feed.mark();
                 if self.keys.press_key(VK_SPACE, SC_SPACE).is_err() {
                     self.log.push_str("  rest: the Space press failed\n");
