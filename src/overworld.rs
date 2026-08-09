@@ -3017,6 +3017,57 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_abandoned_node_is_still_stepped_on_when_it_is_the_only_way() {
+        // The load-bearing assumption behind `Run::backed_out_of`. Backing out of a blocking node
+        // abandons it, so the router looks for another way round — but if there is no other way, the
+        // unfiltered fallback has to bring us back to it, or the run wanders instead of fighting and
+        // the second strike never fires.
+        //
+        // `l9sub16` live: a level 1 spider nest, the only neighbour, on the only road to the exit.
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump(
+            "l9",
+            "l9sub11",
+            "Saltagh Park spider nest",
+            vec![node("l9sub16", "Saltagh Park — level 1 spider nest")],
+            vec![exit("l19")],
+        ));
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+        m.abandon("l9sub16");
+        // Not `None`, which would be a stall, and not a wander: the one neighbour there is.
+        match m.cross_toward(&[exit("l19")]) {
+            Some(Crossing::Explore { to, .. }) => assert_eq!(to, "l9sub16"),
+            other => panic!("expected the fallback to step onto it anyway, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn abandoning_the_blocker_takes_the_other_road_when_there_is_one() {
+        // The first strike's whole purpose. With a second way to the exit, retreating and retiring
+        // the blocker has to actually change the route -- otherwise backing out is theatre and the
+        // run bounces, which is exactly what five laps of `l9sub16` were.
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump(
+            "l9",
+            "l9sub11",
+            "Saltagh Park spider nest",
+            vec![
+                node("l9sub16", "Saltagh Park — level 1 spider nest"),
+                node("l9sub18", "Saltagh Park road"),
+            ],
+            vec![exit("l19")],
+        ));
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+        m.abandon("l9sub16");
+        match m.cross_toward(&[exit("l19")]) {
+            Some(Crossing::Explore { to, .. }) | Some(Crossing::Step { to, .. }) => {
+                assert_eq!(to, "l9sub18", "round the blocker, by the road");
+            }
+            other => panic!("expected a step round it, got {other:?}"),
+        }
+    }
+
     /// The dev's crossing rule, one pass at a time. The ordering IS the rule, so each layer is
     /// exercised by making the one above it unavailable.
     #[test]

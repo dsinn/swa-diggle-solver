@@ -339,21 +339,31 @@ pub struct Run<'a> {
     pub shrines_tried: std::collections::HashSet<String>,
     /// Area-slot captures already taken, so a template is photographed once rather than every step.
     pub slots_captured: std::collections::HashSet<String>,
-    /// Consecutive retreats inside a subworld, reset by any other crossing.
+    /// Nodes we have already backed out of once, inside whichever subworld we were in.
     ///
-    /// `WorldMap::cross_toward` prefers backing out to fighting while hurt, and that is right once.
-    /// Repeated, it is a cycle: live in `l9`, the route to the exit ran through `l9sub13` — a level 1
-    /// chest — so the run stepped on, found departure blocked, retreated to `l9sub11`, re-routed to
-    /// `l9sub13`, and went round four times before dying on a mistimed click.
+    /// `WorldMap::cross_toward` prefers backing out to fighting while hurt, and that is right the
+    /// first time — the interior is usually still fogged, and another way round may well exist.
+    /// Repeated, it is a cycle: live in `l9`, the route to the exit ran through `l9sub16` — a level
+    /// 1 spider nest — so the run stepped on, found departure blocked, retreated to `l9sub11`,
+    /// re-routed through `l9sub16`, and went round five times until it stopped.
     ///
-    /// The map cannot settle this on its own. The obvious test there — "is there another route to
-    /// the exit" — cannot tell an unavoidable fight from an interior we have simply not explored yet,
-    /// and on arrival the second is the normal state.
+    /// ## Why the counter this replaces could never fire
     ///
-    /// So the run counts instead. A second consecutive retreat means backing out is not finding us
-    /// anything, and the fight we are pacing in front of gets taken. The dev's rule: a forest whose
-    /// combat nodes completely block progress has to be fought through.
-    pub retreats_running: usize,
+    /// It counted **consecutive** `Retreat` verdicts and tripped at two. That pattern cannot occur:
+    /// a retreat lands us on a *completed* node, from which departure is never blocked, so the next
+    /// verdict is always a `Step`. The real cycle alternates retreat, step, retreat, step — and the
+    /// step reset the counter every other turn. The guard was written for a shape the bug does not
+    /// have, and it read as working because the reset looked like ordinary bookkeeping.
+    ///
+    /// Keyed by node, the question becomes the one that matters: **has backing out of THIS node
+    /// found us another way round?** Once is a fair try. Twice means the router keeps arriving at
+    /// the same answer, and the fight is the way on — the dev's rule, that a forest whose combat
+    /// nodes completely block progress has to be fought through rather than stalled in front of.
+    ///
+    /// The map cannot settle this on its own: "is there another route to the exit" cannot tell an
+    /// unavoidable fight from an interior we have not explored yet, and on arrival the second is the
+    /// normal state. Only the driver knows what it has already tried.
+    pub backed_out_of: std::collections::HashSet<String>,
     /// Consecutive turns inside a subworld with no usable adjacency dump.
     ///
     /// Reset on every dump that does arrive, so this counts a *run* of misses rather than a total.
@@ -2108,12 +2118,46 @@ pub fn drive(
         // not a detour — `canTravelToDirect` refuses to move off an incomplete node, so clearing the
         // one underfoot is the only legal move available.
         let mut crossing = None;
+        // The crossing said this node has to be dealt with. Carried to the fight branch rather than
+        // re-derived there from `can_step`, which answers a *different* question — "is any move off
+        // this node legal" — and says yes whenever a neighbour is complete, which after a retreat is
+        // always true. That gap is why a `Fight` verdict could fall through the fight branch and out
+        // the other side.
+        let mut must_clear_here = false;
+        // ...and this says we have positive evidence that backing out finds nothing.
+        let mut no_way_round = false;
         if let Some(container) = r.map.inside().map(|s| s.to_string()) {
             match r.map.cross_toward(&fresh.exits) {
-                Some(crate::overworld::Crossing::Fight { at }) => r.log.push_str(&format!(
-                    "{step}. inside `{container}` — `{at}` must be cleared before we can leave it\n"
-                )),
-                Some(mv) => crossing = Some((container, mv)),
+                Some(crate::overworld::Crossing::Fight { at }) => {
+                    r.log.push_str(&format!(
+                        "{step}. inside `{container}` — `{at}` must be cleared before we can leave it\n"
+                    ));
+                    must_clear_here = true;
+                }
+                // Second time blocked at this node. The first retreat was a fair try; arriving back
+                // here means the router keeps reaching the same answer, so there is no way round.
+                Some(crate::overworld::Crossing::Retreat { .. })
+                    if r.backed_out_of.contains(&here) =>
+                {
+                    r.log.push_str(&format!(
+                        "{step}. backing out of `{here}` found no way round — taking the fight\n"
+                    ));
+                    must_clear_here = true;
+                    no_way_round = true;
+                }
+                Some(mv) => {
+                    if matches!(mv, crate::overworld::Crossing::Retreat { .. }) {
+                        r.backed_out_of.insert(here.clone());
+                        // Tell the router as well, so it looks for another way instead of
+                        // recomputing the one that brought us here. Same remedy as every bounce
+                        // before it: the planner and the driver must not disagree about what is
+                        // still worth walking to. If no other way exists, `cross_toward`'s
+                        // unfiltered fallback steps back onto this node and the clause above takes
+                        // the fight — which is the whole point of retreating only once.
+                        r.map.abandon(&here);
+                    }
+                    crossing = Some((container, mv));
+                }
                 None => return Stop::Failed(format!("inside {container} with no crossing plan")),
             }
         }
@@ -2143,32 +2187,6 @@ pub fn drive(
                     ));
                 }
                 continue;
-            }
-            // **A second consecutive retreat means retreating is not working.** See
-            // `Run::retreats_running`. The map prefers backing out to fighting while hurt, which is
-            // right once and a cycle repeated — `l9sub13 -> l9sub11 -> l9sub13`, four laps, live.
-            //
-            // Converted to the fight rather than to a stop, because stopping is the outcome the
-            // whole rest objective exists to avoid and the node underfoot is the only way on.
-            if matches!(mv, Crossing::Retreat { .. }) {
-                r.retreats_running += 1;
-                if r.retreats_running > 1 {
-                    r.log.push_str(&format!(
-                        "{step}. backing out of `{here}` is going nowhere ({} in a row) — taking the fight\n",
-                        r.retreats_running
-                    ));
-                    r.retreats_running = 0;
-                    // Retire the node we keep bouncing off, so the next route goes round it. Same
-                    // remedy as the shrine and explore bounces: the planner and the driver must not
-                    // disagree about what is still worth walking to, and `abandon` is how the driver
-                    // says "I have had my go at that one".
-                    if let Crossing::Retreat { .. } = mv {
-                        r.map.abandon(&here);
-                    }
-                    continue;
-                }
-            } else {
-                r.retreats_running = 0;
             }
             let (what, at) = match &mv {
                 Crossing::Leave { to } => {
@@ -2333,8 +2351,11 @@ pub fn drive(
         // and the node behind us always is -- so leaving was legal all along, and the fight it
         // picked was one it walked into for nothing.
         let hop = r.map.next_hop();
-        // Two ways this node has to be dealt with rather than walked past.
+        // Three ways this node has to be dealt with rather than walked past.
         //
+        // 0. **The crossing said so** — `must_clear_here`, set above. `can_step` cannot answer this
+        //    one: it asks whether *a* move off the node is legal, and after a retreat the answer is
+        //    always yes, because the node we came from is complete.
         // 1. Leaving is illegal -- the original test, and the one that matters inside a subworld.
         // 2. **We came here on purpose.** `next_target` excludes `here`, so a node's own reason for
         //    existing evaporates the instant we stand on it; without this the run arrives at the
@@ -2342,6 +2363,7 @@ pub fn drive(
         //    pointless to leave are different questions and only the first was being asked.
         let arrived_at_target = r.committed_to.as_deref() == Some(here.as_str());
         let must_fight_here = arrived_at_target
+            || must_clear_here
             || match hop.as_ref() {
                 Some(h) => !r.map.can_step(&here, &h.step),
                 None => true,
@@ -2389,8 +2411,21 @@ pub fn drive(
             // `Risk::Forest` and not `type_is("forest")`: a **corrupted** forest ranks `Corrupt`, and
             // corruption puts the interior under attack (`village.lua:371-395`) — which is precisely
             // the state where retreating is not available.
+            //
+            // **`no_way_round` is the other exemption, and the narrower one.** It is set only after
+            // we have backed out of this exact node once and the router has brought us straight back
+            // to it — so it is not a judgement that the fight is winnable, it is the observation
+            // that there is no other move. Refusing here does not preserve the health: it ends the
+            // run in front of the node, which is the stall the dev asked us not to have. Fighting at
+            // least has an outcome.
+            //
+            // The trade-off is real and worth stating: this will take a level 4 guard post at 1/20
+            // if a village has walled us in with one. Weighing the node's level against health is
+            // the better rule and is not implemented — see the open question on `easiest_hostile`.
             let enterable = p.risk() == crate::overworld::Risk::Forest;
-            let too_hurt = health.map(crate::rest::health_is_low).unwrap_or(true) && !enterable;
+            let too_hurt = health.map(crate::rest::health_is_low).unwrap_or(true)
+                && !enterable
+                && !no_way_round;
             if too_hurt && !is_anomaly {
                 let hp = health
                     .map(|h| format!("{}/{}", h.current, h.max))
