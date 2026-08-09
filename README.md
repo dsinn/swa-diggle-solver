@@ -1,8 +1,11 @@
 # Diggle Solver
 
-An external Windows program in Rust that plays the LÖVE game *Sternly Worded Adventures* (**v52.4**)
-by reading its window and console and injecting real input. The goal is to clear the anomaly quickly,
-shrines included.
+An external Windows program in Rust that plays the LÖVE game *Sternly Worded Adventures* by reading
+its window and console and injecting real input. The goal is to clear the anomaly quickly, shrines
+included.
+
+**Tested against game version v52.4.** That is the only number in this file, because it is the only
+one a reader cannot get more reliably by asking the repo.
 
 **The game is never modified.** Everything here observes the running process — screen captures
 compared against templates, and the verbose console on stdout — and acts through Win32 `SendInput`.
@@ -55,8 +58,7 @@ cargo build --release
 
 ## The commands worth knowing
 
-There are 42 binaries in `src/bin/` and most of them are not part of the interface — see below. These
-are:
+Most of what is in `src/bin/` is not part of the interface — see below. These are:
 
 ```powershell
 # The driver. Build first: `cargo test --lib` does NOT build binaries.
@@ -98,7 +100,7 @@ cargo run --release --bin score_compare   # searched vs exact template scoring o
 
 ## What everything else in `src/bin/` is
 
-The 28 `spike_*` binaries are **probes, not tools**. Each was written to answer one question with a
+The `spike_*` binaries are **probes, not tools**. Each was written to answer one question with a
 measurement — how long a click takes to register, whether a ConPTY can be driven, what the console
 latency is — and is kept because the answer is cited in a doc comment somewhere and the reader should
 be able to re-run the evidence. They are history, not an interface, and most will not do anything
