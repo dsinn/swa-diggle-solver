@@ -107,6 +107,32 @@ pub struct Place {
     /// Set from the `lost_woods_known_*` save flags — see [`crate::subworld::LOST_WOODS_KNOWN`].
     /// Routing treats these as walls and only passes through one if there is no other way at all.
     pub avoid: bool,
+    /// This node is **inside a lost woods**, where the generator disguises its own roads.
+    ///
+    /// Set in [`WorldMap::fold`] from the container's live heading, for the container and every
+    /// subnode of it. It is not a save flag and must not be confused with [`Place::avoid`], which
+    /// says "do not go in there" and is read from `lost_woods_known_*` at load. This says "we are in
+    /// there now", which is the situation `avoid` exists to prevent and cannot help with.
+    ///
+    /// ## What it changes, and why the heading is enough to know it
+    ///
+    /// `lost_woods.lua:29` makes the type name conditional:
+    ///
+    /// ```lua
+    /// getTypeName = function(self)
+    ///     return overworldview.areaFlag('lost_woods_known_'..self.key) and 'lost woods'
+    ///         or self.typeData.typeName  -- 'forest'
+    /// end
+    /// ```
+    ///
+    /// so the woods read as an ordinary `forest` until the mist event names them, and thereafter the
+    /// game itself prints `lost woods` in every heading. Evaluated live, which is why this is learned
+    /// by observation rather than mirrored from a type table.
+    ///
+    /// The one confusable is `corrupt_lost_woods`, whose `typeName` is `'lost woods'`
+    /// **unconditionally** (`:41`) — but it also sets `lostOrientation = false` and `thickFog = false`
+    /// (`:44-47`), so none of the disguises below apply to it. [`Place::corrupted`] separates them.
+    pub in_lost_woods: bool,
 }
 
 /// What standing on a place would cost us. See [`Place::arrival`].
@@ -297,11 +323,40 @@ impl Place {
     ///
     /// Cleared is safe, whichever way it got that way: corruption that has been fought off leaves
     /// `completed` set, and a camp we have already emptied is not going to refill.
+    /// ## Inside a lost woods, `forest` in a heading does not mean what it means anywhere else
+    ///
+    /// The bandit-camp reasoning above is about a *container* we are deciding whether to enter. It
+    /// leaks onto the interior because `node` — the generator's filler type — has
+    /// `typeName = 'forest'` (`forest.lua:131-135`), so an unvisited subnode reads hostile too. In an
+    /// ordinary forest that is survivable: the road and crossroads nodes keep their own type names,
+    /// so the paved route across is exempt and there is always something to walk on.
+    ///
+    /// A lost woods removes that escape. `forest.lua:653-659` renames every interior road:
+    ///
+    /// ```lua
+    /// if areaData.lostOrientation then
+    ///     for k, loc in pairs(locationData) do
+    ///         if loc.type=='road' and not loc.targetNode then
+    ///             loc.type = 'node'
+    ///         end
+    ///     end
+    /// end
+    /// ```
+    ///
+    /// and interior roads never carry a `targetNode` — `world.lua:1174` sets only `type` — so the
+    /// whole interior reads `forest`, every neighbour looks hostile, and a hurt run has nowhere it is
+    /// willing to step. The disguise is the *point* of the place; treating it as evidence of a bandit
+    /// camp is reading the generator's costume as a threat.
+    ///
+    /// Narrowed to the lost woods rather than lifted for all subnodes, which is the other defensible
+    /// fix. `banditos` rewrites surface forests only (`world.lua:466-475`), so on the merits the rule
+    /// has no business inside *any* subworld — but widening it that far changes where hurt runs are
+    /// willing to walk everywhere, and that wants its own run to justify it.
     pub fn hostile_to_enter(&self) -> bool {
         if self.completed {
             return false;
         }
-        self.corrupted || (self.type_is("forest") && !self.visited)
+        self.corrupted || (self.type_is("forest") && !self.visited && !self.in_lost_woods)
     }
 
     /// A made road: the paved way through a subworld's interior.
@@ -313,6 +368,23 @@ impl Place {
     /// One subtlety worth stating rather than discovering: [`Place::type_is`] is a suffix test and
     /// `"crossroads"` ends with `"road"`, so the first check already covers the second. Both are
     /// written out because a reader should not have to notice that.
+    ///
+    /// ## In a lost woods this stays correct and stops meaning the same thing
+    ///
+    /// The rename at `forest.lua:653-659` (quoted in [`Place::hostile_to_enter`]) turns every
+    /// interior `road` into a plain `node`, because only the out-roads carry a `targetNode`. Two
+    /// things therefore survive as paved in there, and both are better to walk to than the road
+    /// network we lost:
+    ///
+    /// - **`crossroads`**, untouched because its type is `'crossroads'` and the rename tests for
+    ///   `'road'`. `world.lua:1173-1174` gives that type to a node with more than two road segments
+    ///   through it, so what survives is exactly the junctions of the entrance-to-plaza spine.
+    /// - **the out-roads**, which are the exits themselves.
+    ///
+    /// So "prefer paved" changes from *follow the road across* to *make for a junction or a way out*,
+    /// which is the better instruction of the two when the map is fogged. The tile layer agrees and
+    /// is not ours to read: `paveRoads = false` with `paveInsetRoads = true`
+    /// (`lost_woods.lua:8-9`) means the only tiles actually painted as road are the exit approaches.
     pub fn is_paved(&self) -> bool {
         self.type_is("road") || self.type_is("crossroads")
     }
@@ -928,11 +1000,36 @@ impl WorldMap {
         // Being inside a subworld names its container, which is the only reliable way we learn that
         // a node is one. Its heading will not say so — `Eight Timberland — level 4 forest` reads
         // exactly like a fight.
+        //
+        // The heading is taken **whenever it is offered**, not only to fill a gap. It used to be
+        // `if p.heading.is_empty()`, which threw away the one line that says a forest has turned out
+        // to be a lost woods: we learn `Howden Timberland — level 2 forest` from the surface, walk
+        // in, and the game prints `Howden Timberland — level 2 lost woods` from that point on. The
+        // surface heading is not wrong, it is *stale* — `getTypeName` is evaluated per call
+        // (`lost_woods.lua:29`) — and preferring the older of two live readings is never right.
+        // A run ended inside `e1` with the answer sitting in the dump it had already parsed.
         if let Some((key, heading)) = a.subworld.as_ref() {
             let p = self.entry(key);
             p.subworld_container = true;
-            if p.heading.is_empty() {
+            if !heading.trim().is_empty() {
                 p.heading = heading.clone();
+            }
+        }
+
+        // Are we inside a lost woods? Asked once here rather than at every use, because the answer
+        // is a property of the container and the places that need it are its subnodes.
+        //
+        // `corrupt_lost_woods` prints the same type name with none of the behaviour, so corruption
+        // excludes it — see [`Place::in_lost_woods`].
+        let lost_woods = a
+            .subworld
+            .as_ref()
+            .and_then(|(k, _)| self.places.get(k))
+            .map(|p| p.type_is("lost woods") && !p.corrupted)
+            .unwrap_or(false);
+        if lost_woods {
+            if let Some((key, _)) = a.subworld.as_ref() {
+                self.entry(key).in_lost_woods = true;
             }
         }
 
@@ -942,6 +1039,7 @@ impl WorldMap {
             here.visited = true;
             here.hidden = Some(a.hidden);
             here.parent = parent.clone();
+            here.in_lost_woods |= lost_woods;
         }
 
         // Where this dump's coordinates sit relative to the frame we are building. `None` means we
@@ -959,6 +1057,9 @@ impl WorldMap {
             if place.parent.is_none() {
                 place.parent = p;
             }
+            // Never cleared once set. A subnode we saw from inside the woods is in the woods, and a
+            // later dump that happens not to name the container must not un-learn that.
+            place.in_lost_woods |= lost_woods;
             // First fix wins. Averaging repeated sightings would be defensible, but a position that
             // never moves is easier to reason about and the registration below is exact, not
             // approximate — every reading of one node in one frame differs only by the shift.
@@ -1711,19 +1812,44 @@ impl WorldMap {
                 // Committed first, derived only when there is nothing left to honour. The
                 // commitment also survives an exits list we cannot see past — `exit_toward` gives up
                 // on an empty one, and a pan that shows no exits is fog, not a dead end.
+                //
+                // ## No door yet is not the same as no move, and this used to end runs
+                //
+                // This was `self.choose_exit(exits)?`, and the `?` returned from `cross_toward`
+                // itself — past the frontier walk 100 lines below, which is the entire answer to
+                // "we cannot see a way out yet". The driver reads that `None` as
+                // `inside {container} with no crossing plan` and stops (`navigate.rs:2282`).
+                //
+                // The comment directly above already said fog is not a dead end, and there is a test
+                // pinning it (`fog_is_not_a_dead_end`) — but both only cover the case where a
+                // commitment exists to fall back on. On the **first** step into a subworld there is
+                // nothing committed, so the guard was unreachable exactly when it was needed.
+                //
+                // A lost woods makes this the normal case rather than a rare one: `thickFog = true`
+                // (`lost_woods.lua:13`) means every exit prints as `Hidden location` on arrival, so
+                // the run stopped in `e1` one step after walking in, with three perfectly good
+                // neighbours named in the same dump.
+                //
+                // Falling through to `None` puts us in the same state as a village whose inn we have
+                // not found: no destination, so explore — which for a fogged crossing is precisely
+                // right, because seeing an exit is the thing exploring achieves.
                 let errand = self.next_target().map(|p| p.reason);
                 let to = match self.committed_exit(&parent, errand) {
-                    Some(to) => to,
-                    None => {
-                        let (to, why) = self.choose_exit(exits)?;
+                    Some(to) => Some(to),
+                    None => self.choose_exit(exits).map(|(to, why)| {
                         self.door_reason = Some(why);
                         to
-                    }
+                    }),
                 };
                 // Nothing to be single-minded *about* when there is no errand: `exit_toward` is down
-                // to its own fallback, and recording that as a commitment would freeze a guess.
-                self.crossing_to = errand.map(|goal| (to.clone(), goal));
-                Some(to)
+                // to its own fallback, and recording that as a commitment would freeze a guess. And
+                // nothing to record at all when no door was found — leaving any earlier commitment
+                // untouched, which is what the old early return did by accident and this does on
+                // purpose.
+                if let Some(to) = to.as_ref() {
+                    self.crossing_to = errand.map(|goal| (to.clone(), goal));
+                }
+                to
             }
         };
         let dest = match (&inn, &leaving_to) {
@@ -2185,9 +2311,23 @@ mod tests {
     }
 
     /// A dump taken inside `parent`, with the exits the game would have printed.
+    ///
+    /// The container's own heading is **not** a free choice: `fold` now believes it over anything
+    /// learned from the surface, because that is how a lost woods announces itself. So the two
+    /// containers these tests use get the headings the game would really print for them. Handing
+    /// `l9` the village heading — which this helper did for every parent until the day `fold`
+    /// started listening — made a forest answer `seeking_a_rest`, and two crossing tests changed
+    /// their answers as soon as the lie stopped being discarded.
+    fn container_heading(parent: &str) -> &'static str {
+        match parent {
+            "l9" => "Saltagh Park — level 1 forest",
+            _ => "Ulrome — level 6 village",
+        }
+    }
+
     fn inside_dump(parent: &str, here: &str, heading: &str, nodes: Vec<Node>, exits: Vec<Exit>) -> Adjacency {
         Adjacency {
-            subworld: Some((parent.into(), "Ulrome — level 6 village".into())),
+            subworld: Some((parent.into(), container_heading(parent).into())),
             exits,
             ..dump(here, heading, nodes)
         }
@@ -3354,6 +3494,110 @@ mod tests {
             vec![node("l9sub1", "Saltagh Park road"), node("l9sub2", "Saltagh Park road")],
             both.clone()));
         (m, dane, cowlam)
+    }
+
+    /// The state the run of 2026-08-09 stopped in, rebuilt from `spike-run-raw.log:363-405`.
+    ///
+    /// We knew `e1` from the surface as an ordinary forest, travelled onto it, and the arrival event
+    /// `Lost in the mists!` turned it into a lost woods. The dump taken one step later named three
+    /// neighbours and printed every exit as `Hidden location`, because `thickFog = true`.
+    fn a_lost_woods() -> WorldMap {
+        let mut m = WorldMap::new();
+        m.fold(&dump("l12", "Standing — level 2 crypt",
+            vec![node("e1", "Howden Timberland — level 2 forest")]));
+        m.fold(&Adjacency {
+            subworld: Some(("e1".into(), "Howden Timberland — level 2 lost woods".into())),
+            exits: Vec::new(),
+            hidden_exits: 3,
+            ..dump("e1_plaza", "Howden Timberland forest", vec![
+                node("e1sub1", "Howden Timberland — level 2 chest"),
+                node("e1sub2", "Howden Timberland forest"),
+                node("e1sub3", "Howden Timberland crossroads"),
+            ])
+        });
+        m
+    }
+
+    /// The container's type name is re-read on every dump, because the game re-evaluates it.
+    ///
+    /// `getTypeName` (`lost_woods.lua:29`) returns `'forest'` until `lost_woods_known_<key>` is set
+    /// and `'lost woods'` after, so the two headings are the same place at different times. Keeping
+    /// the first one meant the run never learned where it was — the report it printed on the way out
+    /// still called `e1` a forest.
+    #[test]
+    fn walking_into_a_lost_woods_updates_what_we_call_it() {
+        let m = a_lost_woods();
+        let e1 = m.get("e1").expect("container");
+        assert!(e1.type_is("lost woods"), "the fresher heading wins, got {:?}", e1.heading);
+        assert!(e1.in_lost_woods);
+        for k in ["e1_plaza", "e1sub1", "e1sub2", "e1sub3"] {
+            assert!(m.get(k).unwrap().in_lost_woods, "{k} is inside it");
+        }
+    }
+
+    /// The regression itself: thick fog is not a dead end on the **first** step either.
+    ///
+    /// `cross_toward` returned `None` here and the driver ended the run with
+    /// `inside e1 with no crossing plan`. There was never nothing to do — three neighbours were
+    /// named in the same dump that hid the exits.
+    #[test]
+    fn a_fogged_arrival_explores_instead_of_giving_up() {
+        let mut m = a_lost_woods();
+        match m.cross_toward(&[]) {
+            Some(Crossing::Seek { to }) | Some(Crossing::Explore { to, .. }) => {
+                assert_eq!(to, "e1sub3", "the crossroads: paved outranks the rest");
+            }
+            other => panic!("fog is not a dead end, got {other:?}"),
+        }
+    }
+
+    /// Paved still means something in here, and it means something better.
+    ///
+    /// The rename at `forest.lua:653-659` strips `road` from every interior node that has no
+    /// `targetNode`, so what is left calling itself paved is the junctions of the spine and the ways
+    /// out. `e1sub3` is the only one of the three, and it is the one to walk to.
+    #[test]
+    fn only_the_crossroads_survives_the_lost_woods_rename() {
+        let m = a_lost_woods();
+        assert!(m.get("e1sub3").unwrap().is_paved(), "crossroads is not renamed");
+        assert!(!m.get("e1sub2").unwrap().is_paved(), "an interior road now reads as forest");
+    }
+
+    /// A disguised road must not be read as a possible bandit camp.
+    ///
+    /// `e1sub2` prints `forest` because the generator renamed it, not because anything is hiding in
+    /// it. Left alone, every unvisited node in the woods owes a fight on the `hostile_to_enter` axis
+    /// and a hurt run has nowhere it is willing to step.
+    #[test]
+    fn the_lost_woods_interior_is_not_a_bandit_camp() {
+        let m = a_lost_woods();
+        let disguised = m.get("e1sub2").unwrap();
+        assert!(disguised.type_is("forest"), "this is what the dump says");
+        assert!(!disguised.hostile_to_enter(), "renamed road, not a camp");
+
+        // And the rule it is exempted from still holds everywhere else: `l12`'s neighbour `e1` is a
+        // surface forest we have not entered, which is exactly the gamble the rule prices.
+        let mut surface = WorldMap::new();
+        surface.fold(&dump("l12", "Standing — level 2 crypt",
+            vec![node("e1", "Howden Timberland — level 2 forest")]));
+        assert!(surface.get("e1").unwrap().hostile_to_enter(), "an unentered forest still might be");
+    }
+
+    /// `corrupt_lost_woods` prints the same two words and behaves like neither.
+    ///
+    /// Its `typeName` is `'lost woods'` unconditionally (`lost_woods.lua:41`) while
+    /// `lostOrientation` and `thickFog` are both false (`:44-47`) — so the roads keep their names and
+    /// none of the exemptions apply. Corruption is what tells the two apart.
+    #[test]
+    fn a_corrupted_lost_woods_is_not_the_disguised_kind() {
+        let mut m = WorldMap::new();
+        m.entry("e2").corrupted = true;
+        m.fold(&Adjacency {
+            subworld: Some(("e2".into(), "Burnt Timberland — level 6 lost woods".into())),
+            ..dump("e2sub1", "Burnt Timberland forest", vec![])
+        });
+        assert!(!m.get("e2").unwrap().in_lost_woods, "corrupt, so nothing is disguised");
+        assert!(!m.get("e2sub1").unwrap().in_lost_woods);
     }
 
     /// A node seen in two dumps of different places lands in one frame.
