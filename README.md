@@ -11,6 +11,21 @@ one a reader cannot get more reliably by asking the repo.
 compared against templates, and the verbose console on stdout — and acts through Win32 `SendInput`.
 If the solver disagrees with the game, the solver is wrong.
 
+## This is pre-MVP
+
+**No run has cleared an anomaly yet.** The MVP is one unattended run that starts a save and finishes
+the objective, and we are not there: a run today ends when it reaches a situation nothing handles,
+and every such stop has so far been a genuinely new one rather than a repeat.
+
+That shapes what to expect from the code. Whole mechanics are deliberately unimplemented and say so
+— status effects beyond the tick that decides the current turn, several classes of screen, buying
+anything in a shop. Where a piece of the model is missing, the run is meant to **report it and carry
+on with an honest under-estimate**, not to guess; if you see a `not modelled` or `deferred` line in a
+turn log, that is the design working rather than an oversight.
+
+A run ending is therefore the ordinary outcome, and the log it leaves is the deliverable. The stop
+reason names the state that had no handler, which is the next thing to build.
+
 ## Read this before running anything
 
 - **A live run takes the real mouse and keyboard.** `SendInput` follows the foreground window, so
