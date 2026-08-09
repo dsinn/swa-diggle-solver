@@ -526,14 +526,13 @@ pub enum Crossing {
     /// old log unreadable.
     Seek { to: String },
     /// Standing on the exit road: leave for this overworld node.
-    Leave { to: String },
-    /// Hurt, and the way onward is a fight — so go back the way we came instead.
     ///
-    /// Legal for the same reason [`WorldMap::can_step`] documents and [`WorldMap::blocks_departure`]
-    /// forgot: `canTravelToDirect` needs **one** endpoint complete, and the node behind us is
-    /// complete by definition, since we walked through it. An unfinished fight blocks going onward,
-    /// never going back.
-    Retreat { to: String },
+    /// There was a `Retreat` variant here — hurt, the way onward is a fight, so go back the way we
+    /// came. It is gone. Backing out was legal (`canTravelToDirect` needs only one endpoint
+    /// complete, and the node behind us is complete by definition) and it still cost more than it
+    /// saved: one cycle, one guard that could never fire, and a run stopped in front of a level 1
+    /// nest. `WorldMap::cross_toward` carries the full account. The MVP sticks to the path.
+    Leave { to: String },
 }
 
 /// One move: the adjacent node to travel to, and the plan it serves.
@@ -1452,31 +1451,35 @@ impl WorldMap {
         if let Some(to) = leaving_to.filter(|to| here == exit_node_key(&parent, to)) {
             return Some(Crossing::Leave { to });
         }
-        // An unfinished fight underfoot blocks going ONWARD. It does not block going back.
+        // An unfinished fight underfoot blocks going onward, so it is the move.
         //
-        // This returned `Fight` unconditionally, and a live run paid for it: at 0 health, crossing
-        // Ulrome toward the `l7` campfire, it stepped onto `l10sub11` — a level 6 guard post — and
-        // concluded the only legal move was to fight it. Three turns later the board was down to one
-        // tile with nothing playable.
+        // ## Backing out was tried for a year of runs and the dev has called it off
         //
-        // `canTravelToDirect` needs one of the two endpoints complete
-        // (`overworldview.lua:1316-1321`), and the node we arrived from is complete by definition.
-        // [`WorldMap::can_step`] says so in as many words; this function simply never asked. So when
-        // a rest is what we are after, retreating is available and is the better move — the fight
-        // ahead is the thing we are trying to avoid, and taking it because we walked one node too
-        // far is the worst version of that.
+        // The idea was that a hurt run should not have to take a fight it merely walked into:
+        // `canTravelToDirect` needs one endpoint complete (`overworldview.lua:1316-1321`) and the
+        // node behind us is complete by definition, so retreating is legal where going on is not.
+        // It was sound in the small and cost more than it saved in the large:
+        //
+        // - it produced the `l9sub16` <-> `l9sub11` cycle, and the guard written to stop that
+        //   (`retreats_running`) could never fire;
+        // - `backed_out_of` replaced it, which meant the *second* block at a node took the fight
+        //   anyway — so the rule bought one wasted round trip and then did the thing it had been
+        //   avoiding;
+        // - and when it could not retreat at all it fell through to `Fight`, which the driver's
+        //   health gate then refused, ending a run in front of a **level 1** spider nest at 1/20.
+        //   That is the run of 2026-08-08: twenty-four steps, no exit found, stopped by the guard
+        //   rather than by the game.
+        //
+        // The dev's call, and it is a scope decision rather than a discovery: **for the MVP, stick
+        // to the path and fight through whatever is standing on it.** A fight has an outcome; a
+        // refusal has none, and a refusal in a spider forest is a run that ends where it stands.
+        //
+        // What this gives up is real and worth stating: a crossing that leads onto a level 6 guard
+        // post will now take it. The protection that remains is in the *destination* choice, where
+        // it belongs — `Risk`, `hostile_to_enter` and `next_target`'s two passes still keep a hurt
+        // run from choosing to walk into hostile ground. This is only about what happens once the
+        // path we are already on has something on it.
         if self.blocks_departure(&here) {
-            // Retreating is a *preference*, and the caller is what stops it becoming a habit — see
-            // `Run::retreats_running`. Deciding it here was tried and is wrong: the obvious test,
-            // "is there another route to the exit", cannot tell "the fight ahead is unavoidable"
-            // from "the interior is still fogged and we have not learned the route yet", and the
-            // second is the normal state on arrival. `hurt_and_blocked_we_back_out_instead_of_
-            // fighting` is exactly that case and says so.
-            if self.wants_rest {
-                if let Some(back) = self.retreat_step(&here) {
-                    return Some(Crossing::Retreat { to: back });
-                }
-            }
             return Some(Crossing::Fight { at: here });
         }
         if let Some(step) = dest.as_ref().and_then(|d| self.first_step_toward(&here, d, false)) {
@@ -1530,13 +1533,29 @@ impl WorldMap {
         // decreases with each step, so the walk terminates at something worth learning. Frontier is
         // [`Place::is_frontier`] — never visited, or visited while the game withheld neighbours —
         // so "worth learning" is the map's own record rather than a heuristic.
-        // Ranked, not merely nearest. Nearest alone quietly undid the dev's crossing rule: offered an
-        // unvisited forest and an unvisited road side by side it took whichever sorted first, and
-        // `walking_into_the_dark_still_avoids_the_other_exits` said so immediately. The order is the
-        // same one `first_step_toward` uses for the route — no fight, then close, then paved — so
-        // choosing where to explore and choosing how to get there cannot disagree.
+        //
+        // **Paved before near, and that ordering is the whole of the dev's crossing rule.**
+        //
+        // It was `(fight, distance, paved, key)` — nearest first, with paved as a tiebreak that only
+        // applied at equal distance. The live run of 2026-08-08 shows what that does over
+        // twenty-four steps: the exit road was never on the map, so `first_step_toward` returned
+        // `None` every single time and **this fallback was the entire crossing**. Ranking by
+        // distance took every unvisited patch of brush one hop off the road before it would take a
+        // road node two hops along — road, brush, back to the road, over and over, never crossing
+        // the forest. The dev watched it happen and said so.
+        //
+        // The road is not a preference about safety, it is the map's own structure: `forest.lua`
+        // strings `road` and `crossroads` from entrance to exit, so following it is how a forest is
+        // crossed and everything else is a detour.
+        //
+        // Combat is no longer ranked at all here, for the same reason it is no longer routed around
+        // in [`WorldMap::first_step_toward`] — see the note there. A nest on the road gets fought.
+        //
+        // This is now genuinely the same order `first_step_toward` uses, which the old comment
+        // claimed while the code did something else: its passes are `[paved]` then `[any]`, and
+        // BFS runs *within* each pass, so paved outranks distance there too. Choosing where to
+        // explore and choosing how to get there cannot disagree.
         let hops = self.distances(&here);
-        let costs_a_fight = |p: &Place| !p.completed && heading_has_combat(&p.heading);
         let exit_prefix = format!("{parent}_path_to_");
         let frontier = self
             .places
@@ -1546,9 +1565,9 @@ impl WorldMap {
             // An exit road we have not walked is a frontier too, but heading for one is leaving —
             // and while looking for an inn, leaving is the move that abandons the errand.
             .filter(|p| !p.key.starts_with(&exit_prefix) || Some(&p.key) == dest.as_ref())
-            .filter_map(|p| hops.get(&p.key).map(|d| (costs_a_fight(p), *d, !p.is_paved(), &p.key)))
+            .filter_map(|p| hops.get(&p.key).map(|d| (!p.is_paved(), *d, &p.key)))
             .min()
-            .map(|(_, _, _, k)| k.clone());
+            .map(|(_, _, k)| k.clone());
         if let Some(step) = frontier.and_then(|f| self.first_step_toward(&here, &f, false)) {
             return Some(match dest {
                 Some(toward) => Crossing::Explore { to: step, toward },
@@ -1637,23 +1656,6 @@ impl WorldMap {
             .places
             .values()
             .any(|p| p.parent.as_deref() == Some(container) && p.is_inn() && self.abandoned.contains(&p.key))
-    }
-
-    /// A neighbour we may legally step back to from a node that blocks going onward.
-    ///
-    /// Any **completed** neighbour qualifies, because `canTravelToDirect` accepts the move when
-    /// either endpoint is complete. Prefers one we have already stood on — that is the way we came,
-    /// and it leads back toward the entrance rather than deeper in.
-    fn retreat_step(&self, here: &str) -> Option<String> {
-        let me = self.places.get(here)?;
-        let mut back: Vec<&Place> = me
-            .neighbours
-            .iter()
-            .filter_map(|k| self.places.get(k))
-            .filter(|p| p.completed && !p.avoid)
-            .collect();
-        back.sort_by(|a, b| b.visited.cmp(&a.visited).then(a.key.cmp(&b.key)));
-        back.first().map(|p| p.key.clone())
     }
 
     /// Does an unfinished fight on this node forbid stepping off it?
@@ -1755,37 +1757,37 @@ impl WorldMap {
     /// With `shun`, places marked [`Place::avoid`] are treated as walls.
     /// The first hop of a route, **preferring the paved path**.
     ///
-    /// The dev's rule, from playing the game: inside a forest, stick to the road unless a combat
-    /// node sits on it and there is a combat-free way round. Four passes, first match wins:
+    /// The dev's rule, from playing the game: inside a subworld, **stick to the road**. Two passes,
+    /// first match wins:
     ///
     /// ```text
-    ///   1. paved, and no fight on it        the ordinary crossing
-    ///   2. any type, and no fight on it     the "combat-less pathway" the rule allows
-    ///   3. paved, fight and all             the road is blocked and nothing else is clear
-    ///   4. anything at all                  never stall; see below
+    ///   1. paved     the road the generator strung from entrance to exit
+    ///   2. anything  no road known yet, or the road does not go where we are going
     /// ```
     ///
-    /// The order encodes the rule exactly: 2 only ever beats 3 when the road has a fight on it and
-    /// the detour does not, because otherwise 1 would have matched already.
+    /// ## Routing round combat used to be pass 2 of 4, and is gone
     ///
-    /// **Pass 4 is the one that must not be removed.** Forest combat nodes can block progress
-    /// outright — a spider forest is generated with nests across the interior — and a run that
-    /// refuses every route because they all cost a fight has stalled, which is worse than fighting.
-    /// Whether the fight is then *taken* is not decided here: `cross_toward` and the health gate in
-    /// `navigate` have their own say, and this only reports that a way exists.
+    /// The old cascade put "any type, no fight on it" *above* "paved, fight and all", so a combat
+    /// node on the road sent the route into the brush. The dev has withdrawn that: it is what the
+    /// live run of 2026-08-08 spent twenty-four steps doing — road, brush, back to the road, never
+    /// reaching the exit — because every detour round a nest is also a detour away from the only
+    /// structure in the map that leads anywhere. `forest.lua:117-130` strings `road` and
+    /// `crossroads` from entrance to exit; the brush is filler.
+    ///
+    /// So a fight on the road is now simply crossed. What decides whether that fight is *survivable*
+    /// is destination choice, upstream — `Risk`, `hostile_to_enter`, and `next_target`'s two passes,
+    /// which still keep a hurt run from picking hostile ground to walk into. Once we are on the
+    /// path, the path is the path.
     ///
     /// Paved nodes are still subject to `blocked`, so an abandoned or shunned road is skipped by
-    /// every pass — those are hard exclusions, this is a preference.
+    /// both passes — those are hard exclusions, this is a preference. `to` is exempt from both, for
+    /// the same reason: refusing to path to where we were told to go is not routing.
     fn first_step_toward(&self, from: &str, to: &str, shun: bool) -> Option<String> {
-        let costs_a_fight = |p: &Place| !p.completed && heading_has_combat(&p.heading);
-        // Ordered least to most tolerant. `to` is exempt from the preference for the same reason it
-        // is exempt from `blocked`: refusing to path to where we were told to go is not routing.
-        let passes: [&dyn Fn(&Place) -> bool; 4] = [
-            &|p: &Place| !p.is_paved() || costs_a_fight(p),
-            &|p: &Place| costs_a_fight(p),
-            &|p: &Place| !p.is_paved(),
-            &|_: &Place| false,
-        ];
+        // **Pass 2 must not be removed.** A subworld can have no road at all between here and the
+        // destination, and a run that refuses every route has stalled — which is worse than any
+        // single bad step.
+        let passes: [&dyn Fn(&Place) -> bool; 2] =
+            [&|p: &Place| !p.is_paved(), &|_: &Place| false];
         for avoid in passes {
             if let Some(step) = self.step_avoiding(from, to, shun, avoid) {
                 return Some(step);
@@ -2730,14 +2732,24 @@ mod tests {
 
     /// An unvisited subworld container counts as hostile, because a bandit camp is an ordinary
     /// forest until you are standing in it (`overworld/generators/world.lua:466-475`).
-    /// Hurt and standing on a node that blocks going onward: back out rather than fight.
+    /// Standing on a node that blocks going onward: fight it, hurt or not.
     ///
-    /// The live failure this comes from: at 0 health, crossing Ulrome toward the `l7` campfire, the
-    /// run stepped onto `l10sub11` — a level 6 guard post — and `cross_toward` reported the fight as
-    /// the only legal move. It was not. `canTravelToDirect` needs one endpoint complete, and the
-    /// node behind us is.
+    /// **This test used to assert the opposite**, and the reversal is a scope decision rather than a
+    /// discovery. Backing out was legal — `canTravelToDirect` needs one endpoint complete and the
+    /// node behind us is — and it was introduced after a run at 0 health stepped onto this very
+    /// node, a level 6 guard post, and fought it.
+    ///
+    /// What backing out then cost, in order: the `l9sub16` <-> `l9sub11` cycle; a guard against that
+    /// cycle which could never fire; a replacement guard that took the fight on the second visit
+    /// anyway, so the rule bought one wasted round trip; and finally a run stopped in front of a
+    /// **level 1** spider nest at 1/20, twenty-four steps into a forest it never crossed. The dev
+    /// called it off: for the MVP, stick to the path and fight through what is on it.
+    ///
+    /// The protection that replaces it is upstream, in destination choice — `Risk`,
+    /// `hostile_to_enter` and `next_target`'s two passes still keep a hurt run from *choosing* to
+    /// walk into hostile ground.
     #[test]
-    fn hurt_and_blocked_we_back_out_instead_of_fighting() {
+    fn blocked_by_a_fight_we_take_it_hurt_or_not() {
         let exits = vec![Exit {
             to_key: "l10_path_to_l7".into(),
             to_heading: "Road to Greenoak".into(),
@@ -2762,12 +2774,14 @@ mod tests {
             Some(Crossing::Fight { at: "l10sub11".into() })
         );
 
-        // Hurt: backing out is legal and is the better move.
+        // Hurt: the same answer. Stepping back to `l10sub10` is still legal -- it is complete, and
+        // that is what used to be taken -- but the crossing no longer offers it, because a detour
+        // that ends in the same fight two steps later is not a detour.
         m.note_health_level(crate::rest::Health { current: 0, max: 12 });
         assert_eq!(
             m.cross_toward(&exits),
-            Some(Crossing::Retreat { to: "l10sub10".into() }),
-            "the node we came from is complete, so stepping back is allowed"
+            Some(Crossing::Fight { at: "l10sub11".into() }),
+            "the path goes through it"
         );
     }
 
@@ -3388,10 +3402,16 @@ mod tests {
         }
     }
 
-    /// The dev's crossing rule, one pass at a time. The ordering IS the rule, so each layer is
-    /// exercised by making the one above it unavailable.
+    /// The dev's crossing rule: **the road is the road.** A fight on it is crossed, not detoured
+    /// around.
+    ///
+    /// Case 2 asserted the opposite until 2026-08-08 — "a combat-less pathway beats a blocked road"
+    /// — and it is the case the dev withdrew. Every detour round a nest is also a detour away from
+    /// the only structure in the map that leads anywhere (`forest.lua:117-130` strings the road from
+    /// entrance to exit), and a live run spent twenty-four steps proving it: road, brush, back to
+    /// the road, never crossing.
     #[test]
-    fn a_forest_is_crossed_by_the_road_unless_the_road_is_blocked() {
+    fn a_forest_is_crossed_by_the_road_fight_and_all() {
         // Two ways from `here` to the exit: a paved one through `road1`, and a wooded one through
         // `wood1`. Everything peaceful to start with.
         let build = |road_fights: bool, wood_fights: bool| {
@@ -3421,28 +3441,70 @@ mod tests {
             "paved and peaceful is the ordinary crossing"
         );
 
-        // 2. A fight on the road and a clear way round: take the detour. This is the ONLY case the
-        //    rule allows leaving the path, and it is the whole reason the second pass exists.
+        // 2. A fight on the road and a clear way round: **still the road.** This is the reversal.
+        //    The nest gets fought; the brush leads nowhere in particular.
         assert_eq!(
             build(true, false).first_step_toward("here", "exit", false).as_deref(),
-            Some("wood1"),
-            "a combat-less pathway beats a blocked road"
+            Some("road1"),
+            "a fight on the path is crossed, not routed around"
         );
 
-        // 3. A fight on the road and a fight in the woods too: stay on the road. Nothing is gained
-        //    by wandering off it to pay the same price.
+        // 3. A fight on the road and a fight in the woods too: the road, obviously.
         assert_eq!(
             build(true, true).first_step_toward("here", "exit", false).as_deref(),
             Some("road1"),
             "if both cost a fight, the road is still the road"
         );
 
-        // 4. And the detour is not preferred merely for being clear when the road is clear too --
-        //    that would be pass 2 beating pass 1, which would make the preference meaningless.
+        // 4. And a clear road against a wooded fight, which never depended on the withdrawn pass.
         assert_eq!(
             build(false, true).first_step_toward("here", "exit", false).as_deref(),
             Some("road1")
         );
+    }
+
+    /// Exploring a forest follows the road too, even when brush is nearer.
+    ///
+    /// **The live case, 2026-08-08.** Crossing `l9` toward `l9_path_to_l19`, which was never on the
+    /// map — so `first_step_toward` returned `None` every step and the frontier fallback *was* the
+    /// whole crossing, for twenty-four steps. It ranked `(fight, distance, paved, key)`, so an
+    /// unvisited patch of brush one hop away beat an unvisited road two hops along, every time. The
+    /// run went road, brush, back to the road, and never crossed. The dev watched it and said so.
+    ///
+    /// The dumps below are that node verbatim (`spike-run-raw.log:635-645`): standing on `l9sub22`,
+    /// a road, with `l9sub21` and `l9sub7` unvisited brush adjacent and the unvisited road `l9sub12`
+    /// two hops off through the crossroads.
+    #[test]
+    fn exploring_a_forest_also_sticks_to_the_road() {
+        let exits = vec![Exit { x: 0.0, y: 0.0, to_key: "l19".into(), to_heading: "Dane village".into() }];
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump("l9", "l9sub22", "Saltagh Park road",
+            vec![
+                node("l9sub7", "Saltagh Park forest"),
+                node("l9sub21", "Saltagh Park forest"),
+                node("l9sub10", "Saltagh Park crossroads"),
+            ],
+            exits.clone()));
+        // The crossroads has been walked; the road beyond it has not.
+        m.fold(&inside_dump("l9", "l9sub10", "Saltagh Park crossroads",
+            vec![node("l9sub22", "Saltagh Park road"), node("l9sub12", "Saltagh Park road")],
+            exits.clone()));
+        m.fold(&inside_dump("l9", "l9sub22", "Saltagh Park road",
+            vec![
+                node("l9sub7", "Saltagh Park forest"),
+                node("l9sub21", "Saltagh Park forest"),
+                node("l9sub10", "Saltagh Park crossroads"),
+            ],
+            exits.clone()));
+
+        // Nearest-first says `l9sub21` at one hop. The rule says the road at two.
+        match m.cross_toward(&exits) {
+            Some(Crossing::Explore { to, toward }) => {
+                assert_eq!(toward, "l9_path_to_l19", "still the committed door");
+                assert_eq!(to, "l9sub10", "toward the unwalked road, not into the brush");
+            }
+            other => panic!("expected an explore step along the road, got {other:?}"),
+        }
     }
 
     /// **Never stall.** A forest whose every route costs a fight still has a route.
