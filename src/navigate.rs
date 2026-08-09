@@ -312,6 +312,19 @@ pub const fn answer_for(screen: Screen) -> Answer {
 /// Only [`Answer::Unanswered`] stops. [`Answer::Elsewhere`] deliberately does not: seeing one of
 /// those in `drive` means the component that owns it has already finished — a reward screen still up
 /// after a fight, say — and those resolve on the next iteration rather than being errors.
+/// Has a dump been *counted* since the map was last invalidated?
+///
+/// Split out as a pure function for the same reason [`precheck`] is: the loop it lives in needs a
+/// live game, so without this the rule would be a claim nothing checks. Answers only the freshness
+/// half — [`Run::settled_dump`] still requires the dump to have settled, and has the account of the
+/// run this cost.
+///
+/// Strictly greater, and that is the whole point. Equality means the newest dump is the one that was
+/// already on hand when the map turned over, which is exactly the dump that must not be believed.
+const fn dump_is_usable(counted: usize, stale_at: usize) -> bool {
+    counted > stale_at
+}
+
 pub fn precheck(screen: Screen) -> Option<Stop> {
     match answer_for(screen) {
         Answer::Unanswered => Some(Stop::Unanswered(screen)),
@@ -410,6 +423,17 @@ pub struct Run<'a> {
     /// branches on it: both go through the same handler, which is the point — see
     /// [`Run::settle_after_mode_change`].
     pub combat_expected: bool,
+    /// The dump count at the moment every recorded screen position stopped being trustworthy.
+    ///
+    /// [`Run::settled_dump`] will not return anything counted at or before this, so a dump taken
+    /// before a fight cannot be used to aim a click after one. See that function for the mechanism
+    /// and for the run it cost.
+    ///
+    /// Raised after a fight, unconditionally rather than only in a lost woods. Returning from combat
+    /// re-centres the camera in any case, and "wait for one more dump" is a far cheaper mistake than
+    /// clicking a mirrored map — this project has three runs' evidence that a stale coordinate fails
+    /// quietly, by selecting empty ground.
+    pub positions_stale_at: usize,
 }
 
 impl Run<'_> {
@@ -993,18 +1017,59 @@ impl Run<'_> {
     /// Returns `None` rather than falling back to the arrival dump. A stale coordinate does not fail
     /// loudly — it clicks empty ground and reports that nothing happened, which is three runs'
     /// evidence that guessing here is worse than stopping.
+    ///
+    /// ## Settled is not the same as current, and in a lost woods the difference ends runs
+    ///
+    /// This used to test `reason.contains("pan")` and nothing else, against whichever dump happened
+    /// to be newest. "Settled" is a claim about the camera having stopped when the numbers were
+    /// printed; it says nothing about **when** they were printed, and a dump from before a fight
+    /// passes the test just as well as one from after it.
+    ///
+    /// That is fatal in a lost woods, because every fight re-orients the map. Ending one calls
+    /// `overworld.returnFromDungeon` → `overworld:loadLight` (`overworld.lua:1035-1036`) →
+    /// `overworldview.loadLight` (`overworldview.lua:1610-1620`):
+    ///
+    /// ```lua
+    /// if worldParentLocation.typeData.generatorData.lostOrientation then
+    ///     core.regenerateMap()
+    ///     core.warpPlayerAvatar()
+    ///     core.centreScreenOnPlayer(true)
+    ///     core.generateClouds()
+    /// end
+    /// ```
+    ///
+    /// and `regenerateMap` re-runs the generator's `lostOrientation` block
+    /// (`overworld/generators/forest.lua:483-498`), which multiplies every `posX`/`posY` by a fresh
+    /// random sign and may transpose them. So a node's screen position before a fight predicts
+    /// nothing about where it is afterwards — it is frequently the *mirror image*.
+    ///
+    /// The run of 2026-08-09 won five fights in the woods and died to this on the sixth step after
+    /// one. It clicked toward `e1sub19` using the pan dump from before the fight, the map having
+    /// been flipped underneath it, and moved the screen **0.032**. It looks exactly like a missed
+    /// click, which is why it was first blamed on the blind-click problem — but the click landed
+    /// precisely where it was aimed. The aim came from a stale map.
+    ///
+    /// It survived four earlier fights only by luck: a fresh dump usually arrives before the next
+    /// step needs one, so this was a race that was mostly won. `positions_stale_at` makes the wait
+    /// deliberate — a dump counted before the invalidation cannot satisfy this, whatever it says
+    /// about panning.
     fn settled_dump(&mut self, within: Duration) -> Option<Adjacency> {
         let by = Instant::now() + within;
         loop {
             self.pump();
-            if let Some(a) = self.latest.as_ref().filter(|a| a.reason.contains("pan")) {
+            let usable = dump_is_usable(self.dumps, self.positions_stale_at);
+            if let Some(a) = self.latest.as_ref().filter(|a| usable && a.reason.contains("pan")) {
                 return Some(a.clone());
             }
             if Instant::now() >= by {
                 let reason = self.latest.as_ref().map(|a| a.reason.clone()).unwrap_or_default();
-                self.log.push_str(&format!(
-                    "  no settled dump within {within:?}; newest is `{reason}`\n"
-                ));
+                // Says which of the two it was. "Newest is `Screen pan finished`" while refusing it
+                // reads like a bug unless the staleness is named.
+                let why = match dump_is_usable(self.dumps, self.positions_stale_at) {
+                    true => format!("newest is `{reason}`"),
+                    false => "nothing since the map was re-oriented".to_string(),
+                };
+                self.log.push_str(&format!("  no settled dump within {within:?}; {why}\n"));
                 return None;
             }
             std::thread::sleep(Duration::from_millis(250));
@@ -1746,6 +1811,10 @@ pub fn drive(
             match outcome {
                 Ok(o) if o.cleared() => {
                     r.log.push_str(&format!("  fight finished: {o:?}\n"));
+                    // Every screen position we hold predates the map the fight just handed back.
+                    // In a lost woods that is literal: `loadLight` re-orients it. See
+                    // [`Run::settled_dump`].
+                    r.positions_stale_at = r.dumps;
                     // Bookkeeping every fight needs. Skipping it is how a run walks out of a fight at
                     // 1/20 and never considers resting, because nothing recorded the loss.
                     let now = r.apply_save();
@@ -2893,6 +2962,24 @@ mod tests {
         for e in ESCAPES {
             assert!(Screen::ALL.contains(&e.screen), "{:?} is escapable but not in Screen::ALL", e.screen);
         }
+    }
+
+    /// A dump that was already in hand when the map turned over is not evidence about the new one.
+    ///
+    /// The run of 2026-08-09 clicked toward `e1sub19` on coordinates printed before a fight, in a
+    /// lost woods, where ending a fight re-orients the map — so the node it aimed at was somewhere
+    /// between mirrored and transposed away. The screen moved 0.032 and it read like a missed click.
+    ///
+    /// Four earlier fights survived it because a fresh dump usually lands before the next step needs
+    /// one. A rule that is usually satisfied by timing is not a rule, which is what this pins.
+    #[test]
+    fn a_dump_from_before_the_map_turned_over_is_not_usable() {
+        // The failing case: the fight raised the watermark to the dump we already had.
+        assert!(!dump_is_usable(7, 7), "same dump, new map — this is the one that clicked wrong");
+        assert!(!dump_is_usable(6, 7), "older still");
+        assert!(dump_is_usable(8, 7), "counted after the fight, so it describes the map we have");
+        // Nothing has invalidated anything yet: the ordinary case must stay free.
+        assert!(dump_is_usable(1, 0), "a first dump with no fight behind it is fine");
     }
 
     /// Both ways into a fight must be answered by the loop, not by whoever pressed the button.
