@@ -89,15 +89,19 @@ const EMPTY_MAP_CANDIDATES: [(i32, i32); 4] =
 /// right edge, next door to a function named `backOutOfHotspotMapPan`. Parking on the boundary of a
 /// region whose handler pans the map is not somewhere to leave a cursor for seconds at a time.
 const NEUTRAL: (i32, i32) = (760, 240);
-/// A budget, not a target. Run 4 reached the anomaly trigger on step 20 and died there — the cap
-/// expired on the exact step the interesting part began, so the cinematic skip below it had never
-/// run live. Three shrines and two fights cost that run its whole budget; getting past the trigger
-/// and into the anomaly needs roughly twice as much.
-///
-/// This bounds a program that holds the real mouse and keyboard, so it stays finite. Drop
-/// `.diggle-stop` in the working directory to end a run early — it is read between steps, where
-/// nothing is half-done.
-const MAX_STEPS: usize = 45;
+// A step cap lived here — 45, then 20 before that. It is gone.
+//
+// It was never a safety measure, only a guess about how long a run *ought* to take, and it kept
+// expiring on the interesting part: run 4 died on the anomaly trigger at step 20 with the cinematic
+// skip below it never once exercised, and the run of 2026-08-09 was cut off mid-errand at step 45
+// while walking into its third village, having just rested to full and fought through a mausoleum.
+// The dev's call: while runs are still turning up new behaviour every time, an arbitrary cap costs
+// discoveries and buys nothing.
+//
+// What actually bounds a program holding the real mouse and keyboard is time, and that stays — see
+// `drive`'s `deadline`, which the caller sets and which is checked at the top of every step. So does
+// `.diggle-stop`, now checked in the same place rather than partway down, so it is honoured from any
+// state rather than only from the states that reach the middle of the loop.
 
 /// How many times to click a node, re-deriving its coordinates between tries, before giving up.
 ///
@@ -593,6 +597,26 @@ impl Run<'_> {
     ///
     /// `tag` records what the game's own state says should be in the slot, so the capture arrives
     /// already labelled rather than needing to be identified afterwards.
+    /// Photograph the whole window, for a failure we cannot explain from the console alone.
+    ///
+    /// Added because a rest failed live and the only honest answer to "what was on screen" was that
+    /// nobody had looked. `ui/inn.lua:39-66` declares `Shop` and `Rest` statically, with no
+    /// `activeIf` and no variant sets, so the *source* says our coordinate cannot be wrong — but a
+    /// screen nobody photographed is not evidence, and arguing from source about a live failure is
+    /// how this project has been wrong before.
+    fn snap_screen(&mut self, tag: &str) {
+        match crate::win::capture::capture_window(self.win) {
+            Ok(f) => {
+                let path = Path::new(FRAMES).join(format!("{tag}.png"));
+                match f.write_png(&path) {
+                    Ok(()) => self.log.push_str(&format!("  photographed the screen as `{tag}`\n")),
+                    Err(e) => self.log.push_str(&format!("  could not write {tag}: {e}\n")),
+                }
+            }
+            Err(e) => self.log.push_str(&format!("  could not capture {tag}: {e}\n")),
+        }
+    }
+
     fn snap_area_slot(&mut self, tag: &str) {
         // `default` is 250x100 (`ui/elements/button.lua:17`), and [`AREA_BUTTON`] is its centre.
         let (x, y) = (AREA_BUTTON.0 - 125, AREA_BUTTON.1 - 50);
@@ -702,6 +726,10 @@ impl Run<'_> {
                     "  rest: the rest screen did not open (try {try_n} of {})\n",
                     innplay::REST_TRIES
                 ));
+                // One picture per attempt, because the two candidate explanations look completely
+                // different and the console cannot tell them apart: a screen that has not finished
+                // arriving, versus a button somewhere other than where we pressed.
+                self.snap_screen(&format!("rest-no-screen-{try_n}"));
             }
             let Some(mark) = opened else {
                 break;
@@ -1547,9 +1575,17 @@ pub fn drive(
         }
     }
 
-    for step in 1..=MAX_STEPS {
+    for step in 1.. {
         if Instant::now() >= deadline {
             return Stop::Exhausted;
+        }
+        // Checked here, at the top, and not partway down where it used to sit: with no step cap
+        // above it, this and the deadline are the only two ways a run ends that are not the run's
+        // own decision, and a `continue` from a screen handler must not be able to skip either.
+        if Path::new(STOP_FILE).exists() {
+            let _ = std::fs::remove_file(STOP_FILE);
+            r.log.push_str(&format!("{step}. stop requested — ending cleanly\n"));
+            return Stop::Requested;
         }
         if r.map.anomaly_beaten() {
             return Stop::AnomalyBeaten;
@@ -1745,12 +1781,6 @@ pub fn drive(
 ")),
             }
             continue;
-        }
-        if Path::new(STOP_FILE).exists() {
-            let _ = std::fs::remove_file(STOP_FILE);
-            r.log.push_str(&format!("{step}. stop requested — ending cleanly
-"));
-            return Stop::Requested;
         }
         // An event can be up at the top of any iteration, and while one is it owns the screen —
         // clicking the map does nothing and `recentre` times out with "no pan dump". Entering a

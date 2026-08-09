@@ -211,7 +211,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A global stop, so the report is always written. A spike killed from outside leaves a stale
     // report on disk that then reads as the current result.
-    let stop = drive(&mut r, &fight, &mut health, Instant::now() + Duration::from_secs(900));
+    // `0` means no limit, expressed as a deadline a year out rather than as an `Option` threaded
+    // through `drive`: the check stays one comparison, and a run that is still going in a year has
+    // problems this would not have solved.
+    let minutes = cfg.run_minutes.unwrap_or(diggle_solver::config::DEFAULT_RUN_MINUTES);
+    let budget = match minutes {
+        0 => Duration::from_secs(365 * 24 * 60 * 60),
+        m => Duration::from_secs(m * 60),
+    };
+    r.log.push_str(&match minutes {
+        0 => "no time limit; `.diggle-stop` ends the run\n\n".to_string(),
+        m => format!("time limit {m} min; `.diggle-stop` ends the run\n\n"),
+    });
+    let stop = drive(&mut r, &fight, &mut health, Instant::now() + budget);
     r.log.push_str(&format!("\n## Stopped\n\n{stop:?}\n\n"));
 
     // Photograph whatever beat us, once, here.
