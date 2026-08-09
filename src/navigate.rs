@@ -325,6 +325,40 @@ const fn dump_is_usable(counted: usize, stale_at: usize) -> bool {
     counted > stale_at
 }
 
+/// Does this dump place **every** neighbour off the screen?
+///
+/// If so the camera and the coordinates disagree, whatever the dump's reason line says, and nothing
+/// in it can be clicked or panned to. Adjacent nodes are around the player by construction — they
+/// cannot all be off the same edge of a settled view — so this is a geometric impossibility rather
+/// than a threshold, and needs no tuning.
+///
+/// ## The transient it catches
+///
+/// Ending a fight in a lost woods runs `regenerateMap` (see [`Run::settled_dump`]), which flips every
+/// `posX`/`posY`. The camera is re-centred separately, and the dump can be printed in between — new
+/// positions against the old `xoffset`, which mirrors the whole map about the viewport. The run of
+/// 2026-08-09 got one and believed it, because it announced itself as `Screen pan finished`:
+///
+/// ```text
+/// Local overworld data:   Screen pan finished     e1sub35
+///     Adjacent connections:
+///         e1sub45   posX: -1308.48   posY: 718.33
+///         e1sub39   posX: -1418.89   posY: 204.56
+///         e1sub20   posX:  -909.94   posY: 347.45
+/// ```
+///
+/// Every neighbour a thousand pixels off the left edge. The step before, from the node next door,
+/// the same neighbours had read `+792` and `+1270` — same magnitudes, opposite sign. Trusting it
+/// asked for a pan of 1539 px, got 451 before `clampWithinBoundsX` stopped it, and ended the run.
+///
+/// Deliberately not "the node I want is off-screen", which is ordinary and is what panning is for.
+/// **All** of them is the impossible reading.
+fn camera_is_lost(nodes: &[crate::observe::adjacency::Node], client_w: i32, client_h: i32) -> bool {
+    let (w, h) = (client_w as f64, client_h as f64);
+    let off = |n: &crate::observe::adjacency::Node| n.x < 0.0 || n.x > w || n.y < 0.0 || n.y > h;
+    !nodes.is_empty() && nodes.iter().all(off)
+}
+
 pub fn precheck(screen: Screen) -> Option<Stop> {
     match answer_for(screen) {
         Answer::Unanswered => Some(Stop::Unanswered(screen)),
@@ -1055,19 +1089,36 @@ impl Run<'_> {
     /// about panning.
     fn settled_dump(&mut self, within: Duration) -> Option<Adjacency> {
         let by = Instant::now() + within;
+        let (cw, ch) = self.win.client_size().unwrap_or((1920, 1080));
+        // Two ways to be unusable, and they need different words in the log. Tracked so the
+        // explanation is written once rather than on every poll.
+        let mut lost = false;
         loop {
             self.pump();
             let usable = dump_is_usable(self.dumps, self.positions_stale_at);
-            if let Some(a) = self.latest.as_ref().filter(|a| usable && a.reason.contains("pan")) {
-                return Some(a.clone());
+            let candidate =
+                self.latest.as_ref().filter(|a| usable && a.reason.contains("pan")).cloned();
+            if let Some(a) = candidate {
+                // Settled, fresh, and still not to be believed — see `camera_is_lost`.
+                if !camera_is_lost(&a.nodes, cw, ch) {
+                    return Some(a);
+                }
+                if !lost {
+                    lost = true;
+                    self.log.push_str(
+                        "  every neighbour is off-screen — the camera has not caught up with the \
+                         map, so these coordinates cannot be used\n",
+                    );
+                }
             }
             if Instant::now() >= by {
                 let reason = self.latest.as_ref().map(|a| a.reason.clone()).unwrap_or_default();
                 // Says which of the two it was. "Newest is `Screen pan finished`" while refusing it
                 // reads like a bug unless the staleness is named.
-                let why = match dump_is_usable(self.dumps, self.positions_stale_at) {
-                    true => format!("newest is `{reason}`"),
-                    false => "nothing since the map was re-oriented".to_string(),
+                let why = match (dump_is_usable(self.dumps, self.positions_stale_at), lost) {
+                    (_, true) => "the camera has not caught up with the map".to_string(),
+                    (true, false) => format!("newest is `{reason}`"),
+                    (false, false) => "nothing since the map was re-oriented".to_string(),
                 };
                 self.log.push_str(&format!("  no settled dump within {within:?}; {why}\n"));
                 return None;
@@ -2159,7 +2210,16 @@ pub fn drive(
             let polled = r.settled_dump(Duration::ZERO).or_else(|| {
                 // `recentre` clicks the map to force a pan dump, so it is worth one try rather than
                 // three: a run that is not on the map at all should not be clicking at it repeatedly.
-                (r.dump_misses + 1 >= MAX_DUMP_MISSES).then(|| r.recentre()).flatten()
+                //
+                // It is also the cure for a camera that has not caught up, because locate-me centres
+                // on the player by construction. Its answer is held to the same test anyway — an
+                // invariant that is only checked on one of two paths into the same variable is a
+                // rule with a hole in it.
+                let (cw, ch) = r.win.client_size().unwrap_or((1920, 1080));
+                (r.dump_misses + 1 >= MAX_DUMP_MISSES)
+                    .then(|| r.recentre())
+                    .flatten()
+                    .filter(|a| !camera_is_lost(&a.nodes, cw, ch))
             });
             match polled {
                 Some(a) => {
@@ -2980,6 +3040,38 @@ mod tests {
         assert!(dump_is_usable(8, 7), "counted after the fight, so it describes the map we have");
         // Nothing has invalidated anything yet: the ordinary case must stay free.
         assert!(dump_is_usable(1, 0), "a first dump with no fight behind it is fine");
+    }
+
+    /// Every neighbour off the same edge is the camera being wrong, not the map being big.
+    ///
+    /// The numbers are the ones the game printed at `e1sub35` after a fight in the lost woods, and
+    /// the step before from next door, where the same nodes read positive. See [`camera_is_lost`].
+    #[test]
+    fn a_dump_with_every_neighbour_off_screen_is_the_camera_not_the_map() {
+        let at = |x: f64, y: f64| crate::observe::adjacency::Node {
+            key: format!("n{x}"),
+            heading: "Howden Timberland forest".into(),
+            x,
+            y,
+            connections: 2,
+        };
+        // The dump that ended the run.
+        let flipped = [at(-1308.48, 718.33), at(-1418.89, 204.56), at(-909.94, 347.45)];
+        assert!(camera_is_lost(&flipped, 1920, 1080));
+
+        // The same three from the node next door, before the fight flipped them.
+        let ordinary = [at(791.82, 703.56), at(1270.18, 730.56)];
+        assert!(!camera_is_lost(&ordinary, 1920, 1080));
+
+        // One node out of reach is the ordinary state of a big subworld, and is what panning is
+        // for. Ulrome prints a road at x=2109 with the rest of the village on screen.
+        assert!(!camera_is_lost(&[at(2109.0, 500.0), at(800.0, 500.0)], 1920, 1080));
+
+        // A node dead-centre with nothing else named must not read as lost.
+        assert!(!camera_is_lost(&[at(960.0, 540.0)], 1920, 1080));
+
+        // No neighbours at all says nothing about the camera; only a dump that names some can.
+        assert!(!camera_is_lost(&[], 1920, 1080));
     }
 
     /// Both ways into a fight must be answered by the loop, not by whoever pressed the button.
