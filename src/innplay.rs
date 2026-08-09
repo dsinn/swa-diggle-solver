@@ -132,6 +132,26 @@ pub const WAKE_UP: ButtonSpec =
 /// the rest is expensive.
 pub const MAX_PRESSES: usize = 12;
 
+/// How many times to press `Rest` before accepting that the rest screen is not going to open.
+///
+/// **One press was not enough, measured.** Live 2026-08-09 at The Alot inn: `Entered inn screen`
+/// arrived, `Rest` was pressed, and no [`REST_SCREEN`] followed in eight seconds. The run wrote the
+/// inn off and walked to the next village at 7/20 to try again. The same inn had worked the run
+/// before, and `l19`'s worked twice in that very run — intermittent, which is the signature of a
+/// race rather than a wrong coordinate.
+///
+/// The cause is the one this project keeps rediscovering: [`ENTERED`] is printed from the inn's
+/// `onActive` (`ui/inn.lua:125-127`), which is the screen *becoming* active, not the screen being
+/// ready to take a click — and `ui/elements/button.lua:93` is a strict hit test. Announcement is not
+/// readiness.
+///
+/// Retrying rather than sleeping first is deliberate. A fixed delay is a guess that is either too
+/// short on a slow frame or wasted on every fast one, and this file already has the better pattern
+/// in `wake_from_dream`: press, look for the announcement, press again. Re-pressing is safe because
+/// [`REST_SCREEN`] is printed from `onActive` too, so silence for a few seconds is real evidence the
+/// screen never opened rather than evidence the console is behind.
+pub const REST_TRIES: usize = 3;
+
 /// What the game says about the rest in front of us.
 ///
 /// Fields are the ones `logRestData` prints (`ui/rest.lua:29-40`). Anything absent from the block is

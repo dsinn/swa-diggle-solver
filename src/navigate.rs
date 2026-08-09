@@ -684,15 +684,28 @@ impl Run<'_> {
         //    lands there.
         let mut done = 0;
         while done < innplay::MAX_PRESSES {
-            let mark = self.feed.mark();
-            if !self.click_button(&innplay::INN_REST) {
-                self.log.push_str("  rest: could not click `Rest`\n");
-                break;
+            // Press `Rest` until the screen says it opened. See [`innplay::REST_TRIES`] for why one
+            // press is not enough: the inn announces itself from `onActive`, before it can take a
+            // click, and a run lost an inn to that and walked to the next village at 7/20.
+            let mut opened = None;
+            for try_n in 1..=innplay::REST_TRIES {
+                let mark = self.feed.mark();
+                if !self.click_button(&innplay::INN_REST) {
+                    self.log.push_str("  rest: could not click `Rest`\n");
+                    break;
+                }
+                if self.wait_for_line(mark, innplay::REST_SCREEN, Duration::from_secs(4)) {
+                    opened = Some(mark);
+                    break;
+                }
+                self.log.push_str(&format!(
+                    "  rest: the rest screen did not open (try {try_n} of {})\n",
+                    innplay::REST_TRIES
+                ));
             }
-            if !self.wait_for_line(mark, innplay::REST_SCREEN, Duration::from_secs(8)) {
-                self.log.push_str("  rest: the rest screen did not open\n");
+            let Some(mark) = opened else {
                 break;
-            }
+            };
             let Some(data) = innplay::parse_rest_data(self.feed.since(mark)) else {
                 self.log.push_str("  rest: the rest screen printed no `Rest data` block\n");
                 self.leave_inn(1);
