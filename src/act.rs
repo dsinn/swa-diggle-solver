@@ -203,13 +203,28 @@ pub const COMBAT_HUD: Button = Button {
 
 /// A fight is in progress and on its **first turn**. See [`COMBAT_HUD`].
 ///
-/// **0.99, not 1.00.** Turn 1 against a turn-1 template genuinely measures 1.0000, and the region is
-/// immune to the vignette that breaks everything else — so a perfect bar would cost nothing *if the
-/// HUD is truly static*. That has been checked on one frame, and one frame is not a steady state:
-/// if the `?` plaque so much as pulses, an exact bar fails intermittently, which is the worst way
-/// for a detector to be wrong. The 0.01 is slack for that, not tolerance for a changed numeral —
-/// the nearest thing below is 0.8894, so it costs no separation at all.
-pub const COMBAT_HUD_PRESENT: f64 = 0.99;
+/// **0.95, and the 0.99 it replaces cost a run.**
+///
+/// The old value came with the right reasoning and the wrong number: turn 1 against a turn-1
+/// template measures 1.0000, the region is immune to the vignette, *but one frame is not a steady
+/// state*, so 0.01 was left as slack in case the HUD moved. Live 2026-08-09 it moved by **0.018**.
+///
+/// Leaving a village walked into a highwayman, the fight opened at turn 1, and this scored
+/// **0.9820** — measured offline against `spike-frames-live/gave-up.png` with `inlier_probe`, so it
+/// is a number and not a story. `identify` returned `Unknown`, the driver stayed on the map path,
+/// and the run spent its retries clicking empty ground at (1750, 160) while a full board sat on
+/// screen. Word count 0, kill count 0.
+///
+/// The template was cut in a crypt and this fight was in a night swamp; the background shows around
+/// the `?` and turn plaques, which is the variation nobody had sampled.
+///
+/// **0.95 costs no separation.** The nearest non-combat frame in the corpus scores 0.8894, so the
+/// gap between "a fight" and "not a fight" is still 0.06 wide on the low side and 0.03 on the high.
+/// What it does give up is the old promise that this fires *only* on turn 1 — a two-character
+/// numeral is a fraction of a 225x100 region, so a later turn may now match too. That is the right
+/// trade: the question worth answering is "is a fight on screen", and answering it only on the
+/// first turn is how a run walks past one.
+pub const COMBAT_HUD_PRESENT: f64 = 0.95;
 
 /// `Finish` is not merely on screen but **drawn active**, i.e. clickable. See [`COMBAT_FINISH`].
 ///
@@ -231,7 +246,16 @@ pub const COMBAT_HUD_PRESENT: f64 = 0.99;
 /// saved to measure it. If a live run is ever refused here at, say, 0.96, that is this caveat
 /// arriving — and [`crate::fight::Fight::finish`] logs the best score precisely so it arrives as a
 /// number rather than a mystery.
-pub const COMBAT_FINISH_ACTIVE: f64 = 0.97;
+///
+/// **That caveat is why this is [`MAX_PRESENT`] and no longer 0.97.** It was written predicting a
+/// refusal around 0.96 from a tint nobody had photographed, and the same shape of prediction came
+/// true elsewhere the same week: [`COMBAT_HUD_PRESENT`] sat at 0.99 on identical reasoning and
+/// missed a live fight at 0.9820, leaving a run stranded in front of a full board. Anticipating the
+/// failure in a comment is not the same as leaving room for it.
+///
+/// The separation is unharmed: 1.0000 against 0.8639 greyed leaves 0.086 below the bar, and the
+/// `Finish`-versus-`Eulogise` question is settled by [`slot_is_eulogise`]'s argmax rather than here.
+pub const COMBAT_FINISH_ACTIVE: f64 = MAX_PRESENT;
 
 /// The reward screen's `Confirm`, captured in its **greyed** state.
 ///
@@ -355,9 +379,15 @@ pub const COMBAT_EULOGISE: Button = Button {
 
 /// The dead-character slot is showing. See [`COMBAT_EULOGISE`].
 ///
-/// 0.97: true positive 1.0000, nearest confusable 0.8527 — the same reasoning as
-/// [`COMBAT_FINISH_ACTIVE`]. Exact bounds make a near-1.0 bar free.
-pub const COMBAT_EULOGISE_PRESENT: f64 = 0.97;
+/// True positive 1.0000, nearest confusable 0.8527, so anything from 0.90 to 0.99 separates. It was
+/// 0.97 on the reasoning that "exact bounds make a near-1.0 bar free" — the same reasoning that put
+/// [`COMBAT_HUD_PRESENT`] at 0.99, where a live fight scored 0.9820 and was missed. Free is the
+/// wrong word for it: a bar that tight buys no separation and spends the margin that absorbs a
+/// background nobody sampled.
+///
+/// Held at [`MAX_PRESENT`] now, with 0.12 still between it and the confusable. The real
+/// discrimination here is argmax between the two templates ([`slot_is_eulogise`]), not this bar.
+pub const COMBAT_EULOGISE_PRESENT: f64 = MAX_PRESENT;
 
 /// Does the bottom-right slot read `Eulogise` rather than `Finish`?
 ///
@@ -1391,6 +1421,26 @@ pub const PROGRESS: Button = Button {
 /// 0.85 sits well clear of that 0.599.
 pub const MIN_INLIERS: f64 = 0.85;
 
+/// **No `_PRESENT` bar may sit above this.** The dev's rule, and it is about frame variation rather
+/// than about any one screen.
+///
+/// A threshold near 1.0 asserts that a region is pixel-identical between the frame the template was
+/// cut from and every frame it will ever meet. That has only ever been checked on one frame, and one
+/// frame is not a steady state: backgrounds differ by biome, plaques animate, the vignette moves.
+/// Twice now a bar was set near 1.0 with the note that "exact bounds make it free" — and on
+/// 2026-08-09 the tighter of the two, [`COMBAT_HUD_PRESENT`] at 0.99, missed a live fight at 0.9820
+/// and the run walked past a full board reporting a navigation error.
+///
+/// 0.95 costs nothing anywhere it applies. Every threshold in this file has its true positive at
+/// 1.0000 and its nearest confusable measured, and the tightest of those gaps is still 0.12 wide.
+/// What the cap buys is that the *slack* is always larger than the frame-to-frame variation nobody
+/// has sampled yet.
+///
+/// It is a floor on slack, not a substitute for measurement: a threshold still has to sit in a
+/// measured gap against the nearest state it could be mistaken for. `every_threshold_leaves_room_
+/// for_a_frame_we_have_not_seen` enforces the cap; the per-button docs carry the gaps.
+pub const MAX_PRESENT: f64 = 0.95;
+
 fn template_path(name: &str) -> PathBuf {
     Path::new("templates").join(name)
 }
@@ -2141,30 +2191,87 @@ mod threshold_tests {
         }
     }
 
-    /// Pins the crop's **turn-specificity**, which is a limitation rather than a defect.
+    /// **This crop is no longer turn-specific, and that is now the point.**
     ///
-    /// The template carries the numeral `1`, so a fight on a later turn scores below
-    /// [`COMBAT_HUD_PRESENT`] — by design, since this is an entry signal. What must stay true is that
-    /// it lands far above the non-combat frames rather than falling in among them: that gap is what a
-    /// future "still in combat, any turn" check would be built on, and if it closes, the crop needs
-    /// the numeral excluded rather than the threshold lowered.
+    /// It used to assert the opposite — that a later turn scores *below* [`COMBAT_HUD_PRESENT`],
+    /// because the template carries the numeral `1` and the check was meant as an entry signal. That
+    /// held at a 0.99 bar, and the old assertion's own message said what to do if the numeral
+    /// stopped mattering: say so here rather than leave the doc claiming it does. This is that.
+    ///
+    /// What changed: a live fight at turn 1 scored **0.9820** and missed the 0.99 bar, so `identify`
+    /// returned `Unknown` and the run stood on the map path in front of a full board until it gave
+    /// up. The bar is [`MAX_PRESENT`] now, and a two-character numeral is too small a part of a
+    /// 225x100 region to hold turn 11 below it.
+    ///
+    /// So the contract is "a fight is on screen", not "a fight just started" — which is the more
+    /// useful question anyway. The **gap to the nearest non-combat frame** is what the check really
+    /// lives on, and if that ever closes the answer is a crop without the numeral, never a lower
+    /// threshold.
     #[test]
-    fn a_later_turn_reads_below_the_entry_bar_but_far_above_any_non_combat_screen() {
+    fn any_turn_reads_as_combat_and_stands_clear_of_what_is_not() {
         let Some(turn_11) = score(&COMBAT_HUD, "combat-chest.png") else {
             eprintln!("SKIP: frame corpus not present");
             return;
         };
-        assert!(
-            turn_11 < COMBAT_HUD_PRESENT,
-            "turn 11 scored {turn_11:.4}, at or above an entry-only bar — if the numeral has stopped \
-             mattering, say so here rather than leaving the doc claiming it does"
-        );
+        let turn_1 = score(&COMBAT_HUD, "combat-turn1-hurt.png").unwrap();
+        for (name, q) in [("turn 1", turn_1), ("turn 11", turn_11)] {
+            assert!(
+                q >= COMBAT_HUD_PRESENT,
+                "{name} scored {q:.4}, below the bar — a fight this misses is a fight the run walks \
+                 past, which is exactly what 0.99 did on 2026-08-09"
+            );
+        }
         let nearest_non_combat = score(&COMBAT_HUD, "16-selected.png").unwrap();
         assert!(
             turn_11 - nearest_non_combat > 0.3,
             "a later turn ({turn_11:.4}) should stand well clear of the nearest non-combat screen \
-             ({nearest_non_combat:.4}); the margin is what a turn-independent check would use"
+             ({nearest_non_combat:.4}); that margin is the whole of this check"
         );
+    }
+
+    /// **No threshold may be tighter than the frame variation nobody has measured.**
+    ///
+    /// The rule behind [`MAX_PRESENT`], enforced rather than trusted. Two bars in this file were set
+    /// near 1.0 with a note that exact bounds made it free, and the tighter of them missed a live
+    /// fight by 0.008 — a run stood in front of a full board reporting a navigation error.
+    ///
+    /// A cap is not a substitute for measurement, and this test does not pretend otherwise: the
+    /// per-button docs carry the true positive and the nearest confusable, and those gaps are what
+    /// make a threshold correct. This only guarantees that whatever is chosen leaves at least 0.05
+    /// of room for a background, an animation or a biome we have not photographed.
+    ///
+    /// The list is written out because there is no way to enumerate consts, which is the same
+    /// weakness [`ALL`] has — a threshold added and not listed here is checked by nothing. Add it.
+    #[test]
+    fn every_threshold_leaves_room_for_a_frame_we_have_not_seen() {
+        let bars = [
+            ("COMBAT_FINISH", COMBAT_FINISH_PRESENT),
+            ("COMBAT_FINISH_ACTIVE", COMBAT_FINISH_ACTIVE),
+            ("COMBAT_HUD", COMBAT_HUD_PRESENT),
+            ("COMBAT_EULOGISE", COMBAT_EULOGISE_PRESENT),
+            ("REWARD_SCREEN", REWARD_SCREEN_PRESENT),
+            ("MENU_START", MENU_START_PRESENT),
+            ("HEROSELECT_CONFIRM", HEROSELECT_CONFIRM_PRESENT),
+            ("POSTGAME_CONTINUE", POSTGAME_CONTINUE_PRESENT),
+            ("CHARACTER_STATS", CHARACTER_STATS_PRESENT),
+            ("CHARACTER_BACK", CHARACTER_BACK_PRESENT),
+            ("PREGAME_START", PREGAME_START_PRESENT),
+            ("EVENT_CHOICE", EVENT_CHOICE_PRESENT),
+            ("UNLOCK_CONTINUE", UNLOCK_CONTINUE_PRESENT),
+            ("HEROSELECT_HEADER", HEROSELECT_HEADER_PRESENT),
+            ("SHRINE_GOBACK", SHRINE_GOBACK_PRESENT),
+            ("STATS_BACK", STATS_BACK_PRESENT),
+            ("SHRINE_PRAY", SHRINE_PRAY_PRESENT),
+            ("CONTINUE", CONTINUE_PRESENT),
+        ];
+        for (name, bar) in bars {
+            assert!(
+                bar <= MAX_PRESENT,
+                "{name}_PRESENT is {bar:.2}, above the {MAX_PRESENT:.2} cap. A bar that tight \
+                 asserts a region is pixel-identical across frames nobody has sampled; if the \
+                 separation genuinely needs it, the crop is wrong, not the cap"
+            );
+        }
     }
 
     /// Pins the inversion itself, because it is the reason [`REWARD_SCREEN_PRESENT`] cannot simply be
