@@ -746,9 +746,61 @@ impl WorldMap {
     /// walls, water and fights are invisible to it — so it belongs where a real route is unavailable
     /// and never in place of one.
     pub fn gap(&self, from: &str, to: &str) -> Option<f64> {
-        let (ax, ay) = self.places.get(from)?.pos?;
-        let (bx, by) = self.places.get(to)?.pos?;
+        let (ax, ay) = self.pos_for(from)?;
+        let (bx, by) = self.pos_for(to)?;
         Some(((ax - bx).powi(2) + (ay - by).powi(2)).sqrt())
+    }
+
+    /// Where a place is, with one estimate allowed: the anomaly, which we can locate without
+    /// having seen it.
+    ///
+    /// **The anomaly is at the world origin, by construction.** `overworld/generators/world.lua:73`
+    /// builds `locationData.start` at `posX=0, posY=0`, and `:505-507` turns that same node into the
+    /// portal when hell opens. It never moves.
+    ///
+    /// That is not directly usable, because our frame is screen units with an unknown offset and
+    /// scale ([`WorldMap::registration`]), so world `(0,0)` has no address in it. What *is* usable is
+    /// that corruption spreads from the same origin. `hellCheck`
+    /// (`overworld/locations/hellportal.lua:16-23`) is
+    ///
+    /// ```lua
+    /// local dist = math.vdist(0,0,x,y)/42 --0 at the center
+    /// return hellval > perlin*dist
+    /// ```
+    ///
+    /// with `perlin` in `[0.5, 1]`, so a node is corrupt iff it lies within a radius of the origin
+    /// that varies by at most 2x with direction. The corrupted nodes are a blob centred on the
+    /// anomaly, and their centroid points at it.
+    ///
+    /// **This is an estimate and it is biased by where we have been.** The centroid is over the
+    /// corrupted nodes *we have positioned*, so a run that has only seen the eastern edge of the
+    /// blob will think the anomaly is east of where it is. It gets better as the map grows, and it
+    /// is never worse than the alternative, which is no direction at all. It is used only to choose
+    /// between adjacent steps when no route exists — never to decide that we have arrived.
+    ///
+    /// A real sighting always wins: once any dump has shown `start`, that position is exact and this
+    /// estimate is not consulted.
+    fn pos_for(&self, key: &str) -> Option<(f64, f64)> {
+        let place = self.places.get(key)?;
+        if let Some(p) = place.pos {
+            return Some(p);
+        }
+        if key != ANOMALY_KEY && !place.type_is("anomaly") {
+            return None;
+        }
+        let corrupt: Vec<(f64, f64)> = self
+            .places
+            .values()
+            .filter(|p| p.corrupted && p.parent.is_none())
+            .filter_map(|p| p.pos)
+            .collect();
+        match corrupt.len() {
+            0 => None,
+            n => {
+                let (sx, sy) = corrupt.iter().fold((0.0, 0.0), |(x, y), (a, b)| (x + a, y + b));
+                Some((sx / n as f64, sy / n as f64))
+            }
+        }
     }
 
     /// Where this dump's coordinates sit relative to the frame we are assembling, if we can tell.
@@ -3274,6 +3326,46 @@ mod tests {
             vec![Node { key: "l9sub2".into(), heading: "road".into(), x: 5.0, y: 5.0, connections: 2 }],
             vec![exit("l19")]));
         assert_eq!(m.get("l9sub2").unwrap().pos, None, "zoomMult is unchecked inside a subworld");
+    }
+
+    /// The anomaly can be aimed at before it has ever been seen, because corruption surrounds it.
+    ///
+    /// `world.lua:73` puts `locationData.start` at world `(0,0)` and `:505-507` makes that node the
+    /// portal, so the anomaly is at the origin by construction. `hellCheck`
+    /// (`hellportal.lua:16-23`) measures from the same `(0,0)`, so the corrupted nodes are a blob
+    /// around it — which means the corrupted places we have positioned point at an anomaly we have
+    /// never stood next to. That is the whole case the coordinate work was for: the run that walked
+    /// into a level 5 crypt had an open anomaly whose key it knew and whose position it did not.
+    #[test]
+    fn corruption_points_at_an_anomaly_we_have_never_seen() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "The Wold crossroads", vec![
+            Node { key: "west".into(), heading: "West Field".into(),
+                   x: -100.0, y: 0.0, connections: 3 },
+            Node { key: "east".into(), heading: "East Field".into(),
+                   x: 100.0, y: 0.0, connections: 3 },
+            // Two corrupted nodes, both well to the west. `start` itself is never dumped.
+            Node { key: "c1".into(), heading: "Burnt Hollow — level 6 crypt".into(),
+                   x: -480.0, y: -40.0, connections: 2 },
+            Node { key: "c2".into(), heading: "Ashen Reach — level 6 forest".into(),
+                   x: -520.0, y: 40.0, connections: 2 },
+        ]));
+        for k in ["c1", "c2"] {
+            m.entry(k).corrupted = true;
+        }
+        // `start` arrives as a bare key, the way `completedAreas` supplies it on a live run: known
+        // to exist, with no heading, no edges and no position.
+        m.entry("start");
+        assert_eq!(m.get("start").unwrap().pos, None, "never dumped, so no real position");
+
+        // The centroid of the corruption is (-500, 0), so `west` is nearer the anomaly than `east`.
+        let west = m.gap("west", "start").expect("estimated through the corrupted blob");
+        let east = m.gap("east", "start").expect("estimated through the corrupted blob");
+        assert!(west < east, "west {west} should beat east {east}");
+
+        // And a real sighting overrides the estimate rather than being averaged with it.
+        m.entry("start").pos = Some((1000.0, 0.0));
+        assert!(m.gap("east", "start").unwrap() < m.gap("west", "start").unwrap(), "sighting wins");
     }
 
     /// Heading for a target we cannot route to, step the way it lies.
