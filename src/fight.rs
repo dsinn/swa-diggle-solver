@@ -209,10 +209,19 @@ impl Fight<'_> {
             //
             // Live, 2026-08-09, in a level 5 crypt: nine turns won cleanly, `Clavicular` down from
             // 81 to 11, `CAPITATES` played for 40 and accepted — the HUD read `Turn: 10` and the
-            // word's definition was on screen. The board had run down to seven tiles that would not
-            // refill, the game printed no `Player turn 10 start` because `tileboard.lua:1285` logs
-            // only once the turn-start fall-and-respawn completes, and this reported `Stalled`. The
-            // fight was going fine; the *report* was wrong, and it named the game as the culprit.
+            // word's definition was on screen. The board was down to seven tiles, the game printed
+            // no `Player turn 10 start` (`tileboard.lua:1285` logs only once the turn-start
+            // fall-and-respawn completes), and this reported `Stalled`. The fight was going fine;
+            // the *report* was wrong, and it named the game as the culprit.
+            //
+            // **Do not read more into that board than was measured.** Seven tiles were on screen and
+            // no turn-10 dump arrived within 45 s. Whether the board could not fill, or simply had
+            // not yet, is unknown — we stopped looking. The game does have an answer if it turns out
+            // to matter: `Refresh`, "clear the tile board of all selectable tiles and refill"
+            // (`rpg.lua:407-412`), which costs health and has a separate gold-tile variant. It is
+            // not implemented, and should stay that way until a run with this timer fixed gets
+            // genuinely stuck — at which point there will be evidence about what the board does over
+            // a longer wait, which is the thing nobody has yet.
             //
             // So the timer resets when either the state changes **or a turn goes by**. Turns only
             // ever increase, so this cannot be gamed by a state that flaps.
