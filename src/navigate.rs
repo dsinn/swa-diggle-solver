@@ -2285,7 +2285,15 @@ pub fn drive(
                 }
             }
         } else {
-            match r.recentre() {
+            // The overworld gets the settling for free — it re-centres every step, and `recentre`
+            // already refuses a dump older than its own click. What it did not get is the sanity
+            // check on the answer, and there is no reason the overworld camera is more trustworthy
+            // than a subworld's; a locate-me caught mid-glide reads the same either side.
+            //
+            // Treated as a miss rather than a stop, which is what this branch already does with a
+            // locate-me that did not answer: go round, re-identify, try again.
+            let (cw, ch) = r.win.client_size().unwrap_or((1920, 1080));
+            match r.recentre().filter(|a| !camera_is_lost(&a.nodes, cw, ch)) {
                 Some(a) => {
                     r.recentre_misses = 0;
                     a
@@ -2974,8 +2982,12 @@ pub fn drive(
             if attempt == SELECT_RETRIES {
                 break;
             }
-            // Fresh coordinates, from a dump that is now required to be newer than the arrow press.
-            match r.recentre() {
+            // Fresh coordinates, from a dump that is now required to be newer than the arrow press —
+            // and to describe a view the player is actually in. Retrying a failed selection against
+            // a camera that has not caught up spends all `SELECT_RETRIES` aiming at the same wrong
+            // place, which reads in the log as the click not registering.
+            let (cw, ch) = r.win.client_size().unwrap_or((1920, 1080));
+            match r.recentre().filter(|a| !camera_is_lost(&a.nodes, cw, ch)) {
                 Some(a) => match a.nodes.iter().find(|n| n.key == hop.step) {
                     Some(n) => {
                         at = (n.x as i32, n.y as i32);
