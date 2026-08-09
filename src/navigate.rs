@@ -2284,31 +2284,107 @@ pub fn drive(
         // Falling through instead lets the code below click the area button, which enters the
         // subworld (`getLocationButtons` tests `typeData.subworld` before `basicCombatZone`), after
         // which the next iteration is "inside" and the crossing logic takes over.
-        if let Some(p) = place.as_ref().filter(|p| p.subworld_container) {
-            let heading_for = r.map.next_hop().map(|h| h.plan.target);
+        if let Some(p) = place.as_ref() {
             // **A village we are hurt in front of is never a dead end.** Entering it is the errand,
             // not a detour on the way to somewhere else — so the "nowhere left to go" test must not
             // be allowed to answer for it. Without this the run reaches the rest it planned and
             // stops on the doorstep in exactly the state the rest was for: `next_target` excludes
             // `here`, and at low health with every remaining node hostile there may be no second
             // choice for it to name.
+            //
+            // ## This is also the ONLY way we learn a village can be entered at all
+            //
+            // `subworld_container` is set from a dump taken *inside* (`overworld.rs`), so it can
+            // never be true for a village we have not already been in. Standing on the very rest
+            // stop we crossed a forest to reach, the driver therefore knew nothing about it, walked
+            // away, and `next_target` — which excludes `here` — nominated the next village along.
+            // Live 2026-08-08: `l19 -> l27 (for l27, Rest)`, `l27 -> l19 (for l19, Rest)`, four
+            // round trips between two adjacent villages, having just crossed `l9` to get to one.
+            // Cycle number eight, and the first with a cause outside the routing.
+            //
+            // A village heading settles it where a forest's cannot. The deliberate rule against
+            // inferring a container from its heading — `a_container_is_learned_from_being_inside_
+            // it_not_from_its_heading` — exists because `Eight Timberland — level 4 forest` reads
+            // exactly like a fight. `Dane village` does not: `village.lua:5,72` is
+            // `typeName = 'village'` with `subworld = 'village'`, and `getLocationButtons`
+            // (`overworldview.lua:461-468`) returns the subworld button set for it. So the area
+            // button below is `Enter`, not `Combat`.
+            //
+            // **Corrupted is excluded**, and that is the whole of the risk here: `getAreaButtons`
+            // is consulted *before* `subworld`, and a village under attack replaces the set
+            // (`village.lua:371-395`). We do not know what those buttons are, so we do not press
+            // them on spec.
             let rest_here = r.map.wants_rest()
                 && r.map.gold() >= crate::rest::INN_COST
-                && p.type_is("village");
-            let stuck_here =
-                !rest_here && heading_for.as_deref().map(|t| t == here).unwrap_or(true);
-            if stuck_here {
-                r.log.push_str(&format!(
-                    "{step}. `{here}` ({}) is the destination and is a subworld — clearing it from \
-                     the inside is not implemented\n",
-                    p.heading
-                ));
-                return Stop::AtSubworld(here);
+                && p.type_is("village")
+                && !p.corrupted;
+            if p.subworld_container || rest_here {
+                let heading_for = r.map.next_hop().map(|h| h.plan.target);
+                let stuck_here =
+                    !rest_here && heading_for.as_deref().map(|t| t == here).unwrap_or(true);
+                if stuck_here {
+                    r.log.push_str(&format!(
+                        "{step}. `{here}` ({}) is the destination and is a subworld — clearing it \
+                         from the inside is not implemented\n",
+                        p.heading
+                    ));
+                    return Stop::AtSubworld(here);
+                }
+                match rest_here {
+                    true => r.log.push_str(&format!(
+                        "{step}. `{here}` ({}) is the rest we came for — entering it\n",
+                        p.heading
+                    )),
+                    false => r.log.push_str(&format!(
+                        "{step}. `{here}` is a subworld on the way to `{}` — entering to cross it\n",
+                        heading_for.as_deref().unwrap_or("?")
+                    )),
+                }
+                // **Press it here, rather than falling through and hoping.**
+                //
+                // Falling through worked only by accident, and only for a forest: the area button is
+                // pressed further down inside the *fight* branch, which fires on `has_combat() &&
+                // !completed`. A forest container's heading carries a level, so it qualified and the
+                // `Combat` press turned out to enter the subworld. `Dane village` carries no level
+                // and is already complete, so that branch could never fire — the run logged
+                // "entering to cross it" and then travelled onward, which is the `l19 <-> l27`
+                // bounce with a sentence of narration on top.
+                //
+                // `Enter` and `Combat` are the same click either way: `click_area_button` presses a
+                // fixed position (`AREA_BUTTON`) and the label only reaches the log.
+                //
+                // **Only the rest case takes this path.** A container we are crossing still falls
+                // through to the fight branch, because that is the code that crossed `l9` live on
+                // 2026-08-08 and it handles an outcome this does not: the press may open a *pregame*
+                // rather than a subworld, and telling those apart is the loop down there. Here the
+                // node is a completed, uncorrupted village — there is no fight for it to start.
+                if rest_here {
+                    let inside_before = r.map.inside().map(str::to_string);
+                    if !matches!(r.click_area_button("Enter"), Ok(true)) {
+                        return Stop::Failed(format!("Enter did nothing at {here}"));
+                    }
+                    // Confirm by the *change*, never by "we are in a subworld" — inside a village
+                    // that is already true before the click, and asking it that way is what once had
+                    // a run report that it had entered somewhere it was standing in. Announcement is
+                    // not readiness: the press is not done until the world says it moved.
+                    let by = Instant::now() + Duration::from_secs(10);
+                    loop {
+                        r.pump();
+                        if r.map.inside().map(str::to_string) != inside_before {
+                            r.log.push_str(&format!(
+                                "  inside `{}` now\n",
+                                r.map.inside().unwrap_or("?")
+                            ));
+                            break;
+                        }
+                        if Instant::now() >= by {
+                            return Stop::Failed(format!("no subworld after entering {here}"));
+                        }
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                    continue;
+                }
             }
-            r.log.push_str(&format!(
-                "{step}. `{here}` is a subworld on the way to `{}` — entering to cross it\n",
-                heading_for.as_deref().unwrap_or("?")
-            ));
         }
         // Ask where we are GOING before deciding to fight. The first live run had these the other
         // way round: it saw an unfinished fight underfoot and cleared it unconditionally, when the
