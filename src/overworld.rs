@@ -1406,8 +1406,52 @@ impl WorldMap {
                     !p.avoid && !(self.wants_rest && p.is_chest() && !p.completed)
                 }).unwrap_or(true)
         };
-        // Same order the real router uses, so exploring does not undo what routing was for: paved
-        // first, then anywhere; unvisited first within each, so the walk cannot cycle.
+
+        // **Head for the nearest place that can still teach us something, by a route.**
+        //
+        // "Unvisited first, then by key" is only cycle-free while an unvisited neighbour is in
+        // reach. Once the ground around us is fully walked and the destination is still unknown, it
+        // degenerates into a deterministic alphabetical pick — and two nodes that each pick the
+        // other is a stable cycle, not a wander that eventually escapes.
+        //
+        // Live: `l9sub2` <-> `l9_plaza`, twenty laps. Both paved, both completed, neither blocking.
+        // From `l9sub2` the smallest key is `l9_plaza` (`_` sorts below `s`); from `l9_plaza` it is
+        // `l9sub2` (a prefix of `l9sub26`). Nothing was wrong with either choice on its own, which
+        // is the signature of every bounce in this project.
+        //
+        // A route to a frontier cannot cycle: the BFS distance to the chosen frontier strictly
+        // decreases with each step, so the walk terminates at something worth learning. Frontier is
+        // [`Place::is_frontier`] — never visited, or visited while the game withheld neighbours —
+        // so "worth learning" is the map's own record rather than a heuristic.
+        // Ranked, not merely nearest. Nearest alone quietly undid the dev's crossing rule: offered an
+        // unvisited forest and an unvisited road side by side it took whichever sorted first, and
+        // `walking_into_the_dark_still_avoids_the_other_exits` said so immediately. The order is the
+        // same one `first_step_toward` uses for the route — no fight, then close, then paved — so
+        // choosing where to explore and choosing how to get there cannot disagree.
+        let hops = self.distances(&here);
+        let costs_a_fight = |p: &Place| !p.completed && heading_has_combat(&p.heading);
+        let exit_prefix = format!("{parent}_path_to_");
+        let frontier = self
+            .places
+            .values()
+            .filter(|p| p.parent.as_deref() == Some(parent.as_str()))
+            .filter(|p| p.key != here && p.is_frontier() && usable(&p.key))
+            // An exit road we have not walked is a frontier too, but heading for one is leaving —
+            // and while looking for an inn, leaving is the move that abandons the errand.
+            .filter(|p| !p.key.starts_with(&exit_prefix) || Some(&p.key) == dest.as_ref())
+            .filter_map(|p| hops.get(&p.key).map(|d| (costs_a_fight(p), *d, !p.is_paved(), &p.key)))
+            .min()
+            .map(|(_, _, _, k)| k.clone());
+        if let Some(step) = frontier.and_then(|f| self.first_step_toward(&here, &f, false)) {
+            return Some(match dest {
+                Some(toward) => Crossing::Explore { to: step, toward },
+                None => Crossing::Seek { to: step },
+            });
+        }
+
+        // Nothing left to learn, or no route to any of it. Same order the real router uses, so
+        // exploring does not undo what routing was for: paved first, then anywhere; unvisited first
+        // within each.
         let pick = |paved_only: bool| {
             let mut best: Option<&String> = None;
             for n in place.neighbours.iter().filter(|n| usable(n)) {
@@ -1415,12 +1459,18 @@ impl WorldMap {
                 if paved_only && !p.map(|p| p.is_paved()).unwrap_or(false) {
                     continue;
                 }
+                // `seen` and not `!seen`. Written the other way round, this said "unvisited first"
+                // in the comment and did the exact opposite: an unvisited node scores `!seen ==
+                // true`, a visited one `false`, and `false < true` — so ground we had already walked
+                // won every comparison. That is the whole of the `l9sub2` <-> `l9_plaza` bounce.
+                // From the plaza the neighbours were `l9sub1` (unwalked), `l9sub2` (walked) and
+                // `l9sub3` (unwalked), and it took `l9sub2` twenty times.
                 let seen = p.map(|p| p.visited).unwrap_or(false);
                 let better = match best {
                     None => true,
                     Some(b) => {
                         let b_seen = self.places.get(b).map(|p| p.visited).unwrap_or(false);
-                        (!seen, n) < (!b_seen, b)
+                        (seen, n) < (b_seen, b)
                     }
                 };
                 if better {
@@ -3014,6 +3064,55 @@ mod tests {
                 assert!(toward.starts_with("l10_path_to_"), "straight through: {toward}");
             }
             other => panic!("expected an exit crossing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn walked_out_ground_is_not_paced_over_again() {
+        // `l9sub2` <-> `l9_plaza`, twenty laps live, until the run was stopped by hand.
+        //
+        // Both paved, both completed, neither blocking, and the exit road never seen — so there was
+        // no route to plan and the fallback was picking a neighbour by name. From `l9sub2` the
+        // smallest key is `l9_plaza` (`_` sorts below `s`); from `l9_plaza` it is `l9sub2` (a prefix
+        // of `l9sub26`). Two locally-correct choices, one stable cycle.
+        // The two dumps exactly as the console printed them, so the neighbour sets are the game's
+        // and not a convenient invention.
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump(
+            "l9",
+            "l9sub2",
+            "Saltagh Park road",
+            vec![
+                node("l9sub4", "Saltagh Park forest"),
+                node("l9_plaza", "Saltagh Park crossroads"),
+                node("l9sub9", "Saltagh Park road"),
+            ],
+            vec![exit("l19")],
+        ));
+        m.fold(&inside_dump(
+            "l9",
+            "l9_plaza",
+            "Saltagh Park crossroads",
+            vec![
+                node("l9sub1", "Saltagh Park road"),
+                node("l9sub2", "Saltagh Park road"),
+                node("l9sub3", "Saltagh Park road"),
+            ],
+            vec![exit("l19")],
+        ));
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+        // The state that produced the loop: both of these walked, everything else still dark.
+        assert!(m.get("l9_plaza").unwrap().visited && m.get("l9sub2").unwrap().visited);
+        assert!(!m.get("l9sub1").unwrap().visited && !m.get("l9sub3").unwrap().visited);
+
+        // Standing on the plaza, `l9sub2` is the one neighbour with nothing left to teach us, and it
+        // is the one the run took -- twenty times.
+        match m.cross_toward(&[exit("l19")]) {
+            Some(Crossing::Explore { to, .. }) => {
+                assert_ne!(to, "l9sub2", "that is the way we came, and it is fully walked");
+                assert_eq!(to, "l9sub1", "an unwalked road, nearest and paved");
+            }
+            other => panic!("expected a step into the dark, got {other:?}"),
         }
     }
 
