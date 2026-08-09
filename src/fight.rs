@@ -40,6 +40,29 @@ const NEUTRAL: (i32, i32) = (300, 300);
 /// A dungeon that has not ended in this many player turns is not going to.
 const MAX_TURNS: usize = 40;
 
+/// Does this console line announce the avoidable-murder dialog?
+///
+/// Two substrings, not one. `Feed::seen_since`'s own doc warns that a bare substring test is wrong
+/// for wordy announcements, because the console also carries item names, enemy names and event
+/// prose — and this game's prose is exactly the sort that could contain "murder" innocently. The
+/// header pins it to a dialog and the phrase pins it to *this* dialog.
+///
+/// Not the whole message, which would be brittle: `wordboard.lua:503` is the only source of it
+/// today, but matching a full sentence makes a localisation or a reworded prompt look like no
+/// dialog at all — and this check failing silently is what a stuck run looks like.
+fn announces_murder_dialog(line: &str) -> bool {
+    line.contains("Okay dialogue:") && line.contains("avoidable murder")
+}
+
+/// How many times to press Backspace at the avoidable-murder modal before giving up on it.
+///
+/// More than one because a keystroke can be lost to focus, and few because each attempt already
+/// waits two seconds for the plaque to fade out — three is enough to distinguish "the press was
+/// dropped" from "this key does not dismiss this dialog", which is the only distinction worth
+/// spending time on. If all three fail the word is still on the board, and the next turn reports
+/// `BoardNeverSettled` rather than this inventing an outcome for it.
+const MURDER_CANCEL_TRIES: usize = 3;
+
 /// How long `combatSaveData` must stay unreadable before the fight is called over.
 ///
 /// A failed read is **not** proof that it ended. Nothing deletes this file per fight — the only two
@@ -323,11 +346,30 @@ impl Fight<'_> {
             }
         }
         if let Goal::Scare { need, below } = goal {
+            // Inclusive in the log, half-open in the code. `race_for_band` filters
+            // `score >= need && score < below` (`search.rs:838`), so `below` is a ceiling the word
+            // must stay under — but "aiming for 4..6" reads in English as "6 is allowed", and it
+            // sent a reader hunting for a bug in the aim when the aim was correct and only this
+            // sentence was wrong.
             log.push_str(&format!(
-                "  {name} can be scared off ({:?}); aiming for {need}..{below} damage, not a kill
-",
-                mods.nerve
+                "  {name} can be scared off ({:?}); aiming for {need}..={} damage, not a kill\n",
+                mods.nerve,
+                below - 1
             ));
+        }
+        // The enemy's statuses, whenever it has any.
+        //
+        // Recorded because a live murder warning could not be explained without them. The game's
+        // estimate is of death *possibly by status* (`rpgview.lua:915`), and
+        // `getStatusEffectHealthDeltasFor` (`:1027`) folds toxin, burn and bleed into the health it
+        // predicts — none of which our arithmetic models. Without this line there is no way to tell
+        // "the game scored the word higher than we did" from "the enemy was already dying".
+        let statuses = crate::lexica::Lexica::statuses_from_save(cs);
+        if !statuses.is_empty() {
+            let mut shown: Vec<String> =
+                statuses.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            shown.sort();
+            log.push_str(&format!("  {name} statuses: {}\n", shown.join(" ")));
         }
         // Built per turn rather than per fight, because the board's tile count is what the target is
         // scaled to and a board can lose tiles mid-fight — the run that died at `l50` watched its
@@ -412,57 +454,6 @@ impl Fight<'_> {
         keys.press_key(VK_SPACE, SC_SPACE)?;
         log.push_str("  selected and submitted\n");
 
-        // ## The game may refuse the submission as an avoidable murder
-        //
-        // `wordboard.startAttack` (`wordboard.lua:499-508`) opens a modal instead of attacking when
-        // the enemy is about to die *and* carries `fear`, `terror` or `caution`. It firing means our
-        // damage model and the game's estimate have disagreed — the game's is of **death**,
-        // "possibly by status" (`rpgview.lua:915`), so an effect we do not model can finish an enemy
-        // our arithmetic left alive.
-        //
-        // Back out rather than confirm. The dev's rule: cancel, clear the word, play something
-        // weaker. Accepting would kill an enemy we came here to frighten off, and a fight we can end
-        // by scaring is one we would rather not pay for — `Goal::Scare` exists for that.
-        //
-        // Nothing here waits for the dialog to *appear*: it is drawn in the same frame the attack is
-        // refused, so a look after the press is either on it or past it. A run that met this without
-        // the handler reported `BoardNeverSettled` — a modal is what a board that never settles looks
-        // like from underneath.
-        if matches!(crate::act::locate(self.win, &crate::act::MURDER_CANCEL), Ok(Some(_))) {
-            log.push_str("  the game says this would be avoidable murder — backing out\n");
-            let (sx, sy) = self
-                .win
-                .client_to_screen(crate::act::MURDER_CANCEL.click.0, crate::act::MURDER_CANCEL.click.1)?;
-            click_at(sx, sy)?;
-            self.park();
-            std::thread::sleep(Duration::from_millis(400));
-            // **The word survives the cancel** — confirmed by the dev — because the modal refused
-            // the attack rather than clearing the board. So every letter has to come back off
-            // before another can be spelled.
-            //
-            // Two more presses than tiles, deliberately. A `QU` tile is one selection but two
-            // letters, so tile count and letter count are not the same number and the difference
-            // depends on the word; over-pressing costs nothing on an already-empty word, while
-            // under-pressing leaves a stub that the next word would be typed onto. "Enough times"
-            // was the instruction and this is the reading of it that cannot leave a residue.
-            keys.focus();
-            for _ in 0..steps.len() + 2 {
-                keys.press_key(crate::win::input::VK_BACK, crate::win::input::SC_BACK)?;
-                std::thread::sleep(Duration::from_millis(60));
-            }
-            *murder_backoff += 1;
-            log.push_str(&format!(
-                "  cleared {} letters; aiming {murder_backoff} lower next pass\n",
-                steps.len()
-            ));
-            self.shot("murder-warning");
-            // `None`, not an outcome: the enemy is alive, the board is intact and the word is off,
-            // so this is a retry rather than an ending. The loop reads everything again from the
-            // top — including the enemy state that disagreed with us — and the backoff makes the
-            // next search pick something weaker instead of the same word for ever.
-            return Ok(None);
-        }
-
         // Wait for the turn to move on: any other state, a changed board, or the reward screen.
         let mark = feed.mark();
         let until = Instant::now() + Duration::from_secs(20);
@@ -486,6 +477,58 @@ impl Fight<'_> {
             feed.pump();
             if feed.seen_since(mark, "Item selection:") {
                 break;
+            }
+            // ## The game may refuse the submission as an avoidable murder
+            //
+            // `wordboard.startAttack` (`wordboard.lua:499-508`) opens a modal instead of attacking
+            // when the enemy is about to die *and* carries `fear`, `terror` or `caution`. It firing
+            // means our damage model and the game's estimate have disagreed — the game's is of
+            // **death**, "possibly by status" (`rpgview.lua:915`), so an effect we do not model can
+            // finish an enemy our arithmetic left alive. Back out rather than confirm: the dev's
+            // rule is cancel, clear the word, play something weaker.
+            //
+            // ## Why this is read off the console and not the screen
+            //
+            // The first version looked for the `Cancel` plaque with a single `act::locate` straight
+            // after the Space press, on the reasoning that the modal is drawn in the same frame the
+            // attack is refused. That reasoning was wrong and it cost a live run.
+            // `setActiveMode` (`main.lua:191-195`) starts a cross-fade of
+            // `userConfig.interface.transitionDuration`, **0.625s** by default, so a look taken
+            // immediately lands mid-fade on a half-transparent plaque and scores under the
+            // threshold. Measured afterwards against the frame the run stopped on, the same
+            // template scores **1.0000** at the same origin: right artwork, right coordinates,
+            // wrong moment.
+            //
+            // Polling the pixels instead would have worked and is still the wrong shape. This check
+            // is speculative — no dialog is the overwhelmingly common case — so any timeout long
+            // enough to outlast the fade would be paid on every turn of every fight. The console
+            // line is free: this loop is already pumping the feed.
+            //
+            // The line is emitted from the dialog's `onActive` (`ui/twobuttondialogue.lua:27-33`),
+            // which `StartTransition` calls at `main.lua:163-165` — nine lines before it installs
+            // the mode's `userFunctions` at `:170`, with no yield in between. Lua is single
+            // threaded and LÖVE pumps events at the top of a frame, not re-entrantly inside a
+            // `captureScreenshot` callback, so nothing can be dispatched in that gap. Our reading
+            // of the line is later still. For once, the announcement *is* the readiness signal —
+            // not because console lines can be trusted in general, but because this one shares an
+            // uninterruptible block with the handler it announces.
+            if feed.since(mark).iter().any(|l| announces_murder_dialog(l)) {
+                log.push_str("  the game says this would be avoidable murder — backing out\n");
+                self.shot("murder-warning");
+                if !self.back_out_of_murder(keys, log, steps.len())? {
+                    // Left as it is rather than dressed up as an outcome. The word is still on the
+                    // board and the modal may still be over it, so the next turn's
+                    // `wait_until_ready` will report `BoardNeverSettled` — which is exactly what
+                    // this situation is, and what it reported before the handler existed.
+                    return Ok(None);
+                }
+                *murder_backoff += 1;
+                log.push_str(&format!("  aiming {murder_backoff} lower next pass\n"));
+                // `None`, not an outcome: the enemy is alive, the board is intact and the word is
+                // off, so this is a retry rather than an ending. The loop reads everything again
+                // from the top — including the enemy state that disagreed with us — and the backoff
+                // makes the next search pick something weaker instead of the same word for ever.
+                return Ok(None);
             }
             match save::load(&self.combat_path) {
                 Ok(next) => {
@@ -515,6 +558,86 @@ impl Fight<'_> {
             ));
         }
         Ok(None)
+    }
+
+    /// Cancels the avoidable-murder modal and clears the word behind it.
+    ///
+    /// Returns whether the modal actually went away. `false` means every press was refused or lost,
+    /// and the caller must not go on to spell anything — the letters would land on a dialog.
+    ///
+    /// ## Backspace, not a click
+    ///
+    /// `defaultbinds/keyboard.lua:74` binds `backspace` to `goBack` in the second bind layer, and
+    /// `doUserFunctionWithBindsFromSet` (`main.lua:471-480`) walks the layers in order taking the
+    /// first handler that returns truthy. While the dialog is up, layer 1's `backspace` action
+    /// resolves to nothing — the dialog installs only `affirmative` and `goBack`
+    /// (`ui/twobuttondialogue.lua:17-23`), and there is no `coreUserFunctions.backspace` — so the
+    /// lookup falls through to layer 2 and cancels. The dialog's own `goBack` shadows
+    /// `coreUserFunctions.goBack`, so `canGoBack()` never gates it.
+    ///
+    /// The same key is safe for the letter-clearing afterwards for the mirror-image reason: on the
+    /// combat screen layer 1 *does* bind it (`rpg.lua:221`, `wordboard.backspace() or true`), it
+    /// always returns truthy, and layer 2 is never reached. One key, opposite meanings, decided
+    /// entirely by which handler set is installed — which is why both halves are checked here
+    /// rather than assumed to be the same press.
+    ///
+    /// A click would also have to wait out the 0.625s fade before the plaque is solid enough to
+    /// aim at; the key is live the moment the dialog is announced.
+    fn back_out_of_murder(
+        &self, keys: &PostMessageInput, log: &mut String, tiles: usize,
+    ) -> Result<bool, crate::Error> {
+        for attempt in 1..=MURDER_CANCEL_TRIES {
+            keys.focus();
+            keys.press_key(crate::win::input::VK_BACK, crate::win::input::SC_BACK)?;
+            // Pressing once and assuming is the failure this project repeats. The press can be lost
+            // to focus, so the dialog going away is checked rather than expected.
+            if self.murder_plaque_gone(Duration::from_secs(2))? {
+                log.push_str(&format!("  cancelled on press {attempt}\n"));
+                // **The word survives the cancel** — confirmed by the dev — because the modal
+                // refused the attack rather than clearing the board. So every letter has to come
+                // back off before another can be spelled.
+                //
+                // Two more presses than tiles, deliberately. A `QU` tile is one selection but two
+                // letters, so tile count and letter count are not the same number and the
+                // difference depends on the word; over-pressing costs nothing on an already-empty
+                // word, while under-pressing leaves a stub that the next word would be typed onto.
+                keys.focus();
+                for _ in 0..tiles + 2 {
+                    keys.press_key(crate::win::input::VK_BACK, crate::win::input::SC_BACK)?;
+                    std::thread::sleep(Duration::from_millis(60));
+                }
+                log.push_str(&format!("  cleared {tiles} tiles worth of letters\n"));
+                return Ok(true);
+            }
+            log.push_str(&format!("  press {attempt} did not dismiss the warning\n"));
+        }
+        log.push_str("  WARNING the murder warning would not go away\n");
+        self.shot("murder-stuck");
+        Ok(false)
+    }
+
+    /// Polls until the murder plaque is no longer on screen, or `within` elapses.
+    ///
+    /// This is the one job the template is genuinely good for. Detection had to come off the
+    /// console because it is speculative and the fade makes an immediate look useless; *confirmation*
+    /// is neither — we already know the dialog was there, so waiting out the fade costs nothing that
+    /// was not going to be spent anyway, and the plaque disappearing is direct evidence the press
+    /// landed.
+    ///
+    /// A capture error is **not** counted as absence. `act::locate` folds a failed grab into `Err`,
+    /// and reading that as "gone" is how a check that cannot see becomes a check that says yes — the
+    /// confusion `probe_button` was written to expose.
+    fn murder_plaque_gone(&self, within: Duration) -> Result<bool, crate::Error> {
+        let deadline = Instant::now() + within;
+        loop {
+            if let Ok(None) = crate::act::locate(self.win, &crate::act::MURDER_CANCEL) {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 
     /// Clicks `Finish`, confirms it took, and retries if it did not.
@@ -816,6 +939,39 @@ fn tiles_of(save: &Table) -> Vec<crate::observe::board::Tile> {
 ///
 /// `ui/itemselection.lua:419-430` prints each item with its name and **screen coordinates**, so the
 /// row never has to be located visually.
+#[cfg(test)]
+mod murder_dialog_tests {
+    use super::*;
+
+    /// The line as the game actually printed it, copied from `spike-run-raw.log` after the live run
+    /// that met this dialog. A positive control taken from real output rather than from the format
+    /// string in `twobuttondialogue.lua` — if the two ever disagree, this is the one that matters.
+    const REAL: &str =
+        "Okay dialogue:\tIt looks like you're about to commit avoidable murder, are you sure?";
+
+    #[test]
+    fn the_line_the_game_printed_is_recognised() {
+        assert!(announces_murder_dialog(REAL), "the captured line must match: {REAL}");
+    }
+
+    #[test]
+    fn the_option_lines_under_it_are_not_mistaken_for_the_announcement() {
+        // The two lines that follow carry the shortcut names, and firing on those would run the
+        // handler three times for one dialog.
+        assert!(!announces_murder_dialog("\t\tOption1:\tAccept\tShortcut:\taffirmative"));
+        assert!(!announces_murder_dialog("\t\tOption2:\tCancel\tShortcut:\tgoBack"));
+    }
+
+    #[test]
+    fn prose_about_murder_that_is_not_this_dialog_is_ignored() {
+        // Both halves are load-bearing: the game prints event text and a dictionary full of words.
+        assert!(!announces_murder_dialog("patricide=\"[[murder|Murder]] of one's [[father]].\""));
+        assert!(!announces_murder_dialog("\t[Murderer][Combat] - \"Are you alone?\""));
+        // A different dialog must not trigger the murder handler.
+        assert!(!announces_murder_dialog("Okay dialogue:\tAbandon this run?"));
+    }
+}
+
 #[cfg(test)]
 mod tileboard_tests {
     use super::*;

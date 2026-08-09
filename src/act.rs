@@ -996,6 +996,19 @@ pub const SHRINE_GOBACK_PRESENT: f64 = 0.90;
 /// Cut from `spike-frames-live/gave-up.png`, which is the frame a live run stopped on with
 /// `BoardNeverSettled` — a modal is what a board that never settles looks like from underneath.
 /// The plaque is opaque, so the blurred scene behind the dialog does not reach the template.
+///
+/// ## This does not detect the dialog, and must not be used to
+///
+/// It used to. A single `locate` fired straight after the Space press, and it missed a live one —
+/// not because the artwork or the search box are wrong, but because `setActiveMode`
+/// (`main.lua:191-195`) cross-fades for **0.625s** and the look landed mid-fade. Measured against
+/// the frame that run stopped on, this template scores **1.0000** at its own origin. A threshold
+/// change would not have helped and neither would a better crop.
+///
+/// Detection is the console's job now — see [`crate::fight::Fight::back_out_of_murder`]. What is
+/// left here is *confirmation*: once the feed says the dialog opened, this is polled until it stops
+/// matching, which is how we know the Backspace landed. That is the role a template is good at,
+/// because by then we already know what should be on screen and are willing to wait out the fade.
 pub const MURDER_CANCEL: Button = Button {
     name: "murder Cancel",
     template: "murder-cancel.png",
