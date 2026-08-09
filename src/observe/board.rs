@@ -181,7 +181,12 @@ impl BoardDump {
     }
 }
 
-const MARKER: &str = "board state = {";
+/// The line `tileboard.lua` prints when a turn's board is dealt.
+///
+/// Public because it is also the cheapest proof that **a fight is running at all**, which the
+/// navigator needs on the one door into combat that announces nothing else — see the chest branch in
+/// [`crate::navigate`]. Shared rather than spelled twice, so the two cannot drift apart.
+pub const MARKER: &str = "board state = {";
 
 /// Tiles from a `tileboard` array, in either form the serializer emits.
 ///

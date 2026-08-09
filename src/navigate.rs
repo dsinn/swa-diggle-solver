@@ -2346,9 +2346,17 @@ pub fn drive(
                 // Its own line, and deliberately not the one above. `Step` and `Explore` already
                 // print identically, which made a wrong-door guess read like a considered route in
                 // the logs; a search with no destination at all would have been a third.
+                //
+                // Two ways to have no destination, and the log used to name only one of them. An inn
+                // we have not found is the errand case; an exit the fog has not shown us is the
+                // crossing case, and a lost woods makes it the common one. Reporting the second as
+                // `searching e1 for its inn` had the run looking for a bar in the woods.
                 Crossing::Seek { to } => match fresh.nodes.iter().find(|n| &n.key == to) {
                     Some(n) => (
-                        format!("searching `{container}` for its inn via `{to}`"),
+                        match r.map.seeking_an_inn(&container) {
+                            true => format!("searching `{container}` for its inn via `{to}`"),
+                            false => format!("no way out of `{container}` in sight — exploring via `{to}`"),
+                        },
                         (n.x, n.y),
                     ),
                     None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
@@ -2707,6 +2715,10 @@ pub fn drive(
                 Instant::now() + Duration::from_secs(10)
             };
             let mut pregame = false;
+            // The fight started without one. Not a variant of "no pregame yet" — a different door
+            // into combat, and pressing Start on the other side of it would be a keystroke into a
+            // live turn.
+            let mut already_fighting = false;
             loop {
                 // Pump and test the POSITIVE signal first. The other two branches are inferences
                 // from what has not happened, and an inference must never pre-empt an announcement
@@ -2716,6 +2728,33 @@ pub fn drive(
                 if r.feed.seen_since(mark, "Pregame screen:") {
                     pregame = true;
                     r.pregame_seen = true;
+                    break;
+                }
+                // ## A chest has no pregame, and waiting for one ended a run
+                //
+                // Two buttons, two doors, and only one of them announces itself
+                // (`overworld/generators/forest.lua:23-39`):
+                //
+                // ```lua
+                // -- Combat
+                // overworldview.startCombatPregame(scenarios.forestCommon(), onStartingCombat)
+                // -- Open, on a chest
+                // overworld.startNewRun(scenarios.chest(overworldview.playerCurrentLocation()))
+                // ```
+                //
+                // `startNewRun` ends in `setActiveMode(require'rpg')` (`overworld.lua:1294-1298`) —
+                // straight into the fight, and `Pregame screen:` is printed from `ui/pregame.lua:91`
+                // alone. So on a chest the announcement we are waiting for cannot ever arrive: the
+                // run of 2026-08-09 waited its ten seconds at `e1sub1`, concluded nothing had
+                // happened, and failed with `Player turn 0 start` and the whole board already in the
+                // feed.
+                //
+                // This is the project's usual mistake wearing its other face. Normally we act before
+                // the announcement; here we waited for one this path never makes. The cure is the
+                // same either way — believe a positive signal about the state we care about, rather
+                // than an inference from a signal about the route into it.
+                if r.feed.seen_since(mark, crate::observe::board::MARKER) {
+                    already_fighting = true;
                     break;
                 }
                 // A live affirmative, or a subworld we were NOT in a moment ago: whatever that
@@ -2736,7 +2775,7 @@ pub fn drive(
                 }
                 std::thread::sleep(Duration::from_millis(150));
             }
-            if !pregame {
+            if !pregame && !already_fighting {
                 // No pregame does not mean failure. `getLocationButtons` tests `typeData.subworld`
                 // BEFORE `basicCombatZone` (`overworldview.lua:462-467`), so on a forest or a
                 // village that button ENTERED the place instead of starting a fight -- and their
@@ -2757,12 +2796,18 @@ pub fn drive(
                     "no pregame at {here} and still inside {inside_before:?}"
                 ));
             }
-            r.keys.focus();
-            std::thread::sleep(Duration::from_millis(400));
-            if r.keys.press_key(VK_SPACE, SC_SPACE).is_err() {
-                return Stop::Failed("could not send Start".into());
+            // Start belongs to the pregame. On the chest's door the fight is already on turn 0, and
+            // Space there is a keystroke into a live board rather than a button.
+            if already_fighting {
+                r.log.push_str("  no pregame — that button opened straight into the fight\n");
+            } else {
+                r.keys.focus();
+                std::thread::sleep(Duration::from_millis(400));
+                if r.keys.press_key(VK_SPACE, SC_SPACE).is_err() {
+                    return Stop::Failed("could not send Start".into());
+                }
+                std::thread::sleep(Duration::from_secs(2));
             }
-            std::thread::sleep(Duration::from_secs(2));
 
             let mut log = String::new();
             let outcome = fight.run(

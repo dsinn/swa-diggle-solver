@@ -2062,6 +2062,14 @@ impl WorldMap {
     /// and without that clause a village whose inn refused to serve us would be searched forever:
     /// the inn is filtered out of `inn_inside`, so the fog case and the tried-it case would look
     /// identical from here. That is the same shape as every bounce this project has had.
+    /// Which of the two reasons a [`Crossing::Seek`] has no destination, for the log to say so.
+    ///
+    /// `true` is the errand — a village whose inn the fog still hides. `false` is the crossing — an
+    /// exit we cannot see yet, which in a lost woods is every exit.
+    pub fn seeking_an_inn(&self, container: &str) -> bool {
+        self.seeking_a_rest(container)
+    }
+
     fn seeking_a_rest(&self, container: &str) -> bool {
         if !self.wants_rest || self.gold < crate::rest::INN_COST {
             return false;
