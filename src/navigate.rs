@@ -468,6 +468,29 @@ pub struct Run<'a> {
     /// clicking a mirrored map — this project has three runs' evidence that a stale coordinate fails
     /// quietly, by selecting empty ground.
     pub positions_stale_at: usize,
+    /// The camera must be put back on the player before any coordinate is believed again.
+    ///
+    /// ## Why waiting for a fresh dump was not enough
+    ///
+    /// [`Run::positions_stale_at`] stops us reading a dump printed *before* a fight. It cannot help
+    /// with one printed **during** the camera's return: `loadLight` re-centres on the player
+    /// (`overworldview.lua:1610-1620`) and the view is still moving while the dump goes out, so the
+    /// numbers are a snapshot of a glide.
+    ///
+    /// Two runs, the same cause, different severities. The first read a fully mirrored map and
+    /// clicked a thousand pixels wrong — loud, and [`camera_is_lost`] catches it. The second was off
+    /// by 128 px: `pan_map` was asked for `(27, 0)` and measured `(28, -128)`, because the game's own
+    /// motion landed inside our measurement. That moved the target *under the inventory button* and
+    /// ended the run, and no impossibility test can see it, because every number involved is
+    /// perfectly plausible.
+    ///
+    /// So the cure is not a better detector. `recentre` presses locate-me, which does
+    /// `refreshAreaButtons` and `centreScreenOnPlayer` together (`overworldview.lua:485-494`) and
+    /// waits for the pan it starts — it ends the glide rather than trying to read around it, and the
+    /// dump it returns is settled by construction.
+    ///
+    /// Costs one click and one dump per fight. Cheap against a run.
+    pub needs_recentre: bool,
 }
 
 impl Run<'_> {
@@ -1866,6 +1889,9 @@ pub fn drive(
                     // In a lost woods that is literal: `loadLight` re-orients it. See
                     // [`Run::settled_dump`].
                     r.positions_stale_at = r.dumps;
+                    // And the camera is still returning to the player, so even a dump printed after
+                    // this one describes a view in motion. See [`Run::needs_recentre`].
+                    r.needs_recentre = true;
                     // Bookkeeping every fight needs. Skipping it is how a run walks out of a fight at
                     // 1/20 and never considers resting, because nothing recorded the loss.
                     let now = r.apply_save();
@@ -2207,6 +2233,19 @@ pub fn drive(
         let fresh = if inside_now {
             // `Duration::ZERO` is one pump and one look — see `settled_dump`, which tests its
             // deadline after checking, so a zero budget still gets a full attempt.
+            // A fight just ended: settle the camera deliberately rather than reading around it.
+            // Nothing here is a fallback — if locate-me cannot be made to work we would rather take
+            // the miss and retry than aim at a moving view. See [`Run::needs_recentre`].
+            if r.needs_recentre {
+                let (cw, ch) = r.win.client_size().unwrap_or((1920, 1080));
+                // `recentre` leaves its answer in `latest`, which is where `settled_dump` reads
+                // from, so there is nothing to carry across by hand. The flag clears only on
+                // success: a locate-me that did not take has settled nothing.
+                if r.recentre().is_some_and(|a| !camera_is_lost(&a.nodes, cw, ch)) {
+                    r.needs_recentre = false;
+                    r.dump_misses = 0;
+                }
+            }
             let polled = r.settled_dump(Duration::ZERO).or_else(|| {
                 // `recentre` clicks the map to force a pan dump, so it is worth one try rather than
                 // three: a run that is not on the map at all should not be clicking at it repeatedly.

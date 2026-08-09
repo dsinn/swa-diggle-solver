@@ -101,6 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pending_cinematic: false,
         combat_expected: false,
         positions_stale_at: 0,
+        needs_recentre: false,
     };
 
     // Timed because the startup felt slow and nobody could say which part was slow. `wait_for_window`
