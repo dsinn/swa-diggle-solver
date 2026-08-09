@@ -54,6 +54,24 @@ fn announces_murder_dialog(line: &str) -> bool {
     line.contains("Okay dialogue:") && line.contains("avoidable murder")
 }
 
+/// How many avoidable-murder refusals to absorb before taking the kill.
+///
+/// Each refusal drops the ceiling by one and re-searches, so a handful walks the band from a typical
+/// `below` down to its floor of "deal exactly 1". Past that there is nothing left to lower and the
+/// same word comes back for ever — a live run submitted `VENEPUNCTURE` thirty times before it was
+/// stopped by hand, and every one of those cost a turn (`turns += 1` runs on this path, so the only
+/// bound was `MAX_TURNS`).
+///
+/// **The dev's call, recorded as an accepted risk:** a kill we did not intend is the price of not
+/// looping. Our damage model does not carry status, so a word inside the direct-damage band can
+/// still kill through the bleed or toxin it applies, and no amount of aiming lower fixes a model
+/// that is missing a term. Backing off a few times catches the cases where one point was the
+/// difference; after that the murder is treated as unavoidable and confirmed.
+///
+/// Six, because the widest band seen live was `4..=5` against a lethal of 6, and the floor is 1 —
+/// so six steps is one more than the longest walk the backoff can usefully make.
+const MURDER_REFUSALS_BEFORE_ACCEPTING: i64 = 6;
+
 /// How many times to press Backspace at the avoidable-murder modal before giving up on it.
 ///
 /// More than one because a keystroke can be lost to focus, and few because each attempt already
@@ -556,6 +574,15 @@ impl Fight<'_> {
             if feed.since(mark).iter().any(|l| announces_murder_dialog(l)) {
                 log.push_str("  the game says this would be avoidable murder — backing out\n");
                 self.shot("murder-warning");
+                // Enough. See `MURDER_REFUSALS_BEFORE_ACCEPTING`: the backoff has run out of room
+                // and the alternative to confirming is repeating this until `MAX_TURNS`.
+                if *murder_backoff >= MURDER_REFUSALS_BEFORE_ACCEPTING {
+                    log.push_str(&format!(
+                        "  refused {murder_backoff} times with nothing left to lower — taking the kill\n"
+                    ));
+                    self.accept_murder(keys, log)?;
+                    return Ok(None);
+                }
                 if !self.back_out_of_murder(keys, log, steps.len())? {
                     // Left as it is rather than dressed up as an outcome. The word is still on the
                     // board and the modal may still be over it, so the next turn's
@@ -655,6 +682,34 @@ impl Fight<'_> {
         log.push_str("  WARNING the murder warning would not go away\n");
         self.shot("murder-stuck");
         Ok(false)
+    }
+
+    /// Confirms the avoidable-murder dialog, killing the enemy we meant to frighten off.
+    ///
+    /// Space, because layer 1 binds it to `affirmative` (`defaultbinds/keyboard.lua:13`) and the
+    /// dialog installs `affirmative` as its first button — `Accept` (`ui/confirm.lua:4-9`). The same
+    /// key that submits a word on the board, which is why this is only ever called with the dialog
+    /// confirmed present on the console.
+    ///
+    /// Only reached when the backoff has nothing left to lower; see
+    /// [`MURDER_REFUSALS_BEFORE_ACCEPTING`] for why a kill is preferred to another twenty turns.
+    fn accept_murder(
+        &self, keys: &PostMessageInput, log: &mut String,
+    ) -> Result<(), crate::Error> {
+        for attempt in 1..=MURDER_CANCEL_TRIES {
+            keys.focus();
+            keys.press_key(VK_SPACE, SC_SPACE)?;
+            if self.murder_plaque_gone(Duration::from_secs(2))? {
+                log.push_str(&format!("  accepted on press {attempt}\n"));
+                return Ok(());
+            }
+            log.push_str(&format!("  press {attempt} did not confirm the warning\n"));
+        }
+        // The board still has the word on it and the modal is still up, so the next turn's
+        // `wait_until_ready` reports `BoardNeverSettled` rather than this inventing an outcome.
+        log.push_str("  WARNING could not confirm the murder warning either\n");
+        self.shot("murder-stuck");
+        Ok(())
     }
 
     /// Polls until the murder plaque is no longer on screen, or `within` elapses.
