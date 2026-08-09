@@ -23,16 +23,22 @@
 //!
 //! ## Before you add anything that stops the run walking in circles
 //!
-//! **Read `docs/superpowers/notes/navigation-loops.md` first.** Six two-node cycles have been found
-//! and fixed here, and **two of the fixes were guards whose trigger condition could never occur** —
-//! including one in this file that counted consecutive retreats, a state the system cannot reach.
-//! Both looked exactly like the anti-cycling measure they were named after.
+//! **Read `docs/superpowers/notes/navigation-loops.md` first.** Seven two-node cycles have been
+//! found and fixed here, and **two of the fixes were guards whose trigger condition could never
+//! occur** — including one in this file that counted consecutive retreats, a state the system cannot
+//! reach. Both looked exactly like the anti-cycling measure they were named after.
 //!
 //! The short version, so this file states its own rule: only two things stop a loop — **explicit
 //! memory of what we already tried** ([`Run::committed_to`], [`Run::backed_out_of`],
-//! [`Run::shrines_tried`], `WorldMap::abandon`) and **a monotone progress measure**. A ranking is
-//! neither: a stable preference between two alternating states *is* a cycle. If you are adding a
-//! guard, state the condition that trips it and prove that condition is reachable.
+//! [`Run::shrines_tried`], `WorldMap::crossing_to`, `WorldMap::abandon`) and **a monotone progress
+//! measure**. A ranking is neither: a stable preference between two alternating states *is* a cycle.
+//! If you are adding a guard, state the condition that trips it and prove that condition is
+//! reachable.
+//!
+//! And check the ranking runs at all before improving it. The seventh cycle was `exit_toward`
+//! ranking a subworld's exits by distance to the target — from inside the subworld, where our graph
+//! reaches no surface node, so the ranking was dead code and the door came from the fallback beneath
+//! it. Nothing in the routing said so; only measuring did.
 
 use crate::act::{Button, Screen};
 use crate::fight::{Fight, Outcome};
@@ -2140,7 +2146,10 @@ pub fn drive(
         // ...and this says we have positive evidence that backing out finds nothing.
         let mut no_way_round = false;
         if let Some(container) = r.map.inside().map(|s| s.to_string()) {
-            match r.map.cross_toward(&fresh.exits) {
+            // Bound rather than matched in place: `cross_toward` now records the door it chose, so
+            // the borrow it takes would still be live in the arms that call `abandon`.
+            let verdict = r.map.cross_toward(&fresh.exits);
+            match verdict {
                 Some(crate::overworld::Crossing::Fight { at }) => {
                     r.log.push_str(&format!(
                         "{step}. inside `{container}` — `{at}` must be cleared before we can leave it\n"

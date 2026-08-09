@@ -410,6 +410,36 @@ pub struct WorldMap {
     /// because leaving a village by the door you came in is a retreat, and nothing visible inside
     /// distinguishes that road from any other.
     entered_from: Option<String>,
+    /// The door this crossing is making for, and the errand it was chosen to serve.
+    ///
+    /// The subworld twin of [`crate::navigate::Run::committed_to`], and it exists for the same
+    /// reason. [`WorldMap::exit_toward`] asks [`WorldMap::next_target`] afresh on every step, so the
+    /// door being crossed toward was a function of the *whole map* — and of where we happen to be
+    /// standing. Walk two nodes into a forest and the argmax can move; walk back and it moves again.
+    /// Two halves of a forest each sending the run to the other is the shape of all six cycles in
+    /// `docs/superpowers/notes/navigation-loops.md`.
+    ///
+    /// **The `Goal` is the load-bearing half of this pair.** Read those six together and they are
+    /// one bug: *the goal never changed, the target flipped anyway, because `here` moved.* So this
+    /// is keyed by goal rather than held unconditionally, which splits the two cases the old code
+    /// could not tell apart:
+    ///
+    /// - **Same errand, different door** — always the bug. The commitment holds and the run finishes
+    ///   what it started.
+    /// - **Different errand** — the anomaly opened, a fight left us hurt, a shrine got finished.
+    ///   Those are real events in the world, not artefacts of our own movement, and re-planning on
+    ///   them is the correct response. The commitment is dropped.
+    ///
+    /// That distinction is what keeps this from being blind commitment. Its safety argument is that
+    /// goal changes are *monotone across a single crossing*: nothing inside a subworld un-opens the
+    /// anomaly or un-finishes a shrine, and nothing heals us back above the rest threshold. A goal
+    /// cannot flip back and forth in here, so it cannot be a cycle of its own.
+    ///
+    /// The **route** is not committed and must not be: it is re-derived every step so fog, fresh
+    /// fights and corruption are always accounted for. Destination bold, route cautious — which is
+    /// Kinny & Georgeff's result applied to a world with two rates of change, since within a
+    /// crossing the layout is static and only fog lifts.
+    crossing_to: Option<(String, Goal)>,
 }
 
 /// Where to head, and why. The reason is carried so a route can be explained rather than just taken.
@@ -715,8 +745,14 @@ impl WorldMap {
                 .strip_prefix(&prefix)
                 .filter(|k| !k.is_empty())
                 .map(str::to_string);
+            // A fresh crossing decides its own door. Re-entering a subworld is the one moment the
+            // world is allowed to have changed under us — `subworld::Rules::edges_survive_reentry`
+            // exists because the interior can re-roll — so a commitment made on the last visit is
+            // worth nothing and holding it would be blind rather than bold.
+            self.crossing_to = None;
         } else if a.subworld.is_none() {
             self.entered_from = None;
+            self.crossing_to = None;
         }
         self.here = Some(a.here_key.clone());
 
@@ -1253,6 +1289,23 @@ impl WorldMap {
     ///
     /// Returns the key to head for. The caller matches it against the exits in a **current** dump,
     /// since exit positions expire with every pan like everything else.
+    ///
+    /// ## The ranking below mostly does not run, and that is measured
+    ///
+    /// `distances(target)` reaches **no surface node from inside a subworld**: nothing links a
+    /// subworld node to its container, so the interior and the overworld are separate components of
+    /// our graph. The `dist.contains_key` filter therefore empties, and the answer comes from the
+    /// fallback at the bottom — *the first exit that is not the entrance*, which is to say whichever
+    /// road the current pan happened to print first.
+    ///
+    /// That is why [`WorldMap::cross_toward`] asks this **once** per crossing and then holds the
+    /// answer in [`WorldMap::crossing_to`]. Exits print only while visible
+    /// (`overworldview.lua:1044`), so re-asking every step let fog reverse a crossing and reverse it
+    /// back. See `docs/superpowers/notes/navigation-loops.md`.
+    ///
+    /// Connecting the two components is the real fix and is not attempted here — it changes what
+    /// every distance in this file means, including `next_target`'s. Until then, read the ranking as
+    /// what happens on the surface, and the fallback as what happens while crossing.
     pub fn exit_toward(&self, exits: &[crate::observe::adjacency::Exit]) -> Option<String> {
         if exits.is_empty() {
             return None;
@@ -1298,6 +1351,35 @@ impl WorldMap {
             .map(|e| e.to_key.clone())
     }
 
+    /// The door this crossing already chose, if it is still worth believing in.
+    ///
+    /// Single-minded commitment: held until achieved or believed impossible. *Achieved* is handled
+    /// elsewhere — leaving the subworld clears [`WorldMap::crossing_to`] in `fold`. Everything here
+    /// is the "believed impossible" half, and each clause is deliberately narrow, because a
+    /// commitment that lapses easily is not one.
+    ///
+    /// Two things drop it:
+    ///
+    /// 1. **The errand changed.** `errand` is the caller's current [`Goal`], and a commitment made
+    ///    while exploring says nothing about where to go once we are hurt. This is the clause that
+    ///    keeps boldness from becoming blindness — see [`WorldMap::crossing_to`].
+    /// 2. **We wrote the road off.** `abandoned` is the driver's own memory of having tried
+    ///    something, so an abandoned road out is one we have genuinely given up on.
+    ///
+    /// Note what does **not** drop it. Not "the exit is missing from the current dump": exits print
+    /// only while visible (`overworldview.lua:1044`), so an absent exit is the ordinary state of a
+    /// subworld we have just walked into, and treating that as impossibility would discard the
+    /// commitment exactly when it is doing the most work. And not "we know no route to it": fog
+    /// means no route is the *first* thing we know about anywhere, which is why `cross_toward` has a
+    /// frontier fallback for walking toward a destination it cannot yet reach.
+    fn committed_exit(&self, parent: &str, errand: Option<Goal>) -> Option<String> {
+        let (to, goal) = self.crossing_to.as_ref()?;
+        if errand != Some(*goal) || self.abandoned.contains(&exit_node_key(parent, to)) {
+            return None;
+        }
+        Some(to.clone())
+    }
+
     /// One move toward getting out of the subworld we are standing in.
     ///
     /// [`WorldMap::exit_toward`] answers *which* exit; this answers what to do next about reaching
@@ -1317,7 +1399,11 @@ impl WorldMap {
     /// The exit's own key is derivable rather than guessable: the dump builds it as
     /// `parent.key..'_path_to_'..k` (`:1043`), which is why the player location reads
     /// `l10_path_to_l19` while standing on one.
-    pub fn cross_toward(&self, exits: &[crate::observe::adjacency::Exit]) -> Option<Crossing> {
+    ///
+    /// Takes `&mut self` because choosing a door is also *recording* that we chose it — see
+    /// [`WorldMap::crossing_to`]. Deriving the destination and remembering it cannot be separated
+    /// without the caller re-deriving it, which is the bug.
+    pub fn cross_toward(&mut self, exits: &[crate::observe::adjacency::Exit]) -> Option<Crossing> {
         let parent = self.inside()?.to_string();
         let here = self.here.as_deref()?.to_string();
 
@@ -1332,8 +1418,23 @@ impl WorldMap {
         // - **the road out**, which is every other case.
         let inn = self.inn_inside(&parent).map(|p| p.key.clone());
         let leaving_to = match inn.is_some() || self.seeking_a_rest(&parent) {
+            // The errand outranks the crossing, and leaves the commitment untouched rather than
+            // clearing it: the rest is a detour, and the door we were making for is still the door.
             true => None,
-            false => Some(self.exit_toward(exits)?),
+            false => {
+                // Committed first, derived only when there is nothing left to honour. The
+                // commitment also survives an exits list we cannot see past — `exit_toward` gives up
+                // on an empty one, and a pan that shows no exits is fog, not a dead end.
+                let errand = self.next_target().map(|p| p.reason);
+                let to = match self.committed_exit(&parent, errand) {
+                    Some(to) => to,
+                    None => self.exit_toward(exits)?,
+                };
+                // Nothing to be single-minded *about* when there is no errand: `exit_toward` is down
+                // to its own fallback, and recording that as a commitment would freeze a guess.
+                self.crossing_to = errand.map(|goal| (to.clone(), goal));
+                Some(to)
+            }
         };
         let dest = match (&inn, &leaving_to) {
             (Some(k), _) => Some(k.clone()),
@@ -2917,6 +3018,120 @@ mod tests {
     }
 
     /// Exploring the dark must not step out of the subworld by the wrong door.
+    /// Saltagh Park's shape: walk in at a crossroads with a road out either side, and explore both
+    /// arms. Returns the map standing back at the crossroads with the whole interior mapped.
+    ///
+    /// The doors are asymmetric on purpose. `l19` is an ordinary village; `l1` is a **campfire**, so
+    /// it becomes a rest site the moment health drops — which is how a genuine change of errand gets
+    /// expressed without inventing one.
+    fn a_forest_with_two_doors() -> (WorldMap, Exit, Exit) {
+        let dane = Exit { x: 0.0, y: 0.0, to_key: "l19".into(), to_heading: "Dane village".into() };
+        let cowlam =
+            Exit { x: 0.0, y: 0.0, to_key: "l1".into(), to_heading: "Cowlam campfire".into() };
+        let both = vec![dane.clone(), cowlam.clone()];
+        let mut m = WorldMap::new();
+        m.fold(&dump("start", "The Wold portal", vec![node("l9", "Saltagh Park — level 1 forest")]));
+        m.fold(&inside_dump("l9", "l9sub0", "Saltagh Park crossroads",
+            vec![node("l9sub1", "Saltagh Park road"), node("l9sub2", "Saltagh Park road")],
+            both.clone()));
+        m.fold(&inside_dump("l9", "l9sub1", "Saltagh Park road",
+            vec![node("l9sub0", "Saltagh Park crossroads"), node("l9_path_to_l19", "Road to Dane")],
+            both.clone()));
+        m.fold(&inside_dump("l9", "l9sub2", "Saltagh Park road",
+            vec![node("l9sub0", "Saltagh Park crossroads"), node("l9_path_to_l1", "Road to Cowlam")],
+            both.clone()));
+        m.fold(&inside_dump("l9", "l9sub0", "Saltagh Park crossroads",
+            vec![node("l9sub1", "Saltagh Park road"), node("l9sub2", "Saltagh Park road")],
+            both.clone()));
+        (m, dane, cowlam)
+    }
+
+    #[test]
+    fn which_door_we_are_crossing_to_is_decided_once() {
+        // **How bad this was, measured rather than argued.** Inside a subworld, `distances(here)`
+        // reaches no surface node at all -- the interior and the overworld are separate components
+        // of our graph, since nothing links a subworld node to its container. So `exit_toward`'s
+        // ranking-by-distance silently never applies while crossing, and every crossing was decided
+        // by its last-resort fallback: *the first exit in the dump that is not the entrance*.
+        //
+        // Which means the door was a function of what the current pan happened to print. Exits print
+        // only while visible (`overworldview.lua:1044`), so a pan that showed one road and not the
+        // other reversed the crossing -- and the next pan reversed it back. Not an argmax that could
+        // flip; no argmax at all.
+        let (mut m, dane, cowlam) = a_forest_with_two_doors();
+
+        // Both roads in sight: pick one, and record it.
+        match m.cross_toward(&[dane.clone(), cowlam.clone()]) {
+            Some(Crossing::Step { to, toward }) => {
+                assert_eq!(toward, "l9_path_to_l19");
+                assert_eq!(to, "l9sub1", "one hop along the route, re-derived every step");
+            }
+            other => panic!("expected a step toward the road out, got {other:?}"),
+        }
+
+        // The signal is there: asked afresh with only the near road in sight, the chooser turns the
+        // run around. This is the pre-fix answer, and it is what a live run acted on.
+        assert_eq!(m.exit_toward(&[cowlam.clone()]), Some("l1".into()), "unguarded, fog flips it");
+
+        // The crossing does not turn around.
+        match m.cross_toward(&[cowlam.clone()]) {
+            Some(Crossing::Step { toward, .. }) => assert_eq!(toward, "l9_path_to_l19"),
+            other => panic!("expected the same door, got {other:?}"),
+        }
+        // Nor when the pan shows no way out whatever. `exit_toward` gives up on an empty list and
+        // `cross_toward` used to hand the driver a `None`, which it reports as "no crossing plan"
+        // and ends the run -- over a pan that simply had no exit in shot.
+        assert_eq!(m.exit_toward(&[]), None, "the chooser has nothing to go on");
+        match m.cross_toward(&[]) {
+            Some(Crossing::Step { toward, .. }) => assert_eq!(toward, "l9_path_to_l19"),
+            other => panic!("fog is not a dead end, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_change_of_errand_releases_the_door() {
+        // The other half, and the half that keeps this from being blind commitment. Taking a fight
+        // in the woods is not our own movement rearranging an argmax -- it is the world changing,
+        // and the campfire we were walking away from is now the point.
+        let (mut m, dane, cowlam) = a_forest_with_two_doors();
+        assert_eq!(m.next_target().map(|p| p.reason), Some(Goal::Explore));
+        m.cross_toward(&[dane.clone(), cowlam.clone()]);
+
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+        assert_eq!(m.next_target().map(|p| p.reason), Some(Goal::Rest), "the errand changed");
+        match m.cross_toward(&[dane, cowlam]) {
+            Some(Crossing::Step { toward, .. }) => assert_eq!(toward, "l9_path_to_l1", "the fire"),
+            other => panic!("expected the door to the campfire, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writing_off_the_road_releases_the_door() {
+        // `abandoned` is the driver's record of having had its go, and the only evidence available
+        // in here that a door is genuinely no good. Fog is not evidence; this is.
+        let (mut m, dane, cowlam) = a_forest_with_two_doors();
+        m.cross_toward(&[dane, cowlam.clone()]);
+        m.abandon("l9_path_to_l19");
+        match m.cross_toward(&[cowlam]) {
+            Some(Crossing::Step { toward, .. } | Crossing::Explore { toward, .. }) => {
+                assert_eq!(toward, "l9_path_to_l1", "re-derived, because the first door is written off")
+            }
+            other => panic!("expected a fresh choice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_door_does_not_outlive_the_forest() {
+        // A commitment is to *this* crossing. Re-entering is the one moment the interior is allowed
+        // to have changed under us -- `subworld::Rules::edges_survive_reentry` exists because it can
+        // re-roll -- so last visit's choice is worth nothing.
+        let (mut m, dane, cowlam) = a_forest_with_two_doors();
+        m.cross_toward(&[dane.clone(), cowlam.clone()]);
+        assert!(m.crossing_to.is_some());
+        m.fold(&dump("l19", "Dane village", vec![node("l9", "Saltagh Park — level 1 forest")]));
+        assert_eq!(m.crossing_to, None, "out on the surface, the planner gets its say again");
+    }
+
     #[test]
     fn walking_into_the_dark_still_avoids_the_other_exits() {
         // `l9`, live: crossing toward `l9_path_to_l19` with no known route, the fallback took any
@@ -2970,7 +3185,7 @@ mod tests {
     fn a_hurt_run_in_a_village_heads_for_the_inn_rather_than_the_way_out() {
         // The whole point of entering. `cross_toward` only ever knew how to head for an exit, so a
         // rest errand walked in one door and out the other.
-        let m = inside_a_village(
+        let mut m = inside_a_village(
             ("l10sub1", "Ulrome well"),
             vec![node("l10sub4", "The Wobbly Cat inn"), node("l10_path_to_l7", "Road to Greenoak")],
             763,
@@ -2983,7 +3198,7 @@ mod tests {
 
     #[test]
     fn standing_on_the_inn_is_where_the_crossing_ends() {
-        let m = inside_a_village(
+        let mut m = inside_a_village(
             ("l10sub4", "The Wobbly Cat inn"),
             vec![node("l10sub1", "Ulrome house")],
             763,
@@ -2999,7 +3214,7 @@ mod tests {
     fn an_inn_we_cannot_pay_for_is_not_a_destination() {
         // `getCanRest` is a flat `getPlayerGold() >= 10` (`ui/rest.lua:49`). Below it, walking to the
         // bar buys a wasted trip and the fights on the way back, so cross as normal.
-        let m = inside_a_village(
+        let mut m = inside_a_village(
             ("l10sub1", "Ulrome well"),
             vec![node("l10sub4", "The Wobbly Cat inn"), node("l10_path_to_l7", "Road to Greenoak")],
             9,
@@ -3019,7 +3234,7 @@ mod tests {
         // the inn has to be seen. Until it is, the one move that must NOT be made is the exit —
         // which is exactly what the old fallback reached for, the entrance road being the nearest
         // thing to walk to.
-        let m = inside_a_village(
+        let mut m = inside_a_village(
             ("l10sub1", "Ulrome well"),
             vec![
                 node("l10sub2", "Ulrome house"),
