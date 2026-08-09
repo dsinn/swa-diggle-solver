@@ -147,6 +147,9 @@ impl Fight<'_> {
         // The turn we last saw progress on. Paired with `last_state` so the stall timer resets on
         // either signal — see where it is compared.
         let mut last_turn = usize::MAX;
+        // How far below our own ceiling to aim, after the game has called an attempt murder. One
+        // point per refusal; see where it is applied.
+        let mut murder_backoff = 0i64;
         let mut last_change = Instant::now();
         let mut finished = false;
         // When `combatSaveData` first became unreadable, cleared on every successful read.
@@ -251,7 +254,7 @@ impl Fight<'_> {
                 }
                 "PlayerTurn" => {
                     turns += 1;
-                    match self.play_turn(feed, keys, log, &cs, turns, &mut peak_health)? {
+                    match self.play_turn(feed, keys, log, &cs, turns, &mut peak_health, &mut murder_backoff)? {
                         Some(bad) => return Ok(bad),
                         None => {}
                     }
@@ -274,7 +277,7 @@ impl Fight<'_> {
     #[allow(clippy::too_many_arguments)]
     fn play_turn(
         &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, cs: &Table, turns: usize,
-        peak_health: &mut std::collections::HashMap<String, i64>,
+        peak_health: &mut std::collections::HashMap<String, i64>, murder_backoff: &mut i64,
     ) -> Result<Option<Outcome>, crate::Error> {
         let tiles = tiles_of(cs);
         if tiles.is_empty() {
@@ -302,7 +305,23 @@ impl Fight<'_> {
         // so that fight wants the hardest hit rather than the quickest kill. Otherwise, an enemy
         // that can be frightened is frightened rather than killed.
         let player = player_state(cs, &mods);
-        let goal = Goal::for_enemy(&mods, health, armour, Some(peak), player.as_ref());
+        let mut goal = Goal::for_enemy(&mods, health, armour, Some(peak), player.as_ref());
+        // **Aim lower than last time if the game called the last attempt murder.**
+        //
+        // Our arithmetic said that hit was survivable and the game's estimate said it kills, so the
+        // model is wrong by at least the amount we have backed off. Re-searching with the same
+        // ceiling would choose the same word and be refused again, forever; each refusal takes one
+        // more point off the top. `need` moves with it, or a band one point wide inverts.
+        if *murder_backoff > 0 {
+            if let Goal::Scare { need, below } = goal {
+                let dropped = (below - *murder_backoff).max(1);
+                goal = Goal::Scare { need: need.min(dropped - 1).max(0), below: dropped };
+                log.push_str(&format!(
+                    "  aiming {} lower after a murder warning: {goal:?}
+", murder_backoff
+                ));
+            }
+        }
         if let Goal::Scare { need, below } = goal {
             log.push_str(&format!(
                 "  {name} can be scared off ({:?}); aiming for {need}..{below} damage, not a kill
@@ -392,6 +411,57 @@ impl Fight<'_> {
         std::thread::sleep(Duration::from_millis(150));
         keys.press_key(VK_SPACE, SC_SPACE)?;
         log.push_str("  selected and submitted\n");
+
+        // ## The game may refuse the submission as an avoidable murder
+        //
+        // `wordboard.startAttack` (`wordboard.lua:499-508`) opens a modal instead of attacking when
+        // the enemy is about to die *and* carries `fear`, `terror` or `caution`. It firing means our
+        // damage model and the game's estimate have disagreed — the game's is of **death**,
+        // "possibly by status" (`rpgview.lua:915`), so an effect we do not model can finish an enemy
+        // our arithmetic left alive.
+        //
+        // Back out rather than confirm. The dev's rule: cancel, clear the word, play something
+        // weaker. Accepting would kill an enemy we came here to frighten off, and a fight we can end
+        // by scaring is one we would rather not pay for — `Goal::Scare` exists for that.
+        //
+        // Nothing here waits for the dialog to *appear*: it is drawn in the same frame the attack is
+        // refused, so a look after the press is either on it or past it. A run that met this without
+        // the handler reported `BoardNeverSettled` — a modal is what a board that never settles looks
+        // like from underneath.
+        if matches!(crate::act::locate(self.win, &crate::act::MURDER_CANCEL), Ok(Some(_))) {
+            log.push_str("  the game says this would be avoidable murder — backing out\n");
+            let (sx, sy) = self
+                .win
+                .client_to_screen(crate::act::MURDER_CANCEL.click.0, crate::act::MURDER_CANCEL.click.1)?;
+            click_at(sx, sy)?;
+            self.park();
+            std::thread::sleep(Duration::from_millis(400));
+            // **The word survives the cancel** — confirmed by the dev — because the modal refused
+            // the attack rather than clearing the board. So every letter has to come back off
+            // before another can be spelled.
+            //
+            // Two more presses than tiles, deliberately. A `QU` tile is one selection but two
+            // letters, so tile count and letter count are not the same number and the difference
+            // depends on the word; over-pressing costs nothing on an already-empty word, while
+            // under-pressing leaves a stub that the next word would be typed onto. "Enough times"
+            // was the instruction and this is the reading of it that cannot leave a residue.
+            keys.focus();
+            for _ in 0..steps.len() + 2 {
+                keys.press_key(crate::win::input::VK_BACK, crate::win::input::SC_BACK)?;
+                std::thread::sleep(Duration::from_millis(60));
+            }
+            *murder_backoff += 1;
+            log.push_str(&format!(
+                "  cleared {} letters; aiming {murder_backoff} lower next pass\n",
+                steps.len()
+            ));
+            self.shot("murder-warning");
+            // `None`, not an outcome: the enemy is alive, the board is intact and the word is off,
+            // so this is a retry rather than an ending. The loop reads everything again from the
+            // top — including the enemy state that disagreed with us — and the backoff makes the
+            // next search pick something weaker instead of the same word for ever.
+            return Ok(None);
+        }
 
         // Wait for the turn to move on: any other state, a changed board, or the reward screen.
         let mark = feed.mark();

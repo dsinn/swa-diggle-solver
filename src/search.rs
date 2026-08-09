@@ -430,8 +430,20 @@ impl Goal {
         // Armour absorbs first, so reaching `top` health costs the difference plus the armour.
         let scare_need = ((health - top) + armour).max(0);
         if scare_need >= below {
-            // No non-lethal hit reaches the threshold.
-            return Self::killing_blow(kill, lethal, player);
+            // No non-lethal hit reaches the threshold, so this one dies. **But it is still a
+            // fearable enemy, and that outranks the rested-charge optimisation.**
+            //
+            // `killing_blow`'s frugal branch aims at `lethal..lethal+2` to keep overkill inside the
+            // free heal window — a *player-side* saving, about being well rested and short of
+            // health. Applied here it spends damage we do not need on an enemy the game classes as a
+            // person: `looksLikeAvoidableFirstMurder` (`wordboard.lua:486-497`) needs only
+            // `enemyHasDeathFlag'Murder'` and a `fear`/`terror`/`caution` status to call the kill
+            // avoidable, and it does not care how tidy our overkill was.
+            //
+            // So `player` is dropped on this path and the plain kill is used. Aiming past lethal
+            // could never help here — the charge is worth less than not overshooting something we
+            // would rather have frightened off, and the dev's ordering is the right one.
+            return Self::killing_blow(kill, lethal, None);
         }
         // Buffer both edges by as much as the band can spare. `slack` is the width of the raw
         // non-lethal band `scare_need ..= below - 1`; see `affordable_buffer` for why this shrinks

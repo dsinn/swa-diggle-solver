@@ -974,6 +974,36 @@ pub const SHRINE_GOBACK: Button = Button {
 /// The shrine's back plaque is on screen. See [`SHRINE_GOBACK`]. **0.90**, against 0.3437 absent.
 pub const SHRINE_GOBACK_PRESENT: f64 = 0.90;
 
+/// `Cancel` on the **avoidable-murder confirmation**, which is a modal over the combat board.
+///
+/// `wordboard.lua:499-508`: submitting an attack routes through
+///
+/// ```lua
+/// if userConfig.interface.murderWarning and not murderConfirm and looksLikeAvoidableFirstMurder()
+/// ```
+///
+/// and `looksLikeAvoidableFirstMurder` (`:488-497`) needs `getEstimationEnemyAboutToDie()` **and**
+/// the enemy carrying `fear`, `terror` or `caution`. So it appears exactly when we are about to kill
+/// something we could have frightened off — the case [`crate::search::Goal::Scare`] exists to avoid,
+/// which means it firing is evidence our damage model and the game's estimate have disagreed.
+///
+/// The disagreement has at least two sources and we do not need to tell them apart to back out
+/// safely: the game's estimate is of *death*, "possibly by status" (`rpgview.lua:915`), so a
+/// damage-over-time effect can finish an enemy our arithmetic left alive; and `killing_blow`'s
+/// frugal branch deliberately aims at `lethal..lethal+2` to control overkill, which is a kill even
+/// though it is spelled as a band.
+///
+/// Cut from `spike-frames-live/gave-up.png`, which is the frame a live run stopped on with
+/// `BoardNeverSettled` — a modal is what a board that never settles looks like from underneath.
+/// The plaque is opaque, so the blurred scene behind the dialog does not reach the template.
+pub const MURDER_CANCEL: Button = Button {
+    name: "murder Cancel",
+    template: "murder-cancel.png",
+    search: (984, 564, 1251, 676),
+    origin: (992, 572),
+    click: (1117, 620),
+};
+
 /// The inn's `Rest`, on the inn screen.
 ///
 /// `button('Rest', 1, 0.9, { xOffset = -2 })` (`ui/inn.lua:55`) with the 250x100 `default` size, so
@@ -1353,6 +1383,7 @@ pub const ALL: &[&Button] =
     &UNLOCK_CONTINUE,
     &INN_REST,
     &REST_CONFIRM,
+    &MURDER_CANCEL,
 ];
 
 /// Start menu `Continue`. Measured on 52.3 at 1920x1080; `Restart` is the adjacent button at
