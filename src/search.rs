@@ -127,6 +127,11 @@ pub struct Modifiers {
     /// This enemy turns overkill healing into gold instead (`:1085`), which is the curse described
     /// in `items/curses.lua:111`. Healing does not happen, so there is no charge to conserve.
     pub overkill_heal_to_gold: bool,
+    /// The player's gear, for the `wordBonus` terms it adds to every word (see [`crate::gear`]).
+    ///
+    /// Kept here rather than passed alongside because every scoring site already has a `Modifiers`,
+    /// and a term that must be applied at all of them should not be one a new call site can forget.
+    pub gear: crate::gear::Gear,
 }
 
 impl Modifiers {
@@ -155,6 +160,14 @@ impl Modifiers {
         let overkill_gold = statuses.contains_key("overkillGold")
             || save.path("rpg.player.gearFlags.overkillGold").is_some();
 
+        let gear = crate::gear::Gear::from_save(save);
+        // A word bonus we cannot evaluate makes every score a lower bound, which is safe for a kill
+        // and unsafe for a scare. Reported as a problem so it shows in the turn log rather than
+        // being discovered from a murder warning, which is how it was discovered the first time.
+        for flag in gear.word_bonus("PLACEHOLDER", &[]).unknown {
+            problems.push(format!("gear {flag} affects word score and is not modelled"));
+        }
+
         Ok((
             Modifiers {
                 excluded: lexica.excluded_words(&statuses),
@@ -169,6 +182,7 @@ impl Modifiers {
                 bonuses: lexica.bonus_sets(&statuses),
                 overkill_no_heal: statuses.contains_key("overkillNoHeal"),
                 overkill_heal_to_gold: statuses.contains_key("overkillHealToGold"),
+                gear,
             },
             resolved.geometry,
         ))
@@ -186,6 +200,7 @@ impl Modifiers {
             bonuses: Vec::new(),
             overkill_no_heal: false,
             overkill_heal_to_gold: false,
+            gear: crate::gear::Gear::none(),
         }
     }
 
@@ -206,7 +221,21 @@ impl Modifiers {
     /// `utils/words.lua:219-242` builds the bonus additively — `mult = mult + val - 1` per matching
     /// lexicon — so two 1.5x lexicons make 2.0x, not 2.25x.
     pub fn modifier_for(&self, word: &str, corners_used: usize, corner_count: usize) -> f64 {
-        let mut mult = 1.0;
+        self.modifier_for_base(word, corners_used, corner_count, 1.0)
+    }
+
+    /// The same, starting from the multiplier the player's gear has already accumulated.
+    ///
+    /// **Not the gear multiplier times the lexicon one.** `words.modifiers` hands its accumulated
+    /// `mult` *into* `words.getWordBonusModifier` (`utils/words.lua:287`), which then does
+    /// `mult = mult+val-1` per matching lexicon. So gear and lexicons add on one accumulator and
+    /// only the corner nerf multiplies. With gear at 1.25 and one 1.5x lexicon the game gets 1.75,
+    /// while multiplying the two factors separately would get 1.875 — an over-estimate, which is
+    /// the direction that types a word expecting a kill and does not get one.
+    pub fn modifier_for_base(
+        &self, word: &str, corners_used: usize, corner_count: usize, base: f64,
+    ) -> f64 {
+        let mut mult = base;
         for (words, val) in &self.bonuses {
             if words.contains(word) {
                 mult += val - 1.0;
@@ -214,6 +243,31 @@ impl Modifiers {
         }
         self.modifier(corners_used, corner_count) * mult
     }
+}
+
+/// One word's damage, with everything that modifies it.
+///
+/// The single place the three sources are combined, because they have to be combined the same way
+/// every time and there are four scoring sites. Getting the *order* right is the point:
+///
+/// 1. the player's gear contributes `preAdd`, a share of `mult`, and `postAdd` ([`crate::gear`]);
+/// 2. the gear multiplier is the **starting value** for the enemy's lexicon accumulator, not a
+///    separate factor — [`Modifiers::modifier_for_base`];
+/// 3. `preAdd` joins the tile sum before the multiplier and the length scale, `postAdd` lands after
+///    the rounding — [`Scorer::score_typed_with`].
+pub fn scored(
+    scorer: &Scorer, mods: &Modifiers, word: &str, consumed: &[Tile], corners_used: usize,
+    corner_count: usize,
+) -> i64 {
+    let adjust = mods.gear.word_bonus(word, consumed);
+    let modifier = mods.modifier_for_base(word, corners_used, corner_count, adjust.mult);
+    scorer.score_typed_with(
+        consumed,
+        word.chars().count(),
+        modifier,
+        adjust.pre_add,
+        adjust.post_add,
+    )
 }
 
 /// A word the search found worth reporting.
@@ -636,11 +690,7 @@ pub fn ranked_kill(
                         let Some(typed) = typist.type_word(word) else { continue };
                         let consumed: Vec<Tile> =
                             typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
-                        let score = scorer.score_typed(
-                            &consumed,
-                            word.chars().count(),
-                            mods.modifier_for(word, typed.corners_used, corner_count),
-                        );
+                        let score = scored(scorer, mods, word, &consumed, typed.corners_used, corner_count);
                         if score >= need {
                             let rank = crate::pick::rank(
                                 tiles,
@@ -752,11 +802,7 @@ pub fn max_damage(
                         let Some(typed) = typist.type_word(word) else { continue };
                         let consumed: Vec<Tile> =
                             typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
-                        let score = scorer.score_typed(
-                            &consumed,
-                            word.chars().count(),
-                            mods.modifier_for(word, typed.corners_used, corner_count),
-                        );
+                        let score = scored(scorer, mods, word, &consumed, typed.corners_used, corner_count);
                         if local_best.as_ref().map(|b| score > b.score).unwrap_or(true) {
                             local_best = Some(Found { word: word.clone(), score, slice });
                         }
@@ -866,11 +912,7 @@ pub fn race_for_band(
                     let Some(typed) = typist.type_word(word) else { continue };
                     let consumed: Vec<Tile> =
                         typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
-                    let score = scorer.score_typed(
-                        &consumed,
-                        word.chars().count(),
-                        mods.modifier_for(word, typed.corners_used, corner_count),
-                    );
+                    let score = scored(scorer, mods, word, &consumed, typed.corners_used, corner_count);
                     if score >= need && below.map(|b| score < b).unwrap_or(true) {
                         let found = Found { word: word.clone(), score, slice };
                         let mut l = lethal.lock().unwrap();
@@ -955,6 +997,74 @@ mod tests {
 
     fn race(scorer: &Scorer, dict: &Dictionary, tiles: &[Tile], mods: &Modifiers, need: i64) -> Outcome {
         race_for_kill(dict, scorer, tiles, &Geometry::default(), mods, need, 8)
+    }
+
+    /// The shortsword, end to end, against the readings that exposed it.
+    ///
+    /// From the run of 2026-08-09, player wearing `wordScoreBonusPreLength456 = 3`: we logged
+    /// `AAPA` at 4 and the game estimated 7, while three-letter `AAM` was accepted unchanged.
+    ///
+    /// **The gap is what is asserted, not the absolute score.** On plain tiles `AAPA` comes to 5
+    /// here, not the 4 the run logged, so one of the tiles it actually consumed carried a quality —
+    /// a burn or a carbon count — that this fixture does not reproduce. Asserting 4 would be
+    /// asserting a board we do not have. The invariant that survives is the one the bug was made
+    /// of: for a four-letter word at multiplier 1, the three stacks add exactly 3, because
+    /// `lengthScore(4)` is `0.2*5 = 1.0` and `preAdd` is scaled by it.
+    #[test]
+    fn the_shortsword_adds_exactly_three_to_a_four_letter_words_damage() {
+        if !present() {
+            return;
+        }
+        let scorer = Scorer::new(&game_dir()).unwrap();
+        let bare = Modifiers::none();
+        let armed = Modifiers {
+            gear: crate::gear::Gear::from_pairs(&[("wordScoreBonusPreLength456", 3.0)]),
+            ..Modifiers::none()
+        };
+        let tiles = |w: &str| -> Vec<Tile> {
+            w.chars().map(|c| Tile::plain(&c.to_string())).collect()
+        };
+
+        let aapa = tiles("AAPA");
+        let unarmed = scored(&scorer, &bare, "AAPA", &aapa, 0, 0);
+        let armed_score = scored(&scorer, &armed, "AAPA", &aapa, 0, 0);
+        assert_eq!(
+            armed_score - unarmed,
+            3,
+            "the same +3 that turned the run's 4 into the game's 7 (got {unarmed} -> {armed_score})"
+        );
+
+        // Three letters is outside the 4..=6 band, so the gear changes nothing — which is what
+        // pins the cause to the length band rather than to something else about the board.
+        let aam = tiles("AAM");
+        assert_eq!(
+            scored(&scorer, &bare, "AAM", &aam, 0, 0),
+            scored(&scorer, &armed, "AAM", &aam, 0, 0),
+            "a three-letter word takes no length bonus either way"
+        );
+
+        // Twelve letters is outside it too, so the word that looped the run was never affected by
+        // this gear — it was simply the hardest hit on the board, which is the other bug.
+        let long = tiles("VENEPUNCTURE");
+        assert_eq!(
+            scored(&scorer, &bare, "VENEPUNCTURE", &long, 0, 0),
+            scored(&scorer, &armed, "VENEPUNCTURE", &long, 0, 0),
+        );
+    }
+
+    /// Gear and lexicon bonuses add on one accumulator; they do not multiply.
+    ///
+    /// `words.modifiers` passes its `mult` into `getWordBonusModifier`, which does `mult+val-1`.
+    /// Treating them as independent factors would over-estimate whenever both apply — and an
+    /// over-estimate is the miss that types a word expecting a kill and does not get one.
+    #[test]
+    fn a_gear_multiplier_joins_the_lexicon_accumulator_rather_than_multiplying_it() {
+        let mut m = Modifiers::none();
+        m.bonuses = vec![(["OOZE".to_string()].into_iter().collect(), 1.5)];
+        // Gear at +0.25 and a 1.5x lexicon: 1.25 + 0.5 = 1.75, not 1.25 * 1.5 = 1.875.
+        assert_eq!(m.modifier_for_base("OOZE", 0, 0, 1.25), 1.75);
+        // Without the gear term the old behaviour is unchanged.
+        assert_eq!(m.modifier_for("OOZE", 0, 0), 1.5);
     }
 
     /// A band nothing can satisfy must fall back DOWNWARD.
@@ -1358,11 +1468,7 @@ mod tests {
         let rank_of = |word: &str| {
             let typed = typist.type_word(word)?;
             let consumed: Vec<Tile> = typed.tiles.iter().map(|&i| board[i].clone()).collect();
-            let score = scorer.score_typed(
-                &consumed,
-                word.chars().count(),
-                mods.modifier_for(word, typed.corners_used, geom.corner_count()),
-            );
+            let score = scored(&scorer, &mods, word, &consumed, typed.corners_used, geom.corner_count());
             (score >= need).then(|| {
                 crate::pick::rank(
                     &board,

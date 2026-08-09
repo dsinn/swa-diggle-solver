@@ -5,6 +5,7 @@ pub mod itemchoice;
 pub mod items;
 pub mod fight;
 pub mod game;
+pub mod gear;
 pub mod geometry;
 pub mod innplay;
 pub mod layout;

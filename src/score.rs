@@ -33,8 +33,12 @@
 //!
 //! ## Known divergence, stated rather than discovered later
 //!
-//! - **Gear `wordBonus` modifiers are ignored** — ~26 files adjusting `mult`/`add`/`postAdd` under
-//!   conditions. At MVP the player's `gear` is empty; as gear accumulates this under-estimates.
+//! - **Gear `wordBonus` modifiers are read by [`crate::gear`]**, not here — this scores tiles, and
+//!   the gear terms arrive through [`Scorer::score_typed_with`]. Nine of the twenty-six are
+//!   evaluated; the rest need board shape, the auxiliary dictionaries, quill tiles or the fight's
+//!   word history, and holding one is **reported** through `Adjust::unknown` rather than silently
+//!   dropped. Anything calling [`Scorer::score_typed`] directly gets no gear terms at all, which is
+//!   why the search goes through [`crate::search::scored`].
 //! - **Enemy lexicon bonuses are ignored** (see [`crate::lexica`], which handles the resist half,
 //!   the half that can reach zero).
 //! - **`bonusBurnTileMult` gear is not read**, so a burning tile is scored at zero rather than half.
@@ -59,9 +63,11 @@
 //! Three-letter `AAM` took no bonus and was accepted, which is what pins the cause to the length
 //! band rather than to anything else on the board.
 //!
-//! So the divergence is no longer only a cost in search. Until the `wordBonus` modifiers are read,
-//! `Goal::Scare` is aiming with a ruler it knows is short, and `murder_backoff`
-//! ([`crate::fight`]) is what keeps that survivable.
+//! That reading is now implemented ([`crate::gear`]), so this particular gap is closed. The
+//! principle it taught is not: **an under-estimate is only cheap when overshooting is harmless.**
+//! Every remaining divergence above should be judged against the goal that will consume it, and a
+//! bonus that cannot be evaluated is named rather than assumed to be zero. `murder_backoff`
+//! ([`crate::fight`]) remains the backstop for the ones that are still unmodelled.
 
 use crate::game::save::{parse, parse_module, Table};
 use crate::observe::board::Tile;
@@ -250,8 +256,25 @@ impl Scorer {
     /// `resistCornerless` fraction. It multiplies the whole sum, so a zero there is a zero score no
     /// matter how good the letters are.
     pub fn score_typed(&self, tiles: &[Tile], letters: usize, modifier: f64) -> i64 {
+        self.score_typed_with(tiles, letters, modifier, 0.0, 0.0)
+    }
+
+    /// The full form, with the player's gear terms.
+    ///
+    /// `floor((sum + preAdd) * mult * lengthScore + 0.5 + postAdd)` — `utils/words.lua:301`. The
+    /// placement of each term is load-bearing and none of the three is interchangeable:
+    /// `pre_add` joins the tile sum and is therefore scaled by both the multiplier and the length,
+    /// while `post_add` is added after the rounding and is scaled by neither. The shortsword's +3
+    /// on a four-letter word is worth `3 * mult * 1.0`, not 3.
+    ///
+    /// `modifier` must already include the gear multiplier — see
+    /// [`crate::search::Modifiers::modifier_for_base`], which is where gear and lexicons are
+    /// combined on the one accumulator the game uses.
+    pub fn score_typed_with(
+        &self, tiles: &[Tile], letters: usize, modifier: f64, pre_add: f64, post_add: f64,
+    ) -> i64 {
         let sum: f64 = tiles.iter().map(|t| self.tile_score(t)).sum();
-        (sum * modifier * Self::length_score(letters) + 0.5).floor() as i64
+        ((sum + pre_add) * modifier * Self::length_score(letters) + 0.5 + post_add).floor() as i64
     }
 
     /// Would this score kill the enemy?
