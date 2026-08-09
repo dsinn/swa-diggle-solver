@@ -138,6 +138,14 @@ pub struct Modifiers {
     /// Only the auxiliary dictionaries the plan will ask about — usually none. Carried as word sets
     /// rather than a `Lexica` so `Modifiers` stays cheap to clone.
     pub dicts: Vec<(crate::gear::Dict, HashSet<String>)>,
+    /// The gear that changes damage *after* the word is scored — see [`crate::gear::weapon`].
+    pub weapon: crate::gear::Weapon,
+    /// Health the enemy loses to the status already on it, at the start of its next turn.
+    ///
+    /// Subtracted from its health when choosing a goal, because the question every goal is really
+    /// asking is whether the enemy gets to act: `enemyCanHit` is gated on the same post-status
+    /// health the game uses for `attackEstimatedToCauseEnemyDeath` (`rpgview.lua:1044-1052`).
+    pub enemy_status_tick: i64,
 }
 
 impl Modifiers {
@@ -183,6 +191,20 @@ impl Modifiers {
             .into_iter()
             .filter_map(|d| lexica.words_for(d.key()).map(|w| (d, w.clone())))
             .collect();
+        let weapon = crate::gear::Weapon::from_save(&crate::gear::Gear::from_save(save), save);
+        if weapon.mindfog_unmodelled {
+            problems.push("gear bonusMindfogToxin needs the tile queue, which the save omits".into());
+        }
+        // The status a word *applies* is not in this number — it is per word, and the band the
+        // search filters on is per word too. `bonusBastard` trading 6 damage for 3 bleed and 3 toxin
+        // is the case that matters, and it under-rates the turn's total by about 4.
+        let enemy_status_tick =
+            crate::gear::status_tick(&statuses, crate::gear::WeaponBonus::default(), None);
+        problems.extend(
+            crate::gear::weapon::unmodelled_status(&statuses)
+                .into_iter()
+                .map(|k| format!("enemy status {k} changes its status damage and is not modelled")),
+        );
 
         Ok((
             Modifiers {
@@ -201,6 +223,8 @@ impl Modifiers {
                 plan,
                 fight,
                 dicts,
+                weapon,
+                enemy_status_tick,
             },
             resolved.geometry,
         ))
@@ -221,6 +245,8 @@ impl Modifiers {
             plan: crate::gear::Plan::default(),
             fight: crate::gear::FightFacts::default(),
             dicts: Vec::new(),
+            weapon: crate::gear::Weapon::default(),
+            enemy_status_tick: 0,
         }
     }
 
@@ -282,13 +308,20 @@ pub fn scored(
     let facts = crate::gear::Facts::new(word, consumed, typed, &mods.dicts);
     let adjust = mods.plan.apply(&facts, &mods.fight);
     let modifier = mods.modifier_for_base(word, corners_used, corner_count, adjust.mult);
-    scorer.score_typed_with(
+    let score = scorer.score_typed_with(
         consumed,
-        word.chars().count(),
+        // Letters, not tiles, and `len()` rather than a scan: the dictionary is ASCII A-Z
+        // (`search.rs:67-68`), so the byte length is the letter count.
+        word.len(),
         modifier,
         adjust.pre_add,
         adjust.post_add,
-    )
+    );
+    // The weapon layer, which is the only gear that can make us over-estimate: `bonusBastard`
+    // removes 6 from a seven-letter word (`rpgview.lua:871-876`). Clamped at zero because the game
+    // takes `math.max(0, damageByPlayer-effectiveArmour)` downstream and a negative here would
+    // otherwise read as healing.
+    (score + mods.weapon.bonus_for(word, consumed).damage_delta).max(0)
 }
 
 /// A word the search found worth reporting.

@@ -42,9 +42,11 @@
 
 pub mod facts;
 pub mod table;
+pub mod weapon;
 
 pub use facts::{FightFacts, Facts};
 pub use table::{Dict, Fact, ModifierSpec, MODIFIERS};
+pub use weapon::{status_tick, Weapon, WeaponBonus};
 
 use facts::Eval;
 use std::collections::HashMap;

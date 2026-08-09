@@ -367,7 +367,27 @@ impl Fight<'_> {
         // so that fight wants the hardest hit rather than the quickest kill. Otherwise, an enemy
         // that can be frightened is frightened rather than killed.
         let player = player_state(cs, &mods);
-        let mut goal = Goal::for_enemy(&mods, health, armour, Some(peak), player.as_ref());
+        // **Health after the status already on it ticks**, not the health the save reports.
+        //
+        // The question every goal is really asking is whether the enemy gets to act, because most
+        // enemy turns hurt us. The game asks the same question the same way: `enemyCanHit`
+        // (`rpgview.lua:1046-1052`) is gated on the post-status health that also decides
+        // `attackEstimatedToCauseEnemyDeath` (`:1045`). An enemy on 5 that is bleeding is, for our
+        // purposes, an enemy on 4.
+        //
+        // This is also what a scare ceiling has to respect: a word inside the direct-damage band
+        // still kills if the status finishes the job, which is how a live run collected thirty
+        // avoidable-murder refusals for words its own arithmetic called safe.
+        let deciding_health = (health - mods.enemy_status_tick).max(0);
+        if mods.enemy_status_tick != 0 {
+            log.push_str(&format!(
+                "  {name} loses {} to status before acting; aiming against {deciding_health}hp
+",
+                mods.enemy_status_tick
+            ));
+        }
+        let mut goal =
+            Goal::for_enemy(&mods, deciding_health, armour, Some(peak), player.as_ref());
         // **Aim lower than last time if the game called the last attempt murder.**
         //
         // Our arithmetic said that hit was survivable and the game's estimate said it kills, so the
