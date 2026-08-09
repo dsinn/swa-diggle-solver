@@ -382,6 +382,12 @@ pub struct WorldMap {
     /// false and it remains a legitimate destination forever. This is the driver's own memory of
     /// having tried, and it exists because the planner and the caller must not disagree about what is
     /// still worth walking to — when they did, a run spent thirty steps crossing the same crypt.
+    ///
+    /// The oldest piece of this project's loop-prevention machinery, and the archetype for the rest:
+    /// **state a dump can never give us**. `docs/superpowers/notes/navigation-loops.md` catalogues
+    /// all six cycles found so far, the two guards that could never fire, and the rule this file's
+    /// routing has to obey — memory or a monotone measure, never a ranking. Read it before adding
+    /// another.
     abandoned: std::collections::HashSet<String>,
     /// Where the last dump said we were.
     here: Option<String>,

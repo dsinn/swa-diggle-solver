@@ -20,6 +20,19 @@
 //! step 2 that is purely "press the button that leaves" into a table, so that "is every dead end
 //! answered" is a question with an answer rather than a chain of near-identical branches. Screens
 //! needing more than a button — a fight to play, a menu worth a second look — keep their own code.
+//!
+//! ## Before you add anything that stops the run walking in circles
+//!
+//! **Read `docs/superpowers/notes/navigation-loops.md` first.** Six two-node cycles have been found
+//! and fixed here, and **two of the fixes were guards whose trigger condition could never occur** —
+//! including one in this file that counted consecutive retreats, a state the system cannot reach.
+//! Both looked exactly like the anti-cycling measure they were named after.
+//!
+//! The short version, so this file states its own rule: only two things stop a loop — **explicit
+//! memory of what we already tried** ([`Run::committed_to`], [`Run::backed_out_of`],
+//! [`Run::shrines_tried`], `WorldMap::abandon`) and **a monotone progress measure**. A ranking is
+//! neither: a stable preference between two alternating states *is* a cycle. If you are adding a
+//! guard, state the condition that trips it and prove that condition is reachable.
 
 use crate::act::{Button, Screen};
 use crate::fight::{Fight, Outcome};
