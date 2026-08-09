@@ -17,11 +17,11 @@
 //! Neither is reachable from `rpg/effects/modifiers/`, so the gear table's parity test says nothing
 //! about them. They are transcribed here by hand and cited line by line.
 //!
-//! ## What is deliberately not modelled
+//! ## The status model is deferred to post-MVP, as one decision
 //!
-//! `bonusMindfogToxin` counts `!` tiles across the whole board including the queue
-//! (`tileboard.getLetterCount('!', true)`, `tileboard.lua:317-329`), and the queue is not in the
-//! save. Reported rather than guessed.
+//! What is modelled here is the single tick that decides **this** turn: does the enemy survive to
+//! act? That is a damage question and it belongs in the MVP. Everything needing status tracked
+//! *over* turns is deferred together rather than gap by gap — see [`deferred_status_model`].
 
 use super::Gear;
 use crate::observe::board::Tile;
@@ -173,25 +173,45 @@ pub fn status_tick(
     total
 }
 
-/// Enemy statuses whose effect on the tick is real and **not** modelled.
+/// What of the deferred status model is actually in play, as one line rather than several.
 ///
-/// Only the `Resist` family. `Weak` and `Immune` are handled in [`status_tick`]; `Resist` subtracts
-/// `entity.gearFlags[status..'Resist']` plus a status point, floored at `min(1, base)`
-/// (`rpgview.lua:1282-1284`), and the gear amount is not something we read — so its size is unknown
-/// rather than merely fiddly.
+/// ## The deferral, and why it is one decision
 ///
-/// Reported only when the status it modifies is actually on the enemy: a `bleedResist` on something
-/// that is not bleeding changes nothing, and a problem nobody can act on is noise in a turn log.
-pub fn unmodelled_status(enemy_statuses: &std::collections::HashMap<String, f64>) -> Vec<String> {
-    let mut out = Vec::new();
+/// **The dev's call:** status logic beyond the deciding tick is post-MVP, on complexity. Reporting
+/// each piece separately made three unrelated-looking gaps out of one agreed boundary, and a turn
+/// log full of "not modelled" reads like an oversight rather than a plan.
+///
+/// What sits behind the line:
+///
+/// - **`[status]Resist`.** Subtracts `entity.gearFlags[status..'Resist']` plus a status point,
+///   floored at `min(1, base)` (`rpgview.lua:1282-1284`). The gear amount is not something we read,
+///   so its size is unknown rather than merely fiddly.
+/// - **`bonusMindfogToxin`**, the Mindfog dagger. It adds toxin per `!` tile counted across the
+///   whole board *including the queue* (`tileboard.getLetterCount('!', true)`,
+///   `tileboard.lua:317-329`), and the queue is not in the save. The dev's reasoning for letting this
+///   one go: the build is strong for a human, who must find playable words under pressure and is glad
+///   of damage that arrives without one — and worth much less to a solver that rapidly scans the
+///   entire dictionary every turn and can usually just find the better word.
+/// - **The status a word *applies*, over later turns.** The tick modelled here is only the next one.
+///
+/// Returned only when something is genuinely in play: a `bleedResist` on an enemy that is not
+/// bleeding changes nothing, and a problem nobody can act on is noise.
+pub fn deferred_status_model(
+    enemy_statuses: &std::collections::HashMap<String, f64>, weapon: &Weapon,
+) -> Option<String> {
+    let mut live: Vec<String> = Vec::new();
     for s in ["bleed", "toxin", "burn", "ice"] {
         let key = format!("{s}Resist");
         let active = enemy_statuses.get(s).copied().unwrap_or(0.0) != 0.0;
         if active && enemy_statuses.contains_key(&key) {
-            out.push(key);
+            live.push(key);
         }
     }
-    out
+    if weapon.mindfog_unmodelled {
+        live.push("bonusMindfogToxin".into());
+    }
+    (!live.is_empty())
+        .then(|| format!("status model deferred post-MVP; in play here: {}", live.join(", ")))
 }
 
 #[cfg(test)]
@@ -250,7 +270,10 @@ mod tests {
         assert_eq!(status_tick(&e, WeaponBonus::default(), Some(20)), 5, "bleed doubles to 2");
         e.insert("toxinImmune".to_string(), 1.0);
         assert_eq!(status_tick(&e, WeaponBonus::default(), Some(20)), 2, "toxin contributes nothing");
-        assert!(unmodelled_status(&e).is_empty(), "Weak and Immune are modelled, not reported");
+        assert!(
+            deferred_status_model(&e, &Weapon::default()).is_none(),
+            "Weak and Immune are modelled, not deferred"
+        );
     }
 
     /// A `Resist` on a status the enemy does not have changes nothing, so it is not worth saying.
@@ -258,9 +281,23 @@ mod tests {
     fn only_a_resist_on_an_active_status_is_reported() {
         let mut e = HashMap::new();
         e.insert("bleedResist".to_string(), 1.0);
-        assert!(unmodelled_status(&e).is_empty(), "not bleeding, so it cannot matter");
+        assert!(
+            deferred_status_model(&e, &Weapon::default()).is_none(),
+            "not bleeding, so it cannot matter"
+        );
         e.insert("bleed".to_string(), 2.0);
-        assert_eq!(unmodelled_status(&e), vec!["bleedResist"]);
+        assert!(deferred_status_model(&e, &Weapon::default())
+            .expect("now it is in play")
+            .contains("bleedResist"));
+    }
+
+    /// The Mindfog dagger is part of the same deferral, not a separate gap.
+    #[test]
+    fn the_mindfog_dagger_is_deferred_with_the_rest_of_the_status_model() {
+        let w = Weapon { mindfog_unmodelled: true, ..Weapon::default() };
+        let note = deferred_status_model(&HashMap::new(), &w).expect("in play");
+        assert!(note.contains("bonusMindfogToxin"));
+        assert!(note.contains("deferred post-MVP"), "one decision, not an oversight: {note}");
     }
 
     #[test]

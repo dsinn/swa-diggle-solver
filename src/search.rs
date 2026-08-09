@@ -192,19 +192,15 @@ impl Modifiers {
             .filter_map(|d| lexica.words_for(d.key()).map(|w| (d, w.clone())))
             .collect();
         let weapon = crate::gear::Weapon::from_save(&crate::gear::Gear::from_save(save), save);
-        if weapon.mindfog_unmodelled {
-            problems.push("gear bonusMindfogToxin needs the tile queue, which the save omits".into());
-        }
         // The status a word *applies* is not in this number — it is per word, and the band the
         // search filters on is per word too. `bonusBastard` trading 6 damage for 3 bleed and 3 toxin
         // is the case that matters, and it under-rates the turn's total by about 4.
         let enemy_status_tick =
             crate::gear::status_tick(&statuses, crate::gear::WeaponBonus::default(), None);
-        problems.extend(
-            crate::gear::weapon::unmodelled_status(&statuses)
-                .into_iter()
-                .map(|k| format!("enemy status {k} changes its status damage and is not modelled")),
-        );
+        // One line for the whole deferred status model, not one per piece of it.
+        if let Some(note) = crate::gear::weapon::deferred_status_model(&statuses, &weapon) {
+            problems.push(note);
+        }
 
         Ok((
             Modifiers {
