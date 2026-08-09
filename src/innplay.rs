@@ -82,6 +82,7 @@
 
 use crate::game::save::{Table, Value};
 use crate::win::window::ButtonSpec;
+use std::time::Duration;
 
 /// `ui/inn.lua:125-127`, printed from the inn's `onActive`. Our confirmation that `Enter` worked.
 pub const ENTERED: &str = "Entered inn screen";
@@ -150,7 +151,20 @@ pub const MAX_PRESSES: usize = 12;
 /// in `wake_from_dream`: press, look for the announcement, press again. Re-pressing is safe because
 /// [`REST_SCREEN`] is printed from `onActive` too, so silence for a few seconds is real evidence the
 /// screen never opened rather than evidence the console is behind.
-pub const REST_TRIES: usize = 3;
+///
+/// **Many short tries, not a few long ones.** `REST_SCREEN` comes from `onActive`, so once a press
+/// registers the line follows within a frame or two — waiting four seconds for it only delays the
+/// next attempt. Eight tries at [`REST_WAIT`] costs about the same wall-clock as three at four
+/// seconds and gets nearly three times as many chances at the frame where the button is finally
+/// live.
+///
+/// A stray press cannot do damage, which is what makes tightening safe: the rest screen's own
+/// `Rest` sits at `(0.5, 0.9)` (`ui/rest.lua:504`) — screen centre, (960, 972) — while this one is
+/// at (1420, 972). Press again after the screen has already opened and the click lands on nothing.
+pub const REST_TRIES: usize = 8;
+
+/// How long one [`REST_TRIES`] attempt waits for the rest screen to announce itself.
+pub const REST_WAIT: Duration = Duration::from_millis(1500);
 
 /// What the game says about the rest in front of us.
 ///

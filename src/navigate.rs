@@ -718,7 +718,7 @@ impl Run<'_> {
                     self.log.push_str("  rest: could not click `Rest`\n");
                     break;
                 }
-                if self.wait_for_line(mark, innplay::REST_SCREEN, Duration::from_secs(4)) {
+                if self.wait_for_line(mark, innplay::REST_SCREEN, innplay::REST_WAIT) {
                     opened = Some(mark);
                     break;
                 }
@@ -726,10 +726,13 @@ impl Run<'_> {
                     "  rest: the rest screen did not open (try {try_n} of {})\n",
                     innplay::REST_TRIES
                 ));
-                // One picture per attempt, because the two candidate explanations look completely
-                // different and the console cannot tell them apart: a screen that has not finished
-                // arriving, versus a button somewhere other than where we pressed.
-                self.snap_screen(&format!("rest-no-screen-{try_n}"));
+                // The first failure and the last, not every one: the first catches a screen still
+                // arriving, the last shows what it settled into, and the ones between are the same
+                // picture at 1.5 MB each. The console cannot tell those two explanations apart,
+                // which is why there is a photograph at all.
+                if try_n == 1 || try_n == innplay::REST_TRIES {
+                    self.snap_screen(&format!("rest-no-screen-{try_n}"));
+                }
             }
             let Some(mark) = opened else {
                 break;
@@ -2237,8 +2240,21 @@ pub fn drive(
             // planner and the driver must not disagree about what is still worth walking to.
             if let Crossing::Arrive { at } = &mv {
                 r.log.push_str(&format!("{step}. at **{at}** in `{container}` — resting\n"));
-                r.map.abandon(at);
                 let rested = r.rest_at_inn();
+                // **Written off only if it gave us nothing.** This used to abandon before trying,
+                // which is what turned one missed press into "walk to the next village at 7/20":
+                // the inn stopped being a destination, `seeking_a_rest` went false, and the crossing
+                // routed out of the village.
+                //
+                // Abandoning still has to happen on failure, or `cross_toward` returns `Arrive`
+                // here for ever. But a *partial* rest is progress, not failure — health went up, so
+                // coming back round to the same inn is a loop with a monotone measure under it,
+                // which is the one kind that terminates. It ends when the bar is full (`wants_rest`
+                // clears) or the purse is empty (`inn_inside`'s gold gate stops nominating it), and
+                // `rest_at_inn` reports `false` for both, since neither presses anything.
+                if !rested {
+                    r.map.abandon(at);
+                }
                 // Re-read before anything plans on it: `overworld:save()` runs in the inn's
                 // `goBack` (`ui/inn.lua:9`), so leaving is the moment the new health is readable.
                 // This is what clears `wants_rest` and lets the run get on with the anomaly.
