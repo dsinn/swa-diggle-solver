@@ -634,6 +634,23 @@ impl Run<'_> {
     /// For screens with no fingerprint, where the coordinate is derived from the button's
     /// declaration rather than found by looking. The caller is responsible for knowing which screen
     /// is up — every one of these coordinates means something else on the map.
+    ///
+    /// ## This is a blind click, and the return value does not say otherwise
+    ///
+    /// `Ok(true)` means **the input was sent**, not that a button received it. Nothing here looks at
+    /// the screen before pressing or after. Callers must confirm the outcome themselves — every one
+    /// currently does, by waiting for the console line the target screen prints from `onActive`.
+    ///
+    /// That is weaker than the rule in §7 of the v2 spec, and it cost a live run: `Rest` was pressed
+    /// at the right coordinate, nothing happened, and the log could not distinguish a button that
+    /// was not live yet from a click that missed from the wrong screen being up. Settling it took a
+    /// screenshot taken by hand.
+    ///
+    /// The principled fix is available and not built: the game **warps the real OS cursor** to the
+    /// selected control when its hotspot highlight moves, and the inn screen carries
+    /// `ui.elements.hotspot` (`ui/inn.lua:78`). So the game can be asked where its buttons are —
+    /// nudge the highlight, read `GetCursorPos`, and the answer comes from the game rather than from
+    /// our arithmetic. That is the same oracle `locate-me` already uses. Task #19.
     fn click_button(&mut self, spec: &crate::win::window::ButtonSpec) -> bool {
         let Ok((cw, ch)) = self.win.client_size() else { return false };
         let (x, y) = crate::win::window::button_center(spec, cw, ch);
@@ -714,6 +731,13 @@ impl Run<'_> {
             let mut opened = None;
             for try_n in 1..=innplay::REST_TRIES {
                 let mark = self.feed.mark();
+                // Photographed before the press so a failure can say whether the click *did*
+                // anything. `click_button` fires at an arithmetic coordinate and reports only that
+                // the input was sent — so on its own, "no rest screen" cannot distinguish a button
+                // that was not live yet from a click that landed on nothing from the wrong screen
+                // being up. That ambiguity is what made this failure need a human with a
+                // screenshot. A diff is not a fingerprint, but it splits the three apart.
+                let before = crate::win::capture::capture_window(self.win).ok();
                 if !self.click_button(&innplay::INN_REST) {
                     self.log.push_str("  rest: could not click `Rest`\n");
                     break;
@@ -722,8 +746,14 @@ impl Run<'_> {
                     opened = Some(mark);
                     break;
                 }
+                let moved = match (&before, crate::win::capture::capture_window(self.win)) {
+                    (Some(b), Ok(a)) => {
+                        format!("{:.3}", b.diff_fraction(&a, crate::observe::settle::FULL))
+                    }
+                    _ => "unreadable".into(),
+                };
                 self.log.push_str(&format!(
-                    "  rest: the rest screen did not open (try {try_n} of {})\n",
+                    "  rest: the rest screen did not open (try {try_n} of {}); screen moved {moved}\n",
                     innplay::REST_TRIES
                 ));
                 // The first failure and the last, not every one: the first catches a screen still
