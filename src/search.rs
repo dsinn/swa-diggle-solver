@@ -469,6 +469,34 @@ fn affordable_buffer(slack: i64) -> i64 {
     DAMAGE_BUFFER.min((slack / 2).max(0))
 }
 
+/// The least damage worth submitting a word for.
+///
+/// **One, not zero.** A word that deals nothing spends the turn and buys the enemy a free swing, so
+/// there is currently no state in which it is the right play. A live run submitted `A` and then `O`,
+/// both scoring 0, under a band the murder backoff had collapsed to `0..=0`; that read as the
+/// handler working and it was a wasted turn either way.
+///
+/// **Post-MVP this stops being true**, and the two exceptions the dev named are specific:
+///
+/// - **The halfling on an odd turn, against an enemy on 1 health.** `immuneTurnMod2` — "Enemies
+///   can't deal damage to you on even turns" (`items/classpassives.lua:35-45`) — is evaluated as
+///   `entityDodged`: the flag, and `player.turnNumber % 2 == 0` (`rpgview.lua:265`). So a turn
+///   spent dealing nothing is a turn spent moving the parity, and it is free precisely when the
+///   turn it buys is one the enemy cannot hit back on.
+///
+/// - **The slime brooch, letting toxin land the kill.** Not a scare consideration at all, which is
+///   what this comment said before the dev corrected it. `onStatusKillToxinRegen` is
+///   `type = 'onStatusKill'` and pays `affectPlayerStatus('regen', enemy.statusEffects.toxin)` —
+///   "an enemy succumbing to status damage gives you 1 turn of health regeneration for each toxin
+///   stack they had" (`items/statusgear.lua:75`). A kill by our own damage arrives *before* the
+///   toxin does and earns nothing. The game says so itself: the brooch's `highlightIf` (`:83`) is
+///   `not getEstimationAttackAboutToKill() and getEstimationEnemyAboutToDie()` — hold back, and let
+///   the status finish it.
+///
+/// Both need machinery that does not exist yet — turn parity, and the enemy's status arithmetic —
+/// so until one of them is built, aiming at zero is a bug rather than a tactic.
+pub const MIN_MEANINGFUL_DAMAGE: i64 = 1;
+
 impl Goal {
     /// Picks the goal for an enemy, given what modifies it.
     ///
@@ -530,7 +558,27 @@ impl Goal {
         // non-lethal band `scare_need ..= below - 1`; see `affordable_buffer` for why this shrinks
         // instead of inverting.
         let b = affordable_buffer(below - 1 - scare_need);
-        Goal::Scare { need: scare_need + b, below: below - b }
+        let ceiling = below - b;
+        // Floored **after** the buffer, not before it.
+        //
+        // An enemy already at or under its flee threshold needs nothing to make it run, so
+        // `scare_need` is legitimately 0 — but we still have to submit a word to end the turn, and
+        // one that deals nothing hands it a free swing (see [`MIN_MEANINGFUL_DAMAGE`]). Flooring
+        // the input instead would double-count against the buffer and narrow a band that was
+        // already correct: at 4 health against a threshold of 5, `0+1 .. 3` becomes `1+1 .. 3`, a
+        // band one point wide for no reason.
+        let need = (scare_need + b).max(MIN_MEANINGFUL_DAMAGE);
+        // The floor can push the floor into the ceiling, and that is not a band.
+        //
+        // An enemy on 1 health with no armour is the case: `scare_need` is 0 because it is already
+        // past its threshold, `below` is 1 because 1 damage kills it, and the floor lifts `need` to
+        // exactly 1. There is no hit that both lands and leaves it alive, which is the same
+        // conclusion the `scare_need >= below` check above reaches by a different route — so it
+        // ends the same way, killing without the rested-charge optimisation.
+        if need >= ceiling {
+            return Self::killing_blow(kill, lethal, None);
+        }
+        Goal::Scare { need, below: ceiling }
     }
 
     /// The kill, adjusted for what a well-rested charge is worth on this particular wound.
@@ -927,7 +975,12 @@ pub fn race_for_band(
                     if local_best.as_ref().map(|b| score > b.score).unwrap_or(true) {
                         local_best = Some(Found { word: word.clone(), score, slice });
                     }
-                    if local_least.as_ref().map(|b| score < b.score).unwrap_or(true) {
+                    // The gentlest word that still does something. A zero-scoring word is the
+                    // gentlest of all and is never the answer — see `MIN_MEANINGFUL_DAMAGE` — so
+                    // this is the minimum over words that actually land, not over all of them.
+                    if score >= MIN_MEANINGFUL_DAMAGE
+                        && local_least.as_ref().map(|b| score < b.score).unwrap_or(true)
+                    {
                         local_least = Some(Found { word: word.clone(), score, slice });
                     }
                     if local_longest
@@ -1637,6 +1690,31 @@ mod scare_goal_tests {
             Goal::for_enemy(&feared(), 12, 3, Some(12), None),
             Goal::Scare { need: 11, below: 14 }
         );
+    }
+
+    /// No goal may ask for a word that deals nothing.
+    ///
+    /// A live run submitted `A` and then `O`, both scoring 0, under a band the murder backoff had
+    /// collapsed to `0..=0`. Each spent a turn and bought the enemy a free swing. The legitimate
+    /// zero-damage plays — halfling turn parity, and holding back so toxin lands the kill for the
+    /// slime brooch — are post-MVP and need machinery that does not exist, so until then a floor of
+    /// zero is a bug. See [`MIN_MEANINGFUL_DAMAGE`].
+    #[test]
+    fn no_scare_band_ever_asks_for_a_zero_damage_word() {
+        // An enemy at or under its flee threshold needs nothing to make it run, which is exactly
+        // where `scare_need` goes to zero.
+        for health in 1..=6 {
+            for armour in 0..=2 {
+                let g = Goal::for_enemy(&feared(), health, armour, Some(12), None);
+                if let Goal::Scare { need, below } = g {
+                    assert!(
+                        need >= MIN_MEANINGFUL_DAMAGE,
+                        "{health}+{armour}hp produced {g:?}, which permits a wasted turn"
+                    );
+                    assert!(need < below, "{health}+{armour}hp produced the empty band {g:?}");
+                }
+            }
+        }
     }
 
     #[test]

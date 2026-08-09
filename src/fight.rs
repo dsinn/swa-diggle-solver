@@ -365,13 +365,21 @@ impl Fight<'_> {
         *last_seen_at = (health, armour);
         if *murder_backoff > 0 {
             if let Goal::Scare { need, below } = goal {
-                // Never below a band of `0..=0`. Word scores start at 1, so a ceiling of 1 admits
-                // nothing and the search falls through to its fallback — which is the whole reason
-                // this loop ran thirty times. Stopping at 2 keeps the band satisfiable by the
-                // smallest word there is; if even that is called murder, no amount of further
-                // lowering can help and the backoff is the wrong tool.
-                let dropped = (below - *murder_backoff).max(2);
-                goal = Goal::Scare { need: need.min(dropped - 1).max(0), below: dropped };
+                // Never below a band of exactly one point of damage.
+                //
+                // A ceiling of 1 with a floor of 0 admits only a zero-scoring word — which is both
+                // a wasted turn ([`crate::search::MIN_MEANINGFUL_DAMAGE`]) and, on a board with no
+                // such word, an empty band that sends the search to its fallback. That is the whole
+                // reason this loop ran thirty times.
+                //
+                // So the ceiling stops at 2 and the floor at 1: the narrowest honest band is "deal
+                // exactly 1". If even that is refused as murder, no further lowering can help and
+                // the backoff is the wrong tool for whatever is happening.
+                let dropped = (below - *murder_backoff).max(crate::search::MIN_MEANINGFUL_DAMAGE + 1);
+                goal = Goal::Scare {
+                    need: need.min(dropped - 1).max(crate::search::MIN_MEANINGFUL_DAMAGE),
+                    below: dropped,
+                };
                 log.push_str(&format!(
                     "  aiming {} lower after a murder warning: {goal:?}
 ", murder_backoff
