@@ -36,22 +36,21 @@
 //! - **`Wake up` is bound to `goBack`, not `affirmative`** (`:112-116`). Space will not dismiss it,
 //!   and Escape — the other `goBack` binding — is forbidden here, since it maps to
 //!   `goBack() or options()` and can strand a run in the options menu. So this button must be
-//!   **clicked**, at [`WAKE_UP`].
+//!   **clicked**, at [`crate::innplay::WAKE_UP`].
 //! - **It is not there when the dream starts.** `showIf = function() return wakeUp end`, and outside
 //!   the `alreadyCorrupt` case `wakeUp` only becomes true from an `onCollisionCallbacks` handler
 //!   (`:56-70`) — that is, when two tiles in the dream's physics simulation collide. There is no
 //!   fixed duration to wait out. The button's arrival has to be *observed*.
+//!
+//! What can be known in advance is that a dream is *coming*: `doRest` assigns `doingEvent` and then
+//! logs it (`:364-366`), so the console announces the queued event two seconds before the screen
+//! changes. [`crate::innplay`] acts on that, and the pressing lives there — this module stays
+//! decision-only.
 
 /// Health lost at one overworld node that sends us looking for a rest.
 ///
 /// The user's number. Below it, the detour costs more time than the health is worth.
 pub const REST_THRESHOLD: i64 = 4;
-
-/// `Wake up` on the dream screen: a default 250x100 button at screen-space (0, 0.85) with an
-/// xOffset of 0.75 (`overworld/events/rested.lua:112-113`), so x = 250*0.75, y = 1080*0.85 at
-/// 1920x1080. The same slot Travel and Enter use — which is safe only because the dream screen is
-/// the only thing on top when it is showing.
-pub const WAKE_UP: (f64, f64) = (0.75, 0.85);
 
 /// The player's health, from `mainSaveData.player`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
