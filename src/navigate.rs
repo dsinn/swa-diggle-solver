@@ -2314,6 +2314,23 @@ pub fn drive(
             // is consulted *before* `subworld`, and a village under attack replaces the set
             // (`village.lua:371-395`). We do not know what those buttons are, so we do not press
             // them on spec.
+            //
+            // ## This is the narrow version of a general capability
+            //
+            // "Am I hurt, and is this a village" is the wrong question in the long run. The right
+            // one is **does this container hold anything I currently want** — which is the same
+            // question `WorldMap::cross_toward` answers inside, and answers just as narrowly, with
+            // `inn_inside` and `seeking_a_rest` written around the inn specifically.
+            //
+            // The generic form is an *errand*: a predicate over interior places plus what to do on
+            // arriving at one. `Goal::Rest` names the inn (`village.lua:341`); a shop errand names
+            // the shop subnode and `buyer::wanted`, which already exists as a deliberate
+            // pass-through stub. `Crossing::Arrive` would carry the errand and the driver dispatch
+            // on it, instead of `Arrive` meaning "the inn" by construction.
+            //
+            // Deliberately not built yet — the MVP has one errand, and inventing the abstraction
+            // around a single case is how you get the wrong abstraction. Task #18, raised by the dev
+            // for the post-MVP shop work.
             let rest_here = r.map.wants_rest()
                 && r.map.gold() >= crate::rest::INN_COST
                 && p.type_is("village")
