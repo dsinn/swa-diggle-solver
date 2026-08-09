@@ -331,6 +331,21 @@ impl Place {
         self.type_is("chest")
     }
 
+    /// The inn subnode of a village. `typeName = 'inn'` (`village.lua:341`).
+    ///
+    /// Nothing else in a village ends in those three letters — the other types are `crossroads`,
+    /// `guard post`, `guard tower`, `well`, `market stall`, `general store`, `apothecary`, `house`
+    /// and `chapel` (`village.lua:161-495`) — so the suffix test is safe here in a way it would not
+    /// be for a shorter word.
+    ///
+    /// **Found, not derived.** `store_inn` is assigned to whichever `<parent>sub<N>` slot the
+    /// generator reaches first (`village.lua:685`), so unlike an exit road there is no key to build:
+    /// the inn has to be *seen* before it can be walked to, which is why [`WorldMap::cross_toward`]
+    /// has a state for looking.
+    pub fn is_inn(&self) -> bool {
+        self.type_is("inn")
+    }
+
     pub fn type_is(&self, type_name: &str) -> bool {
         self.heading.trim_end().ends_with(type_name)
     }
@@ -449,7 +464,11 @@ fn heading_has_combat(heading: &str) -> bool {
     heading.contains("— level ")
 }
 
-/// What to do next while crossing a subworld toward its exit.
+/// What to do next while crossing a subworld.
+///
+/// Usually toward its exit — but not always. A village is entered *for* something inside it, and
+/// [`Crossing::Arrive`] and [`Crossing::Seek`] are the two states that has which crossing a forest
+/// does not: standing on the thing we came for, and not yet having found it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Crossing {
     /// The node underfoot has an unfinished fight, so nothing else is legal yet.
@@ -458,6 +477,18 @@ pub enum Crossing {
     Step { to: String, toward: String },
     /// No route is known yet. Move here to learn more of the interior.
     Explore { to: String, toward: String },
+    /// Standing on the interior destination — the inn — with the errand still to do.
+    ///
+    /// The counterpart of [`Crossing::Leave`] for a destination that is *inside* rather than out.
+    Arrive { at: String },
+    /// Looking for a destination we have not seen yet. Move here to open the fog.
+    ///
+    /// Distinct from [`Crossing::Explore`], which knows where it is going and is only short of a
+    /// route. This one has no target at all, so it must not be told to head for an exit: leaving is
+    /// precisely the thing that would abandon the errand. Its own variant rather than a flag,
+    /// because `Step` and `Explore` already log identically and a third silent case would make an
+    /// old log unreadable.
+    Seek { to: String },
     /// Standing on the exit road: leave for this overworld node.
     Leave { to: String },
     /// Hurt, and the way onward is a fight — so go back the way we came instead.
@@ -634,6 +665,11 @@ impl WorldMap {
         } else if now.is_full() {
             self.wants_rest = false;
         }
+    }
+
+    /// `player.gold`, as of the last save read. What an inn will and will not do is a gold check.
+    pub fn gold(&self) -> i64 {
+        self.gold
     }
 
     /// Cleared once health is back up.
@@ -1278,12 +1314,36 @@ impl WorldMap {
     pub fn cross_toward(&self, exits: &[crate::observe::adjacency::Exit]) -> Option<Crossing> {
         let parent = self.inside()?.to_string();
         let here = self.here.as_deref()?.to_string();
-        let leaving_to = self.exit_toward(exits)?;
-        let exit_key = exit_node_key(&parent, &leaving_to);
 
+        // Where inside this subworld are we trying to get to?
+        //
+        // Three answers, and only the third is what crossing a forest ever needed:
+        //
+        // - **the inn**, when a rest is what brought us into a village and we have seen one;
+        // - **nowhere yet**, when we are in a village looking for an inn the fog still hides —
+        //   which must NOT fall back to the exit, because leaving is the one move that abandons the
+        //   errand, and the doorway we came in by is usually the nearest thing to walk to;
+        // - **the road out**, which is every other case.
+        let inn = self.inn_inside(&parent).map(|p| p.key.clone());
+        let leaving_to = match inn.is_some() || self.seeking_a_rest(&parent) {
+            true => None,
+            false => Some(self.exit_toward(exits)?),
+        };
+        let dest = match (&inn, &leaving_to) {
+            (Some(k), _) => Some(k.clone()),
+            (None, Some(to)) => Some(exit_node_key(&parent, to)),
+            (None, None) => None,
+        };
+
+        // Standing on the inn: the crossing is over and the errand starts. Guarded by
+        // `blocks_departure` because a village under attack puts a fight on its subnodes
+        // (`village.lua:371-395`), and a fight underfoot is dealt with before anything else.
+        if inn.as_deref() == Some(here.as_str()) && !self.blocks_departure(&here) {
+            return Some(Crossing::Arrive { at: here });
+        }
         // Already standing on the road out.
-        if here == exit_key {
-            return Some(Crossing::Leave { to: leaving_to });
+        if let Some(to) = leaving_to.filter(|to| here == exit_node_key(&parent, to)) {
+            return Some(Crossing::Leave { to });
         }
         // An unfinished fight underfoot blocks going ONWARD. It does not block going back.
         //
@@ -1312,8 +1372,8 @@ impl WorldMap {
             }
             return Some(Crossing::Fight { at: here });
         }
-        if let Some(step) = self.first_step_toward(&here, &exit_key, false) {
-            return Some(Crossing::Step { to: step, toward: exit_key });
+        if let Some(step) = dest.as_ref().and_then(|d| self.first_step_toward(&here, d, false)) {
+            return Some(Crossing::Step { to: step, toward: dest? });
         }
         // No known route. Fog means the interior is learned a hop at a time, so an unknown route is
         // the normal early state rather than an error — walk into the dark, preferring somewhere we
@@ -1328,10 +1388,14 @@ impl WorldMap {
         // The logging hid it too: `Step` and `Explore` print the same line, so the report read like
         // a considered route rather than a guess. That is worth knowing when reading old logs.
         let place = self.places.get(&here)?;
+        //
+        // With no destination at all — looking for an inn we have not seen — *every* exit is
+        // "elsewhere", so this filter is also what keeps a search inside the village it is
+        // searching.
         let exits_elsewhere: BTreeSet<String> = exits
             .iter()
             .map(|e| exit_node_key(&parent, &e.to_key))
-            .filter(|k| k != &exit_key)
+            .filter(|k| Some(k) != dest.as_ref())
             .collect();
         let usable = |k: &String| {
             // Another exit road is not a step into the dark, it is a way out of the subworld — and
@@ -1371,7 +1435,51 @@ impl WorldMap {
         let step = pick(true)
             .or_else(|| pick(false))
             .or_else(|| place.neighbours.iter().min().cloned())?;
-        Some(Crossing::Explore { to: step, toward: exit_key })
+        Some(match dest {
+            Some(toward) => Crossing::Explore { to: step, toward },
+            None => Crossing::Seek { to: step },
+        })
+    }
+
+    /// The inn inside `container`, when a rest is what we are in there for.
+    ///
+    /// `None` covers three different situations, and the caller does not need to tell them apart:
+    /// we are not resting, we cannot pay, or the fog has not shown us the inn yet. The first two
+    /// mean cross normally; the third is what [`WorldMap::seeking_a_rest`] separates out.
+    ///
+    /// The gold check is not an optimisation. `getCanRest` is a flat `getPlayerGold() >= 10`
+    /// (`ui/rest.lua:49`), so walking a hurt run across a village with nine gold buys a wasted trip
+    /// and the fights on the way back.
+    fn inn_inside(&self, container: &str) -> Option<&Place> {
+        if !self.wants_rest || self.gold < crate::rest::INN_COST {
+            return None;
+        }
+        self.places
+            .values()
+            .find(|p| p.parent.as_deref() == Some(container) && p.is_inn() && !self.abandoned.contains(&p.key))
+    }
+
+    /// Are we inside a village on a rest errand, with its inn still to find?
+    ///
+    /// The container's own heading is what says "village" — `typeName = 'village'` on the surface
+    /// node — so this asks a question about the place we are *in*, not the place we are on.
+    ///
+    /// **An abandoned inn ends the search**, which is the difference between this and a plain
+    /// `inn_inside().is_none()`. [`WorldMap::abandon`] is the driver's record of having had its go,
+    /// and without that clause a village whose inn refused to serve us would be searched forever:
+    /// the inn is filtered out of `inn_inside`, so the fog case and the tried-it case would look
+    /// identical from here. That is the same shape as every bounce this project has had.
+    fn seeking_a_rest(&self, container: &str) -> bool {
+        if !self.wants_rest || self.gold < crate::rest::INN_COST {
+            return false;
+        }
+        if !self.places.get(container).map(|p| p.type_is("village")).unwrap_or(false) {
+            return false;
+        }
+        !self
+            .places
+            .values()
+            .any(|p| p.parent.as_deref() == Some(container) && p.is_inn() && self.abandoned.contains(&p.key))
     }
 
     /// A neighbour we may legally step back to from a node that blocks going onward.
@@ -2784,6 +2892,128 @@ mod tests {
                 assert_eq!(to, "l9sub26", "the road, and unvisited");
             }
             other => panic!("expected an explore step, got {other:?}"),
+        }
+    }
+
+    /// Inside Ulrome, hurt, with 763 gold — the sandbox's own state, one node further on.
+    ///
+    /// `nodes` is what the dump reports as adjacent, so the inn is present or absent by the same
+    /// mechanism the fog uses.
+    fn inside_a_village(here: (&str, &str), nodes: Vec<Node>, gold: i64) -> WorldMap {
+        let mut m = WorldMap::new();
+        m.fold(&dump("l19", "Gipsyville crypt", vec![node("l10", "Ulrome village")]));
+        m.fold(&inside_dump("l10", here.0, here.1, nodes, vec![exit("l19"), exit("l7")]));
+        m.apply_save(
+            &crate::game::save::parse(&format!("return {{ player = {{ gold = {gold} }} }}")).unwrap(),
+        );
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+        m
+    }
+
+    #[test]
+    fn a_hurt_run_in_a_village_heads_for_the_inn_rather_than_the_way_out() {
+        // The whole point of entering. `cross_toward` only ever knew how to head for an exit, so a
+        // rest errand walked in one door and out the other.
+        let m = inside_a_village(
+            ("l10sub1", "Ulrome well"),
+            vec![node("l10sub4", "The Wobbly Cat inn"), node("l10_path_to_l7", "Road to Greenoak")],
+            763,
+        );
+        assert_eq!(
+            m.cross_toward(&[exit("l19"), exit("l7")]),
+            Some(Crossing::Step { to: "l10sub4".into(), toward: "l10sub4".into() })
+        );
+    }
+
+    #[test]
+    fn standing_on_the_inn_is_where_the_crossing_ends() {
+        let m = inside_a_village(
+            ("l10sub4", "The Wobbly Cat inn"),
+            vec![node("l10sub1", "Ulrome house")],
+            763,
+        );
+        // Not `Leave`, not a step: the errand is the reason we are in here.
+        assert_eq!(
+            m.cross_toward(&[exit("l19"), exit("l7")]),
+            Some(Crossing::Arrive { at: "l10sub4".into() })
+        );
+    }
+
+    #[test]
+    fn an_inn_we_cannot_pay_for_is_not_a_destination() {
+        // `getCanRest` is a flat `getPlayerGold() >= 10` (`ui/rest.lua:49`). Below it, walking to the
+        // bar buys a wasted trip and the fights on the way back, so cross as normal.
+        let m = inside_a_village(
+            ("l10sub1", "Ulrome well"),
+            vec![node("l10sub4", "The Wobbly Cat inn"), node("l10_path_to_l7", "Road to Greenoak")],
+            9,
+        );
+        match m.cross_toward(&[exit("l19"), exit("l7")]) {
+            Some(Crossing::Step { toward, .. }) | Some(Crossing::Explore { toward, .. }) => {
+                assert!(toward.starts_with("l10_path_to_"), "heading out, not to the bar: {toward}");
+            }
+            other => panic!("expected an exit crossing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_village_whose_inn_is_still_fogged_is_searched_not_left() {
+        // `store_inn` lands on whichever `<parent>sub<N>` the generator reaches first
+        // (`village.lua:685`), so unlike an exit road there is no key to build and no route to plan:
+        // the inn has to be seen. Until it is, the one move that must NOT be made is the exit —
+        // which is exactly what the old fallback reached for, the entrance road being the nearest
+        // thing to walk to.
+        let m = inside_a_village(
+            ("l10sub1", "Ulrome well"),
+            vec![
+                node("l10sub2", "Ulrome house"),
+                node("l10_path_to_l19", "Road to Gipsyville"),
+                node("l10_path_to_l7", "Road to Greenoak"),
+            ],
+            763,
+        );
+        assert_eq!(
+            m.cross_toward(&[exit("l19"), exit("l7")]),
+            Some(Crossing::Seek { to: "l10sub2".into() })
+        );
+    }
+
+    #[test]
+    fn an_inn_we_have_already_tried_stops_the_search() {
+        // The bounce this project keeps rediscovering, in its newest disguise. `abandon` is the
+        // driver's record of having had its go; without consulting it here, "the fog hides the inn"
+        // and "the inn would not serve us" look identical from inside the village, and the run
+        // searches a village it has already finished with until its budget runs out.
+        let mut m = inside_a_village(
+            ("l10sub1", "Ulrome well"),
+            vec![node("l10sub4", "The Wobbly Cat inn"), node("l10_path_to_l7", "Road to Greenoak")],
+            763,
+        );
+        m.abandon("l10sub4");
+        match m.cross_toward(&[exit("l19"), exit("l7")]) {
+            Some(Crossing::Step { toward, .. }) | Some(Crossing::Explore { toward, .. }) => {
+                assert!(toward.starts_with("l10_path_to_"), "back to crossing: {toward}");
+            }
+            other => panic!("expected an exit crossing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_healthy_run_crosses_a_village_without_stopping_at_the_bar() {
+        // The inn is only a destination while a rest is wanted. Otherwise a village is a subworld
+        // like any other and the exit is the whole objective.
+        let mut m = inside_a_village(
+            ("l10sub1", "Ulrome well"),
+            vec![node("l10sub4", "The Wobbly Cat inn"), node("l10_path_to_l7", "Road to Greenoak")],
+            763,
+        );
+        m.note_health_level(crate::rest::Health { current: 20, max: 20 });
+        assert!(!m.wants_rest());
+        match m.cross_toward(&[exit("l19"), exit("l7")]) {
+            Some(Crossing::Step { toward, .. }) | Some(Crossing::Explore { toward, .. }) => {
+                assert!(toward.starts_with("l10_path_to_"), "straight through: {toward}");
+            }
+            other => panic!("expected an exit crossing, got {other:?}"),
         }
     }
 

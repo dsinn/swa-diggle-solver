@@ -601,6 +601,177 @@ impl Run<'_> {
         }
     }
 
+    /// Clicks a button at the position the game's own layout arithmetic puts it.
+    ///
+    /// For screens with no fingerprint, where the coordinate is derived from the button's
+    /// declaration rather than found by looking. The caller is responsible for knowing which screen
+    /// is up — every one of these coordinates means something else on the map.
+    fn click_button(&mut self, spec: &crate::win::window::ButtonSpec) -> bool {
+        let Ok((cw, ch)) = self.win.client_size() else { return false };
+        let (x, y) = crate::win::window::button_center(spec, cw, ch);
+        self.keys.click(x, y).is_ok()
+    }
+
+    /// Pumps the console until a line **equal to** `line` appears, or the deadline passes.
+    ///
+    /// Equality rather than substring, because these are short wordy announcements — `Rested`,
+    /// `Rest screen` — and the console also carries item names and event prose. See
+    /// [`crate::observe::feed::Feed::seen_line_since`], and [`crate::fight::GAME_OVER`] for the
+    /// false positive that made the distinction worth having.
+    fn wait_for_line(&mut self, mark: usize, line: &str, within: Duration) -> bool {
+        let by = Instant::now() + within;
+        loop {
+            self.pump();
+            if self.feed.seen_line_since(mark, line) {
+                return true;
+            }
+            if Instant::now() >= by {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    /// Enters the inn we are standing on, rests until the bar is full, and comes back out.
+    ///
+    /// Every step is confirmed by the console rather than by pixels — see [`crate::innplay`] for the
+    /// three lines the game prints and why one press is not one rest. Returns whether any gold was
+    /// actually spent on health; the caller re-reads the save either way, because "it did not work"
+    /// and "we were already full" both end here and only the save can tell them apart.
+    ///
+    /// **This will not survive its first live press in the current sandbox save.** `doRest` calls
+    /// `getEvent` on every rest, and the Physics dream's `requireCheck` indexes two unguarded nils
+    /// (`overworld/events/rested.lua:14-15`). The module docs have the details. Nothing here can
+    /// route around it; it is logged loudly instead of failing quietly, because a Lua error takes
+    /// the whole game with it and the next thing this run does would otherwise look like a mystery.
+    fn rest_at_inn(&mut self) -> bool {
+        use crate::innplay;
+
+        // 1. `Enter`. It is the ordinary area button, in the slot everything else uses.
+        let mark = self.feed.mark();
+        let _ = self.click_area_button("Enter");
+        if !self.wait_for_line(mark, innplay::ENTERED, Duration::from_secs(8)) {
+            self.log.push_str("  rest: `Enter` did not open the inn\n");
+            return false;
+        }
+
+        // 2. `Rest`, which is a button on the inn screen rather than an area button.
+        let mark = self.feed.mark();
+        if !self.click_button(&innplay::INN_REST) {
+            self.log.push_str("  rest: could not click `Rest`\n");
+            self.leave_inn(1);
+            return false;
+        }
+        if !self.wait_for_line(mark, innplay::REST_SCREEN, Duration::from_secs(8)) {
+            self.log.push_str("  rest: the rest screen did not open\n");
+            self.leave_inn(1);
+            return false;
+        }
+        let Some(data) = innplay::parse_rest_data(self.feed.since(mark)) else {
+            self.log.push_str("  rest: the rest screen printed no `Rest data` block\n");
+            self.leave_inn(2);
+            return false;
+        };
+        let gold = self.map.gold();
+        let presses = innplay::presses_needed(&data, gold);
+        self.log.push_str(&format!(
+            "  rest: {} missing, {} a press, {gold} gold — pressing {presses} time(s)\n",
+            data.health_need, data.health_give
+        ));
+
+        // 3. Press. Space rather than the button: `Rest` declares
+        //    `userFunctionName = 'affirmative'` (`ui/rest.lua:513`) and `space = 'affirmative'`
+        //    (`utils/defaultbinds/keyboard.lua:13`), and reading the binding beats trusting a
+        //    coordinate on a screen we have never photographed.
+        let mut done = 0;
+        for _ in 0..presses {
+            let mark = self.feed.mark();
+            if self.keys.press_key(VK_SPACE, SC_SPACE).is_err() {
+                self.log.push_str("  rest: the Space press failed\n");
+                break;
+            }
+            if !self.wait_for_line(mark, innplay::RESTED, Duration::from_secs(8)) {
+                // The press was swallowed, the button went inactive, or the game is no longer
+                // there. Stopping beats pressing harder at something that is not answering.
+                self.log.push_str("  rest: no `Rested` after the press — stopping here\n");
+                break;
+            }
+            done += 1;
+            // The only field in a `Rested` block that is current, and it is a two-second warning.
+            if innplay::parse_rest_data(self.feed.since(mark)).map(|d| d.doing_event).unwrap_or(false)
+            {
+                self.log.push_str("  rest: a dream is queued — waking from it\n");
+                self.wake_from_dream();
+                break;
+            }
+        }
+        self.log.push_str(&format!("  rest: {done} of {presses} press(es) landed\n"));
+
+        // 4. Out. Two screens, one plaque: the rest screen, then the inn.
+        self.leave_inn(2);
+        done > 0
+    }
+
+    /// Presses the back plaque `screens` times, confirming the inn's own announcement in between.
+    ///
+    /// The rest screen and the inn declare the plaque identically (`ui/inn.lua:68-71`,
+    /// `ui/rest.lua:517-520`), so leaving is the same press twice — and the first of the two lands
+    /// back on the inn, which says so on the console. That gives the sequence a checkpoint in the
+    /// middle instead of two blind clicks in a row.
+    fn leave_inn(&mut self, screens: usize) {
+        for i in 0..screens {
+            let mark = self.feed.mark();
+            if !self.click_button(&crate::innplay::BACK) {
+                self.log.push_str("  rest: could not click the back plaque\n");
+                return;
+            }
+            // Only the first press has something to confirm. The second lands on the overworld,
+            // which announces nothing until it is asked for a dump — the main loop's job.
+            if i + 1 < screens && !self.wait_for_line(mark, crate::innplay::ENTERED, Duration::from_secs(6))
+            {
+                self.log.push_str("  rest: the rest screen did not close\n");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(600));
+        }
+        self.pump();
+    }
+
+    /// Clicks `Wake up` until the inn announces itself again.
+    ///
+    /// Blind clicking, and safe only because the console has already told us which screen we are on
+    /// — `doingEvent` in the `Rested` block is assigned before the log line (`ui/rest.lua:364-366`),
+    /// so it is the one field there that is not a step behind.
+    ///
+    /// A loop rather than a wait because the button's arrival cannot be predicted: `showIf` returns
+    /// `wakeUp`, which is set from an `onCollisionCallbacks` handler
+    /// (`overworld/events/rested.lua:56-70`) — when two tiles in the dream's physics simulation
+    /// collide. There is no duration to wait out, so we press at intervals and let the game ignore
+    /// the presses that land early.
+    ///
+    /// The exit is the game's, not ours: the dream's `back` runs `setActiveMode(nextMode)` (`:80`),
+    /// `nextMode` is the inn mode the rest screen was loaded over, and the inn prints
+    /// [`crate::innplay::ENTERED`] from its `onActive`.
+    fn wake_from_dream(&mut self) {
+        let mark = self.feed.mark();
+        // The event fires two seconds into the update loop (`ui/rest.lua:414-419`) and then
+        // transitions for another 2.5 (`overworld/events/rested.lua:18`). Clicking before that
+        // would land on the rest screen we are still looking at.
+        std::thread::sleep(Duration::from_secs(5));
+        let by = Instant::now() + Duration::from_secs(60);
+        loop {
+            if self.wait_for_line(mark, crate::innplay::ENTERED, Duration::from_secs(2)) {
+                self.log.push_str("  rest: woke up\n");
+                return;
+            }
+            if Instant::now() >= by {
+                self.log.push_str("  rest: still dreaming after a minute\n");
+                return;
+            }
+            self.click_button(&crate::innplay::WAKE_UP);
+        }
+    }
+
     fn click_area_button(&mut self, what: &str) -> Result<bool, Box<dyn std::error::Error>> {
         let before = crate::win::capture::capture_window(self.win)?;
         let (bx, by) = self.win.client_to_screen(AREA_BUTTON.0, AREA_BUTTON.1)?;
@@ -1948,6 +2119,31 @@ pub fn drive(
         }
         if let Some((container, mv)) = crossing {
             use crate::overworld::Crossing;
+            // Standing on the inn we crossed the village for. Nothing to click on the map — the
+            // errand is the whole reason we are in here.
+            //
+            // `abandon` first, and unconditionally, for the same reason the shrine branches do it:
+            // this is the driver's record of having had its go. Without it a rest that fails to open
+            // a screen leaves the inn a perfectly good destination, `cross_toward` routes straight
+            // back to it, and the run spends its budget walking between the gate and the bar. The
+            // planner and the driver must not disagree about what is still worth walking to.
+            if let Crossing::Arrive { at } = &mv {
+                r.log.push_str(&format!("{step}. at **{at}** in `{container}` — resting\n"));
+                r.map.abandon(at);
+                let rested = r.rest_at_inn();
+                // Re-read before anything plans on it: `overworld:save()` runs in the inn's
+                // `goBack` (`ui/inn.lua:9`), so leaving is the moment the new health is readable.
+                // This is what clears `wants_rest` and lets the run get on with the anomaly.
+                if let Some(h) = r.apply_save() {
+                    r.log.push_str(&format!(
+                        "  health is now {}/{}{}\n",
+                        h.current,
+                        h.max,
+                        if rested { "" } else { " (nothing was spent)" }
+                    ));
+                }
+                continue;
+            }
             // **A second consecutive retreat means retreating is not working.** See
             // `Run::retreats_running`. The map prefers backing out to fighting while hurt, which is
             // right once and a cycle repeated — `l9sub13 -> l9sub11 -> l9sub13`, four laps, live.
@@ -1987,6 +2183,16 @@ pub fn drive(
                         None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
                     }
                 }
+                // Its own line, and deliberately not the one above. `Step` and `Explore` already
+                // print identically, which made a wrong-door guess read like a considered route in
+                // the logs; a search with no destination at all would have been a third.
+                Crossing::Seek { to } => match fresh.nodes.iter().find(|n| &n.key == to) {
+                    Some(n) => (
+                        format!("searching `{container}` for its inn via `{to}`"),
+                        (n.x, n.y),
+                    ),
+                    None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
+                },
                 Crossing::Retreat { to } => match fresh.nodes.iter().find(|n| &n.key == to) {
                     Some(n) => (
                         format!("hurt and blocked in `{container}` — backing out via `{to}`"),
@@ -1994,7 +2200,9 @@ pub fn drive(
                     ),
                     None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
                 },
-                Crossing::Fight { .. } => unreachable!("handled above"),
+                Crossing::Fight { .. } | Crossing::Arrive { .. } => {
+                    unreachable!("handled above")
+                }
             };
             r.log.push_str(&format!("{step}. {what}\n"));
             // A node can be adjacent and still be somewhere we must not click. The dump reports
@@ -2095,7 +2303,17 @@ pub fn drive(
         // which the next iteration is "inside" and the crossing logic takes over.
         if let Some(p) = place.as_ref().filter(|p| p.subworld_container) {
             let heading_for = r.map.next_hop().map(|h| h.plan.target);
-            let stuck_here = heading_for.as_deref().map(|t| t == here).unwrap_or(true);
+            // **A village we are hurt in front of is never a dead end.** Entering it is the errand,
+            // not a detour on the way to somewhere else — so the "nowhere left to go" test must not
+            // be allowed to answer for it. Without this the run reaches the rest it planned and
+            // stops on the doorstep in exactly the state the rest was for: `next_target` excludes
+            // `here`, and at low health with every remaining node hostile there may be no second
+            // choice for it to name.
+            let rest_here = r.map.wants_rest()
+                && r.map.gold() >= crate::rest::INN_COST
+                && p.type_is("village");
+            let stuck_here =
+                !rest_here && heading_for.as_deref().map(|t| t == here).unwrap_or(true);
             if stuck_here {
                 r.log.push_str(&format!(
                     "{step}. `{here}` ({}) is the destination and is a subworld — clearing it from \
