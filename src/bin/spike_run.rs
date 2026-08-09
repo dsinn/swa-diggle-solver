@@ -99,7 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         committed_to: None,
         dump_misses: 0,
         pending_cinematic: false,
-        pregame_seen: false,
+        combat_expected: false,
     };
 
     // Timed because the startup felt slow and nobody could say which part was slow. `wait_for_window`

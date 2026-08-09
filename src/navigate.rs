@@ -41,7 +41,7 @@
 //! it. Nothing in the routing said so; only measuring did.
 
 use crate::act::{Button, Screen};
-use crate::fight::{Fight, Outcome};
+use crate::fight::Fight;
 use crate::observe::adjacency::{self, Adjacency};
 use crate::observe::affirm;
 use crate::observe::event;
@@ -404,14 +404,12 @@ pub struct Run<'a> {
     /// has a larger index, the same event has the same index, and nothing has to stay in step with a
     /// count that can drift.
     pub answered_event: Option<usize>,
-    /// Have we already been through the pregame screen in this save?
+    /// We pressed an area button meaning to start a fight, and have not yet seen one.
     ///
-    /// It appears once per save — the item-selection screen before the first fight — and never
-    /// again. So after the first one there is nothing to wait FOR, and the wait can collapse to a
-    /// single immediate look. The branch decision is deliberately unchanged: "no pregame" still has
-    /// to be distinguished from "that button entered a subworld", and conflating the two would send
-    /// a real fight down the subworld path.
-    pub pregame_seen: bool,
+    /// Kept only so the log can tell a fight we walked into from a fight we asked for. Nothing
+    /// branches on it: both go through the same handler, which is the point — see
+    /// [`Run::settle_after_mode_change`].
+    pub combat_expected: bool,
 }
 
 impl Run<'_> {
@@ -421,6 +419,50 @@ impl Run<'_> {
             self.map.fold(&a);
             self.latest = Some(a);
             self.dumps += 1;
+        }
+    }
+
+    /// Give a mode transition time to land, then let the top of [`drive`] say what it landed on.
+    ///
+    /// ## What this replaced, and why the replacement is smaller
+    ///
+    /// Clicking an area button used to be followed by a bespoke wait for `Pregame screen:` on the
+    /// console, with two inferences hung off its absence: "the button entered a subworld" and,
+    /// briefly, "the fight started without one". Every one of those states already has a handler at
+    /// the top of `drive` — [`crate::act::Screen::Pregame`] presses Start,
+    /// [`crate::act::Screen::CombatEntered`] plays the fight out, and a subworld falls through to the
+    /// map path. The wait was a second, worse copy of the loop, and it could only recognise the
+    /// states its one announcement covered.
+    ///
+    /// Which is how it stalled: a chest's `Open` button goes through `overworld.startNewRun`
+    /// (`overworld/generators/forest.lua:30-39`) straight into `setActiveMode(require'rpg')`, and
+    /// `Pregame screen:` is printed from `ui/pregame.lua:91` alone. The run waited ten seconds for a
+    /// line that cannot be printed on that path, then failed with the board already in the feed.
+    ///
+    /// So this waits for the *transition*, which is a real thing with a known duration
+    /// (`setActiveMode` cross-fades for 0.625s, `main.lua:191-195`), and identifies nothing. Three
+    /// ways to stop waiting, none of them an inference about which button was pressed:
+    ///
+    /// - a screen we can name — whatever it turns out to be;
+    /// - a subworld we were not in a moment ago, because that button entered a place;
+    /// - an event plaque, which owns the screen until it is answered.
+    ///
+    /// The timeout is not a failure and is not reported as one. It means "still the map", which is
+    /// the ordinary outcome of every button that neither fights nor enters.
+    fn settle_after_mode_change(&mut self, inside_before: Option<String>) {
+        let by = Instant::now() + Duration::from_secs(10);
+        loop {
+            self.pump();
+            if crate::act::identify(self.win) != crate::act::Screen::Unknown
+                || self.map.inside().map(str::to_string) != inside_before
+                || self.affirmative().state.is_ready()
+            {
+                return;
+            }
+            if Instant::now() >= by {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(150));
         }
     }
 
@@ -1546,7 +1588,6 @@ pub fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
         }
         if r.feed.seen_since(mark, "Pregame screen:") {
             r.log.push_str(&format!("  reached the pregame after {i} Return(s)\n"));
-            r.pregame_seen = true;
             // The pregame IS an item-selection screen, and clearing it is what lets the overworld
             // load — so the adjacency dump the caller waits for cannot arrive until this is done.
             let mut il = String::new();
@@ -1681,21 +1722,32 @@ pub fn drive(
         // the player was at 1/20 health and the hurt vignette had taken the affirmative slot with it.
         //
         // Recognised by the HUD instead, which the vignette does not reach. See [`act::COMBAT_HUD`].
+        //
+        // ## Now the only way into a fight, planned or not
+        //
+        // The planned path used to play its own fight out immediately after pressing the area
+        // button, on the strength of having seen `Pregame screen:`. That made two fight handlers
+        // whose only difference was how they had found out, and the one with the announcement could
+        // not recognise a door that does not make one. Pressing the button now just `continue`s, so
+        // both arrive here — and `combat_expected` is kept only so the log can still say which.
         if screen == crate::act::Screen::CombatEntered {
-            r.log.push_str("  in combat and had not noticed — playing it out\n");
+            r.log.push_str(match std::mem::take(&mut r.combat_expected) {
+                true => "  the fight is up — playing it out\n",
+                false => "  in combat and had not noticed — playing it out\n",
+            });
             let mut fl = String::new();
             let outcome = fight.run(
                 &mut r.feed,
                 &r.keys,
                 &mut fl,
-                deadline.min(Instant::now() + Duration::from_secs(300)),
+                deadline.min(Instant::now() + Duration::from_secs(400)),
             );
             r.log.push_str(&fl.lines().map(|l| format!("    {l}\n")).collect::<String>());
             match outcome {
                 Ok(o) if o.cleared() => {
-                    r.log.push_str(&format!("  unplanned fight finished: {o:?}\n"));
-                    // Same bookkeeping the planned paths do. Skipping it is how a run walks out of a
-                    // fight at 1/20 and never considers resting, because nothing recorded the loss.
+                    r.log.push_str(&format!("  fight finished: {o:?}\n"));
+                    // Bookkeeping every fight needs. Skipping it is how a run walks out of a fight at
+                    // 1/20 and never considers resting, because nothing recorded the loss.
                     let now = r.apply_save();
                     if let (Some(b), Some(a)) = (health.clone(), now) {
                         r.map.note_health(b, a);
@@ -1707,9 +1759,9 @@ pub fn drive(
                 }
                 // Reported as a fight that went wrong, not as a map failure. The whole point of this
                 // branch is that "no pan dump after locate-me" was never the truth about this state.
-                Ok(o) if o.fatal() => return Stop::Died(format!("unplanned: {o:?}")),
-                Ok(other) => return Stop::Fought(format!("unplanned: {other:?}")),
-                Err(e) => return Stop::Failed(format!("could not play an unplanned fight: {e}")),
+                Ok(o) if o.fatal() => return Stop::Died(format!("{o:?}")),
+                Ok(other) => return Stop::Fought(format!("{other:?}")),
+                Err(e) => return Stop::Failed(format!("could not play the fight out: {e}")),
             }
         }
         // Every dead end that is left by pressing one button. See [`ESCAPES`] for which, and why
@@ -1801,7 +1853,6 @@ pub fn drive(
         // announcement-is-not-readiness trap again — and gave no way to tell whether the press took.
         // The fingerprint answers both halves, which is why it is worth the crop.
         if screen == crate::act::Screen::Pregame {
-            r.pregame_seen = true;
             match crate::act::click_exact(
                 r.win,
                 &crate::act::PREGAME_START,
@@ -2679,169 +2730,26 @@ pub fn drive(
                 if is_anomaly { "**THE ANOMALY** " } else { "" },
                 p.heading
             ));
-            // Marked BEFORE the click, because `click_area_button` pumps: it sleeps a second and
-            // drains the console to measure the screen. The pregame announces itself inside that
-            // window, so a mark taken afterwards is already past its own answer.
+            // What that button opens is not ours to predict, so nothing here tries to.
             //
-            // This is the third place the same mistake appeared — the lore counter, the event
-            // window, and here. A mark is only meaningful if nothing between it and the read can
-            // consume the feed, and almost every helper here consumes the feed.
-            let mark = r.feed.mark();
-            // Which subworld we were in *before* the click, so that "we are in one" and "this button
-            // put us in one" stay distinguishable. Inside a village they are not the same thing at
-            // all, and conflating them is what stopped this run: see the loop below.
+            // `getLocationButtons` tests `typeData.subworld` BEFORE `basicCombatZone`
+            // (`overworldview.lua:462-467`), so the button labelled for a fight enters a forest or a
+            // village instead whenever the node is one -- and their headings read exactly like
+            // fights. A chest's button is `Open`, and goes straight into combat with no pregame at
+            // all. Three outcomes from one press, and this used to try to tell them apart from a
+            // single console announcement, which is why a chest ended a run.
+            //
+            // Now it presses, waits for the transition, and lets the top of the loop identify what
+            // arrived -- where `Screen::Pregame` and `Screen::CombatEntered` already have handlers
+            // that were being duplicated here. Being inside a subworld needs no handler at all: the
+            // map path deals with it.
             let inside_before = r.map.inside().map(str::to_string);
             r.snap_area_slot("combat-live");
             if !matches!(r.click_area_button("Combat"), Ok(true)) {
                 return Stop::Failed(format!("Combat did not open at {here}"));
             }
-            // The pregame announces itself; Space there is `Start`.
-            // Cheapest, most local signal first.
-            //
-            // This used to poll for `Pregame screen:` for thirty seconds and only then conclude the
-            // button had entered a subworld — inferring one outcome from the *absence* of the
-            // other's announcement. Entering a village never prints a pregame, so it always paid the
-            // full timeout, and that was the delay before the first text screen of a village.
-            //
-            // A text screen answers immediately, and reading its button is a 76x92 crop compared
-            // against four templates. So ask that first, every pass, and let the console answer only
-            // the case it is actually needed for. The remaining timeout covers "the fight is still
-            // starting", which is a real wait rather than an inferred one — and ten seconds is
-            // generous for a screen that announces itself on `onActive`.
-            // Nothing to wait for once it has been used: one pass, then move on.
-            let by = if r.pregame_seen {
-                Instant::now()
-            } else {
-                Instant::now() + Duration::from_secs(10)
-            };
-            let mut pregame = false;
-            // The fight started without one. Not a variant of "no pregame yet" — a different door
-            // into combat, and pressing Start on the other side of it would be a keystroke into a
-            // live turn.
-            let mut already_fighting = false;
-            loop {
-                // Pump and test the POSITIVE signal first. The other two branches are inferences
-                // from what has not happened, and an inference must never pre-empt an announcement
-                // that is already sitting unread in the feed — which is exactly what went wrong:
-                // `Pregame screen:` was printed, and this loop returned before ever pumping.
-                r.pump();
-                if r.feed.seen_since(mark, "Pregame screen:") {
-                    pregame = true;
-                    r.pregame_seen = true;
-                    break;
-                }
-                // ## A chest has no pregame, and waiting for one ended a run
-                //
-                // Two buttons, two doors, and only one of them announces itself
-                // (`overworld/generators/forest.lua:23-39`):
-                //
-                // ```lua
-                // -- Combat
-                // overworldview.startCombatPregame(scenarios.forestCommon(), onStartingCombat)
-                // -- Open, on a chest
-                // overworld.startNewRun(scenarios.chest(overworldview.playerCurrentLocation()))
-                // ```
-                //
-                // `startNewRun` ends in `setActiveMode(require'rpg')` (`overworld.lua:1294-1298`) —
-                // straight into the fight, and `Pregame screen:` is printed from `ui/pregame.lua:91`
-                // alone. So on a chest the announcement we are waiting for cannot ever arrive: the
-                // run of 2026-08-09 waited its ten seconds at `e1sub1`, concluded nothing had
-                // happened, and failed with `Player turn 0 start` and the whole board already in the
-                // feed.
-                //
-                // This is the project's usual mistake wearing its other face. Normally we act before
-                // the announcement; here we waited for one this path never makes. The cure is the
-                // same either way — believe a positive signal about the state we care about, rather
-                // than an inference from a signal about the route into it.
-                if r.feed.seen_since(mark, crate::observe::board::MARKER) {
-                    already_fighting = true;
-                    break;
-                }
-                // A live affirmative, or a subworld we were NOT in a moment ago: whatever that
-                // button did, it was not starting a fight.
-                //
-                // `inside().is_some()` was the test here, and inside a village it is true before the
-                // click as well as after — so it fired every time, on the first iteration, and the
-                // run reported "that button entered `l10`" while standing in `l10` already. The
-                // pregame it had just opened stayed on screen, and the next step's click found no
-                // area button at all. Only a *change* is evidence.
-                if r.affirmative().state.is_ready()
-                    || r.map.inside().map(str::to_string) != inside_before
-                {
-                    break;
-                }
-                if Instant::now() >= by {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(150));
-            }
-            if !pregame && !already_fighting {
-                // No pregame does not mean failure. `getLocationButtons` tests `typeData.subworld`
-                // BEFORE `basicCombatZone` (`overworldview.lua:462-467`), so on a forest or a
-                // village that button ENTERED the place instead of starting a fight -- and their
-                // headings (`Eight Timberland — level 4 forest`, `Ulrome — level 6 village`) read
-                // exactly like fights. Record what we just learned and let the next iteration deal
-                // with being inside; failing here left the run standing in a village.
-                r.pump();
-                let inside_now = r.map.inside().map(str::to_string);
-                if inside_now != inside_before {
-                    if let Some(container) = inside_now {
-                        r.log.push_str(&format!(
-                            "  no pregame — that button entered `{container}`, which is a subworld\n"
-                        ));
-                        continue;
-                    }
-                }
-                return Stop::Failed(format!(
-                    "no pregame at {here} and still inside {inside_before:?}"
-                ));
-            }
-            // Start belongs to the pregame. On the chest's door the fight is already on turn 0, and
-            // Space there is a keystroke into a live board rather than a button.
-            if already_fighting {
-                r.log.push_str("  no pregame — that button opened straight into the fight\n");
-            } else {
-                r.keys.focus();
-                std::thread::sleep(Duration::from_millis(400));
-                if r.keys.press_key(VK_SPACE, SC_SPACE).is_err() {
-                    return Stop::Failed("could not send Start".into());
-                }
-                std::thread::sleep(Duration::from_secs(2));
-            }
-
-            let mut log = String::new();
-            let outcome = fight.run(
-                &mut r.feed,
-                &r.keys,
-                &mut log,
-                deadline.min(Instant::now() + Duration::from_secs(400)),
-            );
-            r.log.push_str(&log.lines().map(|l| format!("    {l}\n")).collect::<String>());
-            match outcome {
-                // A win with nothing on offer is still a win, and the node is still cleared. Treating
-                // it as a stop would end the run on the ordinary case of a reward roll coming up
-                // empty (`utils/world.lua:1287`).
-                // A win with nothing on offer is still a win, and the node is still cleared. Whatever
-                // screen it left up is not dismissed by the fight -- the top of this loop already
-                // presses the bottom-right affirmative for lore screens, and a post-combat screen is
-                // the same thing wearing a different backdrop. One place that knows how to press it.
-                Ok(Outcome::ClearedWithoutReward { turns }) => {
-                    r.log.push_str(&format!("  cleared in {turns} turns, no reward offered\n"));
-                }
-                Ok(Outcome::Cleared { turns, reward }) => {
-                    r.log.push_str(&format!("  cleared in {turns} turns, took {reward:?}\n"));
-                }
-                Ok(o) if o.fatal() => return Stop::Died(format!("{o:?}")),
-                Ok(other) => return Stop::Fought(format!("{other:?}")),
-                Err(e) => return Stop::Failed(e.to_string()),
-            }
-            let now = r.apply_save();
-            if let (Some(b), Some(a)) = (*health, now) {
-                r.map.note_health(b, a);
-                r.map.rested(a);
-                r.map.note_health_level(a);
-            }
-            *health = now;
+            r.combat_expected = true;
+            r.settle_after_mode_change(inside_before);
             continue;
         }
 
@@ -2984,6 +2892,28 @@ mod tests {
         // going stale in the direction that matters.
         for e in ESCAPES {
             assert!(Screen::ALL.contains(&e.screen), "{:?} is escapable but not in Screen::ALL", e.screen);
+        }
+    }
+
+    /// Both ways into a fight must be answered by the loop, not by whoever pressed the button.
+    ///
+    /// This is the invariant the chest broke. The pregame and the first turn of combat are the two
+    /// states an area button can produce, and for as long as the caller handled them itself it could
+    /// only recognise the door it knew about — so `Open`, which announces nothing, stalled a run with
+    /// the board already in the feed.
+    ///
+    /// [`Answer::Elsewhere`] is the failure this guards against: it means "some other component owns
+    /// this", which for these two would put the knowledge back at a call site. A run can arrive on
+    /// either screen without having pressed anything, so neither has a single owner to give it to.
+    #[test]
+    fn the_two_faces_of_entering_combat_are_both_answered_by_the_loop() {
+        for s in [Screen::Pregame, Screen::CombatEntered] {
+            let answer = answer_for(s);
+            assert!(
+                matches!(answer, Answer::Bespoke | Answer::Fight),
+                "{s:?} must be handled at the top of `drive`, not delegated: got {answer:?}"
+            );
+            assert!(precheck(s).is_none(), "{s:?} must not stop the run");
         }
     }
 
