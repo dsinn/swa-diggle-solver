@@ -129,6 +129,24 @@ const UNMODELLED: &[&str] = &[
     "wordScoreBonusQuillTurnMod5",
     "wordScoreBonusAlliteration",
     "wordScoreBonusRepeatWord",
+    // The six suffix bonuses, `scoreMult = 0.25` for a word ending in each. Declared by
+    // `effects.wordScoreBonusSuffix(...)` in `utils/effects.lua:142-159` rather than in their own
+    // files, which is why the first survey of this directory counted 26 modifiers instead of 32 and
+    // why these were in neither list — neither evaluated nor reported, the one combination that
+    // under-rates in silence.
+    //
+    // `cacheSuffix` (`:105-117`) matches longest-first and requires the suffix to be shorter than
+    // the word, so `BIGGEST` is `EST` rather than `ES`, and `ED` alone is not a suffixed word.
+    "wordScoreBonusSuffixED",
+    "wordScoreBonusSuffixER",
+    "wordScoreBonusSuffixES",
+    "wordScoreBonusSuffixEST",
+    "wordScoreBonusSuffixING",
+    "wordScoreBonusSuffixLY",
+    // Cannot fire in 52.4 — `countEachWithLetter(wordTiles, letter)` compares against an undefined
+    // global (`utils/tiles.lua:189-198`). Listed anyway: if the dev fixes that global, this starts
+    // mattering and we would rather hear about it than not.
+    "wordScoreBonusWildcards",
 ];
 
 /// The player's gear flags, as the save reports them.
@@ -441,6 +459,28 @@ mod tests {
         let a = gear.word_bonus("AAPA", &[]);
         assert_eq!(a, Adjust::none());
         assert!(!gear.touches_score());
+    }
+
+    /// Every `wordBonus` flag the game declares is either evaluated or reported.
+    ///
+    /// The count is 32, not 26: six are built by `effects.wordScoreBonusSuffix(...)` in
+    /// `utils/effects.lua` rather than declared in their own files, so a survey of
+    /// `rpg/effects/modifiers/` for `type = 'wordBonus'` misses them. They were in neither list —
+    /// silently contributing nothing while `unknown` reported nothing — until this test.
+    #[test]
+    fn no_word_bonus_flag_is_both_unevaluated_and_unreported() {
+        assert_eq!(
+            MODELLED.len() + UNMODELLED.len(),
+            32,
+            "every wordBonus modifier must be in exactly one list"
+        );
+        for m in MODELLED {
+            assert!(!UNMODELLED.contains(m), "{m} is in both lists");
+        }
+        // A flag we do not evaluate must make itself heard.
+        let gear = Gear::from_pairs(&[("wordScoreBonusSuffixING", 1.0)]);
+        assert!(gear.touches_score(), "suffix gear affects word score");
+        assert_eq!(gear.word_bonus("TESTING", &[]).unknown, vec!["wordScoreBonusSuffixING"]);
     }
 
     #[test]
