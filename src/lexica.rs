@@ -29,6 +29,10 @@ use std::path::Path;
 
 /// A themed word list and the enemy-status key that modifies it.
 pub struct Lexicon {
+    /// The dictionary's own key — `axe`, `fire`, `ice`, `iron`, `metal`, `wood` and the rest.
+    /// Distinct from the lexicon *file* it loads (`axe` reads `utils.lexica.lumberjack`), and it is
+    /// the name the `wordScoreBonusInDict*` gear is written against.
+    pub key: String,
     /// e.g. `lexiconBonusBone` — the key that appears in `rpg.enemy.statusEffects`.
     pub status_key: String,
     /// Uppercased words, to match the search's representation.
@@ -84,7 +88,12 @@ impl Lexica {
         if words.is_empty() {
             return Err(crate::Error::Config(format!("empty lexicon {}", lex_path.display())));
         }
-        Ok(Some(Lexicon { status_key, words }))
+        Ok(Some(Lexicon { key: key.to_string(), status_key, words }))
+    }
+
+    /// The word set behind a dictionary key, for the `wordScoreBonusInDict*` gear.
+    pub fn words_for(&self, key: &str) -> Option<&HashSet<String>> {
+        self.lexicons.iter().find(|l| l.key == key).map(|l| &l.words)
     }
 
     pub fn len(&self) -> usize {

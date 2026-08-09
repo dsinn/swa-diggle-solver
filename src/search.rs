@@ -127,11 +127,17 @@ pub struct Modifiers {
     /// This enemy turns overkill healing into gold instead (`:1085`), which is the curse described
     /// in `items/curses.lua:111`. Healing does not happen, so there is no charge to conserve.
     pub overkill_heal_to_gold: bool,
-    /// The player's gear, for the `wordBonus` terms it adds to every word (see [`crate::gear`]).
+    /// The player's gear modifiers, compiled once for this fight (see [`crate::gear`]).
     ///
     /// Kept here rather than passed alongside because every scoring site already has a `Modifiers`,
     /// and a term that must be applied at all of them should not be one a new call site can forget.
-    pub gear: crate::gear::Gear,
+    pub plan: crate::gear::Plan,
+    /// Tallies over the words already played this fight, for the Raven and Whale idols. Both halves
+    /// are `None` unless the corresponding idol is worn.
+    pub fight: crate::gear::FightFacts,
+    /// Only the auxiliary dictionaries the plan will ask about — usually none. Carried as word sets
+    /// rather than a `Lexica` so `Modifiers` stays cheap to clone.
+    pub dicts: Vec<(crate::gear::Dict, HashSet<String>)>,
 }
 
 impl Modifiers {
@@ -160,13 +166,23 @@ impl Modifiers {
         let overkill_gold = statuses.contains_key("overkillGold")
             || save.path("rpg.player.gearFlags.overkillGold").is_some();
 
-        let gear = crate::gear::Gear::from_save(save);
+        let plan = crate::gear::Gear::from_save(save).compile();
         // A word bonus we cannot evaluate makes every score a lower bound, which is safe for a kill
         // and unsafe for a scare. Reported as a problem so it shows in the turn log rather than
         // being discovered from a murder warning, which is how it was discovered the first time.
-        for flag in gear.word_bonus("PLACEHOLDER", &[]).unknown {
+        for flag in plan.unevaluable() {
             problems.push(format!("gear {flag} affects word score and is not modelled"));
         }
+        let fight = crate::gear::FightFacts::from_save(
+            save,
+            plan.wants_alliteration(),
+            plan.wants_repeats(),
+        );
+        let dicts = plan
+            .dicts_needed()
+            .into_iter()
+            .filter_map(|d| lexica.words_for(d.key()).map(|w| (d, w.clone())))
+            .collect();
 
         Ok((
             Modifiers {
@@ -182,7 +198,9 @@ impl Modifiers {
                 bonuses: lexica.bonus_sets(&statuses),
                 overkill_no_heal: statuses.contains_key("overkillNoHeal"),
                 overkill_heal_to_gold: statuses.contains_key("overkillHealToGold"),
-                gear,
+                plan,
+                fight,
+                dicts,
             },
             resolved.geometry,
         ))
@@ -200,7 +218,9 @@ impl Modifiers {
             bonuses: Vec::new(),
             overkill_no_heal: false,
             overkill_heal_to_gold: false,
-            gear: crate::gear::Gear::none(),
+            plan: crate::gear::Plan::default(),
+            fight: crate::gear::FightFacts::default(),
+            dicts: Vec::new(),
         }
     }
 
@@ -256,10 +276,11 @@ impl Modifiers {
 /// 3. `preAdd` joins the tile sum before the multiplier and the length scale, `postAdd` lands after
 ///    the rounding — [`Scorer::score_typed_with`].
 pub fn scored(
-    scorer: &Scorer, mods: &Modifiers, word: &str, consumed: &[Tile], corners_used: usize,
-    corner_count: usize,
+    scorer: &Scorer, mods: &Modifiers, word: &str, consumed: &[Tile],
+    typed: Option<&crate::typist::Typed>, corners_used: usize, corner_count: usize,
 ) -> i64 {
-    let adjust = mods.gear.word_bonus(word, consumed);
+    let facts = crate::gear::Facts::new(word, consumed, typed, &mods.dicts);
+    let adjust = mods.plan.apply(&facts, &mods.fight);
     let modifier = mods.modifier_for_base(word, corners_used, corner_count, adjust.mult);
     scorer.score_typed_with(
         consumed,
@@ -738,7 +759,7 @@ pub fn ranked_kill(
                         let Some(typed) = typist.type_word(word) else { continue };
                         let consumed: Vec<Tile> =
                             typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
-                        let score = scored(scorer, mods, word, &consumed, typed.corners_used, corner_count);
+                        let score = scored(scorer, mods, word, &consumed, Some(&typed), typed.corners_used, corner_count);
                         if score >= need {
                             let rank = crate::pick::rank(
                                 tiles,
@@ -850,7 +871,7 @@ pub fn max_damage(
                         let Some(typed) = typist.type_word(word) else { continue };
                         let consumed: Vec<Tile> =
                             typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
-                        let score = scored(scorer, mods, word, &consumed, typed.corners_used, corner_count);
+                        let score = scored(scorer, mods, word, &consumed, Some(&typed), typed.corners_used, corner_count);
                         if local_best.as_ref().map(|b| score > b.score).unwrap_or(true) {
                             local_best = Some(Found { word: word.clone(), score, slice });
                         }
@@ -960,7 +981,7 @@ pub fn race_for_band(
                     let Some(typed) = typist.type_word(word) else { continue };
                     let consumed: Vec<Tile> =
                         typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
-                    let score = scored(scorer, mods, word, &consumed, typed.corners_used, corner_count);
+                    let score = scored(scorer, mods, word, &consumed, Some(&typed), typed.corners_used, corner_count);
                     if score >= need && below.map(|b| score < b).unwrap_or(true) {
                         let found = Found { word: word.clone(), score, slice };
                         let mut l = lethal.lock().unwrap();
@@ -1071,7 +1092,7 @@ mod tests {
         let scorer = Scorer::new(&game_dir()).unwrap();
         let bare = Modifiers::none();
         let armed = Modifiers {
-            gear: crate::gear::Gear::from_pairs(&[("wordScoreBonusPreLength456", 3.0)]),
+            plan: crate::gear::Gear::from_pairs(&[("wordScoreBonusPreLength456", 3.0)]).compile(),
             ..Modifiers::none()
         };
         let tiles = |w: &str| -> Vec<Tile> {
@@ -1079,8 +1100,8 @@ mod tests {
         };
 
         let aapa = tiles("AAPA");
-        let unarmed = scored(&scorer, &bare, "AAPA", &aapa, 0, 0);
-        let armed_score = scored(&scorer, &armed, "AAPA", &aapa, 0, 0);
+        let unarmed = scored(&scorer, &bare, "AAPA", &aapa, None, 0, 0);
+        let armed_score = scored(&scorer, &armed, "AAPA", &aapa, None, 0, 0);
         assert_eq!(
             armed_score - unarmed,
             3,
@@ -1091,8 +1112,8 @@ mod tests {
         // pins the cause to the length band rather than to something else about the board.
         let aam = tiles("AAM");
         assert_eq!(
-            scored(&scorer, &bare, "AAM", &aam, 0, 0),
-            scored(&scorer, &armed, "AAM", &aam, 0, 0),
+            scored(&scorer, &bare, "AAM", &aam, None, 0, 0),
+            scored(&scorer, &armed, "AAM", &aam, None, 0, 0),
             "a three-letter word takes no length bonus either way"
         );
 
@@ -1100,8 +1121,8 @@ mod tests {
         // this gear — it was simply the hardest hit on the board, which is the other bug.
         let long = tiles("VENEPUNCTURE");
         assert_eq!(
-            scored(&scorer, &bare, "VENEPUNCTURE", &long, 0, 0),
-            scored(&scorer, &armed, "VENEPUNCTURE", &long, 0, 0),
+            scored(&scorer, &bare, "VENEPUNCTURE", &long, None, 0, 0),
+            scored(&scorer, &armed, "VENEPUNCTURE", &long, None, 0, 0),
         );
     }
 
@@ -1521,7 +1542,7 @@ mod tests {
         let rank_of = |word: &str| {
             let typed = typist.type_word(word)?;
             let consumed: Vec<Tile> = typed.tiles.iter().map(|&i| board[i].clone()).collect();
-            let score = scored(&scorer, &mods, word, &consumed, typed.corners_used, geom.corner_count());
+            let score = scored(&scorer, &mods, word, &consumed, Some(&typed), typed.corners_used, geom.corner_count());
             (score >= need).then(|| {
                 crate::pick::rank(
                     &board,
@@ -1872,5 +1893,42 @@ mod lexicon_bonus_tests {
         let m = with_bonus(&[("OOZE", 1.5)]);
         let raw = 16.0;
         assert_eq!(raw * m.modifier_for("OOZE", 0, 0), 24.0);
+    }
+}
+
+#[cfg(test)]
+mod typeable_count {
+    use super::*;
+
+    /// How many dictionary words can actually be spelled on a full board?
+    ///
+    /// **The number the gear design rests on.** `search::scored` runs only on words the typist
+    /// accepted, so this — not the dictionary size — is the loop that per-word scoring work lives
+    /// in. Measured on the level-0 crypt board, 2026-08-09: **1750 of 345128, 0.51%**.
+    ///
+    /// An earlier draft of `docs/superpowers/specs/2026-08-09-gear-word-bonuses-design.md` proposed
+    /// precomputing word facts into a table parallel to the dictionary, costing ~1.4 MB and a
+    /// load-time pass. That would have built 345k entries to answer 1750 questions. The measurement
+    /// is what killed it, and this test is here so the assumption cannot rot silently: if a future
+    /// board makes most of the dictionary typeable, the trade-off is worth revisiting.
+    #[test]
+    fn only_a_fraction_of_the_dictionary_can_be_spelled_on_one_board() {
+        if !std::path::Path::new("../sternly-worded-adventures/utils/dictionary.lua").is_file() {
+            return;
+        }
+        let dict =
+            Dictionary::load(&std::path::PathBuf::from("../sternly-worded-adventures")).unwrap();
+        let tiles: Vec<Tile> =
+            "OYCAACTPORLIGAHJ".chars().map(|c| Tile::plain(&c.to_string())).collect();
+        let geom = Geometry::default();
+        let typist = crate::typist::Typist::new(&tiles, &geom);
+        let total = dict.words().len();
+        let typeable = dict.words().iter().filter(|w| typist.type_word(w).is_some()).count();
+        let share = typeable as f64 / total as f64;
+        assert!(
+            share < 0.05,
+            "{typeable} of {total} ({:.2}%) typeable — if this is no longer a small fraction,              precomputing word facts becomes worth reconsidering",
+            share * 100.0
+        );
     }
 }
