@@ -1342,12 +1342,51 @@ impl WorldMap {
                 return Some(best.to_key.clone());
             }
         }
-        // No target, or none of the exits lead anywhere we can measure: still prefer not to retreat.
-        exits
+        // No target, or none of the exits lead anywhere we can measure.
+        //
+        // ## This branch runs far more often than it looks like it should, and it used to pick the
+        // ## first exit in the dump
+        //
+        // "None of the exits lead anywhere we can measure" is not an edge case. Places learned from
+        // `completedAreas` are recorded **by key, with no edges** — `entry(&k)` and nothing else —
+        // so `distances(target)` for any node we have not stood on this run is the singleton
+        // `{target: 0}` and the filter above empties. The anomaly is exactly such a node: its key
+        // comes from the save, and a fresh launch has walked nowhere, so the map has almost no
+        // surface edges at all.
+        //
+        // Live, 2026-08-09: standing in Broach Copse with the anomaly open at `start`, the exits
+        // were `l38` (level 5 crypt), `l54` (level 6 forest), `l26` (a mausoleum we had already
+        // cleared) and `e1` (level 2 forest). Distance said nothing, so this took the first — `l38`
+        // — and the run walked a healthy character out of a village into a level 5 crypt, where the
+        // fight ran nine turns and then ran out of tiles. The cleared node was in the list.
+        //
+        // So when distance cannot speak, **rank by what a fight costs**, which we always know from
+        // the heading. `Risk` is safest-first (`Free < Forest < Fight < Unseen < Corrupt`), which
+        // puts a cleared exit ahead of an unfought one and a forest ahead of a crypt. Still avoiding
+        // the entrance where there is any alternative, since that part was never the problem.
+        //
+        // This is a *tiebreak among doors*, not a route. It cannot know which way the objective is;
+        // it can only decline to pay for a fight when a free door is standing open.
+        //
+        // Abandoned roads drop out first. Without this the memory in [`WorldMap::committed_exit`]
+        // was decorative: it releases a commitment whose road we have written off, and then this
+        // re-derived the very same road and committed to it again. A tabu list nothing consults is
+        // not a tabu list. The `filter` is dropped entirely if it would leave nothing, because being
+        // inside a subworld with no way out named is worse than any one door.
+        let parent = self.inside();
+        let live: Vec<&crate::observe::adjacency::Exit> = exits
             .iter()
-            .find(|e| Some(&e.to_key) != entrance.as_ref())
-            .or_else(|| exits.first())
-            .map(|e| e.to_key.clone())
+            .filter(|e| {
+                parent.map(|p| !self.abandoned.contains(&exit_node_key(p, &e.to_key))).unwrap_or(true)
+            })
+            .collect();
+        let mut ranked: Vec<&crate::observe::adjacency::Exit> =
+            if live.is_empty() { exits.iter().collect() } else { live };
+        ranked.sort_by_key(|e| {
+            let risk = self.places.get(&e.to_key).map(|p| p.risk()).unwrap_or(Risk::Unseen);
+            (Some(&e.to_key) == entrance.as_ref(), risk, &e.to_key)
+        });
+        ranked.first().map(|e| e.to_key.clone())
     }
 
     /// The door this crossing already chose, if it is still worth believing in.
@@ -3035,13 +3074,18 @@ mod tests {
     /// Saltagh Park's shape: walk in at a crossroads with a road out either side, and explore both
     /// arms. Returns the map standing back at the crossroads with the whole interior mapped.
     ///
-    /// The doors are asymmetric on purpose. `l19` is an ordinary village; `l1` is a **campfire**, so
-    /// it becomes a rest site the moment health drops — which is how a genuine change of errand gets
-    /// expressed without inventing one.
+    /// The doors are asymmetric on purpose. `l19` is a **campfire**, so it becomes a rest site the
+    /// moment health drops — which is how a genuine change of errand gets expressed without
+    /// inventing one — while `l1` is an ordinary village, which at zero gold is no rest at all
+    /// (`can_rest_at` for an inn is a flat gold check).
+    ///
+    /// Both are `Risk::Free`, so the unmeasurable-distance fallback ranks them by key and `l1` wins.
+    /// That is deliberate: it means the *committed* door and the *rest* door are different ones, so
+    /// a test that expects the errand to change the door is testing something.
     fn a_forest_with_two_doors() -> (WorldMap, Exit, Exit) {
-        let dane = Exit { x: 0.0, y: 0.0, to_key: "l19".into(), to_heading: "Dane village".into() };
+        let dane = Exit { x: 0.0, y: 0.0, to_key: "l19".into(), to_heading: "Dane campfire".into() };
         let cowlam =
-            Exit { x: 0.0, y: 0.0, to_key: "l1".into(), to_heading: "Cowlam campfire".into() };
+            Exit { x: 0.0, y: 0.0, to_key: "l1".into(), to_heading: "Cowlam village".into() };
         let both = vec![dane.clone(), cowlam.clone()];
         let mut m = WorldMap::new();
         m.fold(&dump("start", "The Wold portal", vec![node("l9", "Saltagh Park — level 1 forest")]));
@@ -3074,22 +3118,24 @@ mod tests {
         // flip; no argmax at all.
         let (mut m, dane, cowlam) = a_forest_with_two_doors();
 
-        // Both roads in sight: pick one, and record it.
+        // Both roads in sight: pick one, and record it. `l1` wins the fallback ranking -- both
+        // doors are `Risk::Free` and it sorts first -- which is a arbitrary-but-stable choice, and
+        // being stuck with it is exactly what this test is about.
         match m.cross_toward(&[dane.clone(), cowlam.clone()]) {
             Some(Crossing::Step { to, toward }) => {
-                assert_eq!(toward, "l9_path_to_l19");
-                assert_eq!(to, "l9sub1", "one hop along the route, re-derived every step");
+                assert_eq!(toward, "l9_path_to_l1");
+                assert_eq!(to, "l9sub2", "one hop along the route, re-derived every step");
             }
             other => panic!("expected a step toward the road out, got {other:?}"),
         }
 
         // The signal is there: asked afresh with only the near road in sight, the chooser turns the
         // run around. This is the pre-fix answer, and it is what a live run acted on.
-        assert_eq!(m.exit_toward(&[cowlam.clone()]), Some("l1".into()), "unguarded, fog flips it");
+        assert_eq!(m.exit_toward(&[dane.clone()]), Some("l19".into()), "unguarded, fog flips it");
 
         // The crossing does not turn around.
-        match m.cross_toward(&[cowlam.clone()]) {
-            Some(Crossing::Step { toward, .. }) => assert_eq!(toward, "l9_path_to_l19"),
+        match m.cross_toward(&[dane.clone()]) {
+            Some(Crossing::Step { toward, .. }) => assert_eq!(toward, "l9_path_to_l1"),
             other => panic!("expected the same door, got {other:?}"),
         }
         // Nor when the pan shows no way out whatever. `exit_toward` gives up on an empty list and
@@ -3097,7 +3143,7 @@ mod tests {
         // and ends the run -- over a pan that simply had no exit in shot.
         assert_eq!(m.exit_toward(&[]), None, "the chooser has nothing to go on");
         match m.cross_toward(&[]) {
-            Some(Crossing::Step { toward, .. }) => assert_eq!(toward, "l9_path_to_l19"),
+            Some(Crossing::Step { toward, .. }) => assert_eq!(toward, "l9_path_to_l1"),
             other => panic!("fog is not a dead end, got {other:?}"),
         }
     }
@@ -3114,7 +3160,7 @@ mod tests {
         m.note_health_level(crate::rest::Health { current: 1, max: 20 });
         assert_eq!(m.next_target().map(|p| p.reason), Some(Goal::Rest), "the errand changed");
         match m.cross_toward(&[dane, cowlam]) {
-            Some(Crossing::Step { toward, .. }) => assert_eq!(toward, "l9_path_to_l1", "the fire"),
+            Some(Crossing::Step { toward, .. }) => assert_eq!(toward, "l9_path_to_l19", "the fire"),
             other => panic!("expected the door to the campfire, got {other:?}"),
         }
     }
@@ -3124,12 +3170,13 @@ mod tests {
         // `abandoned` is the driver's record of having had its go, and the only evidence available
         // in here that a door is genuinely no good. Fog is not evidence; this is.
         let (mut m, dane, cowlam) = a_forest_with_two_doors();
-        m.cross_toward(&[dane, cowlam.clone()]);
-        m.abandon("l9_path_to_l19");
-        match m.cross_toward(&[cowlam]) {
-            Some(Crossing::Step { toward, .. } | Crossing::Explore { toward, .. }) => {
-                assert_eq!(toward, "l9_path_to_l1", "re-derived, because the first door is written off")
-            }
+        m.cross_toward(&[dane.clone(), cowlam.clone()]);
+        m.abandon("l9_path_to_l1");
+        match m.cross_toward(&[dane, cowlam]) {
+            Some(Crossing::Step { toward, .. } | Crossing::Explore { toward, .. }) => assert_eq!(
+                toward, "l9_path_to_l19",
+                "re-derived, and `exit_toward` skips the road we wrote off"
+            ),
             other => panic!("expected a fresh choice, got {other:?}"),
         }
     }

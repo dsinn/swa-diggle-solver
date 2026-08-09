@@ -144,6 +144,9 @@ impl Fight<'_> {
     ) -> Result<Outcome, crate::Error> {
         let mut turns = 0usize;
         let mut last_state = String::new();
+        // The turn we last saw progress on. Paired with `last_state` so the stall timer resets on
+        // either signal — see where it is compared.
+        let mut last_turn = usize::MAX;
         let mut last_change = Instant::now();
         let mut finished = false;
         // When `combatSaveData` first became unreadable, cleared on every successful read.
@@ -196,12 +199,30 @@ impl Fight<'_> {
                     return Ok(Outcome::ClearedWithoutReward { turns });
                 }
             };
+            // ## Progress is the turn counter, not the state label
+            //
+            // This watched `turnState` alone and called 45 s without a change a stall. But
+            // `PlayerTurn` is precisely the state the game sits in *while waiting for us*, so the
+            // label cannot tell "nothing is happening" from "it is our move" — and a label is
+            // neither memory nor a monotone measure, which is the same mistake the navigation guards
+            // made (`docs/superpowers/notes/navigation-loops.md`).
+            //
+            // Live, 2026-08-09, in a level 5 crypt: nine turns won cleanly, `Clavicular` down from
+            // 81 to 11, `CAPITATES` played for 40 and accepted — the HUD read `Turn: 10` and the
+            // word's definition was on screen. The board had run down to seven tiles that would not
+            // refill, the game printed no `Player turn 10 start` because `tileboard.lua:1285` logs
+            // only once the turn-start fall-and-respawn completes, and this reported `Stalled`. The
+            // fight was going fine; the *report* was wrong, and it named the game as the culprit.
+            //
+            // So the timer resets when either the state changes **or a turn goes by**. Turns only
+            // ever increase, so this cannot be gamed by a state that flaps.
             let state = cs.str_at("rpg.player.turnState").unwrap_or("").to_string();
-            if state != last_state {
+            if state != last_state || turns != last_turn {
                 last_state = state.clone();
+                last_turn = turns;
                 last_change = Instant::now();
             } else if last_change.elapsed() > Duration::from_secs(45) {
-                log.push_str(&format!("STALLED in {state:?} for 45s\n"));
+                log.push_str(&format!("STALLED in {state:?} at turn {turns} for 45s\n"));
                 self.shot("combat-stalled");
                 return Ok(Outcome::Stalled { turns, state });
             }
