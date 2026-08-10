@@ -195,6 +195,48 @@ const MAX_DUMP_MISSES: usize = 3;
 /// screen appearing mid-wait is caught almost immediately rather than after eight seconds.
 const DUMP_RETRY_PAUSE: Duration = Duration::from_secs(1);
 
+/// How many drags to spend fetching one node into reach before trying something else.
+///
+/// Scrolling is clamped to the map bounds (`clampWithinBoundsX`, `overworldview.lua:293-297`), so
+/// what we ask for is an upper bound on what we get and a node far outside the window will not
+/// arrive in one pull. Three, because [`pan_again`] also stops the moment a pan gains nothing —
+/// which is what the map's own bound looks like from here — so this is only the cap on *productive*
+/// pulls.
+const PAN_ATTEMPTS: usize = 3;
+
+/// How many times a step may be re-derived from a re-centred view when panning could not fetch it.
+///
+/// The run of 2026-08-09 ended on the first failure with no second thought: the road out of `l2` sat
+/// at y = -130, the pan asked for `(0, 164)` and measured `(38, -26)`. Locate-me is the cure this
+/// project has already proved for a measurement the game's own motion got into
+/// ([`Run::needs_recentre`]), so it is worth spending here before giving up — but a node the map
+/// genuinely will not show has to end the run rather than spin.
+const MAX_PAN_RETRIES: usize = 2;
+
+/// Is another drag worth spending to fetch `at` into reach?
+///
+/// Three ways to answer no, and the middle one is the one that matters:
+///
+/// 1. **It is already in reach** — nothing to fetch.
+/// 2. **The last pan gained nothing.** Scrolling is clamped to the map bounds
+///    (`clampWithinBoundsX`, `overworldview.lua:293-297`) and says nothing when it clamps, so a pull
+///    that moved the view less than [`pan::Shift::matters`] is the map's own edge answering. Pulling
+///    again against a wall will not move it, and the honest response is to stop asking this way
+///    rather than to ask louder.
+/// 3. **[`PAN_ATTEMPTS`] have been spent** — a plain cap, so a view that creeps a little every time
+///    without ever arriving cannot run for ever.
+///
+/// Split out of `drive` because it is the whole stopping rule and `drive` cannot be tested.
+fn pan_again(
+    at: (f64, f64), client_w: i32, client_h: i32, last: Option<pan::Shift>, spent: usize,
+) -> bool {
+    if spent >= PAN_ATTEMPTS || last.is_some_and(|got| !got.matters()) {
+        return false;
+    }
+    crate::observe::hud::chrome_at(at.0 as i32, at.1 as i32, client_w, client_h).is_some()
+        || pan::shift_to_reach(at, client_w, client_h).matters()
+}
+
 pub struct Escape {
     /// What [`crate::act::identify`] calls it.
     pub screen: Screen,
@@ -491,6 +533,14 @@ pub struct Run<'a> {
     ///
     /// Costs one click and one dump per fight. Cheap against a run.
     pub needs_recentre: bool,
+    /// How many times the current step has been re-derived because panning could not fetch its
+    /// target into reach. Cleared by any step that gets as far as clicking.
+    ///
+    /// Counted rather than merely retried, because the failure it answers and the failure it must
+    /// not paper over look identical from here: a measurement the game's own motion got into, which
+    /// a re-centre cures, and a node the map will not scroll to, which nothing does. See
+    /// [`MAX_PAN_RETRIES`].
+    pub pan_retries: usize,
 }
 
 impl Run<'_> {
@@ -2633,36 +2683,59 @@ pub fn drive(
             // is an upper bound on the delta we got, and nothing announces the difference.
             let mut at = at;
             if let Ok((cw, ch)) = r.win.client_size() {
-                let needs_pan = crate::observe::hud::chrome_at(at.0 as i32, at.1 as i32, cw, ch)
-                    .is_some()
-                    || pan::shift_to_reach(at, cw, ch).matters();
-                if needs_pan {
+                // **One drag was one attempt too few.** [`pan_again`] carries the stopping rule: it
+                // gives up the moment a pull gains nothing, which is what the map's own bound looks
+                // like from here, and caps the rest.
+                let mut spent = 0usize;
+                let mut last = None;
+                while pan_again(at, cw, ch, last, spent) {
                     let want = pan::shift_to_reach(at, cw, ch);
-                    match r.pan_map(want) {
-                        Some(got) => {
-                            at = pan::moved(at, got);
-                            r.log.push_str(&format!(
-                                "  panned by ({:.0}, {:.0}) of ({:.0}, {:.0}) wanted; `{}` now at ({:.0}, {:.0})\n",
-                                got.dx, got.dy, want.dx, want.dy, what, at.0, at.1
-                            ));
-                        }
-                        None => {
-                            return Stop::Failed(format!(
-                                "{what}: at ({:.0}, {:.0}), out of reach, and the pan could not be \
-                                 measured — position is now unknown",
-                                at.0, at.1
-                            ))
-                        }
-                    }
-                }
-                if let Some(chrome) =
-                    crate::observe::hud::chrome_at(at.0 as i32, at.1 as i32, cw, ch)
-                {
-                    return Stop::Failed(format!(
-                        "{what}: still {chrome} at ({:.0}, {:.0}) after panning",
-                        at.0, at.1
+                    let Some(got) = r.pan_map(want) else {
+                        return Stop::Failed(format!(
+                            "{what}: at ({:.0}, {:.0}), out of reach, and the pan could not be \
+                             measured — position is now unknown",
+                            at.0, at.1
+                        ));
+                    };
+                    at = pan::moved(at, got);
+                    r.log.push_str(&format!(
+                        "  panned by ({:.0}, {:.0}) of ({:.0}, {:.0}) wanted; `{}` now at ({:.0}, {:.0})\n",
+                        got.dx, got.dy, want.dx, want.dy, what, at.0, at.1
                     ));
+                    (last, spent) = (Some(got), spent + 1);
                 }
+                // **A pan that could not deliver is not the end of a run.** It used to be, and the
+                // run of 2026-08-09 ended exactly here: the road out of `l2` sat at y = -130, the
+                // pan asked for `(0, 164)` and measured `(38, -26)`, and that was that.
+                //
+                // That measurement has a documented shape — see [`Run::needs_recentre`], where a pan
+                // asked for `(27, 0)` and measured `(28, -128)` because the game's own motion landed
+                // inside our measurement. The cure recorded there is not a better detector but
+                // locate-me, which ends the motion instead of reading around it and returns a dump
+                // settled by construction. So take that cure here too rather than a second guess at
+                // the same coordinate: re-centre, and derive the step again from a view we know is
+                // still.
+                //
+                // Bounded, because a node the map genuinely will not show must still end the run
+                // rather than spin.
+                if pan_again(at, cw, ch, None, 0) {
+                    if r.pan_retries >= MAX_PAN_RETRIES {
+                        return Stop::Failed(format!(
+                            "{what}: still out of reach at ({:.0}, {:.0}) after panning and \
+                             {MAX_PAN_RETRIES} re-centres",
+                            at.0, at.1
+                        ));
+                    }
+                    r.pan_retries += 1;
+                    r.needs_recentre = true;
+                    r.log.push_str(&format!(
+                        "  `{what}` is at ({:.0}, {:.0}) and panning did not fetch it — re-centring \
+                         and deriving the step again (try {} of {MAX_PAN_RETRIES})\n",
+                        at.0, at.1, r.pan_retries
+                    ));
+                    continue;
+                }
+                r.pan_retries = 0;
             }
             let Ok((ax, ay)) = r.win.client_to_screen(at.0 as i32, at.1 as i32) else {
                 return Stop::Failed("coordinate conversion failed".into());
@@ -3089,6 +3162,34 @@ pub fn drive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stopping rule for fetching a node into reach, in the state that ended a run.
+    ///
+    /// `l2`'s road out sat at y = -130 on 2026-08-09 and exactly one drag was spent on it. Every
+    /// clause here exists because one was not the right number: too few for a node that far out, and
+    /// unlimited too many for a map that has stopped moving.
+    #[test]
+    fn a_node_out_of_reach_is_pulled_for_until_the_map_stops_giving() {
+        let (w, h) = (1920, 1080);
+        let far = (1301.0, -70.0); // the road out of `l2`, above the top of the window
+        let here = (960.0, 540.0); // mid-screen, nothing to fetch
+
+        assert!(pan_again(far, w, h, None, 0), "a first pull, which is all the run ever spent");
+        assert!(!pan_again(here, w, h, None, 0), "already in reach");
+
+        // The map's own bound, which announces itself only by not moving.
+        assert!(pan_again(far, w, h, Some(pan::Shift { dx: 0.0, dy: 120.0 }), 1), "still giving");
+        assert!(
+            !pan_again(far, w, h, Some(pan::Shift { dx: 1.0, dy: -2.0 }), 1),
+            "a pull that gained nothing is the edge answering; asking louder will not help"
+        );
+
+        // And a cap, so a view that creeps without ever arriving cannot run for ever.
+        assert!(
+            !pan_again(far, w, h, Some(pan::Shift { dx: 0.0, dy: 20.0 }), PAN_ATTEMPTS),
+            "the budget is spent"
+        );
+    }
 
     /// `Screen::ALL` has to actually list every variant, or every test below silently checks less
     /// than it claims.
