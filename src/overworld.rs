@@ -452,6 +452,30 @@ impl Place {
     pub fn is_frontier(&self) -> bool {
         !self.visited || self.hidden.unwrap_or(0) > 0
     }
+
+    /// A leaf: one connection, so the only way on from it is back the way we came.
+    ///
+    /// The dump prints the game's own `connections` count, which is the total and **not** filtered by
+    /// what is currently visible — `hidden` is the separate figure for neighbours it declined to
+    /// describe. So `1` really does mean one neighbour, and in a subworld that neighbour is
+    /// necessarily the node we would arrive from. Walking in costs two steps and reveals nothing.
+    ///
+    /// A run of 2026-08-09 in the lost woods spent six of twenty-three steps on three of them —
+    /// `e1sub65`, `e1sub67`, `e1sub84`, each reported `connections: 1` in every dump that named it,
+    /// each entered and immediately left.
+    ///
+    /// **Zero is not a dead end**, it is silence. `connections` defaults to 0 for a place learned by
+    /// key alone — from `completedAreas`, say — and on a resume that is most of the map. Reading
+    /// "unknown" as "leaf" would exclude nearly everywhere.
+    ///
+    /// ## The exception, which is post-MVP
+    ///
+    /// A chest sits at a leaf often enough that "nothing to reveal" is not the same as "nothing to
+    /// gain". Detouring for one is the dev's rule and belongs with the rest of that work — see the
+    /// chest task in `handoff/TASKS.md`. Until then a leaf is skipped whatever is standing on it.
+    pub fn is_dead_end(&self) -> bool {
+        self.connections == 1
+    }
 }
 
 /// Everything we have folded together, plus the run state that decides routing.
@@ -1459,14 +1483,34 @@ impl WorldMap {
             .values()
             .filter(|p| p.key != here && !p.visited && !p.avoid && ok(p))
             .filter(|p| !self.abandoned.contains(&p.key))
+            // A leaf reveals nothing, and the walk back out is the same length as the walk in.
+            .filter(|p| !p.is_dead_end())
             .collect();
         // Order matters, and a live run showed why. From l10 with l1 and l18 both adjacent and both
         // unvisited, sorting by key chose `l1` — already **completed**, so it revealed nothing — and
         // the run then had to walk back through l10 to reach l18. Two of three hops wasted, on an
         // objective that is explicitly about speed.
         //
-        // So: unvisited first, then nearest, then whatever has most left to give — an uncompleted
-        // node over a finished one, and a better-connected node over a dead end.
+        // So: unvisited first, then **unfinished**, then nearest, then whatever has most left to
+        // give.
+        //
+        // ## Why `completed` outranks distance, which it did not used to
+        //
+        // `visited` is set only by standing somewhere *this run* — nothing seeds it from the save.
+        // So on a resume it is uniformly false, the first key ties for every place on the map, and
+        // distance decides everything. A run that picks up an in-progress save therefore prefers
+        // near ground it has already cleared to fresh ground slightly further off, and re-walks its
+        // own footprints.
+        //
+        // `completed` is the half we do load (`overworld.completedAreas`), and in a subworld it is a
+        // good proxy for having been there: peaceful subnodes carry
+        // `competeOnVisit = subnodeIsPeaceful` (`forest.lua:107-130`), so arriving finishes them.
+        // Promoting it puts the resume case back on the ordering the fresh case always had.
+        //
+        // Ranked, not filtered. On a resume we know completed places **by key with no edges**, so
+        // excluding them outright could empty the frontier in a subworld we have partly cleared.
+        // Preferring the unfinished keeps the cleared ground available as a fallback, which costs
+        // nothing when there is anything better and saves the run when there is not.
         let far = usize::MAX;
         let dist = self.distances(here);
         // No direction heuristic here, and the reason is worth recording so nobody adds one.
@@ -1478,8 +1522,8 @@ impl WorldMap {
         frontier.sort_by(|a, b| {
             a.visited
                 .cmp(&b.visited)
-                .then(dist.get(&a.key).unwrap_or(&far).cmp(dist.get(&b.key).unwrap_or(&far)))
                 .then(a.completed.cmp(&b.completed))
+                .then(dist.get(&a.key).unwrap_or(&far).cmp(dist.get(&b.key).unwrap_or(&far)))
                 .then(b.connections.cmp(&a.connections))
                 .then(b.hidden.unwrap_or(0).cmp(&a.hidden.unwrap_or(0)))
                 .then(a.key.cmp(&b.key))
@@ -1982,6 +2026,7 @@ impl WorldMap {
             // An exit road we have not walked is a frontier too, but heading for one is leaving —
             // and while looking for an inn, leaving is the move that abandons the errand.
             .filter(|p| !p.key.starts_with(&exit_prefix) || Some(&p.key) == dest.as_ref())
+            .filter(|p| !p.is_dead_end())
             .filter_map(|p| hops.get(&p.key).map(|d| (!p.is_paved(), *d, &p.key)))
             .min()
             .map(|(_, _, k)| k.clone());
@@ -3524,6 +3569,77 @@ mod tests {
             ])
         });
         m
+    }
+
+    /// A leaf is not worth the two steps it costs, so the crossing does not offer one.
+    ///
+    /// `e1sub65`, `e1sub67` and `e1sub84` were each entered and immediately left in the run of
+    /// 2026-08-09, six of its twenty-three steps. Every dump that named them said `connections: 1`,
+    /// so this was knowable before walking in.
+    #[test]
+    fn a_dead_end_is_not_somewhere_to_explore() {
+        let leaf = |key: &str| Node {
+            key: key.into(),
+            heading: "Howden Timberland forest".into(),
+            x: 0.0,
+            y: 0.0,
+            connections: 1,
+        };
+        let mut m = WorldMap::new();
+        m.fold(&Adjacency {
+            subworld: Some(("e1".into(), "Howden Timberland — level 2 lost woods".into())),
+            exits: Vec::new(),
+            ..dump("e1sub69", "Howden Timberland forest", vec![
+                leaf("e1sub67"),
+                node("e1sub75", "Howden Timberland forest"),
+            ])
+        });
+        assert!(m.get("e1sub67").unwrap().is_dead_end());
+        assert!(!m.get("e1sub75").unwrap().is_dead_end());
+        match m.cross_toward(&[]) {
+            Some(Crossing::Seek { to }) | Some(Crossing::Explore { to, .. }) => {
+                assert_eq!(to, "e1sub75", "the leaf has nothing behind it");
+            }
+            other => panic!("expected a step past the leaf, got {other:?}"),
+        }
+    }
+
+    /// Resuming a save: prefer ground we have not finished over ground we have, even if it is further.
+    ///
+    /// `visited` is set only by standing somewhere *this run*, and nothing seeds it from the save.
+    /// So on a resume the first sort key ties for every place on the map and distance used to decide
+    /// everything — which sent a resumed run back over its own cleared nodes because they were
+    /// nearer. `completed` is the half we do load, so it is what carries the knowledge across.
+    #[test]
+    fn a_resumed_run_prefers_unfinished_ground_to_nearer_finished_ground() {
+        let mut m = WorldMap::new();
+        // `near` is one hop away and `far` is two, so distance and completion genuinely disagree.
+        // An earlier version of this test put both at one hop, where the two orderings give the
+        // same answer — it passed against the code it was written to catch.
+        m.fold(&dump("here", "Somewhere", vec![node("near", "Nearby crossroads")]));
+        m.entry("far").heading = "Distant crossroads".into();
+        m.entry("near").neighbours.insert("far".into());
+        m.entry("far").neighbours.insert("near".into());
+        assert_eq!(m.distances("here").get("near"), Some(&1));
+        assert_eq!(m.distances("here").get("far"), Some(&2));
+        // Nothing has been stood on this run but `here`: that is what a resume looks like.
+        assert!(!m.get("near").unwrap().visited && !m.get("far").unwrap().visited);
+        // What the save told us, and the only thing that separates them.
+        m.entry("near").completed = true;
+
+        let target = m.next_target().expect("something to explore").target;
+        assert_eq!(target, "far", "cleared ground is not worth walking to first");
+    }
+
+    /// Silence is not a dead end. A place known only by key has no connection count at all.
+    ///
+    /// `completedAreas` gives us keys and nothing else, which on a resume is most of the map. If
+    /// `0` read as a leaf the frontier would be empty almost everywhere.
+    #[test]
+    fn a_place_we_know_only_by_key_is_not_a_dead_end() {
+        let mut m = WorldMap::new();
+        assert_eq!(m.entry("l44").connections, 0, "never seen in a dump");
+        assert!(!m.get("l44").unwrap().is_dead_end());
     }
 
     /// The container's type name is re-read on every dump, because the game re-evaluates it.
