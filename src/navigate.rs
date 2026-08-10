@@ -610,6 +610,39 @@ impl Run<'_> {
     /// is the shift. That needs no sprite identity and no calibration constant, and it cancels tint
     /// and scale because it compares a rendering against itself.
     ///
+    /// ## Why the clamp is measured and not predicted
+    ///
+    /// Asked and answered on 2026-08-10, and recorded here because it is the first question anyone
+    /// reworking this will have. `clampWithinBoundsX` (`overworldview.lua:293-303`) is
+    ///
+    /// ```lua
+    /// mapsizeX = ((data.tileRadiusX or 15)*64+80)*zoomMult
+    /// return math.clamp(x, -mapsizeX+width/2, mapsizeX+width/2)
+    /// ```
+    ///
+    /// so predicting it needs `tileRadiusX/Y` for the *current* generator, `zoomMult`, and the
+    /// current `xoffset`. **The last two are never printed.** There is one way in — `posX = xoffset +
+    /// location.posX*zoomMult`, and `start` is at world `(0, 0)` (`world.lua:73`, which
+    /// [`crate::overworld::WorldMap::pos_for`] already leans on), so a dump naming `start` gives
+    /// `xoffset` outright. That is exactly the case this does not need: the clamp bites *inside*
+    /// subworlds, where `start` is never in frame.
+    ///
+    /// So it would mean modelling three unobserved quantities to predict something already measured
+    /// for free — a pull that gains nothing **is** the clamp, observed rather than inferred. See
+    /// [`pan_again`].
+    ///
+    /// ## Zoom is the better lever, and is not used yet
+    ///
+    /// `core:wheelmoved` calls `setZoom`, which clamps `targetZoomMul` to `[0.5, 8]`
+    /// (`overworldview.lua:996`), and `UpdateZoom` (`:1087-1097`) keeps the same world point centred
+    /// while it scales. A node's screen distance from centre scales with `zoomMult` and the window
+    /// does not — so zooming out *always* pulls an off-screen node inward, with no drag semantics and
+    /// no patch matching to get wrong.
+    ///
+    /// Not done, and the cost is the reason: a zoom change rescales every printed coordinate, which
+    /// invalidates [`crate::overworld::WorldMap::frame`] comparisons and the steering measure behind
+    /// them, and is precisely what `registration` refuses to mix. Task #29.
+    ///
     /// Several patch positions are tried because a patch of flat void matches equally well
     /// everywhere, and would report whichever candidate the sweep reached first. `None` means the
     /// map moved by an unknown amount, which the caller must treat as losing its position entirely —

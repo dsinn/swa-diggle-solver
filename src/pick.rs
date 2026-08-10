@@ -3,17 +3,20 @@
 //! [`crate::search::Goal::FirstKill`] took whichever lethal word a thread happened to find first.
 //! That is the right answer to "end the exchange" and the wrong answer to "play the fight", because
 //! the word also decides what the board looks like afterwards and what the turn is worth beyond the
-//! damage. Three things separate two words that both kill:
+//! damage. Four things separate two words that both kill:
 //!
 //! 1. **A wood-only kill pays out**, when the gear for it is held and the payout is not wasted.
-//! 2. **Hazard tiles want to reach the bottom.** `tileboard.lua:178` is the game telling the player
+//! 2. **Gold and wildcards are held back.** A board's gold tiles are the damage it has in reserve for
+//!    the turn a big hit is needed, so a kill that spends one where a plainer word would also have
+//!    killed has thrown that reserve away. See [`hoarded`].
+//! 3. **Hazard tiles want to reach the bottom.** `tileboard.lua:178` is the game telling the player
 //!    so directly: *"I'm sorry. Your special tile got unlucky. Get it to the bottom to get rid of
 //!    it."* A `!` tile *"falls off if it's at the bottom of the board at the start of your turn"*
 //!    (`:180`), so clearing tiles beneath one is how it leaves.
-//! 3. **What is left should look like a board you can play.** See [`crate::letters`].
+//! 4. **What is left should look like a board you can play.** See [`crate::letters`].
 //!
-//! In that order, and the order is the point: 1 and 2 are payouts, 3 is hygiene. A tiebreak never
-//! outranks a payout, and none of the three ever outranks killing.
+//! In that order, and the order is the point: 1 and 2 are about value, 3 and 4 are hygiene. A
+//! tiebreak never outranks a payout, and none of the four ever outranks killing.
 //!
 //! ## Everything here is a tiebreak among words that already kill
 //!
@@ -105,13 +108,23 @@ pub struct Context {
 
 /// How good a lethal candidate is, beyond the fact that it kills.
 ///
-/// Compared in field order: wood-only first, then hazard fall, then deviation. Not `Ord`, because
-/// `deviation` is an `f64` and a total order over floats would be a lie — [`Rank::better_than`] is
-/// the comparison, and it is deliberately the only one.
+/// Compared in field order: wood-only first, then what it spends from the board's good tiles, then
+/// hazard fall, then deviation. Not `Ord`, because two fields are `f64` and a total order over floats
+/// would be a lie — [`Rank::better_than`] is the comparison, and it is deliberately the only one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rank {
     /// Every tile used was wood, and the gear pays for that. Higher is better.
     pub wood_only: bool,
+    /// What this word spends from the board's stock of tiles worth keeping. **Lower** is better.
+    ///
+    /// See [`hoarded`]. Ranked below `wood_only`, which is a payout the gear actually pays, and above
+    /// both hygiene terms: a kill is a kill, so of two words that both end the fight, the one that
+    /// does not burn the board's biggest hitter is the better trade.
+    ///
+    /// Note the two do **not** subsume each other, though it looks as if they might. A wildcard's
+    /// material is `wood0` (`rpg/effects/material/default.lua:4`), which `wood_only` accepts, so a
+    /// wood-only kill can still be spending one.
+    pub hoarded: f64,
     /// Total slots every hazard tile on the board would fall by. Higher is better.
     pub hazard_fall: usize,
     /// Distance of the resulting board from its target letter distribution. **Lower** is better.
@@ -128,6 +141,9 @@ impl Rank {
     pub fn better_than(&self, other: &Rank) -> bool {
         if self.wood_only != other.wood_only {
             return self.wood_only;
+        }
+        if self.hoarded != other.hoarded {
+            return self.hoarded < other.hoarded;
         }
         if self.hazard_fall != other.hazard_fall {
             return self.hazard_fall > other.hazard_fall;
@@ -192,6 +208,68 @@ pub fn wood_only(tiles: &[Tile], consumed: &[usize], scorer: &Scorer) -> bool {
         })
 }
 
+/// A wildcard: the letter is `.` until something is typed into it.
+///
+/// `letterMaterials['.'] = 'wood0'` and `score.wood0 = 0`
+/// (`rpg/effects/material/default.lua:4,38`), so a wildcard is worth **nothing** on its own and
+/// nothing in the scorer has any reason to keep one. What makes it precious is the other half: it
+/// takes whatever letter we ask for, so it is the tile that turns a word we cannot spell into one we
+/// can. That value does not appear in any score, which is why it has to be named here.
+const WILDCARD: &str = ".";
+
+/// What a wildcard counts for when deciding what a word spends. See [`hoarded`].
+///
+/// The dev's number, 2026-08-10, and the reasoning is in the size of it: **1, not 10.** A wildcard is
+/// worth conserving, but nothing like as much as a gold tile — so this is set low enough that it can
+/// never argue a gold tile into the fire, and high enough that between two words which spend the same
+/// gold, the one that also burns a wildcard loses.
+const WILDCARD_WORTH: f64 = 1.0;
+
+/// The material a word should not be spending unless the kill needs it.
+const GOLD: &str = "gold";
+
+/// What this word spends from the board's stock of tiles worth keeping. Lower is better.
+///
+/// The dev's rule, 2026-08-09: **do not spend a solid gold tile until we cannot land a kill without
+/// it.** Gold is what a board holds for the moment a big hit is needed, and spending a `Q` on a kill
+/// a wood word would also have made is the waste this exists to stop.
+///
+/// ## Solid gold, and that means the material, not the border
+///
+/// [`Scorer::material_name`] resolves the two cases in one call — an explicit `bg` where gear has
+/// upgraded the tile, and otherwise the material the letter implies, which makes **Z, X, J and Q**
+/// gold by nature (`rpg/effects/material/default.lua:25-28`). The dev settled that both are hoarded:
+/// the point of the rule is damage held in reserve, and a natural `Q` is the biggest reserve there
+/// is. A *bordered* gold tile is a different thing — `rpg/effects/border/gold.lua` is an overlay that
+/// can sit on any material — and is deliberately not counted.
+///
+/// ## Cost is the tile's own worth, which buys the post-MVP refinement for nothing
+///
+/// A gold tile costs what [`Scorer::tile_score`] says it is worth, so `Z = 10` and `Q = 40` are not
+/// the same expenditure. That was raised as a later task — *minimise the value of the gold spent* —
+/// and falls out of pricing preciousness at value rather than counting tiles. Nothing was added for
+/// it; a flat cost would have been the same amount of code and less true.
+///
+/// A tile has one preciousness, so the two reasons are `max`ed rather than summed: a wildcard that
+/// gear has turned gold is priced as gold, which it is.
+pub fn hoarded(tiles: &[Tile], consumed: &[usize], scorer: &Scorer) -> f64 {
+    consumed
+        .iter()
+        .filter_map(|&i| tiles.get(i))
+        .map(|t| {
+            let gold = match scorer.material_name(t) {
+                Some(GOLD) => scorer.tile_score(t),
+                _ => 0.0,
+            };
+            let wild = match t.letter == WILDCARD {
+                true => WILDCARD_WORTH,
+                false => 0.0,
+            };
+            gold.max(wild)
+        })
+        .sum()
+}
+
 /// Letter counts of what would be left standing.
 pub fn remaining_counts(tiles: &[Tile], consumed: &[usize]) -> [usize; ALPHABET] {
     letters::counts_of(
@@ -210,6 +288,7 @@ pub fn rank(
 ) -> Rank {
     Rank {
         wood_only: prefs.wood_only_pays && wood_only(tiles, consumed, scorer),
+        hoarded: hoarded(tiles, consumed, scorer),
         hazard_fall: hazard_fall(tiles, geometry, consumed, scorer),
         deviation: target.deviation(&remaining_counts(tiles, consumed)),
     }
@@ -228,6 +307,72 @@ mod tests {
             return None;
         }
         Some(Scorer::new(&dir).expect("scoring tables load"))
+    }
+
+    /// What a word spends, read off the game's own tables rather than asserted from memory.
+    ///
+    /// The dev's rule is about *solid gold*, so the fixture has to prove the scorer agrees which
+    /// letters those are before the costs mean anything.
+    #[test]
+    fn gold_letters_cost_what_they_are_worth_and_plain_ones_cost_nothing() {
+        let Some(sc) = scorer() else { return };
+        let tiles = board(&["Q", "Z", "E", "A"]);
+        // If this is wrong the fixture is wrong, not the code, and every assertion below would be
+        // passing for the wrong reason.
+        for (i, letter) in ["Q", "Z"].iter().enumerate() {
+            assert_eq!(sc.material_name(&tiles[i]).as_deref(), Some(GOLD), "{letter} is solid gold");
+        }
+        assert_eq!(sc.material_name(&tiles[2]).as_deref(), Some("wood"), "E is not");
+
+        assert_eq!(hoarded(&tiles, &[2, 3], &sc), 0.0, "a word of plain letters spends nothing");
+        // `score.Q = 40`, `score.Z` falls through to `score.gold = 10`
+        // (`rpg/effects/material/default.lua:33-41`). So the two are not interchangeable, which is
+        // the whole of the deferred "spend the cheapest gold" refinement, arriving for free.
+        let q = hoarded(&tiles, &[0], &sc);
+        let z = hoarded(&tiles, &[1], &sc);
+        assert!(z > 0.0 && q > z, "Q ({q}) should cost more to spend than Z ({z})");
+        assert_eq!(hoarded(&tiles, &[0, 1], &sc), q + z, "and spending both costs both");
+    }
+
+    /// A wildcard is worth nothing to the scorer and something to us.
+    ///
+    /// `letterMaterials['.'] = 'wood0'` with `score.wood0 = 0`, so nothing in the scoring model has
+    /// any reason to keep one — its value is that it takes whatever letter we ask for. The dev's
+    /// number is **1**: enough to break a tie, never enough to argue a gold tile into the fire.
+    #[test]
+    fn a_wildcard_is_worth_keeping_but_never_more_than_gold() {
+        let Some(sc) = scorer() else { return };
+        let tiles = board(&[".", "Z", "E"]);
+        assert_eq!(sc.tile_score(&tiles[0]), 0.0, "the game scores a wildcard at nothing");
+        assert_eq!(hoarded(&tiles, &[0], &sc), WILDCARD_WORTH, "and we still would rather keep it");
+
+        // The point of the number being small: burning a wildcard must never look worse than
+        // burning gold, or the rule would spend the reserve to protect the convenience.
+        assert!(
+            hoarded(&tiles, &[0], &sc) < hoarded(&tiles, &[1], &sc),
+            "a wildcard has to cost less than the cheapest gold tile"
+        );
+        assert_eq!(hoarded(&tiles, &[2], &sc), 0.0, "and a plain letter is free to spend");
+    }
+
+    /// Two words that both kill: the one that keeps the good tiles wins.
+    ///
+    /// The rule in the shape it is actually used — a comparison between candidates, not a score.
+    #[test]
+    fn between_two_kills_the_one_that_spends_less_wins() {
+        let plain = Rank { wood_only: false, hoarded: 0.0, hazard_fall: 0, deviation: 9.0 };
+        let golden = Rank { wood_only: false, hoarded: 40.0, hazard_fall: 0, deviation: 0.0 };
+        assert!(plain.better_than(&golden), "a tidier board is not worth a Q");
+        assert!(!golden.better_than(&plain));
+
+        // Below the payout, though. `wood_only` is gear paying out for real, and this is a saving.
+        let paid = Rank { wood_only: true, hoarded: 40.0, hazard_fall: 0, deviation: 9.0 };
+        assert!(paid.better_than(&plain), "a payout in hand outranks a tile kept back");
+
+        // And the wildcard case the dev asked for: same gold either way, so do not also burn one.
+        let gold_only = Rank { wood_only: false, hoarded: 10.0, hazard_fall: 0, deviation: 0.0 };
+        let gold_and_wild = Rank { wood_only: false, hoarded: 11.0, hazard_fall: 0, deviation: 0.0 };
+        assert!(gold_only.better_than(&gold_and_wild), "no reason to spend a wildcard as well");
     }
 
     /// Two columns of three. Flat indices are column-major with row 1 at the bottom
@@ -365,16 +510,16 @@ mod tests {
 
     #[test]
     fn a_payout_outranks_tidier_letters_and_wood_outranks_a_falling_hazard() {
-        let wood = Rank { wood_only: true, hazard_fall: 0, deviation: 99.0 };
-        let hazard = Rank { wood_only: false, hazard_fall: 5, deviation: 1.0 };
+        let wood = Rank { wood_only: true, hoarded: 0.0, hazard_fall: 0, deviation: 99.0 };
+        let hazard = Rank { wood_only: false, hoarded: 0.0, hazard_fall: 5, deviation: 1.0 };
         assert!(wood.better_than(&hazard), "a wood-only kill outranks any number of falls");
 
-        let falls = Rank { wood_only: false, hazard_fall: 2, deviation: 50.0 };
-        let tidy = Rank { wood_only: false, hazard_fall: 1, deviation: 0.0 };
+        let falls = Rank { wood_only: false, hoarded: 0.0, hazard_fall: 2, deviation: 50.0 };
+        let tidy = Rank { wood_only: false, hoarded: 0.0, hazard_fall: 1, deviation: 0.0 };
         assert!(falls.better_than(&tidy), "a falling hazard outranks a tidier board");
 
-        let a = Rank { wood_only: false, hazard_fall: 1, deviation: 3.0 };
-        let b = Rank { wood_only: false, hazard_fall: 1, deviation: 4.0 };
+        let a = Rank { wood_only: false, hoarded: 0.0, hazard_fall: 1, deviation: 3.0 };
+        let b = Rank { wood_only: false, hoarded: 0.0, hazard_fall: 1, deviation: 4.0 };
         assert!(a.better_than(&b), "with the payouts equal, lower deviation wins");
         assert!(!b.better_than(&a));
         assert!(!a.better_than(&a), "better_than is strict");
