@@ -2933,9 +2933,18 @@ pub fn drive(
         let Some(target) = fresh.nodes.iter().find(|n| n.key == hop.step).cloned() else {
             return Stop::Failed(format!("{} is not on screen from {here}", hop.step));
         };
+        // The suffix says whether this step is *on the way* or merely *the way it lies*. Without it
+        // a run heading nowhere reads exactly like a run heading somewhere -- five identical
+        // `(for start, Anomaly)` lines were read as a journey and were five guesses.
         r.log.push_str(&format!(
-            "{step}. {here} -> **{}** (for {}, {:?})\n",
-            hop.step, hop.plan.target, hop.plan.reason
+            "{step}. {here} -> **{}** (for {}, {:?}){}\n",
+            hop.step,
+            hop.plan.target,
+            hop.plan.reason,
+            match hop.routed {
+                true => "",
+                false => " — no route there; stepping the way it lies",
+            }
         ));
         // What this hop is *for*, so that arriving there is recognised as arriving. See
         // [`Run::committed_to`].

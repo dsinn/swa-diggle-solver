@@ -733,6 +733,15 @@ pub enum Crossing {
 pub struct Hop {
     pub step: String,
     pub plan: Plan,
+    /// True when this step is on a route to [`Plan::target`], false when it is a guess in its
+    /// direction — [`WorldMap::next_hop`]'s fallback for a target nothing can reach.
+    ///
+    /// Carried purely so the log can tell them apart, and #24 is why. Five consecutive travel lines
+    /// reading `(for start, Anomaly)` were read as five steps of a journey to the anomaly; they were
+    /// five guesses at a node with no edges, and the run ended in a crypt nobody had chosen.
+    /// Route-gating makes this the rare case rather than the usual one, which is exactly why it
+    /// needs to be visible when it does happen.
+    pub routed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -861,7 +870,20 @@ impl WorldMap {
             .any(|p| p.completed_corrupt && (p.key == ANOMALY_KEY || p.type_is("anomaly")))
     }
 
-    /// Has the anomaly already opened? `None` when no save has been read yet.
+    /// Is the anomaly still **waiting to be opened**? `None` when no save has been read yet.
+    ///
+    /// Read the name as "the trigger is available to spend", which is what every caller means by it,
+    /// and note that the sense is the *opposite* of "the anomaly is available to fight":
+    ///
+    /// ```text
+    ///   hell == 0   ->  Some(true)   nothing has opened it yet; go and trigger one
+    ///   hell != 0   ->  Some(false)  the portal is live and spreading corruption
+    /// ```
+    ///
+    /// `hellOpens` sets `hell` to `0.1` and it grows from there (`utils/events.lua:39`), and
+    /// `shrine.lua:50` reads the same flag as `hell = areaFlag'hell' ~= 0`. The inverted reading is
+    /// not hypothetical: a run header printing `anomaly available Some(false)` was written up as
+    /// "the anomaly is not open yet" when it meant the exact reverse.
     pub fn anomaly_available(&self) -> Option<bool> {
         self.hell.map(|h| h == 0.0)
     }
@@ -1266,7 +1288,10 @@ impl WorldMap {
         // Two passes, so the rule cannot strand the run: if avoiding hostile ground leaves nothing
         // at all to do, the second pass drops the restriction and we get on with it.
         if self.wants_rest {
-            if let Some(plan) = self.plan(true) {
+            if let Some(plan) = self.plan(true, true) {
+                return Some(plan);
+            }
+            if let Some(plan) = self.plan(true, false) {
                 return Some(plan);
             }
             // Nowhere safe left on the map. Rather than fall straight through to the objective —
@@ -1276,7 +1301,41 @@ impl WorldMap {
                 return Some(plan);
             }
         }
-        self.plan(false)
+        self.plan(false, true).or_else(|| self.plan(false, false))
+    }
+
+    /// Could [`WorldMap::next_hop`] actually set off toward `key`, over the edges we have recorded?
+    ///
+    /// The question `plan` failed to ask, and the run of 2026-08-09 is what that cost. Every travel
+    /// goal it printed read `(for start, Anomaly)` — five of five — while the map held `start` with
+    /// no heading and no edges at all, learned from `start_first_corrupt_time` in the save and never
+    /// seen. The anomaly branch outranks the shrine branch and does not yield, so `shrine6 Borsea
+    /// shrine` — heading known, unused, unconsecrated, uncorrupted, and reachable — was never
+    /// considered. `next_hop` found no route, fell through to its any-frontier fallback, and the run
+    /// wandered onto a level 6 crypt and died there while the log claimed it was going somewhere.
+    ///
+    /// So three costs, and only the first is cosmetic: the log lies, a reachable objective is
+    /// skipped, and the fallback picks fights nobody chose.
+    ///
+    /// ## Unreachable and unmeasured look the same, and this does not try to tell them apart
+    ///
+    /// A node we have never stood beside has no edges, so "no route to it" is also what "we have not
+    /// mapped the way yet" looks like — [`Arrival::Unknown`] exists because conflating two such
+    /// states put a run at 1/20 in front of a crypt. This deliberately does not distinguish them.
+    /// It reports what `next_hop` can do *now*, and the caller uses it as a preference with a second
+    /// pass behind it, so a target we merely have not mapped is demoted rather than discarded.
+    ///
+    /// Asked with `shun` false, which is `next_hop`'s second attempt: a route that has to cross a
+    /// lost woods we escaped is a poor route and still a route. The rest of the exclusions —
+    /// abandoned nodes, chests while hurt — are shared with [`WorldMap::step_avoiding`] by calling
+    /// it, rather than restated here where the two could drift apart.
+    ///
+    /// Standing on the target counts. `first_step_toward` answers `None` for `from == to` because
+    /// there is no step to take, which is not the same as being unable to get there, and treating it
+    /// as unreachable would make the planner walk away from somewhere it had just arrived.
+    fn can_route_to(&self, key: &str) -> bool {
+        let Some(here) = self.here.as_deref() else { return true };
+        key == here || self.first_step_toward(here, key, false).is_some()
     }
 
     /// Does going here cost a fight, on **either** axis?
@@ -1327,6 +1386,17 @@ impl WorldMap {
     /// forest crossing actually costs — which no run has yet produced. The ordering follows the
     /// dev's read of the game until then, deliberately and with this written down. Swapping the two
     /// `.then` clauses is the whole change.
+    ///
+    /// ## Not route-gated, unlike [`WorldMap::plan`], and that is a decision
+    ///
+    /// #24 made every branch of the planner refuse a target nothing can reach. This one is exempt,
+    /// because here the two orderings pull against each other: preferring what we can route to means
+    /// taking a reachable level 6 crypt over an unreachable level 1 forest, and this function exists
+    /// precisely to *not* do that — it is reached only while hurt, with nowhere safe left, which is
+    /// the state where picking the wrong fight ends the run.
+    ///
+    /// So an unreachable cheapest fight is still named, and `next_hop` steps its way. Nothing has
+    /// measured which of the two costs more, and the safe direction while hurt is the gentle fight.
     fn easiest_hostile(&self) -> Option<Plan> {
         let here = self.here.as_deref().unwrap_or("");
         let mut candidates: Vec<&Place> = self
@@ -1346,16 +1416,50 @@ impl WorldMap {
             .map(|p| Plan { target: p.key.clone(), reason: Goal::EasiestHostile { level: p.level() } })
     }
 
-    /// The planner proper. `skip_hostile` excludes anywhere a fight is owed, on either axis.
+    /// The planner proper. `skip_hostile` excludes anywhere a fight is owed, on either axis;
+    /// `need_route` excludes anywhere [`WorldMap::next_hop`] could not actually set off toward.
     ///
     /// **Both axes, and that is the fix.** It used to consult [`Place::hostile_to_enter`] alone,
     /// which asks whether a subworld will hold us in — so a crypt, which is not a subworld and
     /// cannot trap anybody, sailed through the hurt pass and a run at 1/20 was routed onto a level 6
     /// one under [`Goal::Explore`]. Meanwhile `shrine5` sat on the same map printing
     /// `Gembling shrine` with no level at all, free to walk onto.
-    fn plan(&self, skip_hostile: bool) -> Option<Plan> {
+    ///
+    /// ## Why `need_route` is a pass over the whole ladder and not a patch on one branch
+    ///
+    /// A branch that cannot make progress used to outrank every branch that could. The anomaly is
+    /// the case that showed it — see [`WorldMap::can_route_to`] for the live run — but nothing about
+    /// it is specific to the anomaly: a shrine in a component we have not linked up yet, or a
+    /// frontier node known only by key from `completedAreas`, suppress the branches below them in
+    /// exactly the same way. So the question is asked of every candidate, in `ok`, alongside the
+    /// hostility one.
+    ///
+    /// It is a *preference*, never a filter on the map: [`WorldMap::next_target`] runs this twice
+    /// and the second pass drops the requirement. Nothing routable is a real state — a fresh launch
+    /// standing nowhere is one — and a run that refuses to name a target it cannot yet reach has
+    /// stopped, which is worse than aiming at one and stepping the way it lies.
+    ///
+    /// ## And it is asked on the SURFACE ONLY
+    ///
+    /// Inside a subworld our graph is **known** to be disconnected: nothing links an interior node
+    /// to its container, so `distances` from inside reaches no surface node at all — the limitation
+    /// [`WorldMap::exit_toward`] is written around. Every surface target therefore fails a route
+    /// test from in there, for a reason that is about our model and not about the world, and gating
+    /// on it would hand the run to whichever interior frontier happened to be walkable.
+    ///
+    /// Which is not hypothetical: it turned "I am at 1 of 20 health and there is a campfire out the
+    /// west door" into `Goal::Explore`, and the door commitment follows the errand. The route test
+    /// is a statement about what [`WorldMap::next_hop`] can do, and while we are inside, `next_hop`
+    /// is not what moves us — [`WorldMap::cross_toward`] is, and it reaches the surface through
+    /// exits rather than edges.
+    fn plan(&self, skip_hostile: bool, need_route: bool) -> Option<Plan> {
         let here = self.here.as_deref().unwrap_or("");
-        let ok = |p: &Place| !(skip_hostile && Self::owes_a_fight(p));
+        let need_route = need_route && self.inside().is_none();
+        // Both halves are deliberately last in every filter chain below: `can_route_to` runs a
+        // search, and the cheap tests in front of it decide most candidates for free.
+        let ok = |p: &Place| {
+            !(skip_hostile && Self::owes_a_fight(p)) && (!need_route || self.can_route_to(&p.key))
+        };
 
         // **Health first, ahead of everything including a live anomaly.**
         //
@@ -1496,10 +1600,11 @@ impl WorldMap {
         if let Some(p) = self
             .places
             .values()
-            .filter(|p| p.key != here && !p.avoid && ok(p) && p.type_is("shrine"))
+            .filter(|p| p.key != here && !p.avoid && p.type_is("shrine"))
             .filter(|p| !self.abandoned.contains(&p.key))
             .filter(|p| worth_a_trip(p))
             .filter(|p| !(anomaly_open && p.corrupted))
+            .filter(|p| ok(p))
             .min_by_key(|p| dist_or_far(&dist, &p.key))
         {
             return Some(Plan { target: p.key.clone(), reason: Goal::Shrine });
@@ -1532,11 +1637,12 @@ impl WorldMap {
         let mut frontier: Vec<&Place> = self
             .places
             .values()
-            .filter(|p| p.key != here && !p.visited && !p.avoid && ok(p))
+            .filter(|p| p.key != here && !p.visited && !p.avoid)
             .filter(|p| !self.abandoned.contains(&p.key))
             // Nothing to find there, so it is not a destination. It stays a waypoint: routing runs
             // over the edges, and this only decides what is worth walking *to*.
             .filter(|p| !p.nothing_left_to_reveal())
+            .filter(|p| ok(p))
             .collect();
         // Order matters, and a live run showed why. From l10 with l1 and l18 both adjacent and both
         // unvisited, sorting by key chose `l1` — already **completed**, so it revealed nothing — and
@@ -1565,17 +1671,44 @@ impl WorldMap {
         // nothing when there is anything better and saves the run when there is not.
         let far = usize::MAX;
         let dist = self.distances(here);
-        // No direction heuristic here, and the reason is worth recording so nobody adds one.
-        // `gap` would need something to head toward, and the only candidate is the anomaly — but
-        // this branch is reached *only* when `anomaly()` found nothing to target, because the
-        // anomaly branch above returns first whenever there is one. A direction toward a place that
-        // by construction is not known is not a direction. The branch that needed this is
-        // `next_hop`'s no-route fallback, where the target is known and the route is not.
+        // **Where we would be going if the map were connected**, and only asked here, on the last
+        // branch, where it is the only thing left that can use it. It is the errand this pass has
+        // just given up on for want of a route.
+        //
+        // Without it the fix trades one failure for a quieter one. The old behaviour aimed at the
+        // unreachable target and let `next_hop`'s fallback step the way it lay, which at least
+        // pointed somewhere; refusing to name the target at all would leave exploration with no
+        // direction and no memory of what it was for.
+        //
+        // The recursion terminates at one level: the inner call reaches this line too, takes the
+        // `false` arm, and asks nothing further.
+        let bearing = match need_route {
+            true => self
+                .plan(skip_hostile, false)
+                .map(|p| p.target)
+                .filter(|k| !self.can_route_to(k)),
+            false => None,
+        };
+        // A direction heuristic, and it used to be argued *against* here on the grounds that this
+        // branch is reached only when there is nothing above to head toward. Route-gating made that
+        // false: the branches above can now yield while knowing perfectly well where they wanted to
+        // go, having only failed to find a way. `bearing` is that place, and this is the same
+        // potential function `next_hop`'s fallback uses, applied one level up where it can pick
+        // among *all* the frontiers rather than only the adjacent ones.
+        //
+        // Below distance on purpose. Hops are what a run actually spends; direction breaks the ties,
+        // which on a surface where several neighbours sit one step away is most of the choices there
+        // are. `None` for every candidate — no bearing, or a target no dump has placed — leaves the
+        // key equal throughout and the ordering exactly as it was.
+        let toward = |p: &Place| -> f64 {
+            bearing.as_ref().and_then(|t| self.gap(&p.key, t)).unwrap_or(f64::MAX)
+        };
         frontier.sort_by(|a, b| {
             a.visited
                 .cmp(&b.visited)
                 .then(a.completed.cmp(&b.completed))
                 .then(dist.get(&a.key).unwrap_or(&far).cmp(dist.get(&b.key).unwrap_or(&far)))
+                .then(toward(a).total_cmp(&toward(b)))
                 .then(b.connections.cmp(&a.connections))
                 .then(b.hidden.unwrap_or(0).cmp(&a.hidden.unwrap_or(0)))
                 .then(a.key.cmp(&b.key))
@@ -1606,10 +1739,10 @@ impl WorldMap {
         // world where every route passes through one leaves us moving rather than stuck — being
         // swallowed again is bad, standing still forever is worse.
         if let Some(step) = self.first_step_toward(here, &plan.target, true) {
-            return Some(Hop { step, plan });
+            return Some(Hop { step, plan, routed: true });
         }
         if let Some(step) = self.first_step_toward(here, &plan.target, false) {
-            return Some(Hop { step, plan });
+            return Some(Hop { step, plan, routed: true });
         }
         // No known route. Step to an adjacent frontier instead: mapping outward is what will
         // eventually connect us to the target.
@@ -1651,7 +1784,7 @@ impl WorldMap {
                 .then(toward(a).cmp(&toward(b)))
                 .then(a.key.cmp(&b.key))
         });
-        options.first().map(|p| Hop { step: p.key.clone(), plan })
+        options.first().map(|p| Hop { step: p.key.clone(), plan, routed: false })
     }
 
     /// Is a single step from `from` to `to` legal?
@@ -2727,7 +2860,19 @@ mod tests {
         m.hell = Some(0.1);
         assert_eq!(m.anomaly().map(|p| p.key.as_str()), Some("start"));
         assert!(m.anomaly_is_assumed(), "no heading has confirmed it yet");
-        assert_eq!(m.next_target().unwrap().reason, Goal::Anomaly);
+
+        // **Knowing where it is and being able to go there are different things**, and the errand
+        // follows the second. Heard of through a save flag, `start` has no edges at all, so naming
+        // it as the target would only have handed the move to `next_hop`'s fallback while the log
+        // claimed an objective. Explore, which is what mends the gap.
+        assert_eq!(m.next_target().unwrap().reason, Goal::Explore, "no route, no nomination");
+
+        // Learn one edge to it and it becomes the errand, with nothing else about the map changed.
+        m.fold(&dump("l29", "Rookdale — level 3 crypt", vec![node("start", "")]));
+        m.here = Some("l39".into());
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Anomaly);
+        assert_eq!(plan.target, "start");
     }
 
     #[test]
@@ -2823,6 +2968,7 @@ mod tests {
         let hop = m.next_hop().unwrap();
         assert_eq!(hop.step, "l4");
         assert_eq!(hop.plan.target, "l4");
+        assert!(hop.routed, "a step we can justify by an edge");
     }
 
     #[test]
@@ -2836,9 +2982,14 @@ mod tests {
         m.fold(&here);
         m.here = Some("start".into());
         let hop = m.next_hop().unwrap();
-        assert_eq!(hop.plan.target, "l4", "the goal is unchanged");
-        assert_eq!(hop.step, "l2", "but the move is the only way onward we know");
-        assert_eq!(hop.plan.reason, Goal::OpenTheAnomaly);
+        assert_eq!(hop.step, "l2", "the move is the only way onward we know");
+
+        // **The move is unchanged and the reason for it is not**, which is the whole of #24. `l4`
+        // is a level 4 trigger we cannot reach, so it stops being what we claim to be doing;
+        // `next_hop`'s any-frontier fallback used to supply this same step under a goal that was
+        // not being pursued. Now the goal is the step.
+        assert_eq!(hop.plan.reason, Goal::Explore);
+        assert_eq!(hop.plan.target, "l2", "we say where we are actually going");
     }
 
     /// start branches two ways to the goal: a short way through `woods`, a long way round.
@@ -3885,49 +4036,112 @@ mod tests {
         assert!(m.gap("east", "start").unwrap() < m.gap("west", "start").unwrap(), "sighting wins");
     }
 
-    /// Heading for a target we cannot route to, step the way it lies.
+    /// With nothing at all we can route to, aim at the unreachable target and step the way it lies.
     ///
-    /// This is the branch coordinates were wanted for. `next_hop` finds no route — the normal state
-    /// early on, and the permanent state for anything across a fog gap — and steps to an adjacent
-    /// frontier instead. That choice used to come down to the lowest key, so a run heading for the
-    /// anomaly stepped whichever way the alphabet pointed.
+    /// This is the branch coordinates were wanted for, and #24 narrowed rather than removed it:
+    /// something routable now wins the nomination outright, so the fallback is reached only when
+    /// *nothing* is. The choice among adjacent nodes used to come down to the lowest key, so a run
+    /// heading for the anomaly stepped whichever way the alphabet pointed.
     ///
-    /// **Not** the case that sent a run into a level 5 crypt, and the difference matters. There the
-    /// anomaly key came from `completedAreas`, so it had no edges *and no position*: nothing
-    /// directional existed to use. Coordinates speak about places some dump has shown us, never
-    /// about places we have only heard of.
+    /// **The earlier fixture for this could not fail.** It reached `start` through a second dump
+    /// that shared a node with the first, and `fold` records edges both ways — so a route existed,
+    /// `first_step_toward` answered `west` on its own, and the bearing was never consulted. Two
+    /// leaves either side of a crossroads and an anomaly known only from a save flag is the real
+    /// shape of it.
     #[test]
     fn with_no_route_we_step_the_way_the_target_lies() {
         let mut m = WorldMap::new();
-        // Two unvisited neighbours, and the anomaly off to the west — placed, but in a component
-        // this node cannot reach.
+        // Two leaves. Nothing left to reveal at either, so the planner will not explore to them --
+        // and they are the only two moves there are.
         m.fold(&dump("here", "The Wold crossroads", vec![
             Node { key: "west".into(), heading: "West Field".into(),
-                   x: -100.0, y: 0.0, connections: 3 },
+                   x: -100.0, y: 0.0, connections: 1 },
             Node { key: "east".into(), heading: "East Field".into(),
-                   x: 100.0, y: 0.0, connections: 3 },
+                   x: 100.0, y: 0.0, connections: 1 },
         ]));
-        m.fold(&dump("far-off", "Somewhere else", vec![
-            Node { key: "start".into(), heading: "The Rift anomaly".into(),
-                   x: -500.0, y: 0.0, connections: 2 },
-            Node { key: "west".into(), heading: "West Field".into(),
-                   x: -100.0, y: 0.0, connections: 3 },
-        ]));
+        // The anomaly as a live run meets it: heard of through `start_first_corrupt_time`, with no
+        // heading and no edges, so no route. Its bearing comes from the corrupted blob, which is
+        // west of here.
         m.apply_save(&crate::game::save::parse(
-            "return { overworld = { areaFlags = { hell = 0.1 } } }",
+            "return { overworld = { areaFlags = {
+                 hell = 0.1, start_first_corrupt_time = 12, west_first_corrupt_time = 12,
+             } } }",
         ).unwrap());
-        m.fold(&dump("here", "The Wold crossroads", vec![
-            Node { key: "west".into(), heading: "West Field".into(),
-                   x: -100.0, y: 0.0, connections: 3 },
-            Node { key: "east".into(), heading: "East Field".into(),
-                   x: 100.0, y: 0.0, connections: 3 },
-        ]));
 
+        assert!(!m.can_route_to("start"), "the fixture must actually have no route");
         let hop = m.next_hop().expect("a step");
-        assert_eq!(hop.plan.reason, Goal::Anomaly, "the errand is unchanged by not knowing the way");
+        assert_eq!(hop.plan.reason, Goal::Anomaly, "nothing routable, so aim at it anyway");
         assert_eq!(hop.plan.target, "start");
         assert!(m.gap("west", "start").unwrap() < m.gap("east", "start").unwrap());
         assert_eq!(hop.step, "west", "toward the anomaly, not the lower key");
+        assert!(!hop.routed, "and the log has to say so");
+    }
+
+    /// The run of 2026-08-09, in the state that killed it.
+    ///
+    /// Every travel goal it printed read `(for start, Anomaly)` while `start` sat in the map
+    /// unheaded and edgeless, and `shrine6` — one step away, uncorrupted, unconsecrated — was never
+    /// considered, because a branch that could make no progress outranked one that could.
+    #[test]
+    fn a_shrine_we_can_reach_beats_an_anomaly_we_cannot() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("l12", "Standing — level 2 crypt", vec![
+            node("l26", "Wetwang meadow"),
+            node("shrine6", "Borsea shrine"),
+        ]));
+        m.apply_save(&crate::game::save::parse(
+            "return { overworld = { areaFlags = { hell = 0.1, start_first_corrupt_time = 12 } } }",
+        ).unwrap());
+        m.here = Some("l12".into());
+
+        assert_eq!(m.anomaly().map(|p| p.key.as_str()), Some("start"), "still known for what it is");
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Shrine, "the branch that can make progress gets its turn");
+        assert_eq!(plan.target, "shrine6");
+    }
+
+    /// Giving up on an errand we cannot route to does not mean giving up its direction.
+    ///
+    /// The half of #24 that is easy to lose. Refusing to *nominate* an unreachable target is right;
+    /// letting exploration then wander is how the fix would have paid for a truthful log with a
+    /// slower run. Both frontiers here are one hop away and equally informative, so nothing but the
+    /// bearing separates them — and the keys are chosen so the alphabet points the wrong way, which
+    /// is what the ordering fell back on before.
+    #[test]
+    fn we_explore_toward_the_errand_we_could_not_route_to() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "The Wold crossroads", vec![
+            Node { key: "zwest".into(), heading: "West Field".into(),
+                   x: -100.0, y: 0.0, connections: 3 },
+            Node { key: "aeast".into(), heading: "East Field".into(),
+                   x: 100.0, y: 0.0, connections: 3 },
+        ]));
+        m.apply_save(&crate::game::save::parse(
+            "return { overworld = { areaFlags = {
+                 hell = 0.1, start_first_corrupt_time = 12, zwest_first_corrupt_time = 12,
+             } } }",
+        ).unwrap());
+
+        assert!(!m.can_route_to("start"), "so the anomaly branch yields");
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Explore);
+        assert_eq!(plan.target, "zwest", "the alphabet says `aeast`; the corruption says west");
+    }
+
+    /// Inside a subworld the route test is not asked, because it would only measure our own model.
+    ///
+    /// Nothing links an interior node to its container, so `distances` from in here reaches no
+    /// surface node at all and every surface errand fails a route test for a reason that has nothing
+    /// to do with the world. Gating on it traded a campfire out the west door at 1 of 20 health for
+    /// whichever interior node happened to be walkable.
+    #[test]
+    fn inside_a_subworld_every_surface_errand_survives_the_route_test() {
+        let (mut m, _, _) = a_forest_with_two_doors();
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+        assert!(!m.can_route_to("l19"), "no edge joins the interior to the surface");
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Rest, "the exits are the route, and `cross_toward` walks them");
+        assert_eq!(plan.target, "l19");
     }
 
     #[test]
