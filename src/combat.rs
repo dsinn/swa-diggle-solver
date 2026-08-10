@@ -129,6 +129,13 @@ pub enum SelectError {
 /// afterwards — once a word is on the board there is no way to look at it and know what unselected
 /// looked like. Kept by the caller for exactly as long as the word might need clearing, which for
 /// the avoidable-murder path is until the game has finished arguing about it.
+///
+/// A baseline stays comparable for the whole word because **selecting a tile does not move any
+/// other tile**. `wordboard.select` (`wordboard.lua:125-162`) flips `tile.selected`, appends the
+/// tile to `wordTiles`, and never touches `tilegrid`; tiles leave the grid — and the rest fall —
+/// only when the word is submitted, through `tileboard.removeTiles` (`tileboard.lua:589`). So a
+/// fixed centre samples the same tile from the first click to the last, and every reading below
+/// compares like with like.
 #[derive(Debug, Clone)]
 pub struct Placed {
     baseline: Vec<f64>,
