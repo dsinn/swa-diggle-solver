@@ -2586,6 +2586,18 @@ pub fn drive(
                     ),
                     None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
                 },
+                // No route, but the dump on screen right now says which way the door lies. Its own
+                // line for the same reason `Explore` got one: it is a third decision procedure, and
+                // one that will be wrong in a way the others are not — straight-line distance knows
+                // nothing about walls, so a steer that repeats without arriving is the signature to
+                // look for.
+                Crossing::Steer { to, toward } => match fresh.nodes.iter().find(|n| &n.key == to) {
+                    Some(n) => (
+                        format!("steering `{container}` toward where `{toward}` is printed, via `{to}`"),
+                        (n.x, n.y),
+                    ),
+                    None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
+                },
                 // Its own line, and deliberately not either of the two above. A search with no
                 // destination at all is a third thing.
                 //

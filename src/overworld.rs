@@ -600,6 +600,33 @@ pub struct WorldMap {
     crossing_to: Option<(String, Goal)>,
     /// Why the door in `crossing_to` was chosen, for the log. Set wherever the choice is made.
     door_reason: Option<Door>,
+    /// **The most recent dump's own frame**, rewritten wholesale by every [`WorldMap::fold`]: every
+    /// node and every exit it named, at the coordinates it printed for them.
+    ///
+    /// Not the assembled map. [`Place::pos`] is a frame built across dumps by [`WorldMap::registration`],
+    /// which deliberately refuses subworld dumps — `zoomMult` is a shared factor and nothing checks
+    /// the zoom, so two interior dumps could silently disagree on scale. This sidesteps that
+    /// entirely by never comparing two dumps: everything in here was printed by the *same* dump, in
+    /// the same instant, under the same offset and the same zoom, so differences between two entries
+    /// are real whatever the view is doing.
+    ///
+    /// That is the whole reason it exists. A dump's exits section gives a door's **position and its
+    /// destination heading but never its key** (`overworldview.lua:1041-1047`), so the road out of a
+    /// subworld is not a node we can route to until some dump happens to name it as a neighbour —
+    /// which in `l2` on 2026-08-09 was the second-to-last step of a 22-step crossing. Its position
+    /// was on screen the entire time. See [`WorldMap::placed_now`].
+    ///
+    /// Keyed for exits by the synthesised `{parent}_path_to_{to_key}`, so a door and an ordinary node
+    /// are asked for by the same name.
+    frame: BTreeMap<String, (f64, f64)>,
+    /// `(door, squared distance)` for the last [`Crossing::Steer`] — the measure the descent has to
+    /// keep beating.
+    ///
+    /// This is what makes steering a *monotone measure* rather than a ranking, and the distinction is
+    /// the one `docs/superpowers/notes/navigation-loops.md` says every cycle in this project has come
+    /// down to. Cleared with the crossing itself, since a number measured against one door says
+    /// nothing about another.
+    steered_gap: Option<(String, f64)>,
 }
 
 /// Where to head, and why. The reason is carried so a route can be explained rather than just taken.
@@ -718,6 +745,14 @@ pub enum Crossing {
     /// because `Step` and `Explore` already log identically and a third silent case would make an
     /// old log unreadable.
     Seek { to: String },
+    /// No route to the destination, but the last dump printed where it *is* — so step to whichever
+    /// neighbour that dump puts closer to it.
+    ///
+    /// The middle ground between [`Crossing::Step`] and [`Crossing::Explore`], and it exists because
+    /// a door's key arrives long after its position does. Its own variant for the reason `Seek` is:
+    /// three decision procedures that print one line make a log that cannot be read, which cost the
+    /// crossing of `l2` a whole run's diagnosis.
+    Steer { to: String, toward: String },
     /// Standing on the exit road: leave for this overworld node.
     ///
     /// There was a `Retreat` variant here — hurt, the way onward is a fight, so go back the way we
@@ -1088,9 +1123,11 @@ impl WorldMap {
             // exists because the interior can re-roll — so a commitment made on the last visit is
             // worth nothing and holding it would be blind rather than bold.
             self.crossing_to = None;
+            self.steered_gap = None;
         } else if a.subworld.is_none() {
             self.entered_from = None;
             self.crossing_to = None;
+            self.steered_gap = None;
         }
         self.here = Some(a.here_key.clone());
 
@@ -1192,6 +1229,50 @@ impl WorldMap {
                 self.entry(container).neighbours.insert(e.to_key.clone());
             }
         }
+
+        // **This dump's own frame**, replacing whatever the last one left. Everything here shares one
+        // offset and one zoom because one print produced it, which is what makes the entries
+        // comparable without any of `registration`'s caveats — and why it is rebuilt rather than
+        // merged. See [`WorldMap::frame`].
+        //
+        // The exits go in under their synthesised node keys. That name is the one thing a dump does
+        // not give us about a door, and the one thing everything else asks for it by.
+        // **Roll the steering measure forward before the old frame is thrown away.**
+        //
+        // The node we have just arrived at was a *neighbour* in the frame about to be discarded, and
+        // that reading is the only one we will ever get of where we now stand: a dump prints its
+        // neighbours' positions and never the player's own. Taken here, "how far from the door am I"
+        // is answerable exactly once per move, which is exactly as often as it changes.
+        //
+        // A pan produces a dump at the same node, whose `here_key` is not in the previous frame
+        // either — so this quietly does nothing and the measure holds, which is what we want.
+        if let (Some((container, _)), Some((to, _))) = (a.subworld.as_ref(), self.crossing_to.as_ref())
+        {
+            let door_key = exit_node_key(container, to);
+            if let (Some(d), Some(h)) = (self.frame.get(&door_key), self.frame.get(&a.here_key)) {
+                let gap = (h.0 - d.0).powi(2) + (h.1 - d.1).powi(2);
+                self.steered_gap = Some((door_key, gap));
+            }
+        }
+        self.frame.clear();
+        for n in &a.nodes {
+            self.frame.insert(n.key.clone(), (n.x, n.y));
+        }
+        if let Some((container, _)) = a.subworld.as_ref() {
+            for e in &a.exits {
+                self.frame.insert(exit_node_key(container, &e.to_key), (e.x, e.y));
+            }
+        }
+    }
+
+    /// Where the most recent dump put `key`, in that dump's own frame — doors included.
+    ///
+    /// Answers `None` for anything the latest dump did not name, which is most of the map. That is
+    /// the point rather than a shortcoming: an answer here is always comparable with any other
+    /// answer here, because both came from one print. Two calls are a straight-line distance apart;
+    /// a call and a [`Place::pos`] are not, and must never be mixed.
+    fn placed_now(&self, key: &str) -> Option<(f64, f64)> {
+        self.frame.get(key).copied()
     }
 
     /// Applies `mainSaveData`: which areas are complete, and whether the anomaly has opened.
@@ -2162,6 +2243,102 @@ impl WorldMap {
                     !p.avoid && !(self.wants_rest && p.is_chest() && !p.completed)
                 }).unwrap_or(true)
         };
+
+        // **We cannot route there, but we can see where it is.**
+        //
+        // A dump's exits section prints a door's position and its destination heading and *not its
+        // key* (`overworldview.lua:1041-1047`). We synthesise the key ourselves, but the road out
+        // only becomes a node with edges once some dump names it as a neighbour — so until we are
+        // standing next to it, `first_step_toward` above has nothing to reach for and every crossing
+        // is the frontier walk below.
+        //
+        // What that costs, measured: crossing `l2` on 2026-08-09 the run explored essentially the
+        // whole village, 22 of its 62 steps, and `l2_path_to_l1` appears in **two lines of the entire
+        // raw log** — both at the second-to-last step. The door's coordinates were in every dump from
+        // the moment we walked in.
+        //
+        // So: descend on the straight-line distance to it. Both readings come from
+        // [`WorldMap::placed_now`], which is one dump's own frame, so no registration is involved and
+        // the subworld zoom caveat does not apply — see [`WorldMap::frame`].
+        //
+        // **Strictly closer than the last steer, or nothing.** A potential that strictly decreases
+        // every step cannot cycle, which `docs/superpowers/notes/navigation-loops.md` says is the
+        // property every navigation bug here has lacked — and "nearest neighbour to the door", taken
+        // on its own, is a ranking rather than a measure, so it can bounce between two nodes for
+        // ever exactly like `l9sub2` <-> `l9_plaza` did.
+        //
+        // ## Measuring the descent without ever knowing where we stand
+        //
+        // A dump prints its *neighbours'* positions and never the player's own, so "am I closer than
+        // I was?" cannot be asked directly. What makes it answerable anyway: a distance between two
+        // points **printed by the same dump** is unaffected by the pan, because a pan is a
+        // translation and both points move together. So the door-distance of the node we stepped
+        // onto, measured while it was still a neighbour, is comparable with the door-distance of its
+        // own neighbours measured one dump later. [`WorldMap::steered_gap`] holds that number, and
+        // each steer must beat it.
+        //
+        // The assumption this rests on is **zoom**, not offset: a zoom change rescales every
+        // distance and would make two dumps incomparable. That degrades safely — a comparison that
+        // wrongly fails simply yields to the frontier walk below, which is where we were before this
+        // existed. It never sends us the wrong way.
+        //
+        // When no neighbour improves — a pocket pointing the wrong way, or a wall between us and the
+        // door — this yields rather than settling for sideways. Straight-line distance knows nothing
+        // of walls, so getting stuck is expected rather than exceptional, and the frontier walk is
+        // what then goes and learns something.
+        //
+        // Paved still outranks near, as everywhere else in this function: `forest.lua` strings the
+        // road from entrance to exit, so a road heading roughly doorward beats brush heading exactly
+        // doorward. Squared distances throughout — they order the same as the distances, and no
+        // square root is taken.
+        //
+        // **No measure, no steer.** The ceiling arrives with the first move of a crossing — see where
+        // `fold` rolls it forward — so this sits out the very first dump inside a subworld and the
+        // frontier walk takes that step. One step, and it buys the guarantee: every steer is a strict
+        // improvement on the last, with no unmeasured first move to argue about. It also means a
+        // fixture carrying no geometry at all cannot accidentally steer.
+        let ceiling = self
+            .steered_gap
+            .as_ref()
+            .filter(|(k, _)| Some(k.as_str()) == dest.as_deref())
+            .map(|(_, g)| *g);
+        if let (Some(door), Some(ceiling)) =
+            (dest.as_deref().and_then(|d| self.placed_now(d)), ceiling)
+        {
+            let gap = |p: (f64, f64)| (p.0 - door.0).powi(2) + (p.1 - door.1).powi(2);
+            let mut best: Option<(bool, f64, &String)> = None;
+            for n in place.neighbours.iter().filter(|n| usable(n)) {
+                let Some(at) = self.placed_now(n) else { continue };
+                let d = gap(at);
+                if d >= ceiling {
+                    continue;
+                }
+                let brush = !self.places.get(n).map(|p| p.is_paved()).unwrap_or(false);
+                // `(brush, distance, key)` ascending, spelled out because an `f64` keeps the tuple
+                // from being `Ord`.
+                let better = match best {
+                    None => true,
+                    Some((b_brush, b_gap, b_key)) => match brush.cmp(&b_brush) {
+                        std::cmp::Ordering::Less => true,
+                        std::cmp::Ordering::Greater => false,
+                        std::cmp::Ordering::Equal => match d.total_cmp(&b_gap) {
+                            std::cmp::Ordering::Less => true,
+                            std::cmp::Ordering::Greater => false,
+                            std::cmp::Ordering::Equal => n < b_key,
+                        },
+                    },
+                };
+                if better {
+                    best = Some((brush, d, n));
+                }
+            }
+            // Deliberately does NOT write the measure. `fold` is its only writer, on arrival, from
+            // the frame that actually saw us get there — so a step the driver fails to take cannot
+            // tighten a ceiling we never passed.
+            if let Some((_, _, to)) = best {
+                return Some(Crossing::Steer { to: to.clone(), toward: dest? });
+            }
+        }
 
         // **Head for the nearest place that can still teach us something, by a route.**
         //
@@ -3772,6 +3949,77 @@ mod tests {
             ])
         });
         m
+    }
+
+    /// The door's position steers a crossing its key cannot route.
+    ///
+    /// Rebuilt from `l2` on 2026-08-09 (`spike-run-raw.log:2185-2210`), where this cost 22 of the
+    /// run's 62 steps. The exits section gives the door at `(1479, -130)` and never gives its key, so
+    /// `l2_path_to_l1` is not a node anything can route to — and the frontier walk, choosing between
+    /// two equally near unvisited neighbours, falls to the lower key and picks the one pointing away.
+    ///
+    /// The coordinates are the real ones for the door and for `l2sub13`; the two candidates are
+    /// placed to put the alphabet and the door in opposition, which is the whole question.
+    #[test]
+    fn a_door_we_cannot_route_to_still_says_which_way_to_go() {
+        let door = Exit {
+            x: 1479.0, y: -130.0,
+            to_key: "l1".into(), to_heading: "Cowlam — level 7 crypt".into(),
+        };
+        let at = |key: &str, x: f64, y: f64| Node {
+            key: key.into(), heading: "Dotterel Hedge house".into(), x, y, connections: 4,
+        };
+        let mut m = WorldMap::new();
+        // One step inside. No measure yet, so this dump is the frontier walk's -- see `cross_toward`.
+        m.fold(&inside_dump("l2", "l2sub7", "Dotterel Hedge house",
+            vec![at("l2sub13", 926.0, 413.0), at("l2sub4", 840.0, 636.0)],
+            vec![door.clone()]));
+        assert!(matches!(m.cross_toward(&[door.clone()]), Some(Crossing::Explore { .. })),
+            "nothing to descend on until a move has been measured");
+
+        // Arrived at `l2sub13`, which the dump above placed -- so the measure rolls forward.
+        m.fold(&inside_dump("l2", "l2sub13", "Dotterel Hedge chapel",
+            vec![at("l2sub12", 1045.0, 679.0), at("l2sub22", 1300.0, 100.0), at("l2sub7", 700.0, 700.0)],
+            vec![door.clone()]));
+        assert!(m.first_step_toward("l2sub13", "l2_path_to_l1", false).is_none(),
+            "the door has no edges, which is the whole predicament");
+
+        match m.cross_toward(&[door]) {
+            Some(Crossing::Steer { to, toward }) => {
+                assert_eq!(toward, "l2_path_to_l1");
+                assert_eq!(to, "l2sub22", "toward the door; `l2sub12` is nearer the front of the alphabet");
+            }
+            other => panic!("expected a steer toward the door, got {other:?}"),
+        }
+    }
+
+    /// A steer has to beat the last one, or a crossing could walk two nodes for ever.
+    ///
+    /// The property that makes this a *measure* and not a ranking. Every navigation cycle in this
+    /// project has been two nodes that each preferred the other, and a preference cannot rule that
+    /// out however sensible each half looks — `l9sub2` <-> `l9_plaza`, twenty laps.
+    #[test]
+    fn a_steer_that_does_not_gain_ground_yields_to_exploring() {
+        let door = Exit {
+            x: 1479.0, y: -130.0,
+            to_key: "l1".into(), to_heading: "Cowlam — level 7 crypt".into(),
+        };
+        let at = |key: &str, x: f64, y: f64| Node {
+            key: key.into(), heading: "Dotterel Hedge house".into(), x, y, connections: 4,
+        };
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump("l2", "l2sub7", "Dotterel Hedge house",
+            vec![at("l2sub13", 926.0, 413.0)], vec![door.clone()]));
+        m.cross_toward(&[door.clone()]);
+        // Standing on `l2sub13`, and every way on is further from the door than it was: a pocket
+        // pointing the wrong way, which straight-line distance cannot see coming.
+        m.fold(&inside_dump("l2", "l2sub13", "Dotterel Hedge chapel",
+            vec![at("l2sub12", 200.0, 900.0), at("l2sub9", 150.0, 1000.0)],
+            vec![door.clone()]));
+        match m.cross_toward(&[door]) {
+            Some(Crossing::Explore { .. }) => {}
+            other => panic!("expected exploring rather than a sideways steer, got {other:?}"),
+        }
     }
 
     /// A leaf is not worth the two steps it costs, so the crossing does not offer one.
