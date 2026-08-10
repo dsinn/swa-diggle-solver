@@ -575,26 +575,33 @@ impl Fight<'_> {
             log.push_str("  board never filled/settled -- not clicking into a moving board\n");
             return Ok(Some(Outcome::BoardNeverSettled { turns }));
         }
-        if let Err(e) = board.select_word(&steps) {
-            *select_failures += 1;
-            log.push_str(&format!(
-                "  SELECTION FAILED ({} of {SELECT_ATTEMPTS}): {e}\n",
-                *select_failures
-            ));
-            self.shot("combat-select-fail");
-            return Ok(match recover_from(*select_failures, e.board_is_clean) {
-                Recovery::PlayOn => {
-                    // Back to the outer loop, which re-reads the save and plans again. Re-planning
-                    // rather than re-typing the same word: the board may genuinely have moved under
-                    // us, and a fresh search costs nothing against a turn we have already paid for.
-                    log.push_str("  board is clear -- planning again\n");
-                    None
-                }
-                Recovery::Stop => {
-                    Some(Outcome::SelectionFailed { turns, detail: e.to_string() })
-                }
-            });
-        }
+        // Kept past the submission: if the game comes back with the avoidable-murder dialog, the
+        // word survives the cancel and has to come off, and this is the only record of what the
+        // board looked like before it went on.
+        let placed = match board.select_word(&steps) {
+            Ok(placed) => placed,
+            Err(e) => {
+                *select_failures += 1;
+                log.push_str(&format!(
+                    "  SELECTION FAILED ({} of {SELECT_ATTEMPTS}): {e}\n",
+                    *select_failures
+                ));
+                self.shot("combat-select-fail");
+                return Ok(match recover_from(*select_failures, e.board_is_clean) {
+                    Recovery::PlayOn => {
+                        // Back to the outer loop, which re-reads the save and plans again.
+                        // Re-planning rather than re-typing the same word: the board may genuinely
+                        // have moved under us, and a fresh search costs nothing against a turn we
+                        // have already paid for.
+                        log.push_str("  board is clear -- planning again\n");
+                        None
+                    }
+                    Recovery::Stop => {
+                        Some(Outcome::SelectionFailed { turns, detail: e.to_string() })
+                    }
+                });
+            }
+        };
         *select_failures = 0;
         self.park();
         std::thread::sleep(Duration::from_millis(150));
@@ -673,7 +680,7 @@ impl Fight<'_> {
                     self.accept_murder(keys, log)?;
                     return Ok(None);
                 }
-                if !self.back_out_of_murder(keys, log, steps.len())? {
+                if !self.back_out_of_murder(keys, log, &board, &placed)? {
                     // Left as it is rather than dressed up as an outcome. The word is still on the
                     // board and the modal may still be over it, so the next turn's
                     // `wait_until_ready` will report `BoardNeverSettled` — which is exactly what
@@ -742,7 +749,7 @@ impl Fight<'_> {
     /// A click would also have to wait out the 0.625s fade before the plaque is solid enough to
     /// aim at; the key is live the moment the dialog is announced.
     fn back_out_of_murder(
-        &self, keys: &PostMessageInput, log: &mut String, tiles: usize,
+        &self, keys: &PostMessageInput, log: &mut String, board: &Board, placed: &crate::combat::Placed,
     ) -> Result<bool, crate::Error> {
         for attempt in 1..=MURDER_CANCEL_TRIES {
             keys.focus();
@@ -755,16 +762,17 @@ impl Fight<'_> {
                 // refused the attack rather than clearing the board. So every letter has to come
                 // back off before another can be spelled.
                 //
-                // Two more presses than tiles, deliberately. A `QU` tile is one selection but two
-                // letters, so tile count and letter count are not the same number and the
-                // difference depends on the word; over-pressing costs nothing on an already-empty
-                // word, while under-pressing leaves a stub that the next word would be typed onto.
-                keys.focus();
-                for _ in 0..tiles + 2 {
-                    keys.press_key(crate::win::input::VK_BACK, crate::win::input::SC_BACK)?;
-                    std::thread::sleep(Duration::from_millis(60));
+                // Backspaced against the board rather than a computed number of times. This used to
+                // press `tiles + 2` and hope, the `+ 2` covering `QU` tiles that are one selection
+                // and two letters — a number that cannot be right for every word. The board itself
+                // says when the word is off, and a clear that did not happen must not be reported
+                // as one.
+                if !board.clear_selection(placed)? {
+                    log.push_str("  WARNING the word would not come off the board\n");
+                    self.shot("murder-stuck");
+                    return Ok(false);
                 }
-                log.push_str(&format!("  cleared {tiles} tiles worth of letters\n"));
+                log.push_str("  cleared the word off the board\n");
                 return Ok(true);
             }
             log.push_str(&format!("  press {attempt} did not dismiss the warning\n"));

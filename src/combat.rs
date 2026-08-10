@@ -18,12 +18,12 @@
 //! and the zero-health last stand, so the turns where a stray is most likely are exactly the turns
 //! worth playing. So a failure puts the board back rather than giving up on it.
 //!
-//! Putting it back is one keypress: `Delete` is `clearWord` (`utils/defaultbinds/keyboard.lua:12`),
-//! which is `wordboard.clear()` (`rpg.lua:220`). Clicking the offender back off would also work,
-//! since selection is a toggle (`wordboard.lua:132`) — but that needs to know *what* is selected,
-//! and after a stray that is precisely what is in doubt. [`SelectFailure`] reports whether the clear
-//! was confirmed, because retrying onto a half-selected board submits a different word than the one
-//! that was scored.
+//! Putting it back is `backspace`, pressed and checked until the board reads empty — see
+//! [`Board::clear_selection`], which records why the one-press `clearWord` is not usable. Clicking
+//! the offender back off would also work, since selection is a toggle (`wordboard.lua:132`) — but
+//! that needs to know *what* is selected, and after a stray that is precisely what is in doubt.
+//! [`SelectFailure`] reports whether the clear was confirmed, because retrying onto a half-selected
+//! board submits a different word than the one that was scored.
 //!
 //! ## Reading the board
 //!
@@ -36,7 +36,7 @@
 use crate::geometry::Geometry;
 use crate::layout;
 use crate::win::capture::{capture_client_rect, Frame};
-use crate::win::input::{click_at, PostMessageInput, SC_DELETE, VK_DELETE};
+use crate::win::input::{click_at, Input, PostMessageInput, SC_BACK, VK_BACK};
 use crate::win::window::GameWindow;
 use std::time::{Duration, Instant};
 
@@ -72,11 +72,18 @@ pub const RESTLESS_WATCH: Duration = Duration::from_millis(750);
 /// Gap between those samples. Six looks across the window.
 pub const RESTLESS_SAMPLE: Duration = Duration::from_millis(125);
 
-/// How long to wait for `clearWord` to empty the selection before pressing it again.
-pub const CLEAR_TIMEOUT: Duration = Duration::from_millis(600);
+/// How long a `backspace` has to show on the board before the next one is sent.
+///
+/// Deselection is the same animation as selection, whose worst measured is 143 ms.
+pub const CLEAR_SETTLE: Duration = Duration::from_millis(180);
 
-/// Presses of `clearWord` before declaring the board unfit to build another word on.
-pub const CLEAR_ATTEMPTS: usize = 3;
+/// Backspaces before declaring the board unfit to build another word on.
+///
+/// One per letter, so this has to clear the longest word the search will ever place plus the
+/// two-letter tiles in it, with room for a press lost to focus. Well past that: the cost of the
+/// ceiling being generous is time on a board that is already failing, and the cost of it being tight
+/// is a fight abandoned with a word still on the board.
+pub const CLEAR_PRESSES: usize = 32;
 
 /// Mean luminance of a box centred on a point, clipped to the frame.
 pub fn luma(frame: &Frame, cx: i32, cy: i32, radius: i32) -> f64 {
@@ -119,6 +126,19 @@ pub enum SelectError {
     /// rather than an input one — and the keyboard is still up, so the caller must clear it.
     LetterRefused { tile: usize, letter: char },
     Win(crate::Error),
+}
+
+/// What a placed word left behind, so it can be taken off again later.
+///
+/// The board as it read *before* anything was clicked, plus the tiles that were already moving on
+/// their own. Both are needed to answer "is anything selected now?", and neither can be recovered
+/// afterwards — once a word is on the board there is no way to look at it and know what unselected
+/// looked like. Kept by the caller for exactly as long as the word might need clearing, which for
+/// the avoidable-murder path is until the game has finished arguing about it.
+#[derive(Debug, Clone)]
+pub struct Placed {
+    baseline: Vec<f64>,
+    restless: Vec<usize>,
 }
 
 /// A word that could not be placed, and whether the board was left fit to try another one.
@@ -210,6 +230,16 @@ enum Settled {
     Missing(Vec<usize>),
     /// Tiles selected that we never asked for.
     Unexpected(Vec<usize>),
+}
+
+/// Is the word off the board?
+///
+/// A restless tile differs from the baseline for as long as it keeps animating, so it can never be
+/// waited out — excluded here for the same reason it is excluded from stray detection. Without that
+/// exclusion a board with one bomb on it can never be declared clear, and the fight is abandoned
+/// over a tile nobody touched.
+fn nothing_selected(selected: &[bool], restless: &[usize]) -> bool {
+    selected.iter().enumerate().all(|(i, c)| !c || restless.contains(&i))
 }
 
 /// Compares what the board shows as selected against what we asked for.
@@ -473,7 +503,7 @@ impl<'a> Board<'a> {
     /// is what [`crate::typist::Typed::steps`] yields. The baseline is taken once, before anything is
     /// clicked, so "selected" always means "differs from the untouched board" — comparing against
     /// the previous step instead would let a missed click look like a successful one.
-    pub fn select_word(&self, plan: &[(usize, Option<char>)]) -> Result<(), SelectFailure> {
+    pub fn select_word(&self, plan: &[(usize, Option<char>)]) -> Result<Placed, SelectFailure> {
         let dirty = |error| SelectFailure { error, board_is_clean: false };
         let baseline = self.read().map_err(|e| dirty(e.into()))?;
 
@@ -504,38 +534,47 @@ impl<'a> Board<'a> {
             }
         }
 
-        match self.place_all(plan, &baseline, &restless) {
-            Ok(()) => Ok(()),
+        let placed = Placed { baseline, restless };
+        match self.place_all(plan, &placed.baseline, &placed.restless) {
+            Ok(()) => Ok(placed),
             Err(error) => {
                 // The fight is not over because a word could not be typed, so the board is put back
                 // to something another word can be built on. Whether that worked is reported rather
                 // than assumed — a caller must not retry onto a half-selected board.
-                let board_is_clean = self.clear_selection(&baseline, &restless).unwrap_or(false);
+                let board_is_clean = self.clear_selection(&placed).unwrap_or(false);
                 Err(SelectFailure { error, board_is_clean })
             }
         }
     }
 
-    /// Presses `clearWord` until nothing reads as selected. `false` if it never got there.
-    fn clear_selection(&self, baseline: &[f64], restless: &[usize]) -> Result<bool, crate::Error> {
+    /// Takes letters off the word until nothing reads as selected. `false` if it never got there.
+    ///
+    /// ## Why not `clearWord`, which would be one press
+    ///
+    /// `Delete` is bound to `clearWord` (`utils/defaultbinds/keyboard.lua:12`), and it looks like
+    /// exactly the primitive this wants — the whole selection gone regardless of what is on it. It is
+    /// **modifier-gated**: the same bind layer declares `_mod = { delete = 'rshift' }`, and
+    /// `doUserFunctionWithBindsFromSet` (`main.lua:471-480`) requires
+    /// `love.keyboard.isDown('rshift')` before it will run the action. Layer 2 binds no `delete` at
+    /// all, so a bare press falls through both layers and does nothing.
+    ///
+    /// `backspace` has no `_mod` entry and layer 1 binds it to `wordboard.backspace()`
+    /// (`rpg.lua:221`) on any screen with a word on it. One letter per press instead of one press
+    /// full stop — which costs nothing here, because the loop has to re-read the board between
+    /// presses either way to know when to stop.
+    ///
+    /// **Press and check, never press a computed number of times.** A `QU` tile is one selection and
+    /// two letters, so the tile count is not the letter count and the difference depends on the word.
+    /// Counting is how the murder path ended up pressing `tiles + 2` times and hoping.
+    pub fn clear_selection(&self, placed: &Placed) -> Result<bool, crate::Error> {
         let keys = PostMessageInput::new(*self.win);
-        for _ in 0..CLEAR_ATTEMPTS {
-            keys.focus();
-            keys.press_extended_key(VK_DELETE, SC_DELETE)?;
-            let deadline = Instant::now() + CLEAR_TIMEOUT;
-            while Instant::now() < deadline {
-                std::thread::sleep(POLL);
-                // A restless tile differs from the baseline forever, so it can never be waited out
-                // — excluded here for the same reason it is excluded from stray detection.
-                let clear = self
-                    .selected_now(baseline)?
-                    .into_iter()
-                    .enumerate()
-                    .all(|(i, c)| !c || restless.contains(&i));
-                if clear {
-                    return Ok(true);
-                }
+        keys.focus();
+        for _ in 0..CLEAR_PRESSES {
+            if nothing_selected(&self.selected_now(&placed.baseline)?, &placed.restless) {
+                return Ok(true);
             }
+            keys.press_key(VK_BACK, SC_BACK)?;
+            std::thread::sleep(CLEAR_SETTLE);
         }
         Ok(false)
     }
@@ -620,6 +659,22 @@ mod tests {
         assert_eq!(compare_selection(&[0, 3, 4], &[0, 3], &[4]), Settled::Yes);
         // But it is still allowed to be one of the tiles we selected.
         assert_eq!(compare_selection(&[0, 4], &[0, 4], &[4]), Settled::Yes);
+    }
+
+    #[test]
+    fn an_empty_board_is_clear_and_a_letter_still_on_it_is_not() {
+        assert!(nothing_selected(&[false, false, false], &[]));
+        assert!(!nothing_selected(&[false, true, false], &[]));
+    }
+
+    #[test]
+    fn a_bomb_ticking_away_does_not_keep_the_board_dirty_forever() {
+        // The clear loop gives up when this stays false, so a restless tile counted as selected
+        // abandons a fight over a tile nothing clicked -- and it can never come good, because the
+        // bomb goes on pulsing whatever we press.
+        assert!(nothing_selected(&[false, true, false], &[1]));
+        // But a real letter alongside it still reads as dirty.
+        assert!(!nothing_selected(&[true, true, false], &[1]));
     }
 
     #[test]

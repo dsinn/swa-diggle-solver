@@ -316,16 +316,20 @@ pub const SC_SPACE: u16 = 0x39;
 pub const VK_ESCAPE: u16 = 0x1B;
 pub const SC_ESCAPE: u16 = 0x01;
 /// Delete, bound to `clearWord` (`utils/defaultbinds/keyboard.lua:12`), which is
-/// `wordboard.clear()` (`rpg.lua:220`) — the whole selection at once, with no state guard on it.
+/// `wordboard.clear()` (`rpg.lua:220`) — the whole selection at once.
 ///
-/// Preferred over un-toggling tiles one by one, because it does not need to know *what* is
-/// selected. After a stray, that is exactly what we do not know.
+/// **Sending this alone does nothing, and that is not obvious from the bind.** The same layer
+/// declares `_mod = { delete = 'rshift' }`, and `doUserFunctionWithBindsFromSet`
+/// (`main.lua:471-480`) will not run the action unless `love.keyboard.isDown('rshift')`. Layer 2
+/// binds no `delete`, so an unmodified press falls through both layers silently. It went into a
+/// commit as a one-press word-clear before the gate was noticed; `crate::combat::Board`
+/// backspaces instead, which has no `_mod` entry.
 ///
-/// **Context-dependent, like every unqualified key here.** `userFunctions` is consulted by whatever
-/// mode is active, so this means "clear the word" only on a screen that has one — combat, the
-/// shrine, crafting. Send it where the screen is already established.
+/// Kept because the fact is worth not re-deriving, not because anything sends it. Whether a posted
+/// `rshift` even reaches `love.keyboard.isDown` — which reads SDL's key state rather than the
+/// message queue — is untested.
 ///
-/// An extended key, like the arrows below: send it with `press_extended_key`.
+/// An extended key, like the arrows below: it would need `press_extended_key`.
 pub const VK_DELETE: u16 = 0x2E;
 pub const SC_DELETE: u16 = 0x53;
 pub const VK_UP: u16 = 0x26;
