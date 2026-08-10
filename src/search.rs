@@ -464,14 +464,18 @@ pub enum Goal {
     /// Kill the enemy. The **first** lethal word wins and the rest stop — optimal play is not the
     /// point, ending the exchange is.
     ///
-    /// **Parked for the ordinary kill, and still live for one branch.** [`Goal::RankedKill`] has
-    /// taken over the general case while it is being evaluated against this; if the ranking does not
-    /// earn the full dictionary scan it costs, this is what we come back to.
+    /// **Nothing selects this any more.** [`Goal::RankedKill`] has the general case, and as of
+    /// 2026-08-10 the last exception went with it — so this is reachable only from a test.
     ///
-    /// The exception is deliberate and is `killing_blow`'s [`crate::rested::Aim::HealFully`]: a
-    /// player who heals on overkill wants the *deepest* overkill that still lands, and ranking a
-    /// board's leftover letters would pull against that. That branch is outside the ranking's remit
-    /// anyway — it is the well-rested case, and the ranking was asked for on the general one.
+    /// Kept, not deleted, because it is the documented fallback: if the ranking turns out not to earn
+    /// the full dictionary scan it costs, this is what we come back to, and it is a one-line change
+    /// in `killing_blow` to do so.
+    ///
+    /// The exception that went was `killing_blow`'s [`crate::rested::Aim::HealFully`], on the
+    /// argument that a player who heals on overkill wants the *deepest* overkill that still lands.
+    /// Wrong twice: this does not find the deepest overkill — it reports whichever thread cleared
+    /// `need` first and stops the rest — and depth past a full heal is worth nothing to want, because
+    /// a player can only be missing so much health. See `killing_blow`.
     FirstKill { need: i64 },
     /// Kill the enemy, and among the words that do, play the best one.
     ///
@@ -684,14 +688,29 @@ impl Goal {
                 Goal::FrugalKill { need: lethal, below: lethal + 2 }
             }
             crate::rested::Aim::Frugal => kill,
-            // Spend it well: the first answer whose half-overkill covers the deficit. If none does,
-            // the search falls back to its best-scoring word, which is exactly "if we cannot heal
-            // fully, use the best scoring answer".
+            // Spend it well: enough overkill that the floored halving covers the whole deficit. If
+            // nothing reaches that, the search falls back to its best-scoring word, which is exactly
+            // "if we cannot heal fully, use the best scoring answer".
             //
             // Buffered, because this is a kill with no upper bound: overshooting heals a little more
             // than needed, undershooting fails to kill at all.
+            //
+            // ## Ranked, not first-found, and the dev's reason is the good one
+            //
+            // **A player can only be missing so much health.** `need` already carries the whole
+            // deficit — `2 * missing`, because the heal is `floor(overkill/2)` — so every point past
+            // it heals nothing at all. There is no prize for hitting harder here, which makes this a
+            // threshold like any other kill's, and the question of *which* word to clear it with is
+            // the ordinary one: the cheapest.
+            //
+            // It read `Goal::FirstKill` and was justified as wanting "the deepest overkill that
+            // still lands". That was wrong twice over. `FirstKill` does not find the deepest
+            // overkill — it reports whichever thread reached `need` first and stops the rest — and
+            // depth past a full heal is worth nothing to want. So a board could spend its `Q` on a
+            // heal a wood word would also have completed. [`crate::pick::Rank`] answers it now,
+            // including what the word costs the board (`pick::hoarded`).
             crate::rested::Aim::HealFully => {
-                Goal::FirstKill { need: lethal + 2 * p.vitals.missing() + DAMAGE_BUFFER }
+                Goal::RankedKill { need: lethal + 2 * p.vitals.missing() + DAMAGE_BUFFER }
             }
         }
     }
@@ -1877,10 +1896,17 @@ mod rested_goal_tests {
         assert_eq!(goal(Some(&player(10, true))), Goal::FrugalKill { need: 10, below: 12 });
     }
 
+    /// A full top-up is a threshold, so it is bought with the cheapest word that clears it.
+    ///
+    /// The dev's correction, 2026-08-10: **a player can only be missing so much health.** `need`
+    /// already carries the whole deficit, so every point past it heals nothing — which makes this an
+    /// ordinary kill threshold and the word that clears it an ordinary ranking question. It was
+    /// `FirstKill`, justified as wanting the deepest overkill; depth past a full heal is worth
+    /// nothing to want, and `FirstKill` does not find it anyway.
     #[test]
-    fn a_bad_wound_buys_a_full_top_up() {
+    fn a_bad_wound_buys_a_full_top_up_with_the_cheapest_word_that_does_it() {
         // Missing 8, and the heal is half the overkill, so 16 of overkill are needed: damage 26.
-        assert_eq!(goal(Some(&player(4, true))), Goal::FirstKill { need: 27 });
+        assert_eq!(goal(Some(&player(4, true))), Goal::RankedKill { need: 27 });
     }
 
     #[test]
