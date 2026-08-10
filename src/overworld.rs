@@ -4077,27 +4077,39 @@ mod tests {
         assert!(!hop.routed, "and the log has to say so");
     }
 
-    /// The run of 2026-08-09, in the state that killed it.
+    /// The last decision of the run of 2026-08-09, rebuilt from `spike-run-raw.log:1336-1344`.
     ///
-    /// Every travel goal it printed read `(for start, Anomaly)` while `start` sat in the map
-    /// unheaded and edgeless, and `shrine6` — one step away, uncorrupted, unconsecrated — was never
-    /// considered, because a branch that could make no progress outranked one that could.
+    /// Standing on `l28`, the dump named `shrine6` for the first time — two connections, uncorrupted,
+    /// unconsecrated, one step away — alongside `l49`, a level 6 crypt. The planner named `start`,
+    /// which sat in the map unheaded and edgeless, stepped onto the crypt because no route to `start`
+    /// existed, and the run died there. A branch that could make no progress outranked one that could.
+    ///
+    /// **`shrine6` was known for exactly this one decision**, not for the five hops before it — the
+    /// earlier `(for start, Anomaly)` lines had no shrine in the map to skip. Worth being precise
+    /// about: what #24 recovers here is the last move, and what it changes about the other four is
+    /// only that they stop claiming an errand and explore under their own name.
     #[test]
     fn a_shrine_we_can_reach_beats_an_anomaly_we_cannot() {
         let mut m = WorldMap::new();
-        m.fold(&dump("l12", "Standing — level 2 crypt", vec![
-            node("l26", "Wetwang meadow"),
+        m.fold(&dump("l28", "Enholmes town", vec![
+            node("l27", "Barkerdale village"),
+            node("l19", "Dane village"),
+            node("l49", "Yokefleet — level 6 crypt"),
             node("shrine6", "Borsea shrine"),
         ]));
+        // `start` as the run actually held it: heard of through `start_first_corrupt_time`, no
+        // heading, no edges. `hell = 0.1` means the portal is open -- see `anomaly_available`.
         m.apply_save(&crate::game::save::parse(
             "return { overworld = { areaFlags = { hell = 0.1, start_first_corrupt_time = 12 } } }",
         ).unwrap());
-        m.here = Some("l12".into());
+        m.here = Some("l28".into());
 
         assert_eq!(m.anomaly().map(|p| p.key.as_str()), Some("start"), "still known for what it is");
+        assert!(!m.can_route_to("start"), "and still nothing we can walk to");
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Shrine, "the branch that can make progress gets its turn");
         assert_eq!(plan.target, "shrine6");
+        assert_eq!(m.next_hop().unwrap().step, "shrine6", "not the level 6 crypt next door");
     }
 
     /// Giving up on an errand we cannot route to does not mean giving up its direction.
