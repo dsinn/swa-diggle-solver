@@ -332,6 +332,10 @@ pub const SC_ESCAPE: u16 = 0x01;
 /// An extended key, like the arrows below: it would need `press_extended_key`.
 pub const VK_DELETE: u16 = 0x2E;
 pub const SC_DELETE: u16 = 0x53;
+/// Right Shift — the modifier `delete` is gated behind. Not an extended key; scancode 0x36 is what
+/// tells it from Left Shift, since Windows reports both under a generic `VK_SHIFT` on some paths.
+pub const VK_RSHIFT: u16 = 0xA1;
+pub const SC_RSHIFT: u16 = 0x36;
 pub const VK_UP: u16 = 0x26;
 pub const SC_UP: u16 = 0x48;
 pub const VK_DOWN: u16 = 0x28;
@@ -391,6 +395,31 @@ impl PostMessageInput {
                 let _ = PostMessageW(self.win.hwnd, WM_CHAR, WPARAM(ch as usize), LPARAM(1));
             }
             std::thread::sleep(Duration::from_millis(40));
+        }
+        Ok(())
+    }
+
+    /// Posts a key-down on its own, leaving the key held as far as the game is concerned.
+    ///
+    /// For modifiers, which are state rather than events: a bind can require one to be held
+    /// (`main.lua:475` gates on `love.keyboard.isDown`), and that cannot be expressed by a press
+    /// that releases itself.
+    ///
+    /// **Every call must be paired with [`key_up`](Self::key_up), including on the error paths.** A
+    /// modifier left down is invisible from outside the game — nothing we capture would show it.
+    pub fn key_down(&self, vk: u16, scancode: u16) -> Result<(), crate::Error> {
+        let down = LPARAM(((scancode as isize) << 16) | 0x0000_0001);
+        unsafe {
+            let _ = PostMessageW(self.win.hwnd, WM_KEYDOWN, WPARAM(vk as usize), down);
+        }
+        Ok(())
+    }
+
+    /// Posts a key-up on its own. Safe to send for a key that was never held.
+    pub fn key_up(&self, vk: u16, scancode: u16) -> Result<(), crate::Error> {
+        let up = LPARAM(((scancode as isize) << 16) | (0xC000_0001u32 as isize));
+        unsafe {
+            let _ = PostMessageW(self.win.hwnd, WM_KEYUP, WPARAM(vk as usize), up);
         }
         Ok(())
     }

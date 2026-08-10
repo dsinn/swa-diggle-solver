@@ -63,14 +63,8 @@ pub const CLICK_TIMEOUT: Duration = Duration::from_millis(600);
 /// Attempts per tile before giving up on the word.
 pub const CLICK_ATTEMPTS: usize = 3;
 
-/// How long to watch an untouched board to learn which tiles move on their own.
-///
-/// Long enough to see a slow animation turn over, where a single pair of reads can catch one at the
-/// same brightness twice and call it still. Paid once per word, against ~1 s to place one.
-pub const RESTLESS_WATCH: Duration = Duration::from_millis(750);
-
-/// Gap between those samples. Six looks across the window.
-pub const RESTLESS_SAMPLE: Duration = Duration::from_millis(125);
+/// Gap between the two reads that learn which tiles move on their own.
+pub const RESTLESS_SAMPLE: Duration = Duration::from_millis(250);
 
 /// How long a `backspace` has to show on the board before the next one is sent.
 ///
@@ -513,26 +507,29 @@ impl<'a> Board<'a> {
         // `clicking tile 1 also changed [4]`, where tile 4 was the bomb and tile 1 had selected
         // perfectly well.
         //
-        // Measured rather than guessed at: watch the board for a while, and anything that moved on
-        // its own is excluded from stray detection for the rest of the word. The safety property
-        // survives, because it never rested on watching other tiles -- a misplaced click still
-        // fails, as the tile we asked for does not become selected.
-        // Sampled over RESTLESS_WATCH rather than a single gap, because one pair of reads only
-        // catches an animation whose phase happens to differ across those two instants. A slow
-        // sparkle can sit at the same brightness 250 ms apart and still be moving, which is how a
-        // word died to `clicking tile 0 also changed [9]` on a board whose tile 9 was quietly
-        // bubbling. Union of every sample: a tile that moved at any point in the window is restless.
-        let mut restless: Vec<usize> = Vec::new();
-        let watch_until = Instant::now() + RESTLESS_WATCH;
-        while Instant::now() < watch_until {
-            std::thread::sleep(RESTLESS_SAMPLE);
-            let now = self.read().map_err(|e| dirty(e.into()))?;
-            for (i, (a, b)) in baseline.iter().zip(now.iter()).enumerate() {
-                if (a - b).abs() > CHANGED && !restless.contains(&i) {
-                    restless.push(i);
-                }
-            }
-        }
+        // Measured rather than guessed at: read the board twice, and anything that moved on its own
+        // is excluded from stray detection for the rest of the word. The safety property survives,
+        // because it never rested on watching other tiles -- a misplaced click still fails, as the
+        // tile we asked for does not become selected.
+        //
+        // **This window was briefly widened to 750ms on a wrong diagnosis, and is back.** The
+        // reasoning was that a slow animation could read the same twice 250ms apart, and that this
+        // explained a live `clicking tile 0 also changed [9]`. `spike_rshift_delete` then measured
+        // the actual board: selecting two tiles changed the reading of NINE of ten, and two
+        // backspaces put all nine back -- so that failure is caused by selection, not by animation,
+        // and no watch window of any length addresses it. Widening this bought nothing and cost
+        // half a second per word. See the board-wide change task.
+        std::thread::sleep(RESTLESS_SAMPLE);
+        let restless: Vec<usize> = {
+            let second = self.read().map_err(|e| dirty(e.into()))?;
+            baseline
+                .iter()
+                .zip(second.iter())
+                .enumerate()
+                .filter(|(_, (a, b))| (*a - *b).abs() > CHANGED)
+                .map(|(i, _)| i)
+                .collect()
+        };
 
         let placed = Placed { baseline, restless };
         match self.place_all(plan, &placed.baseline, &placed.restless) {
