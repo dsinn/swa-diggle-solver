@@ -208,6 +208,19 @@ impl Frame {
 /// only the requested rectangle moves. For the combat loop — which reads a ~472×472 board out of a
 /// 1920×1080 window, once per word — that is ~18× fewer pixels on top of not forcing a redraw.
 ///
+/// Measured live on the board rectangle, 10.7% of the window:
+///
+/// | capture | median | min / max |
+/// |---|---|---|
+/// | `PrintWindow`, full window | 28.5 ms | 23.0 / 31.3 |
+/// | `BitBlt`, board rect | **4.4 ms** | 2.6 / 10.9 |
+///
+/// **The control is the part that mattered, not the 6.4×.** The two read *different sources* — one
+/// re-renders, the other copies what is already on screen — so a speed win would have been worthless
+/// if they disagreed about the pixels. Worst per-tile luma difference was **0.00**, on an idle board
+/// and again with tiles selected. Selection is called at a 12-luma threshold
+/// ([`crate::combat::CHANGED`]), so the agreement is far inside what the reading needs.
+///
 /// **The trade is real:** this reads the actual screen, so anything covering the window is captured
 /// instead of the game. It is only valid with the game in the foreground and unobscured, which the
 /// combat loop already requires for `SendInput` to reach it. When in doubt, use [`capture_window`].
