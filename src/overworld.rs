@@ -485,8 +485,31 @@ impl Place {
     ///   it usually cannot be.
     ///
     /// The saving arrives one step later than it sounds: the second prong only closes when the far
-    /// end is reached. Nothing can do better without seeing through the fog — until `D` is known,
-    /// that prong might genuinely lead somewhere.
+    /// end is reached. Nothing can do better with what we are given — and what we are given was
+    /// checked, because the obvious question is why we do not simply read the neighbour's edges.
+    ///
+    /// ## Why the late close is not a shortcoming: the edges are not published
+    ///
+    /// A player looking at the screen can see the roads leaving a node they are not standing on, and
+    /// judge the fork by eye. That view is not in any data we get:
+    ///
+    /// - **The console gives exactly one level.** `verboseAdjacencyData`
+    ///   (`overworldview.lua:1022-1053`) is the game's only adjacency print, and per neighbour it
+    ///   emits key, heading, position and `table.len(location.connections)` — the *count*. Never the
+    ///   neighbour's own neighbours. The count is what makes this rule possible at all.
+    /// - **The save has no graph.** The only subnode entries in `mainSaveData` are `completedAreas`
+    ///   flags. A subworld's `locationData` is generated from a seed at load and never persisted,
+    ///   which is also what lets `regenerateMap` re-roll it.
+    ///
+    /// One other source exists and is deliberately unused. `connectDiscontiguousLocations` prints
+    /// `Connecting disconnected nodes <a> <b>` (`utils/world.lua:467`) when generation produces a
+    /// split graph and has to bridge it — real named edges, and a live run logged four of them
+    /// naming eight nodes it had never stood on. Tempting, and rejected: it is a generation-time
+    /// debug line rather than a described interface, it fires only for graphs that happened to come
+    /// out disconnected, and in a lost woods it would have to be re-read after every
+    /// `regenerateMap`. Building the map's correctness on an incidental print is a brittleness we
+    /// would be choosing rather than inheriting. Recorded so the next person can weigh it without
+    /// repeating the search.
     ///
     /// ## Three ways it deliberately does not fire
     ///
