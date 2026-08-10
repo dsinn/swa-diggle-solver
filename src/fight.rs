@@ -70,6 +70,9 @@ fn announces_murder_dialog(line: &str) -> bool {
 /// toxin it applies, and no amount of aiming lower fixes a model that is missing a term. The cost is
 /// a `Murder` flag; the alternative is replaying one word until `MAX_TURNS` — `turns += 1` runs on
 /// this path, and a live run reached thirty attempts before it was stopped by hand.
+/// `Goal::FrugalKill` reaches the `_` arm and should: it is a kill we chose to make, so a warning
+/// that the kill is avoidable is not news, and there is no band to lower — its ceiling protects a
+/// rest charge, not a life. Backing off it would trade the fight for a saving.
 fn nothing_left_to_lower(goal: Goal) -> bool {
     match goal {
         Goal::Scare { need, below } => {
@@ -441,6 +444,14 @@ impl Fight<'_> {
             log.push_str(&format!(
                 "  {name} can be scared off ({:?}); aiming for {need}..={} damage, not a kill\n",
                 mods.nerve,
+                below - 1
+            ));
+        }
+        // Its own line, because for one run this band borrowed the one above and the log said an
+        // enemy with no nerve at all `can be scared off (None)` while we tried to kill it.
+        if let Goal::FrugalKill { need, below } = goal {
+            log.push_str(&format!(
+                "  killing {name} frugally: {need}..={} damage keeps the rest charge\n",
                 below - 1
             ));
         }

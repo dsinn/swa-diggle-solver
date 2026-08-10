@@ -433,9 +433,15 @@ impl Outcome {
     /// What to play given the goal that was searched for.
     ///
     /// The fallback direction is a property of the goal, not of the search, and reading it off the
-    /// goal is what keeps the two from disagreeing. A ceiling means missing upward is the dangerous
-    /// miss, so [`Goal::Scare`] falls back to [`Outcome::least`]; everything else is trying to do as
-    /// much damage as it can and falls back to [`Outcome::best`].
+    /// goal is what keeps the two from disagreeing.
+    ///
+    /// Two goals carry a ceiling and they want opposite things when the band comes up empty:
+    ///
+    /// - [`Goal::Scare`]'s ceiling is a **constraint**. Overshooting kills something we meant to
+    ///   frighten off, so the fallback is the gentlest word we have.
+    /// - [`Goal::FrugalKill`]'s ceiling is an **optimisation** — a rest charge saved by not
+    ///   overkilling. Missing it costs a charge; falling back to the gentlest word costs the fight,
+    ///   and did (see [`Goal::FrugalKill`]). So it falls back like every other kill: hardest hit.
     pub fn choice_for(&self, goal: Goal) -> Option<&Found> {
         match goal {
             Goal::Scare { .. } => self.lethal.as_ref().or(self.least.as_ref()),
@@ -489,6 +495,28 @@ pub enum Goal {
     /// pushes it past the line is also a turn it does not get to attack. And for the enemies that
     /// carry `fear`, mostly humans, the kill would be recorded as murder.
     Scare { need: i64, below: i64 },
+    /// **Kill**, but with an overkill of 0 or 1, to avoid spending a `wellRested` charge.
+    ///
+    /// The same shape as [`Goal::Scare`] and the opposite intent, which is why it is its own variant
+    /// rather than a flag. A scare's ceiling is a **constraint** — going over it kills something we
+    /// meant to frighten off. This ceiling is an **optimisation**, worth a point of damage and not
+    /// one turn more.
+    ///
+    /// ## The run this cost
+    ///
+    /// It was `Goal::Scare { need: lethal, below: lethal + 2 }`, and so it inherited the scare's
+    /// fallback: when nothing lands in the band, play the *gentlest* word available. Against a
+    /// 115+10hp boss on 2026-08-09 that band was `125..=126`, no word came close, and the run played
+    /// `TAD` for 1 damage, then `TEEL` for 1, then `COLOG` for 7, and was killed on turn 9 —
+    /// protecting a rest charge it would never live to use.
+    ///
+    /// A kill we cannot afford tidily is still a kill worth making, so this falls back to the
+    /// hardest hit available. The charge is a saving; the fight is the point.
+    ///
+    /// It also explains a log line that read as nonsense: `can be scared off (None); aiming for
+    /// 125..=126 damage, not a kill`, printed for an enemy with no nerve to break at all. That line
+    /// is [`Goal::Scare`]'s, and this was never a scare.
+    FrugalKill { need: i64, below: i64 },
 }
 
 /// Extra damage aimed for beyond a threshold, to absorb error in our own damage model.
@@ -653,7 +681,7 @@ impl Goal {
             // `affordable_buffer(1)` is 0 — there is no slack here to spend on safety. Falling one
             // short costs a turn; buffering would cost the charge this branch exists to protect.
             crate::rested::Aim::Frugal if p.consumes_charge => {
-                Goal::Scare { need: lethal, below: lethal + 2 }
+                Goal::FrugalKill { need: lethal, below: lethal + 2 }
             }
             crate::rested::Aim::Frugal => kill,
             // Spend it well: the first answer whose half-overkill covers the deficit. If none does,
@@ -725,7 +753,9 @@ pub fn search(
         Goal::RankedKill { need } => {
             ranked_kill(dict, scorer, tiles, geometry, mods, need, picking, threads)
         }
-        Goal::Scare { need, below } => {
+        // The same search either way — a band is a band. Only the fallback differs, and that is
+        // `Outcome::choice_for`'s business rather than the racer's.
+        Goal::Scare { need, below } | Goal::FrugalKill { need, below } => {
             race_for_band(dict, scorer, tiles, geometry, mods, need, Some(below), threads)
         }
         Goal::MaxDamage => max_damage(dict, scorer, tiles, geometry, mods, threads),
@@ -1214,6 +1244,22 @@ mod tests {
             played.score, least.score,
             "a missed scare band must fall back to the gentlest word, not to {} at {}",
             best.word, best.score
+        );
+
+        // The same band, the other intent, the opposite fallback.
+        //
+        // `Goal::FrugalKill` used to *be* a `Goal::Scare`, so it inherited the assertion above and
+        // played the gentlest word when its band came up empty. Against a 115+10hp boss that meant
+        // `TAD` for 1 damage, twice, and a dead run on turn 9 — a rest charge protected to the death.
+        // Its ceiling is a saving, not a rule, so a band it cannot hit is abandoned rather than
+        // obeyed.
+        let frugal = out
+            .choice_for(Goal::FrugalKill { need: 1000, below: 1001 })
+            .expect("something is playable");
+        assert_eq!(
+            frugal.score, best.score,
+            "a kill we cannot make tidily is still a kill: expected {} at {}, got {} at {}",
+            best.word, best.score, frugal.word, frugal.score
         );
 
         // And the ordinary kill goals must be unaffected — they have no ceiling, so hitting hard is
@@ -1825,7 +1871,10 @@ mod rested_goal_tests {
     #[test]
     fn a_scratch_kills_without_triggering_a_heal() {
         // Missing 2 of 12. floor(overkill/2) must stay at 0, so overkill of 0 or 1: damage 10 or 11.
-        assert_eq!(goal(Some(&player(10, true))), Goal::Scare { need: 10, below: 12 });
+        //
+        // `FrugalKill` and not `Scare`, which is what this asserted until a boss killed the run for
+        // it. The band is identical and the intent is opposite: see `Goal::FrugalKill`.
+        assert_eq!(goal(Some(&player(10, true))), Goal::FrugalKill { need: 10, below: 12 });
     }
 
     #[test]
