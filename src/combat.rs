@@ -11,8 +11,19 @@
 //! selection animation takes 83 ms median (143 ms worst) to move a tile far enough to read — that is
 //! the game, not our instrument: making the capture 6× cheaper barely changed it.
 //!
-//! The one residual failure, a click landing on the *wrong* tile, needs no new mechanism either:
-//! selection is a toggle (`wordboard.lua:132`), so clicking the offender deselects it.
+//! ## When a word cannot be placed
+//!
+//! A word failing is ordinary, and it does not end the fight. The game ends a run when no word can
+//! be **made** — not when one cannot be typed — and the board keeps shrinking under exploding tiles
+//! and the zero-health last stand, so the turns where a stray is most likely are exactly the turns
+//! worth playing. So a failure puts the board back rather than giving up on it.
+//!
+//! Putting it back is one keypress: `Delete` is `clearWord` (`utils/defaultbinds/keyboard.lua:12`),
+//! which is `wordboard.clear()` (`rpg.lua:220`). Clicking the offender back off would also work,
+//! since selection is a toggle (`wordboard.lua:132`) — but that needs to know *what* is selected,
+//! and after a stray that is precisely what is in doubt. [`SelectFailure`] reports whether the clear
+//! was confirmed, because retrying onto a half-selected board submits a different word than the one
+//! that was scored.
 //!
 //! ## Reading the board
 //!
@@ -25,7 +36,7 @@
 use crate::geometry::Geometry;
 use crate::layout;
 use crate::win::capture::{capture_client_rect, Frame};
-use crate::win::input::click_at;
+use crate::win::input::{click_at, PostMessageInput, SC_DELETE, VK_DELETE};
 use crate::win::window::GameWindow;
 use std::time::{Duration, Instant};
 
@@ -51,6 +62,21 @@ pub const CLICK_TIMEOUT: Duration = Duration::from_millis(600);
 
 /// Attempts per tile before giving up on the word.
 pub const CLICK_ATTEMPTS: usize = 3;
+
+/// How long to watch an untouched board to learn which tiles move on their own.
+///
+/// Long enough to see a slow animation turn over, where a single pair of reads can catch one at the
+/// same brightness twice and call it still. Paid once per word, against ~1 s to place one.
+pub const RESTLESS_WATCH: Duration = Duration::from_millis(750);
+
+/// Gap between those samples. Six looks across the window.
+pub const RESTLESS_SAMPLE: Duration = Duration::from_millis(125);
+
+/// How long to wait for `clearWord` to empty the selection before pressing it again.
+pub const CLEAR_TIMEOUT: Duration = Duration::from_millis(600);
+
+/// Presses of `clearWord` before declaring the board unfit to build another word on.
+pub const CLEAR_ATTEMPTS: usize = 3;
 
 /// Mean luminance of a box centred on a point, clipped to the frame.
 pub fn luma(frame: &Frame, cx: i32, cy: i32, radius: i32) -> f64 {
@@ -93,6 +119,30 @@ pub enum SelectError {
     /// rather than an input one — and the keyboard is still up, so the caller must clear it.
     LetterRefused { tile: usize, letter: char },
     Win(crate::Error),
+}
+
+/// A word that could not be placed, and whether the board was left fit to try another one.
+///
+/// The distinction is the whole point of reporting it. A word failing is ordinary — a stray reading,
+/// a click into an animation — and the fight is not over, because the game only ends a run when no
+/// word can be *made*, not when one cannot be typed. But a retry is only safe on a board with
+/// nothing selected: build a second word on top of a half-finished first and the submission is a
+/// different word than the one that was scored.
+#[derive(Debug)]
+pub struct SelectFailure {
+    pub error: SelectError,
+    /// The selection was cleared and confirmed gone, so the next word starts from a clean board.
+    pub board_is_clean: bool,
+}
+
+impl std::fmt::Display for SelectFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.board_is_clean {
+            write!(f, "{}", self.error)
+        } else {
+            write!(f, "{} (and the board would not clear)", self.error)
+        }
+    }
 }
 
 impl std::fmt::Display for SelectError {
@@ -423,8 +473,9 @@ impl<'a> Board<'a> {
     /// is what [`crate::typist::Typed::steps`] yields. The baseline is taken once, before anything is
     /// clicked, so "selected" always means "differs from the untouched board" — comparing against
     /// the previous step instead would let a missed click look like a successful one.
-    pub fn select_word(&self, plan: &[(usize, Option<char>)]) -> Result<(), SelectError> {
-        let baseline = self.read()?;
+    pub fn select_word(&self, plan: &[(usize, Option<char>)]) -> Result<(), SelectFailure> {
+        let dirty = |error| SelectFailure { error, board_is_clean: false };
+        let baseline = self.read().map_err(|e| dirty(e.into()))?;
 
         // Some tiles change without being touched. An exploding tile counts down with a pulsing red
         // glow, so it differs from any baseline within a frame or two and every later comparison
@@ -432,22 +483,68 @@ impl<'a> Board<'a> {
         // `clicking tile 1 also changed [4]`, where tile 4 was the bomb and tile 1 had selected
         // perfectly well.
         //
-        // Measured rather than guessed at: read the board twice, and anything that moved on its own
-        // is excluded from stray detection for the rest of the word. The safety property survives,
-        // because it never rested on watching other tiles -- a misplaced click still fails, as the
-        // tile we asked for does not become selected.
-        std::thread::sleep(Duration::from_millis(250));
-        let restless: Vec<usize> = {
-            let second = self.read()?;
-            baseline
-                .iter()
-                .zip(second.iter())
-                .enumerate()
-                .filter(|(_, (a, b))| (*a - *b).abs() > CHANGED)
-                .map(|(i, _)| i)
-                .collect()
-        };
+        // Measured rather than guessed at: watch the board for a while, and anything that moved on
+        // its own is excluded from stray detection for the rest of the word. The safety property
+        // survives, because it never rested on watching other tiles -- a misplaced click still
+        // fails, as the tile we asked for does not become selected.
+        // Sampled over RESTLESS_WATCH rather than a single gap, because one pair of reads only
+        // catches an animation whose phase happens to differ across those two instants. A slow
+        // sparkle can sit at the same brightness 250 ms apart and still be moving, which is how a
+        // word died to `clicking tile 0 also changed [9]` on a board whose tile 9 was quietly
+        // bubbling. Union of every sample: a tile that moved at any point in the window is restless.
+        let mut restless: Vec<usize> = Vec::new();
+        let watch_until = Instant::now() + RESTLESS_WATCH;
+        while Instant::now() < watch_until {
+            std::thread::sleep(RESTLESS_SAMPLE);
+            let now = self.read().map_err(|e| dirty(e.into()))?;
+            for (i, (a, b)) in baseline.iter().zip(now.iter()).enumerate() {
+                if (a - b).abs() > CHANGED && !restless.contains(&i) {
+                    restless.push(i);
+                }
+            }
+        }
 
+        match self.place_all(plan, &baseline, &restless) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // The fight is not over because a word could not be typed, so the board is put back
+                // to something another word can be built on. Whether that worked is reported rather
+                // than assumed — a caller must not retry onto a half-selected board.
+                let board_is_clean = self.clear_selection(&baseline, &restless).unwrap_or(false);
+                Err(SelectFailure { error, board_is_clean })
+            }
+        }
+    }
+
+    /// Presses `clearWord` until nothing reads as selected. `false` if it never got there.
+    fn clear_selection(&self, baseline: &[f64], restless: &[usize]) -> Result<bool, crate::Error> {
+        let keys = PostMessageInput::new(*self.win);
+        for _ in 0..CLEAR_ATTEMPTS {
+            keys.focus();
+            keys.press_extended_key(VK_DELETE, SC_DELETE)?;
+            let deadline = Instant::now() + CLEAR_TIMEOUT;
+            while Instant::now() < deadline {
+                std::thread::sleep(POLL);
+                // A restless tile differs from the baseline forever, so it can never be waited out
+                // — excluded here for the same reason it is excluded from stray detection.
+                let clear = self
+                    .selected_now(baseline)?
+                    .into_iter()
+                    .enumerate()
+                    .all(|(i, c)| !c || restless.contains(&i));
+                if clear {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// The selection loop itself, split out so [`select_word`](Self::select_word) can clean up after
+    /// any way it fails without threading the tidy-up through every early return.
+    fn place_all(
+        &self, plan: &[(usize, Option<char>)], baseline: &[f64], restless: &[usize],
+    ) -> Result<(), SelectError> {
         let mut want: Vec<usize> = Vec::with_capacity(plan.len());
 
         for &(i, wildcard) in plan {
@@ -455,13 +552,13 @@ impl<'a> Board<'a> {
                 // A wildcard runs its own confirmed sequence and rejoins here with the board showing
                 // exactly `want` plus this tile, so the rest of the word proceeds against the same
                 // baseline as if an ordinary click had happened.
-                self.place_wildcard(i, letter, &baseline, &want, &restless)?;
+                self.place_wildcard(i, letter, baseline, &want, restless)?;
                 want.push(i);
                 continue;
             }
             let mut ok = false;
             for _ in 0..CLICK_ATTEMPTS {
-                let changed = self.click_and_confirm(i, &baseline)?;
+                let changed = self.click_and_confirm(i, baseline)?;
                 // Everything selected must be something we asked for. A stray selection cannot be
                 // repaired by clicking more, so it stops the word rather than corrupting it.
                 let stray: Vec<usize> = changed

@@ -315,6 +315,19 @@ pub const SC_SPACE: u16 = 0x39;
 /// already decided.
 pub const VK_ESCAPE: u16 = 0x1B;
 pub const SC_ESCAPE: u16 = 0x01;
+/// Delete, bound to `clearWord` (`utils/defaultbinds/keyboard.lua:12`), which is
+/// `wordboard.clear()` (`rpg.lua:220`) — the whole selection at once, with no state guard on it.
+///
+/// Preferred over un-toggling tiles one by one, because it does not need to know *what* is
+/// selected. After a stray, that is exactly what we do not know.
+///
+/// **Context-dependent, like every unqualified key here.** `userFunctions` is consulted by whatever
+/// mode is active, so this means "clear the word" only on a screen that has one — combat, the
+/// shrine, crafting. Send it where the screen is already established.
+///
+/// An extended key, like the arrows below: send it with `press_extended_key`.
+pub const VK_DELETE: u16 = 0x2E;
+pub const SC_DELETE: u16 = 0x53;
 pub const VK_UP: u16 = 0x26;
 pub const SC_UP: u16 = 0x48;
 pub const VK_DOWN: u16 = 0x28;

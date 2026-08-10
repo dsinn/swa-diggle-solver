@@ -104,6 +104,37 @@ const MURDER_CANCEL_TRIES: usize = 3;
 /// reward screen being built are not the same instant.
 const SAVE_SETTLE: Duration = Duration::from_secs(3);
 
+/// Consecutive words that may fail to reach the board before the fight is called off.
+///
+/// Consecutive, not cumulative: a stray is a momentary misreading, so one every few turns is noise
+/// and three in a row is a board we have stopped understanding. Reset by any word that lands.
+const SELECT_ATTEMPTS: usize = 3;
+
+/// What to do about a word that could not be placed.
+#[derive(Debug, PartialEq, Eq)]
+enum Recovery {
+    /// Clear board, attempts left: plan again.
+    PlayOn,
+    /// Out of attempts, or a board we could not clear.
+    Stop,
+}
+
+/// Whether a failed word ends the fight.
+///
+/// Split out from the turn so the judgement is testable without a game window — the code around it
+/// is all input and captures, and this is the only part with a decision in it.
+///
+/// **A dirty board always stops**, however many attempts remain. Everything downstream assumes a
+/// word is built from nothing; retrying onto a half-finished selection would submit a word that was
+/// never scored, which is worse than the failure it is trying to recover from.
+fn recover_from(consecutive_failures: usize, board_is_clean: bool) -> Recovery {
+    if board_is_clean && consecutive_failures < SELECT_ATTEMPTS {
+        Recovery::PlayOn
+    } else {
+        Recovery::Stop
+    }
+}
+
 /// How a fight ended.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
@@ -205,6 +236,9 @@ impl Fight<'_> {
         // The enemy health and armour the backoff above was measured against. Impossible as a real
         // reading, so the first turn always records rather than compares.
         let mut last_seen_at = (i64::MIN, i64::MIN);
+        // Words in a row that could not be placed. Zeroed by any word that lands, so this counts a
+        // board we have stopped understanding rather than a fight's worth of occasional strays.
+        let mut select_failures = 0usize;
         let mut last_change = Instant::now();
         let mut finished = false;
         // When `combatSaveData` first became unreadable, cleared on every successful read.
@@ -318,6 +352,7 @@ impl Fight<'_> {
                         &mut peak_health,
                         &mut murder_backoff,
                         &mut last_seen_at,
+                        &mut select_failures,
                     )? {
                         Some(bad) => return Ok(bad),
                         None => {}
@@ -342,7 +377,7 @@ impl Fight<'_> {
     fn play_turn(
         &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, cs: &Table, turns: usize,
         peak_health: &mut std::collections::HashMap<String, i64>, murder_backoff: &mut i64,
-        last_seen_at: &mut (i64, i64),
+        last_seen_at: &mut (i64, i64), select_failures: &mut usize,
     ) -> Result<Option<Outcome>, crate::Error> {
         let tiles = tiles_of(cs);
         if tiles.is_empty() {
@@ -541,10 +576,26 @@ impl Fight<'_> {
             return Ok(Some(Outcome::BoardNeverSettled { turns }));
         }
         if let Err(e) = board.select_word(&steps) {
-            log.push_str(&format!("  SELECTION FAILED: {e}\n"));
+            *select_failures += 1;
+            log.push_str(&format!(
+                "  SELECTION FAILED ({} of {SELECT_ATTEMPTS}): {e}\n",
+                *select_failures
+            ));
             self.shot("combat-select-fail");
-            return Ok(Some(Outcome::SelectionFailed { turns, detail: e.to_string() }));
+            return Ok(match recover_from(*select_failures, e.board_is_clean) {
+                Recovery::PlayOn => {
+                    // Back to the outer loop, which re-reads the save and plans again. Re-planning
+                    // rather than re-typing the same word: the board may genuinely have moved under
+                    // us, and a fresh search costs nothing against a turn we have already paid for.
+                    log.push_str("  board is clear -- planning again\n");
+                    None
+                }
+                Recovery::Stop => {
+                    Some(Outcome::SelectionFailed { turns, detail: e.to_string() })
+                }
+            });
         }
+        *select_failures = 0;
         self.park();
         std::thread::sleep(Duration::from_millis(150));
         keys.focus();
@@ -1197,4 +1248,34 @@ fn player_state(
         consumes_charge,
         bleeding: status("bleed"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_word_that_would_not_go_on_a_clean_board_is_played_again() {
+        // The whole point of #30. The run that prompted it died at `l1` on its first stray, with a
+        // playable board in front of it and the enemy still standing.
+        assert_eq!(recover_from(1, true), Recovery::PlayOn);
+        assert_eq!(recover_from(SELECT_ATTEMPTS - 1, true), Recovery::PlayOn);
+    }
+
+    #[test]
+    fn a_board_that_would_not_clear_stops_even_with_attempts_left() {
+        // Retrying onto a half-selected board submits a word nothing scored, which is a worse
+        // failure than the one being recovered from. Attempts remaining must not buy their way past
+        // this.
+        assert_eq!(recover_from(1, false), Recovery::Stop);
+        assert_eq!(recover_from(0, false), Recovery::Stop);
+    }
+
+    #[test]
+    fn failing_every_time_still_ends_the_fight() {
+        // Consecutive failures mean the board is no longer understood; playing on forever would
+        // turn a diagnosable stop into a hang.
+        assert_eq!(recover_from(SELECT_ATTEMPTS, true), Recovery::Stop);
+        assert_eq!(recover_from(SELECT_ATTEMPTS + 1, true), Recovery::Stop);
+    }
 }
