@@ -453,28 +453,56 @@ impl Place {
         !self.visited || self.hidden.unwrap_or(0) > 0
     }
 
-    /// A leaf: one connection, so the only way on from it is back the way we came.
+    /// Standing here cannot show us a node we do not already have.
     ///
-    /// The dump prints the game's own `connections` count, which is the total and **not** filtered by
-    /// what is currently visible — `hidden` is the separate figure for neighbours it declined to
-    /// describe. So `1` really does mean one neighbour, and in a subworld that neighbour is
-    /// necessarily the node we would arrive from. Walking in costs two steps and reveals nothing.
+    /// True when the edges we know about account for the node's **whole** degree. It is not a
+    /// statement about having been there — it is a statement that there is nothing there to find.
     ///
-    /// A run of 2026-08-09 in the lost woods spent six of twenty-three steps on three of them —
-    /// `e1sub65`, `e1sub67`, `e1sub84`, each reported `connections: 1` in every dump that named it,
-    /// each entered and immediately left.
+    /// ## Why the two numbers can be compared at all
     ///
-    /// **Zero is not a dead end**, it is silence. `connections` defaults to 0 for a place learned by
-    /// key alone — from `completedAreas`, say — and on a resume that is most of the map. Reading
-    /// "unknown" as "leaf" would exclude nearly everywhere.
+    /// `connections` is the true degree, not the visible one. `verboseAdjacencyData` filters *which*
+    /// neighbours it prints by `isCloudCovered` and `locationIsVisible`, but the figure it prints
+    /// for each is `table.len(location.connections)` (`overworldview.lua:1031-1035`) — the full
+    /// count. Under thick fog that distinction is the whole rule: a visibility-filtered count would
+    /// under-report and retire nodes that still had neighbours behind the cloud.
     ///
-    /// ## The exception, which is post-MVP
+    /// And `neighbours` accumulates from every side. [`WorldMap::fold`] records each edge in both
+    /// directions for every node a dump names, so an **unvisited** node collects its edges as the
+    /// nodes around it are walked.
     ///
-    /// A chest sits at a leaf often enough that "nothing to reveal" is not the same as "nothing to
-    /// gain". Detouring for one is the dev's rule and belongs with the rest of that work — see the
-    /// chest task in `handoff/TASKS.md`. Until then a leaf is skipped whatever is standing on it.
-    pub fn is_dead_end(&self) -> bool {
-        self.connections == 1
+    /// ## What it saves
+    ///
+    /// Two shapes, and they are the same rule:
+    ///
+    /// - **A leaf.** Degree 1, and the one neighbour is the node we would arrive from. The run of
+    ///   2026-08-09 spent six of twenty-three steps on `e1sub65`, `e1sub67` and `e1sub84`, each
+    ///   reported `connections: 1` by every dump that named it.
+    /// - **A fork that merges.** Two paths from `A` to `D` whose interior nodes have degree 2. Walk
+    ///   one of them and the other's nodes are seen from both ends, completing their degree — so the
+    ///   second prong retires instead of being re-walked. In graph terms the two prongs are parallel
+    ///   edges between `A` and `D` once degree-2 vertices are smoothed away; this reaches the same
+    ///   answer locally, without needing the cycle to be identified, which matters because under fog
+    ///   it usually cannot be.
+    ///
+    /// The saving arrives one step later than it sounds: the second prong only closes when the far
+    /// end is reached. Nothing can do better without seeing through the fog — until `D` is known,
+    /// that prong might genuinely lead somewhere.
+    ///
+    /// ## Three ways it deliberately does not fire
+    ///
+    /// **Zero connections is silence, not a verdict.** The field defaults to 0 for a place known by
+    /// key alone — from `completedAreas`, which on a resume is most of the map.
+    ///
+    /// **A subworld container is never retired.** Its edges are surface roads; what it has to offer
+    /// is an interior, and no count of neighbours describes that.
+    ///
+    /// **Reveals nothing is not offers nothing.** A chest or a worthwhile fight can sit on a retired
+    /// node. That is the same exception the chest task already owns — see `handoff/TASKS.md` — and
+    /// until it lands, a node with nothing to reveal is skipped whatever is standing on it.
+    pub fn nothing_left_to_reveal(&self) -> bool {
+        !self.subworld_container
+            && self.connections > 0
+            && self.neighbours.len() as u32 >= self.connections
     }
 }
 
@@ -1483,8 +1511,9 @@ impl WorldMap {
             .values()
             .filter(|p| p.key != here && !p.visited && !p.avoid && ok(p))
             .filter(|p| !self.abandoned.contains(&p.key))
-            // A leaf reveals nothing, and the walk back out is the same length as the walk in.
-            .filter(|p| !p.is_dead_end())
+            // Nothing to find there, so it is not a destination. It stays a waypoint: routing runs
+            // over the edges, and this only decides what is worth walking *to*.
+            .filter(|p| !p.nothing_left_to_reveal())
             .collect();
         // Order matters, and a live run showed why. From l10 with l1 and l18 both adjacent and both
         // unvisited, sorting by key chose `l1` — already **completed**, so it revealed nothing — and
@@ -2026,7 +2055,7 @@ impl WorldMap {
             // An exit road we have not walked is a frontier too, but heading for one is leaving —
             // and while looking for an inn, leaving is the move that abandons the errand.
             .filter(|p| !p.key.starts_with(&exit_prefix) || Some(&p.key) == dest.as_ref())
-            .filter(|p| !p.is_dead_end())
+            .filter(|p| !p.nothing_left_to_reveal())
             .filter_map(|p| hops.get(&p.key).map(|d| (!p.is_paved(), *d, &p.key)))
             .min()
             .map(|(_, _, k)| k.clone());
@@ -3594,8 +3623,8 @@ mod tests {
                 node("e1sub75", "Howden Timberland forest"),
             ])
         });
-        assert!(m.get("e1sub67").unwrap().is_dead_end());
-        assert!(!m.get("e1sub75").unwrap().is_dead_end());
+        assert!(m.get("e1sub67").unwrap().nothing_left_to_reveal());
+        assert!(!m.get("e1sub75").unwrap().nothing_left_to_reveal());
         match m.cross_toward(&[]) {
             Some(Crossing::Seek { to }) | Some(Crossing::Explore { to, .. }) => {
                 assert_eq!(to, "e1sub75", "the leaf has nothing behind it");
@@ -3631,6 +3660,41 @@ mod tests {
         assert_eq!(target, "far", "cleared ground is not worth walking to first");
     }
 
+    /// A prong of a fork that merges retires once the far end names it — not before.
+    ///
+    /// The dev's graph: `A-B`, `A-C`, `B-C`, `B-D`, `C-D`. Walk `A -> B -> D` and `C` is pure
+    /// detour, because everything it leads to is already reachable. The saving is real and it is
+    /// **late**: standing at `B` we know `C` has degree 3 and can see only two of its edges, and the
+    /// third could as easily go somewhere new as to `D`. Guessing there would trade a wasted step for
+    /// a missed branch, which is the worse error.
+    #[test]
+    fn the_second_prong_of_a_fork_retires_when_the_far_end_closes_it() {
+        let deg = |key: &str, connections: u32| Node {
+            key: key.into(),
+            heading: format!("{key} crossroads"),
+            x: 0.0,
+            y: 0.0,
+            connections,
+        };
+        let mut m = WorldMap::new();
+        m.fold(&dump("a", "A crossroads", vec![deg("b", 3), deg("c", 3)]));
+        assert!(!m.get("c").unwrap().nothing_left_to_reveal(), "one edge of three seen");
+
+        m.fold(&dump("b", "B crossroads", vec![deg("a", 2), deg("c", 3), deg("d", 2)]));
+        // Two of `c`'s three edges now, and the third is still worth walking for: it could lead
+        // anywhere. This is the step where guessing would be tempting and wrong.
+        assert_eq!(m.get("c").unwrap().neighbours.len(), 2);
+        assert!(!m.get("c").unwrap().nothing_left_to_reveal(), "the third edge is still unknown");
+
+        m.fold(&dump("d", "D crossroads", vec![deg("b", 3), deg("c", 3)]));
+        assert!(
+            m.get("c").unwrap().nothing_left_to_reveal(),
+            "all three edges known, so standing on `c` cannot show us anything"
+        );
+        // And it is not a claim about having been there — nothing walked to `c`.
+        assert!(!m.get("c").unwrap().visited);
+    }
+
     /// Silence is not a dead end. A place known only by key has no connection count at all.
     ///
     /// `completedAreas` gives us keys and nothing else, which on a resume is most of the map. If
@@ -3639,7 +3703,7 @@ mod tests {
     fn a_place_we_know_only_by_key_is_not_a_dead_end() {
         let mut m = WorldMap::new();
         assert_eq!(m.entry("l44").connections, 0, "never seen in a dump");
-        assert!(!m.get("l44").unwrap().is_dead_end());
+        assert!(!m.get("l44").unwrap().nothing_left_to_reveal());
     }
 
     /// The container's type name is re-read on every dump, because the game re-evaluates it.
