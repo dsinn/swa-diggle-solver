@@ -325,9 +325,22 @@ pub const SC_ESCAPE: u16 = 0x01;
 /// commit as a one-press word-clear before the gate was noticed; `crate::combat::Board`
 /// backspaces instead, which has no `_mod` entry.
 ///
-/// Kept because the fact is worth not re-deriving, not because anything sends it. Whether a posted
-/// `rshift` even reaches `love.keyboard.isDown` — which reads SDL's key state rather than the
-/// message queue — is untested.
+/// Kept because the fact is worth not re-deriving, not because anything sends it.
+///
+/// **A posted `rshift` does not reach `love.keyboard.isDown`, so this bind is unreachable from
+/// [`PostMessageInput`] however it is sent.** Measured with controls by
+/// `src/bin/spike_rshift_delete.rs`: bare `Delete` did not clear, `rshift`-held `Delete` did not
+/// clear, and backspace cleared the same board immediately after — so the instrument was working and
+/// the modifier was the failure. That generalises past this key: **any bind with a `_mod` entry is
+/// out of reach of posted input.** Ordinary keys are unaffected; every word ever submitted is a
+/// posted `WM_KEYDOWN` for Space.
+///
+/// The likely mechanism, **inferred from SDL's source rather than cited**: its Windows pump
+/// re-derives the shift keys from `GetKeyState` each time round, because Windows fails to send a
+/// keyup for shift in several cases, and releases any the OS says is not held. `SendInput` would
+/// work, since it changes real keyboard state — not done, because it buys ~360 ms over two
+/// backspaces and a driver killed between the down and the up leaves Shift stuck on the physical
+/// keyboard.
 ///
 /// An extended key, like the arrows below: it would need `press_extended_key`.
 pub const VK_DELETE: u16 = 0x2E;
