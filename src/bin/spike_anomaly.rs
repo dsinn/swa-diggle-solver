@@ -284,10 +284,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         map.apply_save(&save);
     }
     log.push_str(&format!(
-        "\n## Result\n\nback in the world at **{}**, hell **{:?}**, anomaly available: {:?}\n\n{} places known\n",
+        "\n## Result\n\nback in the world at **{}**, hell **{:?}**, anomaly open: {:?}\n\n{} places known\n",
         map.here().unwrap_or("?"),
         hell_of(&main_save),
-        map.anomaly_available(),
+        map.anomaly_is_open(),
         map.len()
     ));
     for p in map.places() {

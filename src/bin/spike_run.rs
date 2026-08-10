@@ -195,10 +195,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         r.map.note_health_level(h);
     }
     r.log.push_str(&format!(
-        "start at **{}**, hell {:?}, anomaly available {:?}, health {:?}\n\n",
+        "start at **{}**, portal {:?}, anomaly open {:?}, health {:?}\n\n",
         r.map.here().unwrap_or("?"),
         r.map.anomaly().map(|p| p.key.clone()),
-        r.map.anomaly_available(),
+        r.map.anomaly_is_open(),
         health.map(|h| format!("{}/{}", h.current, h.max))
     ));
 

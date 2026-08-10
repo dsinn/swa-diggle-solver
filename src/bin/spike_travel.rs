@@ -118,12 +118,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         map.apply_save(&save);
     }
     log.push_str(&format!(
-        "## Start\n\nat **{}** ({}), reason `{}`, {} places known, anomaly available: {:?}\n\n",
+        "## Start\n\nat **{}** ({}), reason `{}`, {} places known, anomaly open: {:?}\n\n",
         first.here_key,
         first.here_heading,
         first.reason,
         map.len(),
-        map.anomaly_available()
+        map.anomaly_is_open()
     ));
     for n in &first.nodes {
         log.push_str(&format!(

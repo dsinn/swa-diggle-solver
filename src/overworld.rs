@@ -438,7 +438,7 @@ impl Place {
     /// Delegated to [`crate::subworld`], which owns what a parent node implies. The remaining
     /// conditions in the event's check — `node_has_no_followups`, the `hell` flag, and a
     /// heretic/blood-curse exclusion — are not properties of a heading, so they are answered by
-    /// [`WorldMap::anomaly_available`] and by the run itself.
+    /// [`WorldMap::anomaly_is_open`] and by the run itself.
     pub fn triggers_anomaly(&self) -> bool {
         crate::subworld::triggers_anomaly(self.parent.as_deref(), self.level())
     }
@@ -552,8 +552,8 @@ pub struct WorldMap {
     /// `areaFlags.hell` — zero means the anomaly has not opened and the trigger is still live.
     /// A **float**, and that matters: `hellOpens` sets it to `0.1`
     /// (`utils/events.lua:39`, `setHellValue(0.1)`) and it grows from there. Read as an integer it
-    /// parses as nothing at all, `anomaly_available` falls back to "still available", and the run
-    /// sets off to trigger an anomaly that is already open.
+    /// parses as nothing at all, `anomaly_is_open` falls back to "not open", and the run sets off to
+    /// trigger an anomaly that is already open.
     hell: Option<f64>,
     /// Set when a node cost us [`crate::rest::REST_THRESHOLD`] or more health, cleared once we are
     /// topped up. Held on the map because the decision is "where to go next", which is its job.
@@ -877,7 +877,7 @@ impl WorldMap {
     ///
     /// [`WorldMap::anomaly_is_assumed`] says which of the two answered.
     pub fn anomaly(&self) -> Option<&Place> {
-        if self.anomaly_available().unwrap_or(true) || self.anomaly_beaten() {
+        if !self.anomaly_is_open().unwrap_or(false) || self.anomaly_beaten() {
             return None;
         }
         self.places
@@ -905,22 +905,27 @@ impl WorldMap {
             .any(|p| p.completed_corrupt && (p.key == ANOMALY_KEY || p.type_is("anomaly")))
     }
 
-    /// Is the anomaly still **waiting to be opened**? `None` when no save has been read yet.
-    ///
-    /// Read the name as "the trigger is available to spend", which is what every caller means by it,
-    /// and note that the sense is the *opposite* of "the anomaly is available to fight":
+    /// Is the portal open and spreading? `None` when no save has been read yet.
     ///
     /// ```text
-    ///   hell == 0   ->  Some(true)   nothing has opened it yet; go and trigger one
-    ///   hell != 0   ->  Some(false)  the portal is live and spreading corruption
+    ///   hell != 0   ->  Some(true)   the portal is live; consecration is possible, go and fight it
+    ///   hell == 0   ->  Some(false)  nothing has opened it yet; go and trigger one
     /// ```
     ///
     /// `hellOpens` sets `hell` to `0.1` and it grows from there (`utils/events.lua:39`), and
-    /// `shrine.lua:50` reads the same flag as `hell = areaFlag'hell' ~= 0`. The inverted reading is
-    /// not hypothetical: a run header printing `anomaly available Some(false)` was written up as
-    /// "the anomaly is not open yet" when it meant the exact reverse.
-    pub fn anomaly_available(&self) -> Option<bool> {
-        self.hell.map(|h| h == 0.0)
+    /// `shrine.lua:50` reads the same flag as `hell = areaFlag'hell' ~= 0` — so this is phrased the
+    /// way the game phrases its own conditions, and a caller that negates it is stating a rule
+    /// rather than undoing a name.
+    ///
+    /// It was once `anomaly_available`, meaning the *trigger* was still available to spend — the
+    /// exact opposite reading, and the inversion was not hypothetical: a run header printing
+    /// `anomaly available Some(false)` was written up as "the anomaly is not open yet" when the
+    /// portal was open and eating the island.
+    ///
+    /// Unknown counts as **not open**, at every caller. A wasted trip to trigger one is cheaper
+    /// than a run that will not go and open the thing it came to close.
+    pub fn anomaly_is_open(&self) -> Option<bool> {
+        self.hell.map(|h| h != 0.0)
     }
 
     /// Records what a node cost us, and whether that is worth a detour to heal.
@@ -1607,10 +1612,10 @@ impl WorldMap {
         // (`shrine.lua:93-96`) needs `hell ~= 0`, so a run that saved its shrines for first would
         // arrive at every one of them unable to finish it.
         //
-        // Only worth aiming at while the trigger is unspent — `anomaly_available` is `None` before
-        // any save has been read, and an unknown flag is treated as still available, since a wasted
-        // trip is cheaper than stranding the run.
-        if self.anomaly_available().unwrap_or(true) {
+        // Only worth aiming at while the trigger is unspent — `anomaly_is_open` is `None` before any
+        // save has been read, and an unknown flag is read as not open, since a wasted trip is
+        // cheaper than stranding the run.
+        if !self.anomaly_is_open().unwrap_or(false) {
             let mut candidates: Vec<&Place> = self
                 .places
                 .values()
@@ -1649,7 +1654,7 @@ impl WorldMap {
         // [`Goal::Anomaly`] outranks this branch, and once it is finished there is no path left. So
         // a corrupted shrine is never a *destination* — passing through one is judged on arrival,
         // by [`WorldMap::worth_consecrating_here`].
-        let anomaly_open = !self.anomaly_available().unwrap_or(true);
+        let anomaly_open = self.anomaly_is_open().unwrap_or(false);
         let dist = self.distances(here);
         // **What is actually left to do at a shrine**, which `!consecrated` alone does not answer.
         // Two actions live there and they have different gates:
@@ -2512,7 +2517,7 @@ impl WorldMap {
             return false;
         }
         // Consecrating needs the anomaly open at all (`shrine.lua:93-96`).
-        if self.anomaly_available().unwrap_or(true) {
+        if !self.anomaly_is_open().unwrap_or(false) {
             return false;
         }
         if !p.corrupted {
@@ -3231,7 +3236,7 @@ mod tests {
         m.apply_save(&save);
         assert!(m.get("l4").unwrap().avoid, "l4 swallowed us once");
         assert!(!m.get("l7").unwrap().avoid, "an _explored flag is not a lost woods");
-        assert_eq!(m.anomaly_available(), Some(true));
+        assert_eq!(m.anomaly_is_open(), Some(false));
     }
 
     /// Real headings from the captured island: a campfire and a village both adjacent.
@@ -4346,7 +4351,7 @@ mod tests {
             node("shrine6", "Borsea shrine"),
         ]));
         // `start` as the run actually held it: heard of through `start_first_corrupt_time`, no
-        // heading, no edges. `hell = 0.1` means the portal is open -- see `anomaly_available`.
+        // heading, no edges. `hell = 0.1` means the portal is open -- see `anomaly_is_open`.
         m.apply_save(&crate::game::save::parse(
             "return { overworld = { areaFlags = { hell = 0.1, start_first_corrupt_time = 12 } } }",
         ).unwrap());
@@ -4982,7 +4987,7 @@ mod tests {
             p.consecrated = false;
         }
         m.hell = Some(0.1); // the anomaly is open, so consecrating is possible at all
-        assert!(!m.anomaly_available().unwrap(), "fixture must have the door open");
+        assert!(m.anomaly_is_open().unwrap(), "fixture must have the door open");
 
         // There is something to do at both, and `worth_consecrating_here` is what says so -- the
         // function that existed and was called from nowhere while the run bounced.
