@@ -2556,23 +2556,38 @@ pub fn drive(
                         None => return Stop::Failed(format!("exit to {to} not on screen")),
                     }
                 }
-                Crossing::Step { to, toward } | Crossing::Explore { to, toward } => {
-                    match fresh.nodes.iter().find(|n| &n.key == to) {
-                        // The door's reason is printed because three runs in a row turned on which
-                        // branch chose it, and the line looked identical in all of them.
-                        Some(n) => (
-                            format!(
-                                "crossing `{container}` toward `{toward}` ({}) via `{to}`",
-                                r.map.door_reason().map(|d| d.why()).unwrap_or("held from earlier")
-                            ),
-                            (n.x, n.y),
+                Crossing::Step { to, toward } => match fresh.nodes.iter().find(|n| &n.key == to) {
+                    // The door's reason is printed because three runs in a row turned on which
+                    // branch chose it, and the line looked identical in all of them.
+                    Some(n) => (
+                        format!(
+                            "crossing `{container}` toward `{toward}` ({}) via `{to}`",
+                            r.map.door_reason().map(|d| d.why()).unwrap_or("held from earlier")
                         ),
-                        None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
-                    }
-                }
-                // Its own line, and deliberately not the one above. `Step` and `Explore` already
-                // print identically, which made a wrong-door guess read like a considered route in
-                // the logs; a search with no destination at all would have been a third.
+                        (n.x, n.y),
+                    ),
+                    None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
+                },
+                // **Separated from `Step`, which it used to share a line with.** The two mean
+                // opposite things — one is a hop along a route, the other is a walk into the dark
+                // because no route exists — and printing them alike cost a whole run's diagnosis.
+                //
+                // Live in `l2` on 2026-08-09: twenty-two consecutive lines read `crossing l2 toward
+                // l2_path_to_l1 ... via l2subN`, which reads as a considered route across a village.
+                // Every one of them was this branch. The exits section of a dump gives a door's
+                // POSITION but never its key (`overworldview.lua:1041-1047`), so
+                // `l2_path_to_l1` was not a node in our graph until a dump finally named it as a
+                // neighbour — at the second-to-last step. The run explored the whole village because
+                // routing to the door was not something it could do, and the log said otherwise.
+                Crossing::Explore { to, toward } => match fresh.nodes.iter().find(|n| &n.key == to) {
+                    Some(n) => (
+                        format!("`{toward}` is not on any route we know — exploring `{container}` via `{to}`"),
+                        (n.x, n.y),
+                    ),
+                    None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
+                },
+                // Its own line, and deliberately not either of the two above. A search with no
+                // destination at all is a third thing.
                 //
                 // Two ways to have no destination, and the log used to name only one of them. An inn
                 // we have not found is the errand case; an exit the fog has not shown us is the
