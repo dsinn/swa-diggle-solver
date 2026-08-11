@@ -973,6 +973,17 @@ impl WorldMap {
         self.wants_rest
     }
 
+    /// The rest errand is finished, on the inn's own word rather than on a health reading.
+    ///
+    /// [`WorldMap::note_health_level`] and [`WorldMap::rested`] both clear the intent only when they
+    /// *see* full health, and the save that would show it is written when the inn screen is exited —
+    /// so between healing and reading there is a window in which the run still believes it wants a
+    /// rest and will walk back in. This is that window closed from the other side: the rest screen's
+    /// own `healthNeed = 0` is as authoritative as the flag and arrives a screen earlier.
+    pub fn rest_errand_over(&mut self) {
+        self.wants_rest = false;
+    }
+
     /// Has this shrine been consecrated, as the **save** reports it?
     ///
     /// Named after the game's own `isConsecrated`, and reading the same `<key>_consecrated` flag. The
@@ -2767,6 +2778,35 @@ mod tests {
 
     fn node(key: &str, heading: &str) -> Node {
         Node { key: key.into(), heading: heading.into(), x: 0.0, y: 0.0, connections: 2 }
+    }
+
+    /// The inn can end the rest errand before a health reading could.
+    ///
+    /// Live 2026-08-10: the run healed to full, walked out, and walked straight back in — because
+    /// `wants_rest` clears only on *seeing* full health, and `overworld:save()` runs in the inn's
+    /// `goBack`, so the evidence lands after the decision to return has been taken. It opened the
+    /// rest screen again to be told `healthNeed = 0`, eight inn screens in one run.
+    ///
+    /// The control is the middle case, and it is the one that must not regress: a **partial** heal
+    /// leaves the intent standing, or a run interrupted mid-top-up would walk away at 14/20.
+    #[test]
+    fn the_inn_can_end_a_rest_errand_that_a_health_reading_has_not_caught_up_with() {
+        let mut m = WorldMap::new();
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+        assert!(m.wants_rest(), "1/20 asks for a rest");
+
+        // Healed, but the save still shows the old figure — exactly the window that bit us.
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+        assert!(m.wants_rest(), "a stale reading must not clear it by itself");
+
+        m.rest_errand_over();
+        assert!(!m.wants_rest(), "the inn said `healthNeed = 0`, which is the game's own answer");
+
+        // And the middle case is untouched: half-healed is still a rest in progress.
+        let mut m2 = WorldMap::new();
+        m2.note_health_level(crate::rest::Health { current: 2, max: 20 });
+        m2.note_health_level(crate::rest::Health { current: 14, max: 20 });
+        assert!(m2.wants_rest(), "a partial top-up must not cancel the errand");
     }
 
     /// The save is the only thing that knows a consecration happened.

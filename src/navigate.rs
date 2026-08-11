@@ -74,6 +74,28 @@ const EMPTY_MAP: (i32, i32) = (1750, 160);
 /// stale file cannot end the next run before it starts.
 const STOP_FILE: &str = ".diggle-stop";
 
+/// What a visit to an inn actually achieved.
+///
+/// **`NothingToDo` and `Failed` used to be the same `false`**, and the old code could afford that
+/// because it wrote an inn off on the first empty visit either way. Counting failures instead — so a
+/// swallowed `Enter` no longer costs a village — made the conflation expensive: arriving at full
+/// health scored as a failure and was retried [`REST_GIVE_UP`] times, each retry hunting for a `Rest`
+/// plaque that reads `+0 (full)` and matches nothing, for the full [`crate::innplay::REST_TRIES`]
+/// budget. Live 2026-08-10, eight inn screens at 20/20.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rested {
+    /// Gold was spent and health went up.
+    Healed,
+    /// The inn says there is nothing to buy — full health, or a purse it will not serve. Not a
+    /// failure of anything, and the strongest signal available that the errand is over: it is the
+    /// game's own `healthNeed`, read off a rest screen we had just opened, rather than our own
+    /// arithmetic over a save that lags.
+    NothingToDo,
+    /// The visit achieved nothing and we do not know why — a click swallowed, a screen that never
+    /// opened, a press that went nowhere.
+    Failed,
+}
+
 /// How long to let `<key>_consecrated` reach the save before calling a consecration failed.
 ///
 /// Not a guess at latency. Two things have to finish first, and the second is the longer: the flag
@@ -982,7 +1004,7 @@ impl Run<'_> {
     /// That staleness can still make [`crate::innplay::presses_needed`] over-count *within* a round.
     /// It is bounded: the button goes inactive, no `Rested` arrives, the round stops, and the next
     /// round's `canRest` answers false.
-    fn rest_at_inn(&mut self) -> bool {
+    fn rest_at_inn(&mut self) -> Rested {
         use crate::innplay;
 
         // 1. `Enter`. It is the ordinary area button, in the slot everything else uses.
@@ -990,13 +1012,16 @@ impl Run<'_> {
         let _ = self.click_area_button("Enter");
         if !self.wait_for_line(mark, innplay::ENTERED, Duration::from_secs(8)) {
             self.log.push_str("  rest: `Enter` did not open the inn\n");
-            return false;
+            return Rested::Failed;
         }
 
         // 2. Rounds. Each opens the rest screen from the inn — so each gets a block that is current
         //    — and each ends back on the inn, the dream path included, since the dream's own `back`
         //    lands there.
         let mut done = 0;
+        // Set by the inn telling us there is nothing to buy -- full health, or a purse it will not
+        // serve. Distinct from `done == 0`, which is also what a broken visit looks like.
+        let mut nothing_to_do = false;
         while done < innplay::MAX_PRESSES {
             // Press `Rest` until the screen says it opened. See [`innplay::REST_TRIES`] for why one
             // press is not enough: the inn announces itself from `onActive`, before it can take a
@@ -1078,6 +1103,7 @@ impl Run<'_> {
                     true => "  rest: done — nothing left to heal\n",
                 });
                 self.leave_inn(1);
+                nothing_to_do = true;
                 break;
             }
 
@@ -1139,7 +1165,11 @@ impl Run<'_> {
 
         // 4. Out of the inn itself.
         self.leave_inn(1);
-        done > 0
+        match (done, nothing_to_do) {
+            (0, true) => Rested::NothingToDo,
+            (0, false) => Rested::Failed,
+            _ => Rested::Healed,
+        }
     }
 
     /// Presses the back plaque `screens` times, confirming the inn's own announcement in between.
@@ -2716,24 +2746,37 @@ pub fn drive(
                 // coming back round to the same inn is a loop with a monotone measure under it,
                 // which is the one kind that terminates. It ends when the bar is full (`wants_rest`
                 // clears) or the purse is empty (`inn_inside`'s gold gate stops nominating it), and
-                // `rest_at_inn` reports `false` for both, since neither presses anything.
-                // **A failure is counted, not taken as a verdict** — see [`Run::rest_failures`].
-                // The old line abandoned on the first empty visit, so a swallowed `Enter` cost the
-                // whole inn and the crossing routed out of the village.
-                if rested {
-                    r.rest_failures.remove(at);
-                } else {
-                    let n = r.rest_failures.entry(at.clone()).or_insert(0);
-                    *n += 1;
-                    if *n >= REST_GIVE_UP {
-                        r.log.push_str(&format!(
-                            "  rest: {at} has given us nothing {n} times — writing it off\n"
-                        ));
-                        r.map.abandon(at);
-                    } else {
-                        r.log.push_str(&format!(
-                            "  rest: nothing landed at {at} ({n} of {REST_GIVE_UP}) — trying again\n"
-                        ));
+                // **A failure is counted, not taken as a verdict** — see [`Run::rest_failures`] —
+                // and "nothing to buy" is not a failure at all. Collapsing those two is what made
+                // arriving at full health cost three visits.
+                match rested {
+                    Rested::Healed => {
+                        r.rest_failures.remove(at);
+                    }
+                    Rested::NothingToDo => {
+                        r.rest_failures.remove(at);
+                        // **The errand is over, and the inn just said so.** `wants_rest` otherwise
+                        // clears only on *reading* full health, and the read that would do it is not
+                        // on disk until we have left — `overworld:save()` runs in the inn's `goBack`
+                        // (`ui/inn.lua:9`) — so the decision to come back is taken before the
+                        // evidence lands. Live 2026-08-10: healed to full, walked out, walked
+                        // straight back in, and opened the rest screen again to be told
+                        // `healthNeed = 0`. This is that same `healthNeed`, read one screen earlier.
+                        r.map.rest_errand_over();
+                    }
+                    Rested::Failed => {
+                        let n = r.rest_failures.entry(at.clone()).or_insert(0);
+                        *n += 1;
+                        if *n >= REST_GIVE_UP {
+                            r.log.push_str(&format!(
+                                "  rest: {at} has given us nothing {n} times — writing it off\n"
+                            ));
+                            r.map.abandon(at);
+                        } else {
+                            r.log.push_str(&format!(
+                                "  rest: nothing landed at {at} ({n} of {REST_GIVE_UP}) — trying again\n"
+                            ));
+                        }
                     }
                 }
                 // Re-read before anything plans on it: `overworld:save()` runs in the inn's
@@ -2744,7 +2787,11 @@ pub fn drive(
                         "  health is now {}/{}{}\n",
                         h.current,
                         h.max,
-                        if rested { "" } else { " (nothing was spent)" }
+                        match rested {
+                            Rested::Healed => "",
+                            Rested::NothingToDo => " (nothing left to buy)",
+                            Rested::Failed => " (nothing was spent)",
+                        }
                     ));
                 }
                 continue;
