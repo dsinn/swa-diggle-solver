@@ -65,6 +65,11 @@ const REPORT: &str = "spike-run.md";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = Config::load(Path::new("config.toml"))?;
+    // Before the game is launched and before the mouse is seized: a rejected argument must cost
+    // nothing, and a run that has already opened the game has cost something.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let click_frames = diggle_solver::config::click_frames_from_args(&args, cfg.debug_click_frames)
+        .map_err(diggle_solver::Error::Config)?;
     std::fs::create_dir_all(FRAMES)?;
     diggle_solver::win::process::refuse_if_running("lovec.exe", &[])?;
     let save_dir = diggle_solver::game::savedir::locate(cfg.save_dir.clone(), true)?;
@@ -212,9 +217,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         game_dir: cfg.game_dir.clone(),
         combat_path: save_dir.join("combatSaveData"),
         frames: Some(PathBuf::from(FRAMES)),
-        click_frames: cfg.debug_click_frames.then(|| PathBuf::from(FRAMES)),
+        click_frames: click_frames.then(|| PathBuf::from(FRAMES)),
     };
-    if cfg.debug_click_frames {
+    if click_frames {
         r.log.push_str(&format!(
             "**`debug_click_frames` is on**: every tile click is photographed either side, into \
              `{FRAMES}`. This costs a full-window capture per click and is not how a normal run \

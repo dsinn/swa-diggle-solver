@@ -55,6 +55,33 @@ impl Config {
     }
 }
 
+/// Resolves [`Config::debug_click_frames`] against the command line, where the flag belongs.
+///
+/// The config file is the wrong place to reach for something switched on for one run and off again
+/// after — it is a file that gets committed, and a `true` left in it slows every fight afterwards
+/// with nothing in the log to explain it. So the file holds the default and `--click-frames` /
+/// `--no-click-frames` override it for a single invocation.
+///
+/// **An unrecognised argument is an error, not a shrug.** This flag's entire purpose is to produce
+/// photographs, and the way it fails is by producing none — which looks exactly like a run where
+/// nothing interesting happened. `--click-frame` or `--clickframes` would do that silently. Refusing
+/// costs a restart; accepting costs the run the flag was turned on for.
+pub fn click_frames_from_args(args: &[String], default: bool) -> Result<bool, String> {
+    let mut on = default;
+    for a in args {
+        match a.as_str() {
+            "--click-frames" => on = true,
+            "--no-click-frames" => on = false,
+            other => {
+                return Err(format!(
+                    "unrecognised argument {other:?}; expected --click-frames or --no-click-frames"
+                ))
+            }
+        }
+    }
+    Ok(on)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,6 +96,37 @@ mod tests {
         )
         .expect("a config without the flag still parses");
         assert!(!cfg.debug_click_frames);
+    }
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_command_line_overrides_the_file_in_both_directions() {
+        assert!(click_frames_from_args(&args(&["--click-frames"]), false).unwrap());
+        assert!(!click_frames_from_args(&args(&["--no-click-frames"]), true).unwrap());
+    }
+
+    #[test]
+    fn no_argument_leaves_the_file_in_charge() {
+        assert!(!click_frames_from_args(&[], false).unwrap());
+        assert!(click_frames_from_args(&[], true).unwrap());
+    }
+
+    #[test]
+    fn a_misspelled_flag_is_refused_rather_than_ignored() {
+        // The failure mode this guards against is silent: the flag exists to produce photographs,
+        // and a typo produces none -- which is indistinguishable from a run where nothing happened.
+        // A live run is expensive enough that finding out afterwards is the wrong time.
+        let e = click_frames_from_args(&args(&["--click-frame"]), false).unwrap_err();
+        assert!(e.contains("--click-frames"), "the error must say the spelling it wanted: {e}");
+    }
+
+    #[test]
+    fn the_last_flag_wins_so_a_shell_alias_can_be_overridden() {
+        assert!(!click_frames_from_args(&args(&["--click-frames", "--no-click-frames"]), false)
+            .unwrap());
     }
 
     #[test]
