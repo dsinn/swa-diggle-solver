@@ -583,18 +583,29 @@ pub fn play(
         out.log.push_str(
             "  shrine: portal is open, so the solve yields `Consecrate` and not `Pray`\n",
         );
-        // Already on the shrine screen, so this is the back half of `consecrate` — the occupancy
-        // gate plus the game's rule about which button can be there — without re-opening anything.
-        let slot = crate::act::score_exact(win, &crate::act::SHRINE_PRAY)?;
-        if slot < crate::act::SHRINE_SLOT_OCCUPIED {
+        // Already on the shrine screen, so this is the back half of `consecrate` without re-opening
+        // anything — and it now **identifies** the button rather than counting the slot occupied.
+        // Waited for, not sampled once: the shrine screen fades in, and a press aimed at a plaque
+        // that has not finished rendering is this project's most-repeated bug.
+        let found = crate::act::wait_for(
+            win,
+            &crate::act::SHRINE_CONSECRATE,
+            crate::act::SHRINE_CONSECRATE_PRESENT,
+            Duration::from_secs(6),
+        );
+        if !found.found() {
             out.log.push_str(&format!(
-                "  shrine: slot empty ({slot:.4} < {:.2}) — not clicking it blind\n",
-                crate::act::SHRINE_SLOT_OCCUPIED
+                "  shrine: no active `Consecrate` (best {:.4} < {:.2}) — not clicking the slot blind\n",
+                found.best,
+                crate::act::SHRINE_CONSECRATE_PRESENT
             ));
         } else {
-            // Clicked at the occupancy threshold, not `Pray`'s: the question already answered is
-            // "something is painted here", and the save-derived rule above says what it must be.
-            crate::act::click_exact(win, &crate::act::SHRINE_PRAY, crate::act::SHRINE_SLOT_OCCUPIED)?;
+            let slot = found.score.unwrap_or(found.best);
+            crate::act::click_exact(
+                win,
+                &crate::act::SHRINE_CONSECRATE,
+                crate::act::SHRINE_CONSECRATE_PRESENT,
+            )?;
             // `Consecrate` ends in `setActiveMode(overworld)` (`shrine.lua:288`), so the whole
             // shrine screen going away is the game's own confirmation — a far stronger signal than
             // watching a slot swap in place, which this project has been fooled by before.
@@ -741,26 +752,40 @@ pub fn consecrate(
         return Ok(out);
     }
 
-    // 2. Is anything in the slot? The save has already said *which* button it must be; this asks
-    //    only whether it is painted, so we never click an empty rect.
-    out.slot_score = crate::act::score_exact(win, &crate::act::SHRINE_PRAY)?;
-    if out.slot_score < crate::act::SHRINE_SLOT_OCCUPIED {
+    // 2. **Which** button is in the slot, and is it live? This used to ask only whether the rect was
+    //    painted, on the reasoning that the save had already said what must be there. That is half a
+    //    check by construction, and the half it skipped is the one that failed: at `shrine3` on
+    //    2026-08-10 the click went somewhere that opened the stats history page.
+    //
+    //    Waited for rather than sampled, because the shrine screen fades in and a plaque that has
+    //    not finished rendering scores like an empty slot.
+    let found = crate::act::wait_for(
+        win,
+        &crate::act::SHRINE_CONSECRATE,
+        crate::act::SHRINE_CONSECRATE_PRESENT,
+        Duration::from_secs(6),
+    );
+    out.slot_score = found.score.unwrap_or(found.best);
+    if !found.found() {
         out.log.push_str(&format!(
-            "  consecrate: slot empty ({:.4} < {:.2}) — not clicking it blind\n",
-            out.slot_score,
-            crate::act::SHRINE_SLOT_OCCUPIED
+            "  consecrate: no active `Consecrate` (best {:.4} < {:.2}) — not clicking it blind\n",
+            found.best,
+            crate::act::SHRINE_CONSECRATE_PRESENT
         ));
         return Ok(out);
     }
     out.log.push_str(&format!(
-        "  consecrate: slot occupied, scored {:.4} against the `Pray` artwork\n",
+        "  consecrate: active `Consecrate` identified at {:.4}\n",
         out.slot_score
     ));
 
-    // The artwork itself, so the next run can have a real template instead of this two-part gate.
+    // The artwork itself. The template now exists, so this is no longer *for* cutting one — it is
+    // for the gap [`crate::act::SHRINE_CONSECRATE_PRESENT`] names: the template was cut from a single
+    // hand capture, so an active `Consecrate` has never been scored against different scenery. Every
+    // consecration from here leaves that second sample on disk.
     //
-    // It has to be taken **here** — on the shrine screen, at `SHRINE_PRAY`'s rect, after the slot
-    // has been read and before it is clicked. The first attempt at this called the driver's
+    // It has to be taken **here** — on the shrine screen, at the slot's rect, after the button has
+    // been identified and before it is clicked. The first attempt at this called the driver's
     // `snap_area_slot` from `navigate`, which photographs the *overworld* area slot: the capture
     // came back a picture of `Visit`, labelled `consecrate-live`, and the log line said "captured
     // the area slot" exactly as it should have. The name was mine and the code was honest.
@@ -776,8 +801,9 @@ pub fn consecrate(
         Err(e) => out.log.push_str(&format!("  consecrate: could not capture it: {e}\n")),
     }
 
-    // 3. Press it, and confirm by the screen going away.
-    let (cx, cy) = crate::act::SHRINE_PRAY.click;
+    // 3. Press it. The screen going away is reported, but it is **not** the success signal — the
+    //    stats history page closes it too. `Run::confirm_consecrated` reads the save flag.
+    let (cx, cy) = crate::act::SHRINE_CONSECRATE.click;
     input.click(cx, cy)?;
     out.done = crate::act::wait_until_gone(
         win,

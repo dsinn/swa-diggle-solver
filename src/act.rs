@@ -963,6 +963,49 @@ pub const SHOP_OPENED: &str = "Opened shop UI";
 /// That is why `identify` asks it last, below everything that names a screen. It is a generic
 /// "take me back" matcher — the answer to *there is nothing else to do here, how do I leave* — and
 /// never evidence about what the screen is. See the comment at its call site.
+/// `Consecrate`, in the shared right-hand slot. Same rect as [`SHRINE_PRAY`], which is the point:
+/// the slot holds one of several buttons and this identifies *which*, where occupancy could not.
+///
+/// Cut from `spike-frames-live/slot-consecrate-live.png`, captured by hand on 2026-08-10 because the
+/// state cannot be summoned on demand — it needs a solved, unconsecrated, uncorrupted shrine with
+/// the portal open.
+pub const SHRINE_CONSECRATE: Button = Button {
+    name: "shrine Consecrate",
+    template: "shrine-consecrate.png",
+    search: (1600, 914, 1866, 1030),
+    origin: (1608, 922),
+    click: (1733, 972),
+};
+
+/// An **active** `Consecrate` is on screen and will do something if pressed.
+///
+/// Measured against every state we hold a frame for:
+///
+/// | frame | inliers |
+/// |---|---|
+/// | active `Consecrate` | **1.0000** |
+/// | greyed `Consecrate` | **0.8564** |
+/// | inn screen | 0.8073 |
+/// | death / overworld | 0.7976 |
+/// | combat board | 0.7865 |
+/// | murder warning | 0.1175 |
+///
+/// **0.95**, with 0.0936 of margin above the nearest confusable — a greyed `Consecrate`, which is
+/// the same word in the same rect and differs only by tint. That is wider than the 0.107 gap
+/// [`SHRINE_PRAY_PRESENT`] was set on, and the dev's figure: 0.95 has historically survived the
+/// cursor accidentally sitting over a button, which is the failure a tighter threshold invites.
+///
+/// **The 1.0000 is a positive control and nothing more** — the template was cut from that exact
+/// frame, so it is guaranteed and proves only that the matcher works. What is *not* yet measured is
+/// an active `Consecrate` at a different shrine, against different scenery. If that comes in low, the
+/// top end is what moves, not this reasoning.
+///
+/// Note what this cannot do, because the temptation is real: it does not separate `Consecrate` from
+/// `Pray` by strength of evidence alone. The `Pray` artwork scores 0.8560 against an *active*
+/// `Consecrate` — four ten-thousandths from what this template scores against a *greyed* one — so
+/// the two questions must be asked with their own templates, never inferred from one score.
+pub const SHRINE_CONSECRATE_PRESENT: f64 = 0.95;
+
 pub const SHRINE_GOBACK: Button = Button {
     name: "shrine Go back",
     template: "shrine-goback.png",
