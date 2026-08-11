@@ -95,6 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         answered_event: None,
         recentre_misses: 0,
         shrines_tried: std::collections::HashSet::new(),
+        rest_failures: std::collections::HashMap::new(),
         slots_captured: std::collections::HashSet::new(),
         committed_to: None,
         dump_misses: 0,

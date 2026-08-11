@@ -74,6 +74,15 @@ const EMPTY_MAP: (i32, i32) = (1750, 160);
 /// stale file cannot end the next run before it starts.
 const STOP_FILE: &str = ".diggle-stop";
 
+/// Empty visits to one rest site before it stops being a destination.
+///
+/// Three, because the failures worth surviving come in ones — a click lost to a transition, a plaque
+/// not yet painted — and a site that gives nothing three times running is telling us something about
+/// the site rather than about the click. Each attempt is already several seconds of retries inside
+/// [`Run::rest_at_inn`], so this is not free; it is cheap against what one wrong write-off costs,
+/// which live was a village abandoned at 7/20.
+const REST_GIVE_UP: usize = 3;
+
 /// Points tried, in order, when looking for map with no location under it.
 ///
 /// One fixed point cannot be right everywhere — a subworld packs its nodes into a much smaller area
@@ -449,6 +458,20 @@ pub struct Run<'a> {
     /// the run spends its whole budget re-entering the same puzzle. This is the difference between
     /// "there is nothing left to do here" and "we already had our go".
     pub shrines_tried: std::collections::HashSet<String>,
+    /// Rest sites that gave us nothing, and how many times in a row.
+    ///
+    /// A rest that lands zero presses used to abandon the site immediately, which is right about
+    /// termination and wrong about causes. `cross_toward` keeps returning `Arrive` at a site that
+    /// stays a destination, so *something* has to write it off — but the failures that get us here
+    /// are overwhelmingly transient: an `Enter` click swallowed by a transition, a `Rest` plaque not
+    /// painted yet. Live 2026-08-10, one missed `Enter` at `l19sub2` wrote off a working inn and
+    /// sent the run out of the village at 7/20, into a highwayman.
+    ///
+    /// So: count instead of condemn, and abandon at [`REST_GIVE_UP`]. Termination survives because
+    /// the count only rises — a site cannot be retried for ever — while one bad click no longer
+    /// costs a village. Cleared by any rest that spends something, since health rising is the
+    /// monotone measure that makes coming back safe.
+    pub rest_failures: std::collections::HashMap<String, usize>,
     /// Area-slot captures already taken, so a template is photographed once rather than every step.
     pub slots_captured: std::collections::HashSet<String>,
     /// Consecutive turns inside a subworld with no usable adjacency dump.
@@ -945,11 +968,32 @@ impl Run<'_> {
                 {
                     Ok(q) => self.log.push_str(&format!("  rest: `Rest` found at {q:.4}\n")),
                     Err(e) => {
-                        // The button never rendered. That is a real answer now rather than an
-                        // ambiguity, so say it and photograph the screen that disagreed with us.
-                        self.log.push_str(&format!("  rest: `Rest` never appeared — {e}\n"));
-                        self.snap_screen("rest-no-button");
-                        break;
+                        // **Not a verdict — try again.** This used to `break`, which meant
+                        // [`innplay::REST_TRIES`] covered only the "pressed it and nothing opened"
+                        // case and never the one it was written for: the inn announces itself from
+                        // `onActive`, *before* it can take a click. A dream re-enters the inn by
+                        // exactly that route, so the round after a dream met an inn that was not
+                        // ready and gave up on the first look, 1.5s in.
+                        //
+                        // Live 2026-08-10, and it is the same failure this function's own doc
+                        // records from 2026-08-08: 1/20, one rest, a dream, then out of the inn at
+                        // 7/20 with 696 gold unspent. The retry was already sitting here; one arm
+                        // of it just did not reach.
+                        //
+                        // The cost of retrying is bounded and small — `REST_TRIES` × `REST_WAIT`,
+                        // ~12s — and it is only paid when the button genuinely never comes. One
+                        // case where it does: at full health the plaque reads `+0 (full)` and does
+                        // not match this artwork at all, so a needless inn visit now waits the full
+                        // budget. Harmless, since `presses_needed` would be 0 anyway, but it is why
+                        // the last try photographs the screen rather than the first.
+                        self.log.push_str(&format!(
+                            "  rest: `Rest` not on screen yet (try {try_n} of {}) — {e}\n",
+                            innplay::REST_TRIES
+                        ));
+                        if try_n == innplay::REST_TRIES {
+                            self.snap_screen("rest-no-button");
+                        }
+                        continue;
                     }
                 }
                 if self.wait_for_line(mark, innplay::REST_SCREEN, innplay::REST_WAIT) {
@@ -2471,15 +2515,22 @@ pub fn drive(
             // one shrine the arrival branch would always decline, and the run ping-ponged between it
             // and the cleared crypt on the way to the next.
             r.map.abandon(&key);
-            match crate::shrineplay::play(r.win, &r.keys) {
+            // The portal decides which button a solve produces, so the answer travels into `play`
+            // rather than being discovered by a failed match afterwards. Unknown reads as closed —
+            // the conservative direction, since it only costs the older `Pray` attempt.
+            let anomaly_open = r.map.anomaly_is_open().unwrap_or(false);
+            match crate::shrineplay::play(r.win, &r.keys, anomaly_open) {
                 Ok(played) => {
                     let log = played.log.clone();
                     r.log.push_str(&log);
-                    if !played.prayed {
+                    if !played.prayed && !played.consecrated {
                         // Not fatal, and deliberately not a stop: the blessing is a bonus, and a run
                         // that cannot claim it should still get on with the anomaly. It is logged
                         // loudly because a shrine we walked to and failed to use is a wasted trip.
-                        r.log.push_str("  shrine: left unprayed\n");
+                        r.log.push_str(&format!(
+                            "  shrine: left un{}\n",
+                            if anomaly_open { "consecrated" } else { "prayed" }
+                        ));
                     }
                 }
                 Err(e) => r.log.push_str(&format!("  shrine failed: {e}\n")),
@@ -2616,8 +2667,24 @@ pub fn drive(
                 // which is the one kind that terminates. It ends when the bar is full (`wants_rest`
                 // clears) or the purse is empty (`inn_inside`'s gold gate stops nominating it), and
                 // `rest_at_inn` reports `false` for both, since neither presses anything.
-                if !rested {
-                    r.map.abandon(at);
+                // **A failure is counted, not taken as a verdict** — see [`Run::rest_failures`].
+                // The old line abandoned on the first empty visit, so a swallowed `Enter` cost the
+                // whole inn and the crossing routed out of the village.
+                if rested {
+                    r.rest_failures.remove(at);
+                } else {
+                    let n = r.rest_failures.entry(at.clone()).or_insert(0);
+                    *n += 1;
+                    if *n >= REST_GIVE_UP {
+                        r.log.push_str(&format!(
+                            "  rest: {at} has given us nothing {n} times — writing it off\n"
+                        ));
+                        r.map.abandon(at);
+                    } else {
+                        r.log.push_str(&format!(
+                            "  rest: nothing landed at {at} ({n} of {REST_GIVE_UP}) — trying again\n"
+                        ));
+                    }
                 }
                 // Re-read before anything plans on it: `overworld:save()` runs in the inn's
                 // `goBack` (`ui/inn.lua:9`), so leaving is the moment the new health is readable.

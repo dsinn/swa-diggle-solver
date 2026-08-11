@@ -397,6 +397,10 @@ pub struct Played {
     pub solved: Option<String>,
     /// Whether `Pray` was found and pressed.
     pub prayed: bool,
+    /// Whether the solve was cashed in as a **consecration**, which is what the slot holds while the
+    /// portal is live. Distinct from [`Played::prayed`] because they are different rewards claimed
+    /// under different conditions, and collapsing them would hide which one a run actually got.
+    pub consecrated: bool,
     /// Human-readable trail, for the run report.
     pub log: String,
 }
@@ -418,9 +422,21 @@ pub struct Played {
 /// If the game rejects a word this proposes, the baked guess list disagrees with
 /// `utils.dictionary` and is stale — the exact silent-rot failure [`crate::shrine`] warns about.
 /// That is logged as such rather than retried into a loop, because no amount of retrying fixes it.
+/// `anomaly_open` decides **which button the solve is expected to produce**, and it is the game's own
+/// rule rather than a guess. `shrine.lua:98-103` shows `Pray` only when
+/// `areaUnused and (hell == 0 or consecrated or desecrated)`, while `Consecrate` needs
+/// `majorShrine and hell ~= 0` (`:92-95`) — and every shrine is major
+/// (`overworld/generators/world.lua:86-89`). So at an unconsecrated shrine with the portal live,
+/// `Pray` **cannot** be drawn and the slot holds `Consecrate`.
+///
+/// Live 2026-08-10, before this argument was passed: `shrine6` was solved in four guesses, the slot
+/// scored **0.8560** — the measured signature of an active `Consecrate`, see
+/// [`crate::act::SHRINE_PRAY_PRESENT`] — and the run logged `solved but no Pray button` and walked
+/// away from a blessing it had already earned.
 pub fn play(
     win: &crate::win::window::GameWindow,
     input: &dyn crate::win::input::Input,
+    anomaly_open: bool,
 ) -> Result<Played, crate::Error> {
     use crate::shrine::{max_guesses, show, solved, Baked, Band, Solver};
     use crate::win::capture::capture_window;
@@ -556,9 +572,44 @@ pub fn play(
         }
     }
 
-    // 4. Pray. The slot is shared and swaps to a greyed `Consecrate` the moment we use it, so this
-    //    is read before it is pressed and confirmed by its disappearance — never clicked blind.
-    if out.solved.is_some() {
+    // 4. Claim the reward. The slot is shared and swaps the moment we use it, so this is read before
+    //    it is pressed and confirmed by its disappearance — never clicked blind.
+    //
+    //    **Which button is there is decided by the portal, not by hope.** With it open the solve
+    //    yields `Consecrate`, and `Pray` is unreachable until that is done; see this function's doc.
+    //    Matching `Pray`'s artwork against an active `Consecrate` scores ~0.856 against a 0.92
+    //    threshold, so asking the wrong question here reads as "no button" and abandons the blessing.
+    if out.solved.is_some() && anomaly_open {
+        out.log.push_str(
+            "  shrine: portal is open, so the solve yields `Consecrate` and not `Pray`\n",
+        );
+        // Already on the shrine screen, so this is the back half of `consecrate` — the occupancy
+        // gate plus the game's rule about which button can be there — without re-opening anything.
+        let slot = crate::act::score_exact(win, &crate::act::SHRINE_PRAY)?;
+        if slot < crate::act::SHRINE_SLOT_OCCUPIED {
+            out.log.push_str(&format!(
+                "  shrine: slot empty ({slot:.4} < {:.2}) — not clicking it blind\n",
+                crate::act::SHRINE_SLOT_OCCUPIED
+            ));
+        } else {
+            // Clicked at the occupancy threshold, not `Pray`'s: the question already answered is
+            // "something is painted here", and the save-derived rule above says what it must be.
+            crate::act::click_exact(win, &crate::act::SHRINE_PRAY, crate::act::SHRINE_SLOT_OCCUPIED)?;
+            // `Consecrate` ends in `setActiveMode(overworld)` (`shrine.lua:288`), so the whole
+            // shrine screen going away is the game's own confirmation — a far stronger signal than
+            // watching a slot swap in place, which this project has been fooled by before.
+            out.consecrated = crate::act::wait_until_gone(
+                win,
+                &crate::act::SHRINE_GOBACK,
+                crate::act::SHRINE_GOBACK_PRESENT,
+                Duration::from_secs(8),
+            );
+            out.log.push_str(&format!(
+                "  shrine: consecrated={} (slot scored {slot:.4})\n",
+                out.consecrated
+            ));
+        }
+    } else if out.solved.is_some() {
         let found = crate::act::wait_for(
             win,
             &crate::act::SHRINE_PRAY,
