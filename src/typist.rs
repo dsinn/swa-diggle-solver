@@ -122,6 +122,29 @@ impl<'a> Typist<'a> {
             return None;
         }
 
+        // **Does the selection spell what we asked for?** Every step above succeeded, which is not
+        // the same thing, and this is the check that says so.
+        //
+        // Each clause consumes one character and can only *add* a tile, so it is tempting to treat
+        // "no step returned None" as proof. It is not: clause 1 and clause 2 also DELETE, and
+        // `clear_ephemeral` deletes placeholders they never touched -- faithfully, because
+        // `rpg.lua:824` does exactly that via `wordboard.lua:86-93`. A placeholder parked several
+        // characters back can therefore be swept by a ligature completing much later, and the
+        // character it stood for leaves the word without any step failing.
+        //
+        // Live 2026-08-11: `UNEQUIVOCALLY` on a board whose only U was inside a QU tile came back
+        // as a clean 11-tile selection spelling NEQUIVOCALLY. The typist was asked whether it could
+        // type the word and answered about something else. The fight stalled and the run ended.
+        //
+        // Rebuilt the way the game reads it -- `wordboard.getWord` concatenates `letterTemp or
+        // letter` (`wordboard.lua:275-283`), which is precisely [`Typist::slot_letters`] -- so this
+        // compares against the string the game itself would submit rather than against our idea of
+        // one.
+        let spelled: String = built.iter().map(|&s| self.slot_letters(s)).collect();
+        if spelled != upper {
+            return None;
+        }
+
         let tiles: Vec<usize> = built
             .iter()
             .map(|s| match s {
@@ -592,6 +615,35 @@ mod tests {
         let t = tiles_of(&["TH", "E"]);
         let g = strip(2);
         assert_eq!(typed(&t, &g, "TE"), None, "the T never resolves to a tile");
+    }
+
+    #[test]
+    fn a_completed_ligature_does_not_excuse_an_earlier_dangling_placeholder() {
+        // The board that ended the run of 2026-08-11, verbatim from the console, and the word the
+        // search chose. `UNEQUIVOCALLY` needs two U's; the board's only U is locked inside the QU
+        // tile, so it is unspellable — but every step still succeeded:
+        //
+        //   U -> no U tile; clause 4 parks a placeholder, because QU *contains* a U
+        //   N, E -> plain tiles
+        //   Q -> no Q tile either; clause 4 parks a second placeholder
+        //   U -> clause 1 completes "Q"+"U" as the QU tile and calls `clear_ephemeral`,
+        //        which sweeps BOTH placeholders — including the leading U, three steps back
+        //
+        // That is faithful to the game: `rpg.lua:824` calls `wordboard.clearEphemeralTiles`, and
+        // `wordboard.lua:86-93` removes every ephemeral in `wordTiles`, not just the absorbed one.
+        // So the guard on leftover placeholders cannot catch this — by the time it looks, there are
+        // none. What came back was a real, typeable selection that spells NEQUIVOCALLY, which the
+        // game's own `getWord` would hand over and no dictionary would accept. The fight stalled
+        // there and the run ended.
+        let t = tiles_of(&[
+            "QU", "E", "R", "L", "W", "N", "A", "A", "I", "C", "L", "Y", "L", "L", "O", "V",
+        ]);
+        let g = strip(16);
+        assert_eq!(typed(&t, &g, "UNEQUIVOCALLY"), None, "the board has one U and it is inside QU");
+
+        // The negative control, so this cannot be passed by refusing ligatures outright: the same
+        // board still plays a word that genuinely uses the QU tile.
+        assert!(typed(&t, &g, "QUILL").is_some(), "QU-I-L-L is spellable and must stay typeable");
     }
 
     #[test]
