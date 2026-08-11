@@ -505,6 +505,9 @@ pub struct Run<'a> {
     pub rest_failures: std::collections::HashMap<String, usize>,
     /// Area-slot captures already taken, so a template is photographed once rather than every step.
     pub slots_captured: std::collections::HashSet<String>,
+    /// How many times each [`Run::snap_screen`] tag has been used, so the second one does not
+    /// overwrite the first.
+    pub snaps: std::collections::HashMap<String, usize>,
     /// Consecutive turns inside a subworld with no usable adjacency dump.
     ///
     /// Reset on every dump that does arrive, so this counts a *run* of misses rather than a total.
@@ -899,7 +902,18 @@ impl Run<'_> {
     /// `activeIf` and no variant sets, so the *source* says our coordinate cannot be wrong — but a
     /// screen nobody photographed is not evidence, and arguing from source about a live failure is
     /// how this project has been wrong before.
+    /// Photographs the screen under a tag that is made unique before it is used.
+    ///
+    /// **A fixed name loses the evidence it was taken for.** The rest loop photographs its last
+    /// failed look, and on 2026-08-11 it did so twice in one run: the second inn visit's frame
+    /// overwrote the first's. The two failures had different causes — the survivor showed the rest
+    /// screen, and the one destroyed was of the inn, which is the one nobody could then explain.
+    /// Photographs are cheap and a run writes few of them; collisions are not worth the disk they
+    /// save.
     fn snap_screen(&mut self, tag: &str) {
+        let n = self.snaps.entry(tag.to_string()).or_insert(0);
+        *n += 1;
+        let tag = &if *n == 1 { tag.to_string() } else { format!("{tag}-{n}") };
         match crate::win::capture::capture_window(self.win) {
             Ok(f) => {
                 let path = Path::new(FRAMES).join(format!("{tag}.png"));
