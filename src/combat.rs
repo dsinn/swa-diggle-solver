@@ -519,13 +519,23 @@ impl<'a> Board<'a> {
         // because it never rested on watching other tiles -- a misplaced click still fails, as the
         // tile we asked for does not become selected.
         //
-        // **This window was briefly widened to 750ms on a wrong diagnosis, and is back.** The
-        // reasoning was that a slow animation could read the same twice 250ms apart, and that this
-        // explained a live `clicking tile 0 also changed [9]`. `spike_rshift_delete` then measured
-        // the actual board: selecting two tiles changed the reading of NINE of ten, and two
-        // backspaces put all nine back -- so that failure is caused by selection, not by animation,
-        // and no watch window of any length addresses it. Widening this bought nothing and cost
-        // half a second per word. See the board-wide change task.
+        // **This window was briefly widened to 750ms and is back, and neither the widening nor its
+        // reversal was reasoned from the right thing.** The live failure both were aimed at --
+        // `clicking tile 0 also changed [9]` -- was the dev using an item mid-word to rescue a run at
+        // zero health. `randomPotionOld` (`items/potionsmisc.lua:362-372`) fires three to five random
+        // tile effects, and the three tiles it hit are exactly the three that differ between that
+        // turn's dump and the save written afterwards: `!` and `I` became wildcards, and an `H` was
+        // gilded to silver.
+        //
+        // So **the stray check was right** -- the board really had changed under it -- and no window
+        // length is the answer. A pre-sample cannot catch a change that begins after it, and tile 9
+        // was still an ordinary `I` when this one was taken. What the failure actually calls for is
+        // re-planning against a board read *again*, which is
+        // [`crate::fight::Fight::wait_for_board_change`]'s job.
+        //
+        // Widening still bought nothing and cost half a second per word, so it stays at 250ms. This
+        // sample is for tiles that are *already* moving -- an exploding tile, a countdown -- which is
+        // the case it was built for and the one it handles.
         std::thread::sleep(RESTLESS_SAMPLE);
         let restless: Vec<usize> = {
             let second = self.read().map_err(|e| dirty(e.into()))?;

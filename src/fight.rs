@@ -110,6 +110,32 @@ const SAVE_SETTLE: Duration = Duration::from_secs(3);
 /// and three in a row is a board we have stopped understanding. Reset by any word that lands.
 const SELECT_ATTEMPTS: usize = 3;
 
+/// How long to give a queued save write to land before re-planning anyway.
+///
+/// **`rpg:save()` does not write the file.** With `_THREADED` — `love.system.getOS()~='Web'`
+/// (`main.lua:8`), so always on Windows — `saveFileData` pushes onto a `save` thread channel and
+/// returns (`conf.lua:18-25`). There is therefore a gap between the game deciding the board changed
+/// and the bytes reaching disk, and re-reading immediately reads the board we already had.
+///
+/// Generous on purpose. The cost of waiting is a second on a turn that has already failed; the cost
+/// of not waiting is re-planning the same impossible word until [`SELECT_ATTEMPTS`] calls the fight
+/// off. And [`Fight::wait_for_board_change`] returns the moment the board differs, so the full wait
+/// is only ever paid when nothing changed.
+const BOARD_CHANGE_WAIT: Duration = Duration::from_millis(1500);
+
+/// Has the board moved since we planned against it?
+///
+/// **Compares whole tiles, not letters.** A tile can change in ways that leave its letter alone —
+/// the potion that stopped the `l1` run gilded one tile to `silver3` while turning two others into
+/// wildcards — and a letters-only comparison would call that board unchanged. This is the same
+/// mistake [`tiles_of`] records having made once already, in the other direction.
+///
+/// Length is part of it: a board that lost a tile is a different board, and every index after the
+/// gap now means something else.
+fn board_differs(now: &[crate::observe::board::Tile], planned: &[crate::observe::board::Tile]) -> bool {
+    now != planned
+}
+
 /// What to do about a word that could not be placed.
 #[derive(Debug, PartialEq, Eq)]
 enum Recovery {
@@ -374,6 +400,41 @@ impl Fight<'_> {
 
     /// One player turn: read the board, choose a word, type it, submit, wait for the turn to move.
     #[allow(clippy::too_many_arguments)]
+    /// Waits for `combatSaveData` to show a board different from the one we planned against.
+    ///
+    /// Called after a selection failure, and its job is to separate two failures that look identical
+    /// from the board itself: a click that went somewhere wrong, and a *correct* click onto a board
+    /// that changed underneath it. The second is real — using an item mid-turn transmutes tiles and
+    /// saves straight away (`rpgconsumables.lua:328-341`, gated on the item returning a `consumed`
+    /// value and on being in `rpg` mode) — and it is the one where re-planning is the answer, since
+    /// the word being typed refers to letters that are no longer on the board.
+    ///
+    /// **Not a general board oracle, and it must not be used as one.** `rpg:save()` is called on item
+    /// use, hint use (`rpg.lua:517`), turn end (`rpgview.lua:1567`) and the wait phases — *not* on
+    /// every tile change. A tile changed by something that does not save is invisible here, so
+    /// `false` means "no change we can see", never "the board did not change".
+    ///
+    /// A failed read counts as **keep waiting**, not as "no change": the file being briefly
+    /// unreadable is exactly what a rewrite in progress looks like, which is why [`SAVE_SETTLE`]
+    /// exists. Returning on the first failed read would report no change at the very moment the
+    /// change is being written.
+    fn wait_for_board_change(
+        &self, planned: &[crate::observe::board::Tile], timeout: Duration,
+    ) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(cs) = save::load(&self.combat_path) {
+                if board_differs(&tiles_of(&cs), planned) {
+                    return true;
+                }
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     fn play_turn(
         &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, cs: &Table, turns: usize,
         peak_health: &mut std::collections::HashMap<String, i64>, murder_backoff: &mut i64,
@@ -593,7 +654,20 @@ impl Fight<'_> {
                         // Re-planning rather than re-typing the same word: the board may genuinely
                         // have moved under us, and a fresh search costs nothing against a turn we
                         // have already paid for.
-                        log.push_str("  board is clear -- planning again\n");
+                        //
+                        // **The wait is what makes the re-plan worth anything.** The outer loop
+                        // re-reads immediately, and the save is written on a background thread
+                        // ([`BOARD_CHANGE_WAIT`]) — so without pausing here it re-reads the board it
+                        // already had, plans the same impossible word, and fails the same way until
+                        // the attempt limit stops the fight. That is what the `l1` run did.
+                        let moved = self.wait_for_board_change(&tiles, BOARD_CHANGE_WAIT);
+                        log.push_str(if moved {
+                            "  board is clear, and the save now shows a DIFFERENT board \
+                             -- the board moved under us; planning against the new one\n"
+                        } else {
+                            "  board is clear; the save shows the same board \
+                             -- no visible change, so planning again on the same one\n"
+                        });
                         None
                     }
                     Recovery::Stop => {
@@ -1224,6 +1298,57 @@ mod tileboard_tests {
         // Index 1 must still be Y. When the wood tile was dropped this was I, and every later index
         // was wrong by one -- which is how NATURALITY was submitted as YDIWYRIYAW.
         assert_eq!(tiles[1].letter, "Y");
+    }
+
+    /// The two boards either side of the potion that stopped the `l1` run, verbatim.
+    ///
+    /// `BEFORE` is the turn-12 dump the word was planned against (`spike-run-raw.log`); `AFTER` is
+    /// what `combatSaveData` held once the potion had resolved. Real bytes rather than invented
+    /// ones, because the whole question is whether a *real* mid-turn change reads as a change.
+    const BEFORE: &str = "return { tileboard = {\n\
+         \x20 \"G\", \"N\", \"!\", \"U\", \"H\", { \"Z\", { bg = \"wood\" } }, \"U\", \".\", \"Y\", \"I\",\n\
+         } }\n";
+    const AFTER: &str = "return { tileboard = {\n\
+         \x20 \"G\", \"N\", { \".\", { bg = \"bad\" } }, \"U\", { \"H\", { bg = \"silver3\" } },\n\
+         \x20 { \"Z\", { bg = \"wood\" } }, \"U\", \".\", \"Y\", { \".\", { bg = \"wood\" } },\n\
+         } }\n";
+
+    fn board(src: &str) -> Vec<crate::observe::board::Tile> {
+        tiles_of(&parse(src).expect("parses"))
+    }
+
+    #[test]
+    fn a_board_that_has_not_moved_reads_as_unchanged() {
+        // The control. Without this, a comparison that always said "changed" would pass every test
+        // below and make the wait pointless -- it would re-plan on every failure regardless.
+        assert!(!board_differs(&board(BEFORE), &board(BEFORE)));
+        assert!(!board_differs(&board(AFTER), &board(AFTER)));
+    }
+
+    #[test]
+    fn the_potion_that_stopped_the_l1_run_reads_as_a_changed_board() {
+        assert!(board_differs(&board(AFTER), &board(BEFORE)));
+    }
+
+    #[test]
+    fn a_tile_that_changed_only_its_material_still_counts_as_a_change() {
+        // Tile 4 is the reason this compares whole tiles. `H` became `H` on silver3: the letter is
+        // identical, so a letters-only comparison calls the board unchanged and the run keeps
+        // re-planning the same word. Asserting the letters match first is the point -- it proves
+        // this test would pass a letters-only implementation, and therefore that it is testing
+        // something.
+        let (before, after) = (board(BEFORE), board(AFTER));
+        assert_eq!(before[4].letter, after[4].letter, "the letter did NOT change");
+        assert_eq!(after[4].quality.material.as_deref(), Some("silver3"));
+        assert!(board_differs(&after[4..5], &before[4..5]));
+    }
+
+    #[test]
+    fn a_board_that_lost_a_tile_is_a_different_board() {
+        // Length is part of it. A shorter board renumbers every index after the gap, so a plan made
+        // against the longer one now names the wrong tiles -- the same failure `tiles_of` records.
+        let full = board(BEFORE);
+        assert!(board_differs(&full[..full.len() - 1], &full));
     }
 }
 
