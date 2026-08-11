@@ -1596,6 +1596,39 @@ impl WorldMap {
         }
 
 
+        let anomaly_open = self.anomaly_is_open().unwrap_or(false);
+        let dist = self.distances(here);
+        // A shrine still worth walking to. `Pray` retires on `areaUnused`; `Consecrate` needs
+        // `hell ~= 0`, so an open portal makes an unconsecrated shrine live again whatever its
+        // `_used` flag says. See the fuller account at the closed-portal branch below.
+        let worth_a_trip = |p: &Place| !p.used || (anomaly_open && !p.consecrated);
+        let pick_shrine = || {
+            self.places
+                .values()
+                .filter(|p| p.key != here && !p.avoid && p.type_is("shrine"))
+                .filter(|p| !self.abandoned.contains(&p.key))
+                .filter(|p| worth_a_trip(p))
+                .filter(|p| !(anomaly_open && p.corrupted))
+                .filter(|p| ok(p))
+                .min_by_key(|p| dist_or_far(&dist, &p.key))
+        };
+
+        // **With the portal live, a reachable shrine outranks the portal itself** — the dev's call,
+        // 2026-08-10, and the argument is already written under [`Goal::Shrine`]. Consecrating is
+        // *only* possible while `hell ~= 0` (`shrine.lua:93-96`), so the window is exactly now; it
+        // costs no fight at an uncorrupted shrine, which is why the corrupted ones are filtered out
+        // above; and it pays in gold- and silver-bordered wildcard tiles
+        // (`utils/blessings.lua:95-110`), the mechanic this solver handles best.
+        //
+        // So the ordering is not "reward before objective", it is **cheap preparation before a level
+        // 8 fight, during the only window in which it can be bought**. `ok` still demands a known
+        // route, so this can only ever choose a shrine we can actually walk to.
+        if anomaly_open {
+            if let Some(p) = pick_shrine() {
+                return Some(Plan { target: p.key.clone(), reason: Goal::Shrine });
+            }
+        }
+
         // The anomaly is hostile by construction, so `ok` skips it too on the first pass. That is
         // the point rather than an oversight: it is a level 8 fight, and walking into it below half
         // health is the single most expensive thing this run can do. On the first pass we would
@@ -1682,17 +1715,10 @@ impl WorldMap {
         // as spent; without [`WorldMap::abandon`] telling the planner too, the two disagree and the
         // run walks back and forth between the shrine it will not re-enter and the crypt on the way
         // to the next one. Thirty steps of `l10 -> shrine2 -> l10` is what that looks like.
-        let worth_a_trip = |p: &Place| !p.used || (anomaly_open && !p.consecrated);
-        if let Some(p) = self
-            .places
-            .values()
-            .filter(|p| p.key != here && !p.avoid && p.type_is("shrine"))
-            .filter(|p| !self.abandoned.contains(&p.key))
-            .filter(|p| worth_a_trip(p))
-            .filter(|p| !(anomaly_open && p.corrupted))
-            .filter(|p| ok(p))
-            .min_by_key(|p| dist_or_far(&dist, &p.key))
-        {
+        // Reached only with the portal **shut** — the open case is handled above the anomaly branch,
+        // where it now outranks it. Same selection, so it is the same closure rather than a second
+        // copy of the filter chain that could drift from this one.
+        if let Some(p) = pick_shrine() {
             return Some(Plan { target: p.key.clone(), reason: Goal::Shrine });
         }
         // Nothing qualifying is known yet, so grow the map. Unvisited places first — standing on one
@@ -1789,12 +1815,28 @@ impl WorldMap {
         let toward = |p: &Place| -> f64 {
             bearing.as_ref().and_then(|t| self.gap(&p.key, t)).unwrap_or(f64::MAX)
         };
+        // **Direction outranks distance once the portal is live**, and the dev's reason is the one
+        // that matters: node level scales with distance from the origin, so exploring *away* from
+        // the corruption does not merely waste hops, it walks into progressively worse fights.
+        // Live 2026-08-10, with no bearing available at all, "nearest unvisited" drifted outward
+        // from `l19` to `l28` to `l49` — a level 6 crypt — and the run died in it.
+        //
+        // Below distance is where this used to sit, on the argument that hops are what a run
+        // actually spends. That holds while the anomaly is shut, when exploring is genuinely about
+        // growing the map and one direction is as good as another. It stops holding the moment
+        // there is somewhere to be.
+        let steer = self.anomaly_is_open().unwrap_or(false) && bearing.is_some();
         frontier.sort_by(|a, b| {
+            let by_hops =
+                dist.get(&a.key).unwrap_or(&far).cmp(dist.get(&b.key).unwrap_or(&far));
+            let by_bearing = toward(a).total_cmp(&toward(b));
             a.visited
                 .cmp(&b.visited)
                 .then(a.completed.cmp(&b.completed))
-                .then(dist.get(&a.key).unwrap_or(&far).cmp(dist.get(&b.key).unwrap_or(&far)))
-                .then(toward(a).total_cmp(&toward(b)))
+                .then(match steer {
+                    true => by_bearing.then(by_hops),
+                    false => by_hops.then(by_bearing),
+                })
                 .then(b.connections.cmp(&a.connections))
                 .then(b.hidden.unwrap_or(0).cmp(&a.hidden.unwrap_or(0)))
                 .then(a.key.cmp(&b.key))
@@ -2715,6 +2757,72 @@ mod tests {
 
     fn node(key: &str, heading: &str) -> Node {
         Node { key: key.into(), heading: heading.into(), x: 0.0, y: 0.0, connections: 2 }
+    }
+
+    fn node_at(key: &str, heading: &str, x: f64, y: f64) -> Node {
+        Node { key: key.into(), heading: heading.into(), x, y, connections: 2 }
+    }
+
+    /// Exploring with the portal live must walk **toward the corruption**, even when that is the
+    /// longer way round in hops.
+    ///
+    /// The dev's rule, and the reason is survival rather than speed: node level scales with distance
+    /// from the origin, so drifting outward meets progressively worse fights. Live 2026-08-10 a run
+    /// at full health explored `l19 -> l28 -> l49`, a level 6 crypt, and died in it — with no bearing
+    /// available, "nearest unvisited" was the whole strategy.
+    ///
+    /// The map: `far` is corrupted and positioned, so it stands in for the portal's direction.
+    /// `toward` sits beside it but is **two** hops away; `away` is one hop and in the opposite
+    /// direction. Hops alone pick `away`; the bearing picks `toward`.
+    #[test]
+    fn with_the_portal_open_exploration_heads_into_the_corruption_not_to_the_nearest_node() {
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "here",
+            "camp",
+            vec![node_at("away", "Westerly meadow", -100.0, 0.0), node_at("step", "Easterly road", 50.0, 0.0)],
+        ));
+        // Lists `away`, which the first dump already placed, so this one can be **registered**
+        // against the frame — `registration` anchors on a node it has a position for, and a dump it
+        // cannot anchor places nothing at all.
+        m.fold(&dump(
+            "step",
+            "Easterly road",
+            vec![
+                node_at("away", "Westerly meadow", -100.0, 0.0),
+                node_at("toward", "Furtherly meadow", 100.0, 0.0),
+            ],
+        ));
+        // Anchoring cost `away` its last unknown neighbour, and a node with nothing left to reveal
+        // is not a destination at all — which would decide the test for the wrong reason. Both
+        // candidates must stay worth walking to, so the only thing separating them is direction.
+        m.entry("away").connections = 3;
+        m.entry("toward").connections = 3;
+
+        // The corruption blob, positioned and off the graph. `pos_for` averages it into a bearing
+        // for the portal, which is the mechanism under test.
+        m.entry("far").pos = Some((200.0, 0.0));
+        m.entry("far").corrupted = true;
+
+        // The portal, known and **unroutable** — which is the only case that produces a bearing at
+        // all: `Goal::Anomaly` declines for want of a way there, and exploring inherits the
+        // direction it wanted. Reached by giving it an edge to a component of its own, since a node
+        // with no edges is not the same thing as a node we cannot get to. Its position is never
+        // observed; this dump cannot be registered against the frame, so it places nothing, and the
+        // corruption centroid is what stands in.
+        m.fold(&dump("island", "island camp", vec![node_at("start", "The Rift anomaly", 0.0, 0.0)]));
+        m.here = Some("here".into());
+
+        // Control: portal shut, so direction is not a consideration and the nearest wins.
+        m.hell = Some(0.0);
+        let shut = m.next_target().expect("something to explore");
+        assert_eq!(shut.reason, Goal::Explore);
+        assert_eq!(shut.target, "away", "with no portal, nearest unvisited is the whole rule");
+
+        // Open: the same map, and now the far side of the corruption wins despite the extra hop.
+        m.hell = Some(0.1);
+        let open = m.next_target().expect("something to explore");
+        assert_eq!(open.target, "toward", "must head at the corruption, not at the nearest node");
     }
 
     fn dump(here: &str, heading: &str, nodes: Vec<Node>) -> Adjacency {
@@ -5011,9 +5119,14 @@ mod tests {
     }
 
     #[test]
-    fn once_the_anomaly_is_open_only_shrines_already_underfoot_are_worth_it() {
-        // A corrupted shrine has to be fought through again, and corruption is invisible in the
-        // heading -- so after the door opens we stop detouring and take only what is on the way.
+    fn an_open_portal_makes_a_clean_shrine_the_errand_and_a_corrupted_one_no_errand_at_all() {
+        // Two opposite rules meet once the door opens, and this pins both.
+        //
+        // An **uncorrupted** shrine outranks the portal: consecrating is only possible while
+        // `hell ~= 0`, it costs no fight, and it pays in wildcard tiles before a level 8 fight. A
+        // **corrupted** one has to be fought through again, so it is never a destination -- it is
+        // worth something only when we are already standing on it.
+        //
         // here — detour(shrine) is a dead end; here — mid(shrine) — rift is the route.
         let mut m = WorldMap::new();
         m.fold(&dump(
@@ -5023,24 +5136,33 @@ mod tests {
         ));
         m.fold(&dump("mid", "Midway shrine", vec![node("here", "camp"), node("rift", "The Rift anomaly")]));
         m.here = Some("here".into());
-
-        // Open: the anomaly is the goal, and the route runs through `mid` but not `detour`.
         m.hell = Some(0.1);
-        assert_eq!(m.next_target().unwrap().reason, Goal::Anomaly);
+
+        // Clean shrines reachable, so the shrine is the errand -- ahead of the portal itself. This
+        // assertion was the opposite before 2026-08-10; the run that changed it walked past three
+        // shrines and died in a level 6 crypt with the portal never once nominated.
+        assert_eq!(m.next_target().unwrap().reason, Goal::Shrine);
+
+        // The route is a separate question from the goal, and it is unchanged.
         let route = m.anomaly_route().unwrap();
         assert!(route.contains(&"mid".to_string()), "route: {route:?}");
         assert!(!route.contains(&"detour".to_string()), "the dead-end shrine is not on the way");
 
-        // "Unless it is on the shortest direct path" is an ARRIVAL question, because `Anomaly`
-        // outranks `Shrine` for as long as the anomaly is unfinished. Both shrines corrupted:
-        // the one on the route earns its fight, the dead end does not.
+        // Corrupt both. Now neither is a destination, and the portal is what is left -- which is
+        // also the control: without the corruption filter this would still say `Shrine`, so the
+        // first assertion above would pass for the wrong reason.
         m.entry("mid").corrupted = true;
         m.entry("detour").corrupted = true;
+        assert_eq!(
+            m.next_target().unwrap().reason,
+            Goal::Anomaly,
+            "a corrupted shrine is never walked to, so the portal is the errand again"
+        );
+
+        // Arrival is the other axis and it did not move: the one on the way earns its fight
+        // because we are crossing it regardless, the dead end does not.
         assert!(m.worth_consecrating_here("mid"), "we are walking through it regardless");
         assert!(!m.worth_consecrating_here("detour"), "a corrupted dead end is not worth the fight");
-
-        // And a corrupted shrine is never a destination while the anomaly is open.
-        assert_ne!(m.next_target().unwrap().reason, Goal::Shrine);
     }
 
     #[test]
