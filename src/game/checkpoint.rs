@@ -130,10 +130,30 @@ pub fn describe(dir: &Path) -> String {
     let hell = t.table_at("overworld.areaFlags").and_then(|f| f.get("hell").and_then(|v| v.as_f64()));
     let mid_fight = dir.join("combatSaveData").is_file();
     format!(
-        "at {loc}, {completed} areas complete, hell={}, {}",
-        hell.map(|h| h.to_string()).unwrap_or("unset".into()),
+        "at {loc}, {completed} areas complete, anomaly {}, {}",
+        describe_hell(hell),
         if mid_fight { "MID-FIGHT" } else { "no fight in progress" }
     )
+}
+
+/// Says what a `hell` reading MEANS, not what it is.
+///
+/// The bare number reads like a progress meter you compare against some high threshold, and it is
+/// not one: `hellOpens` writes `0.1` (`utils\events.lua:39`) and the game's own test is
+/// `overworldview.areaFlag'hell' ~= 0` (`overworld\locations\shrine.lua:50`), matched by
+/// [`crate::overworld::WorldMap::anomaly_is_open`]. Zero is the only closed state.
+///
+/// So `hell=0.1` has been read as "corruption is barely started, the portal is shut" — by me, more
+/// than once, while planning a run around it. Every checkpoint in the store shows `0.1`, including
+/// ones taken deep into a run, which is the tell: if it were a meter it would have moved. The value
+/// still prints, because it does grow and a future question may want it, but it prints *behind* the
+/// answer rather than in place of it.
+fn describe_hell(hell: Option<f64>) -> String {
+    match hell {
+        Some(h) if h != 0.0 => format!("OPEN (hell={h})"),
+        Some(h) => format!("closed (hell={h})"),
+        None => "closed (hell unset)".into(),
+    }
 }
 
 fn sanitize(name: &str) -> String {
@@ -178,6 +198,27 @@ mod tests {
     #[test]
     fn an_unrelated_directory_is_refused() {
         assert!(guard(Path::new(r"C:\temp\whatever")).is_err());
+    }
+
+    #[test]
+    fn the_value_the_anomaly_opens_at_is_reported_as_open() {
+        // 0.1 is what `hellOpens` writes, and it is the number every checkpoint in the store shows.
+        // Reading it as "barely started" is the mistake this line exists to stop, so assert on the
+        // word rather than on the digits.
+        assert!(describe_hell(Some(0.1)).starts_with("OPEN"));
+        assert!(describe_hell(Some(1.0)).starts_with("OPEN"));
+    }
+
+    #[test]
+    fn only_zero_and_a_missing_flag_are_closed() {
+        assert!(describe_hell(Some(0.0)).starts_with("closed"));
+        assert!(describe_hell(None).starts_with("closed"));
+    }
+
+    #[test]
+    fn the_reading_itself_survives_for_a_question_this_summary_does_not_answer() {
+        // It grows as the run goes on; the summary answers open/closed, not how far along.
+        assert!(describe_hell(Some(0.19)).contains("0.19"));
     }
 
     #[test]
