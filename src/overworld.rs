@@ -973,6 +973,15 @@ impl WorldMap {
         self.wants_rest
     }
 
+    /// Has this shrine been consecrated, as the **save** reports it?
+    ///
+    /// Named after the game's own `isConsecrated`, and reading the same `<key>_consecrated` flag. The
+    /// authoritative answer to "did that press work", as against any screen-shaped proxy for it —
+    /// see [`crate::navigate::Run::confirm_consecrated`] for what believing the proxy cost.
+    pub fn is_consecrated(&self, key: &str) -> bool {
+        self.places.get(key).map(|p| p.consecrated).unwrap_or(false)
+    }
+
     /// Folds one adjacency dump into the map.
     ///
     /// Everything here is additive except the fields a dump is authoritative for. A neighbour's
@@ -2758,6 +2767,34 @@ mod tests {
 
     fn node(key: &str, heading: &str) -> Node {
         Node { key: key.into(), heading: heading.into(), x: 0.0, y: 0.0, connections: 2 }
+    }
+
+    /// The save is the only thing that knows a consecration happened.
+    ///
+    /// Live 2026-08-10 at `shrine3`, `consecrate` reported `shrine screen closed=true` and the run
+    /// believed it. The screen had closed because the **stats history page** opened over it, and the
+    /// shrine finished the run unconsecrated with the log saying otherwise. Two shrines that turn did
+    /// work, so nothing in aggregate gave the false positive away.
+    ///
+    /// The two polarities come out of **one** save here on purpose: a fixture that only ever asserts
+    /// the true case cannot tell "reads the flag" from "returns true".
+    #[test]
+    fn only_the_save_flag_says_a_shrine_was_consecrated() {
+        let mut m = WorldMap::new();
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = {
+                     hell = 0.1, shrine2_consecrated = 1, shrine3_used = 1,
+                 } } }",
+            )
+            .unwrap(),
+        );
+        assert!(m.is_consecrated("shrine2"), "the flag is set, so the game says it is done");
+        assert!(
+            !m.is_consecrated("shrine3"),
+            "used but not consecrated — this is the shrine the run wrongly believed it had finished"
+        );
+        assert!(!m.is_consecrated("shrine9"), "a shrine we have never heard of is not consecrated");
     }
 
     fn node_at(key: &str, heading: &str, x: f64, y: f64) -> Node {

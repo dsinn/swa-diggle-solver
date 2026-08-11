@@ -74,6 +74,15 @@ const EMPTY_MAP: (i32, i32) = (1750, 160);
 /// stale file cannot end the next run before it starts.
 const STOP_FILE: &str = ".diggle-stop";
 
+/// How long to let `<key>_consecrated` reach the save before calling a consecration failed.
+///
+/// Not a guess at latency. Two things have to finish first, and the second is the longer: the flag
+/// is written by `overworld:save()` inside the consecration beam's `onDecay` (`shrine.lua:281`), and
+/// the dev reports the game then **holds the camera on the shrine effect for a few seconds** before
+/// panning back to the player. Eight seconds covers that with room, and costs nothing on the happy
+/// path because [`Run::confirm_consecrated`] polls and returns the moment the flag appears.
+const CONSECRATE_CONFIRM: Duration = Duration::from_secs(8);
+
 /// Empty visits to one rest site before it stops being a destination.
 ///
 /// Three, because the failures worth surviving come in ones — a click lost to a transition, a plaque
@@ -710,6 +719,41 @@ impl Run<'_> {
         let save = crate::game::save::load(&self.save_dir.join("mainSaveData")).ok()?;
         self.map.apply_save(&save);
         crate::rest::Health::from_save(&save)
+    }
+
+    /// Waits for `<key>_consecrated` to reach the save, and reports whether it did.
+    ///
+    /// **The screen closing is not the signal, and believing it cost a shrine.** `consecrate`
+    /// treated "the shrine screen went away" as success — but it also goes away when the stats
+    /// history page opens over it. Live 2026-08-10 at `shrine3`: `shrine screen closed=true`, the
+    /// loop tidily cleared a stats page it had not expected, and the shrine ended the run
+    /// unconsecrated with the log claiming otherwise. `shrine2` and `shrine6` genuinely worked, so
+    /// the false positive was invisible in aggregate.
+    ///
+    /// The flag is the game's own answer — `isConsecrated` reads exactly this key — and it is worth
+    /// waiting for rather than sampling once, for two reasons that compound:
+    ///
+    /// * `overworld:save()` runs in the consecration beam's `onDecay` (`shrine.lua:281`), so the
+    ///   write happens when the *effect* finishes, not when the click lands.
+    /// * The dev, 2026-08-10: after the press the game returns to the overworld but **holds the
+    ///   camera on the shrine effect for a few seconds** before panning back to the player. So the
+    ///   whole confirmation window is one in which the game is animating and the map is not where a
+    ///   dump would expect it — which is its own reason not to act during it.
+    ///
+    /// Polls rather than sleeps a fixed span, so a fast machine pays only what it needs and a slow
+    /// one is not cut off early.
+    fn confirm_consecrated(&mut self, key: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.apply_save();
+            if self.map.is_consecrated(key) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(400));
+        }
     }
 
     /// Clicks empty map to raise "locate me", clicks it, and waits for the pan to FINISH.
@@ -2523,6 +2567,12 @@ pub fn drive(
                 Ok(played) => {
                     let log = played.log.clone();
                     r.log.push_str(&log);
+                    if played.consecrated && !r.confirm_consecrated(&key, CONSECRATE_CONFIRM) {
+                        r.log.push_str(
+                            "  shrine: **the screen closed but `_consecrated` never landed** —                              not consecrated after all
+",
+                        );
+                    }
                     if !played.prayed && !played.consecrated {
                         // Not fatal, and deliberately not a stop: the blessing is a bonus, and a run
                         // that cannot claim it should still get on with the anomaly. It is logged
