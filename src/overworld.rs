@@ -1687,8 +1687,9 @@ impl WorldMap {
         // [`Goal::Anomaly`] outranks this branch, and once it is finished there is no path left. So
         // a corrupted shrine is never a *destination* — passing through one is judged on arrival,
         // by [`WorldMap::worth_consecrating_here`].
-        let anomaly_open = self.anomaly_is_open().unwrap_or(false);
-        let dist = self.distances(here);
+        // `anomaly_open`, `dist` and the shrine pick itself are all hoisted above the anomaly branch
+        // now, since the open-portal case has to choose a shrine before that branch runs.
+        //
         // **What is actually left to do at a shrine**, which `!consecrated` alone does not answer.
         // Two actions live there and they have different gates:
         //
