@@ -100,6 +100,38 @@ pub fn luma(frame: &Frame, cx: i32, cy: i32, radius: i32) -> f64 {
     }
 }
 
+/// Vertical luminance range that makes a column of the word bar "busy" rather than bare plank.
+///
+/// Measured, not chosen — see [`bar_busy_columns`] for the figures.
+pub const BAR_EDGE: f64 = 60.0;
+
+/// How much of the word bar holds tiles, as a count of occupied pixel columns.
+///
+/// **A range, not a brightness.** The plank behind the bar is a smooth gradient, so top-to-bottom it
+/// barely varies; a tile spans the full height of the strip with a bright face, a dark letter and
+/// dark borders, so its columns vary enormously. That makes the measure indifferent to the scene
+/// getting brighter or darker, which is exactly the failure mode being replaced — a mean-luminance
+/// check that an animation could move.
+///
+/// The number is not a tile count and is not meant to be: tiles re-centre and shrink as the word
+/// grows (`wordboard.lua:210`), and the drawn width eases toward its target over several frames
+/// (`:702`), so any given reading is somewhere between two tile counts. What holds is that it is
+/// **zero for an empty bar and strictly larger for each tile added**, which is all a caller needs to
+/// ask "did that click register?".
+pub fn bar_busy_columns(frame: &Frame) -> usize {
+    (0..frame.width)
+        .filter(|&x| {
+            let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+            for y in 0..frame.height {
+                let v = luma(frame, x, y, 0);
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+            hi - lo > BAR_EDGE
+        })
+        .count()
+}
+
 /// Which tiles differ from the baseline — i.e. which are currently selected.
 pub fn selected(frame: &Frame, tiles: &[(i32, i32)], baseline: &[f64], radius: i32) -> Vec<bool> {
     tiles
@@ -116,6 +148,8 @@ pub enum SelectError {
     Stuck(usize),
     /// A click landed somewhere unplanned; the board is not in a state we can reason about.
     Stray { wanted: usize, got: Vec<usize> },
+    /// Something was already selected before the word started. Carries the bar reading.
+    WordBarNotEmpty(usize),
     /// The on-screen keyboard would not take the letter. Almost always a restricted wildcard whose
     /// pattern does not admit it (`onscreenKeypress`, `rpg.lua:664`), which is a planning error
     /// rather than an input one — and the keyboard is still up, so the caller must clear it.
@@ -171,6 +205,9 @@ impl std::fmt::Display for SelectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SelectError::Stuck(i) => write!(f, "tile {i} would not select"),
+            SelectError::WordBarNotEmpty(n) => {
+                write!(f, "the word bar already held a word ({n} columns) before this one started")
+            }
             SelectError::Stray { wanted, got } => {
                 write!(f, "clicking tile {wanted} also changed {got:?}")
             }
@@ -276,6 +313,9 @@ pub struct Board<'a> {
     rect: (i32, i32, i32, i32),
     /// The region watched to tell the on-screen keyboard from the tile board.
     keyboard: (i32, i32, i32, i32),
+    /// The strip that shows the word as it is built — the one place a click can be confirmed
+    /// against the game's own state instead of against a picture of the board.
+    bar: (i32, i32, i32, i32),
     radius: i32,
     /// Where to photograph each click, when the run has asked for it. See
     /// [`crate::config::Config::debug_click_frames`].
@@ -301,12 +341,43 @@ impl<'a> Board<'a> {
             centres: layout::tile_centres(geom, cw, ch),
             rect: layout::board_rect(geom, cw, ch),
             keyboard: crate::typist::wildcard::region(cw, ch),
+            bar: layout::word_bar(cw, ch),
             // 55% of a tile: inside the face, so a small mapping error still samples the right tile
             // and a large one samples the gap.
             radius: (layout::tile_radius(cw, ch) * 0.55).round() as i32,
             click_frames: None,
             shots: std::cell::Cell::new(0),
         })
+    }
+
+    /// How much of the word bar is occupied right now. Zero means nothing is selected.
+    pub fn bar_busy(&self) -> Result<usize, crate::Error> {
+        let (x, y, w, h) = self.bar;
+        Ok(bar_busy_columns(&capture_client_rect(self.win, x, y, w, h)?))
+    }
+
+    /// Waits for the word to grow by at least one tile, and says whether it did.
+    ///
+    /// **This is what "the click registered" means.** A tile going dark does not mean it: while the
+    /// scene animates, tile luminance moves on its own, and on 2026-08-11 a resumed fight had its
+    /// first two clicks discarded by a game not yet taking input while every one of them passed the
+    /// luminance check. The bar is drawn from `wordTiles` alone (`wordboard.lua:686-691`), so it
+    /// cannot be moved by an animation, only by a selection the game accepted.
+    ///
+    /// Growth rather than an exact count, because the drawn width eases toward its target over
+    /// several frames (`wordboard.lua:702`) — a reading taken mid-ease sits between two tile counts.
+    /// "More than before" is the strongest claim the measure supports, and it is the one needed.
+    fn wait_for_bar_growth(&self, from: usize, timeout: Duration) -> Result<bool, crate::Error> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.bar_busy()? > from {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(POLL);
+        }
     }
 
     /// Turns on the per-click photographs, writing them into `dir`.
@@ -549,6 +620,17 @@ impl<'a> Board<'a> {
     /// the previous step instead would let a missed click look like a successful one.
     pub fn select_word(&self, plan: &[(usize, Option<char>)]) -> Result<Placed, SelectFailure> {
         let dirty = |error| SelectFailure { error, board_is_clean: false };
+
+        // **Nothing may be selected yet.** The baseline below is only meaningful against an empty
+        // board, and a word left over from a previous attempt would be submitted along with this
+        // one. The board's own pixels cannot tell us -- a selected tile just reads darker, which is
+        // what the baseline was going to define -- but the word bar can, and it reads exactly zero
+        // when empty.
+        let busy = self.bar_busy().map_err(|e| dirty(e.into()))?;
+        if busy > 0 {
+            return Err(dirty(SelectError::WordBarNotEmpty(busy)));
+        }
+
         let baseline = self.read().map_err(|e| dirty(e.into()))?;
 
         // Some tiles change without being touched. An exploding tile counts down with a pulsing red
@@ -658,8 +740,19 @@ impl<'a> Board<'a> {
                 // tile centres changed but never how, and "the click was sent" is not "the click
                 // landed" — 2026-08-11 ended on a stray report with no way to tell those apart.
                 self.shoot(i, attempt, "before");
+                let bar_before = self.bar_busy()?;
                 let changed = self.click_and_confirm(i, baseline)?;
                 self.shoot(i, attempt, "after");
+
+                // **Did the game take it?** A click that arrives before the scene is ready is
+                // discarded in silence (`wordboard.lua:127`), and the tile-luminance check cannot
+                // see that: an animation moves the tiles whether or not anything was selected. So a
+                // click is only counted once the word itself has grown, and one that did not
+                // register is simply thrown again — which is what an early click needs, without
+                // anyone having to predict how early is too early.
+                if !self.wait_for_bar_growth(bar_before, CLICK_TIMEOUT)? {
+                    continue;
+                }
                 // Everything selected must be something we asked for. A stray selection cannot be
                 // repaired by clicking more, so it stops the word rather than corrupting it.
                 let stray: Vec<usize> = changed
@@ -718,6 +811,54 @@ mod tests {
 
     fn flat(w: i32, h: i32, v: u8) -> Frame {
         Frame { width: w, height: h, bgra: vec![v; (w * h * 4) as usize] }
+    }
+
+    /// A frame whose columns in `busy` run dark-to-light top to bottom, and whose others are flat.
+    fn bar_with_tiles(w: i32, h: i32, busy: std::ops::Range<i32>) -> Frame {
+        let mut f = flat(w, h, 120);
+        for y in 0..h {
+            for x in busy.clone() {
+                let v = if y < h / 2 { 20 } else { 230 };
+                let i = ((y * w + x) * 4) as usize;
+                f.bgra[i] = v;
+                f.bgra[i + 1] = v;
+                f.bgra[i + 2] = v;
+            }
+        }
+        f
+    }
+
+    #[test]
+    fn an_empty_word_bar_reads_zero() {
+        // The precondition for starting a word rests on this being exactly zero, not merely small.
+        assert_eq!(bar_busy_columns(&flat(400, 59, 120)), 0);
+    }
+
+    #[test]
+    fn the_reading_grows_with_the_word() {
+        // Not a tile count -- the drawn width eases (`wordboard.lua:702`) -- so the only property
+        // the caller may rely on is that more tiles read as more.
+        let one = bar_busy_columns(&bar_with_tiles(400, 59, 100..140));
+        let three = bar_busy_columns(&bar_with_tiles(400, 59, 60..180));
+        assert!(one > 0, "a tile must register");
+        assert!(three > one, "three tiles must read higher than one: {three} vs {one}");
+    }
+
+    #[test]
+    fn a_scene_getting_brighter_does_not_look_like_a_selection() {
+        // The whole reason for measuring a range rather than a brightness. An animation lifting the
+        // entire frame is what fooled the luminance check on 2026-08-11.
+        assert_eq!(bar_busy_columns(&flat(400, 59, 120)), 0);
+        assert_eq!(bar_busy_columns(&flat(400, 59, 200)), 0);
+    }
+
+    #[test]
+    fn the_word_bar_sits_where_the_game_draws_it() {
+        // `buildDrawDataTable(0, 118, 0.5, 0, 0, 1.41525)` (`wordboard.lua:16`) in the same
+        // convention as every button: centre = ss*client + offset*size. Height is halved to keep
+        // the plank's rails out -- with them in, an empty bar and an eight-letter word both read
+        // 1748 of 1888.
+        assert_eq!(crate::layout::word_bar(1920, 1080), (16, 137, 1888, 59));
     }
 
     #[test]

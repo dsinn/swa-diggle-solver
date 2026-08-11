@@ -996,6 +996,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => println!("no match at all  bounds={bounds:?}"),
             }
         }
+        "wordbar" => {
+            // The positive control for `bar_busy_columns`: run it over saved frames whose selected
+            // word is known by eye, and check the reading rises with the word. Offline, so the
+            // threshold is calibrated against real frames rather than against a running game.
+            for path in args.iter().skip(1) {
+                let dec = png::Decoder::new(std::fs::File::open(path)?);
+                let mut rdr = dec.read_info()?;
+                let mut buf = vec![0; rdr.output_buffer_size()];
+                let info = rdr.next_frame(&mut buf)?;
+                let n = info.color_type.samples();
+                let mut bgra = Vec::with_capacity((info.width * info.height * 4) as usize);
+                for px in buf.chunks_exact(n) {
+                    bgra.extend_from_slice(&[px[2], px[1], px[0], 255]);
+                }
+                let full = Frame { width: info.width as i32, height: info.height as i32, bgra };
+                let (x, y, w, h) =
+                    diggle_solver::layout::word_bar(full.width, full.height);
+                let mut sub = Vec::with_capacity((w * h * 4) as usize);
+                for row in y..y + h {
+                    let start = ((row * full.width + x) * 4) as usize;
+                    sub.extend_from_slice(&full.bgra[start..start + (w * 4) as usize]);
+                }
+                let bar = Frame { width: w, height: h, bgra: sub };
+                println!(
+                    "{path}: bar=({x},{y},{w},{h}) busy={} of {w}",
+                    diggle_solver::combat::bar_busy_columns(&bar)
+                );
+            }
+        }
         "croppng" => {
             // Measuring a UI bounding box means looking at it. Eyeballing a region off a
             // full-resolution screenshot is how the F1 classifier ended up hashing map and sea
