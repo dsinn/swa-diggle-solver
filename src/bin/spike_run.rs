@@ -212,7 +212,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         game_dir: cfg.game_dir.clone(),
         combat_path: save_dir.join("combatSaveData"),
         frames: Some(PathBuf::from(FRAMES)),
+        click_frames: cfg.debug_click_frames.then(|| PathBuf::from(FRAMES)),
     };
+    if cfg.debug_click_frames {
+        r.log.push_str(&format!(
+            "**`debug_click_frames` is on**: every tile click is photographed either side, into \
+             `{FRAMES}`. This costs a full-window capture per click and is not how a normal run \
+             should be measured.\n\n"
+        ));
+    }
 
     // A global stop, so the report is always written. A spike killed from outside leaves a stale
     // report on disk that then reads as the current result.

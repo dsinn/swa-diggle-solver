@@ -38,6 +38,7 @@ use crate::layout;
 use crate::win::capture::{capture_client_rect, Frame};
 use crate::win::input::{click_at, Input, PostMessageInput, SC_BACK, VK_BACK};
 use crate::win::window::GameWindow;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Luminance change that means a tile changed state.
@@ -276,6 +277,20 @@ pub struct Board<'a> {
     /// The region watched to tell the on-screen keyboard from the tile board.
     keyboard: (i32, i32, i32, i32),
     radius: i32,
+    /// Where to photograph each click, when the run has asked for it. See
+    /// [`crate::config::Config::debug_click_frames`].
+    click_frames: Option<PathBuf>,
+    /// Serial for those photographs, so their filenames sort into the order they were taken.
+    shots: std::cell::Cell<usize>,
+}
+
+/// Names one debug frame: sequence first, so a directory listing is a timeline.
+///
+/// `seq` counts every photograph this board has taken, `tile` is the dump index being clicked, and
+/// `attempt` is which of [`CLICK_ATTEMPTS`] this is — a stray on the first try and a stray on the
+/// third are different stories, and without the attempt number the pair cannot be told apart.
+pub fn click_frame_name(seq: usize, tile: usize, attempt: usize, when: &str) -> String {
+    format!("click-{seq:03}-tile{tile:02}-try{attempt}-{when}.png")
 }
 
 impl<'a> Board<'a> {
@@ -289,7 +304,35 @@ impl<'a> Board<'a> {
             // 55% of a tile: inside the face, so a small mapping error still samples the right tile
             // and a large one samples the gap.
             radius: (layout::tile_radius(cw, ch) * 0.55).round() as i32,
+            click_frames: None,
+            shots: std::cell::Cell::new(0),
         })
+    }
+
+    /// Turns on the per-click photographs, writing them into `dir`.
+    ///
+    /// `None` leaves them off, so a caller can pass a config flag straight through without branching.
+    pub fn with_click_frames(mut self, dir: Option<PathBuf>) -> Self {
+        self.click_frames = dir;
+        self
+    }
+
+    /// Photographs the whole window, if this board was asked to.
+    ///
+    /// **The whole window, not [`Board::rect`].** The board rect is what the click loop samples, and
+    /// if the answer were in there the luminance readings would already have given it. The questions
+    /// these frames exist to settle are outside it: did the cursor go where it was sent, is a
+    /// keyboard or dialog covering the board, is an overlay being drawn across the tiles.
+    ///
+    /// Failures are swallowed. This is a diagnostic; a run must not die because a disk write failed,
+    /// and the click it is watching has already happened either way.
+    fn shoot(&self, tile: usize, attempt: usize, when: &str) {
+        let Some(dir) = self.click_frames.as_ref() else { return };
+        let seq = self.shots.get() + 1;
+        self.shots.set(seq);
+        if let Ok(f) = crate::win::capture::capture_window(self.win) {
+            let _ = f.write_png(&dir.join(click_frame_name(seq, tile, attempt, when)));
+        }
     }
 
     pub fn tile_count(&self) -> usize {
@@ -610,8 +653,13 @@ impl<'a> Board<'a> {
                 continue;
             }
             let mut ok = false;
-            for _ in 0..CLICK_ATTEMPTS {
+            for attempt in 1..=CLICK_ATTEMPTS {
+                // Either side of the click, and only when asked for. The stray check can say which
+                // tile centres changed but never how, and "the click was sent" is not "the click
+                // landed" — 2026-08-11 ended on a stray report with no way to tell those apart.
+                self.shoot(i, attempt, "before");
                 let changed = self.click_and_confirm(i, baseline)?;
+                self.shoot(i, attempt, "after");
                 // Everything selected must be something we asked for. A stray selection cannot be
                 // repaired by clicking more, so it stops the word rather than corrupting it.
                 let stray: Vec<usize> = changed
@@ -640,6 +688,33 @@ impl<'a> Board<'a> {
 mod tests {
     use super::*;
     use crate::win::capture::Frame;
+
+    #[test]
+    fn click_frames_sort_into_the_order_they_were_taken() {
+        // A directory listing is how these get read, so the sequence has to lead and has to be
+        // zero-padded -- otherwise shot 10 sorts between 1 and 2 and the timeline is a jumble.
+        let mut names = vec![
+            click_frame_name(10, 3, 1, "before"),
+            click_frame_name(2, 15, 2, "after"),
+            click_frame_name(1, 3, 1, "before"),
+        ];
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "click-001-tile03-try1-before.png",
+                "click-002-tile15-try2-after.png",
+                "click-010-tile03-try1-before.png",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_before_and_an_after_of_the_same_click_are_different_files() {
+        // They differ only in `when`, and if that were dropped from the name the after would
+        // overwrite the before -- losing the half that says what the click changed.
+        assert_ne!(click_frame_name(1, 4, 1, "before"), click_frame_name(2, 4, 1, "after"));
+    }
 
     fn flat(w: i32, h: i32, v: u8) -> Frame {
         Frame { width: w, height: h, bgra: vec![v; (w * h * 4) as usize] }

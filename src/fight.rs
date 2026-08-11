@@ -242,6 +242,13 @@ pub struct Fight<'a> {
     pub combat_path: PathBuf,
     /// Where to drop diagnostic PNGs, if anywhere.
     pub frames: Option<PathBuf>,
+    /// Where to drop a photograph either side of every tile click, if the run asked for them.
+    ///
+    /// Separate from [`Fight::frames`] rather than a flag on it, because the two have opposite
+    /// defaults: the diagnostic PNGs are a handful per run and always wanted, and these are dozens
+    /// per turn and wanted only when a specific question is being asked. See
+    /// [`crate::config::Config::debug_click_frames`].
+    pub click_frames: Option<PathBuf>,
 }
 
 impl Fight<'_> {
@@ -630,7 +637,7 @@ impl Fight<'_> {
             }
         ));
 
-        let board = Board::new(self.win, &geom)?;
+        let board = Board::new(self.win, &geom)?.with_click_frames(self.click_frames.clone());
         self.park();
         if !board.wait_until_ready(Duration::from_secs(20))? {
             log.push_str("  board never filled/settled -- not clicking into a moving board\n");

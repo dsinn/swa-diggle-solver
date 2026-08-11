@@ -29,6 +29,19 @@ pub struct Config {
     /// not the program's. `.diggle-stop` in the working directory ends a run early from any state.
     #[serde(default)]
     pub run_minutes: Option<u64>,
+    /// Photograph the whole window either side of every tile click. **Off unless asked for.**
+    ///
+    /// The stray-selection check reports which tile centres changed luminance, and when it fires on
+    /// a board nobody was watching there is no way to ask *how* they changed — glow, dimming, an
+    /// overlay, a click that never landed at all. A frame from each side of the click answers that,
+    /// and it is the one question the log cannot.
+    ///
+    /// Not on by default because it is a full-window `PrintWindow` per click — ~28 ms measured
+    /// (`win::capture`) against the 4.4 ms cheap path the click loop is built around — and a word is
+    /// ten or more clicks. It slows every turn and fills the frames directory. Turn it on for the
+    /// run that is meant to answer a question, then turn it off.
+    #[serde(default)]
+    pub debug_click_frames: bool,
 }
 
 /// Used when `run_minutes` is absent. Long enough for a full run with rest detours — the run of
@@ -39,5 +52,31 @@ impl Config {
     pub fn load(path: &std::path::Path) -> Result<Self, crate::Error> {
         let text = std::fs::read_to_string(path)?;
         toml::from_str(&text).map_err(|e| crate::Error::Config(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_config_without_the_debug_flag_leaves_click_photography_off() {
+        // The defaulted field must not change what an existing config.toml does. Photographing
+        // every click costs a full-window capture per click; turning that on by accident would slow
+        // every fight and nothing in the log would say why.
+        let cfg: Config = toml::from_str(
+            "game_dir = \"g\"\nlovec_path = \"l\"\nrun_minutes = 0\n",
+        )
+        .expect("a config without the flag still parses");
+        assert!(!cfg.debug_click_frames);
+    }
+
+    #[test]
+    fn the_flag_can_be_turned_on_from_the_file() {
+        let cfg: Config = toml::from_str(
+            "game_dir = \"g\"\nlovec_path = \"l\"\ndebug_click_frames = true\n",
+        )
+        .expect("parses");
+        assert!(cfg.debug_click_frames);
     }
 }

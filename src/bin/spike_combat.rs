@@ -66,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         game_dir: cfg.game_dir.clone(),
         combat_path: save_dir.join("combatSaveData"),
         frames: Some(PathBuf::from(FRAMES)),
+        click_frames: cfg.debug_click_frames.then(|| PathBuf::from(FRAMES)),
     };
     // Deliberately shorter than any harness timeout wrapping this: a spike killed from outside
     // never writes its report, and the stale one on disk then reads as the current result.
