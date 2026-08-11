@@ -442,9 +442,31 @@ impl Outcome {
     /// - [`Goal::FrugalKill`]'s ceiling is an **optimisation** — a rest charge saved by not
     ///   overkilling. Missing it costs a charge; falling back to the gentlest word costs the fight,
     ///   and did (see [`Goal::FrugalKill`]). So it falls back like every other kill: hardest hit.
+    /// ## Missing a scare band has two directions, and they want opposite answers
+    ///
+    /// Falling back to [`Outcome::least`] unconditionally was right for the failure it was written
+    /// for and catastrophic for the opposite one. Both are live:
+    ///
+    /// * **Everything overshoots.** A murder warning backed the band down to `need 0, below 1`; the
+    ///   hardest word raised the warning again, thirty times. The gentlest word is the answer.
+    /// * **Nothing reaches the floor.** 2026-08-10, a cultist at 127+33: the band was `98..=158` and
+    ///   the best word on the board did 29. Seven turns of `SE`, `YA`, `PI`, `NA`, `EE`, `IF`, `GI`
+    ///   — one point each — while the board eroded from sixteen tiles to nine and the run died. The
+    ///   gentlest word does not scare, does not kill, and does not even buy time.
+    ///
+    /// `best` tells them apart. If the hardest hit available is **below** `need`, no word can scare
+    /// and playing softly is strictly worse than playing hard — and it is safe to play hard, because
+    /// a word under the floor is also under the ceiling and so cannot commit the murder the ceiling
+    /// exists to prevent. Chipping also *lowers the band*: `need` tracks the enemy's health, so
+    /// hitting hard now is how the scare becomes reachable at all.
     pub fn choice_for(&self, goal: Goal) -> Option<&Found> {
         match goal {
-            Goal::Scare { .. } => self.lethal.as_ref().or(self.least.as_ref()),
+            Goal::Scare { need, .. } => self.lethal.as_ref().or_else(|| {
+                match self.best.as_ref() {
+                    Some(b) if b.score < need => Some(b),
+                    _ => self.least.as_ref(),
+                }
+            }),
             _ => self.choice(),
         }
     }
@@ -767,7 +789,7 @@ pub fn search(
 ) -> Outcome {
     match goal {
         Goal::FirstKill { need } => {
-            race_for_band(dict, scorer, tiles, geometry, mods, need, None, threads)
+            race_for_band(dict, scorer, tiles, geometry, mods, need, None, picking, threads)
         }
         Goal::RankedKill { need } => {
             ranked_kill(dict, scorer, tiles, geometry, mods, need, picking, threads)
@@ -775,7 +797,7 @@ pub fn search(
         // The same search either way — a band is a band. Only the fallback differs, and that is
         // `Outcome::choice_for`'s business rather than the racer's.
         Goal::Scare { need, below } | Goal::FrugalKill { need, below } => {
-            race_for_band(dict, scorer, tiles, geometry, mods, need, Some(below), threads)
+            race_for_band(dict, scorer, tiles, geometry, mods, need, Some(below), picking, threads)
         }
         Goal::MaxDamage => max_damage(dict, scorer, tiles, geometry, mods, threads),
     }
@@ -1002,9 +1024,10 @@ pub fn race_for_kill(
     geometry: &Geometry,
     mods: &Modifiers,
     need: i64,
+    picking: &crate::pick::Context,
     threads: usize,
 ) -> Outcome {
-    race_for_band(dict, scorer, tiles, geometry, mods, need, None, threads)
+    race_for_band(dict, scorer, tiles, geometry, mods, need, None, picking, threads)
 }
 
 /// First word scoring at least `need`, and under `below` when one is given.
@@ -1020,6 +1043,7 @@ pub fn race_for_band(
     mods: &Modifiers,
     need: i64,
     below: Option<i64>,
+    picking: &crate::pick::Context,
     threads: usize,
 ) -> Outcome {
     let typist = Typist::new(tiles, geometry);
@@ -1028,8 +1052,17 @@ pub fn race_for_band(
     let threads = threads.max(1).min(words.len().max(1));
     let chunk = words.len().div_ceil(threads);
 
+    // **Not a race any more, whatever the name says.** It stopped every thread on the first word
+    // inside the band, so which qualifying word got played was decided by thread scheduling — and a
+    // band is usually wide. Live 2026-08-10, a highwayman with a `17..=25` band was routed with a
+    // word that spent a **solid gold tile**, while cheaper words in the same band went unexamined.
+    //
+    // A band is a set of equally acceptable answers, which is exactly the situation
+    // [`crate::pick::Rank`] exists for — it is already what picks between two words that both kill.
+    // Ranking costs a full dictionary scan instead of an early exit; [`ranked_kill`] pays the same
+    // price for the same reason, and hoarding a gold tile is worth more than the milliseconds.
     let stop = AtomicBool::new(false);
-    let lethal: Mutex<Option<Found>> = Mutex::new(None);
+    let lethal: Mutex<Option<(Found, crate::pick::Rank)>> = Mutex::new(None);
     let best: Mutex<Option<Found>> = Mutex::new(None);
     let least: Mutex<Option<Found>> = Mutex::new(None);
     let longest: Mutex<Option<Found>> = Mutex::new(None);
@@ -1041,12 +1074,14 @@ pub fn race_for_band(
                 (&stop, &lethal, &best, &least, &longest, &considered, &typist, mods);
             scope.spawn(move || {
                 let mut seen = 0usize;
+                let mut local_lethal: Option<(Found, crate::pick::Rank)> = None;
                 let mut local_best: Option<Found> = None;
                 let mut local_least: Option<Found> = None;
                 let mut local_longest: Option<Found> = None;
                 for word in part {
                     // Checked periodically rather than every word: an atomic load per word would
-                    // dominate the loop for no benefit at this granularity.
+                    // dominate the loop for no benefit at this granularity. Only ever set by the
+                    // unbounded-kill path below; a banded search must see every word to rank them.
                     if seen % 512 == 0 && stop.load(Ordering::Relaxed) {
                         break;
                     }
@@ -1061,15 +1096,38 @@ pub fn race_for_band(
                         typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
                     let score = scored(scorer, mods, word, &consumed, Some(&typed), typed.corners_used, corner_count);
                     if score >= need && below.map(|b| score < b).unwrap_or(true) {
-                        let found = Found { word: word.clone(), score, slice };
-                        let mut l = lethal.lock().unwrap();
-                        // First writer wins, so the result does not depend on thread scheduling
-                        // any more than it has to.
-                        if l.is_none() {
-                            *l = Some(found);
+                        // Ranked, not raced. Every word in the band ends the exchange the same way,
+                        // so the tiles it spends are the only thing left to choose on.
+                        let rank = crate::pick::rank(
+                            tiles,
+                            geometry,
+                            &typed.tiles,
+                            scorer,
+                            &picking.target,
+                            picking.prefs,
+                        );
+                        // **Only a band ranks.** With no ceiling this is `race_for_kill`, whose
+                        // contract is `Goal::FirstKill`'s: every lethal word ends the exchange, so
+                        // the first one wins and the rest stop. Scanning the whole dictionary to
+                        // choose between words that are all simply "a kill" is the cost that goal
+                        // exists to avoid.
+                        if below.is_none() {
+                            let mut l = lethal.lock().unwrap();
+                            if l.is_none() {
+                                *l = Some((Found { word: word.clone(), score, slice }, rank));
+                            }
+                            stop.store(true, Ordering::Relaxed);
+                            break;
                         }
-                        stop.store(true, Ordering::Relaxed);
-                        break;
+                        let better = match local_lethal.as_ref() {
+                            Some((_, cur)) => rank.better_than(cur),
+                            None => true,
+                        };
+                        if better {
+                            local_lethal =
+                                Some((Found { word: word.clone(), score, slice }, rank));
+                        }
+                        continue;
                     }
                     if local_best.as_ref().map(|b| score > b.score).unwrap_or(true) {
                         local_best = Some(Found { word: word.clone(), score, slice });
@@ -1091,6 +1149,12 @@ pub fn race_for_band(
                     }
                 }
                 considered.fetch_add(seen, Ordering::Relaxed);
+                if let Some((lf, rank)) = local_lethal {
+                    let mut l = lethal.lock().unwrap();
+                    if l.as_ref().map(|(_, cur)| rank.better_than(cur)).unwrap_or(true) {
+                        *l = Some((lf, rank));
+                    }
+                }
                 if let Some(lb) = local_best {
                     let mut b = best.lock().unwrap();
                     if b.as_ref().map(|cur| lb.score > cur.score).unwrap_or(true) {
@@ -1117,7 +1181,7 @@ pub fn race_for_band(
     });
 
     Outcome {
-        lethal: lethal.into_inner().unwrap(),
+        lethal: lethal.into_inner().unwrap().map(|(f, _)| f),
         best: best.into_inner().unwrap(),
         least: least.into_inner().unwrap(),
         longest: longest.into_inner().unwrap(),
@@ -1148,7 +1212,7 @@ mod tests {
     }
 
     fn race(scorer: &Scorer, dict: &Dictionary, tiles: &[Tile], mods: &Modifiers, need: i64) -> Outcome {
-        race_for_kill(dict, scorer, tiles, &Geometry::default(), mods, need, 8)
+        race_for_kill(dict, scorer, tiles, &Geometry::default(), mods, need, &crate::pick::Context::default(), 8)
     }
 
     /// The shortsword, end to end, against the readings that exposed it.
@@ -1219,21 +1283,21 @@ mod tests {
         assert_eq!(m.modifier_for("OOZE", 0, 0), 1.5);
     }
 
-    /// A band nothing can satisfy must fall back DOWNWARD.
+    /// A scare band can be missed from **either side**, and the two want opposite answers.
     ///
-    /// The live failure this reproduces, 2026-08-09: a murder warning backed `Goal::Scare` down to
-    /// `need 0, below 1`, and on a board where nothing scored zero the band came up empty.
-    /// `Outcome::choice` handed back `best` — `VENEPUNCTURE`, 40 points, against an enemy on 2
-    /// health. The game refused it as murder, the backoff lowered the ceiling again, and the same
-    /// word came back thirty times until the run was stopped by hand. "Aim as low as you can" had
-    /// come to mean "hit as hard as you can".
+    /// This fixture is the *floor* case: `need: 1000` on a board whose best word scores far less, so
+    /// nothing reaches the band from below. That is the 2026-08-10 death — a cultist at 127+33 with
+    /// the band at `98..=158`, and seven consecutive one-point words while the board eroded from
+    /// sixteen tiles to nine. Playing softly there scares nothing, kills nothing and buys nothing.
     ///
-    /// The band here is unreachable by construction rather than by score-zero, because the first
-    /// draft of this test assumed no word can score 0 and the crypt board disproved it — single
-    /// letters on plain tiles score nothing, and the run played `A` and `O` quite happily. What
-    /// makes the bug fire is an empty band, whatever emptied it.
+    /// **This test asserted the opposite until 2026-08-10**, and it passed, because its fixture
+    /// never matched the failure in its own comment. It described the murder backoff — `need 0,
+    /// below 1`, where every word *overshoots* — but was written with `need: 1000`, where every word
+    /// undershoots. One rule was being asked to cover two directions and only one of them was ever
+    /// exercised. The overshoot direction now has its own test below, on the band that actually
+    /// caused it.
     #[test]
-    fn a_scare_that_cannot_be_satisfied_plays_the_gentlest_word_not_the_hardest() {
+    fn a_scare_whose_floor_is_out_of_reach_hits_as_hard_as_it_can() {
         if !present() {
             return;
         }
@@ -1243,7 +1307,7 @@ mod tests {
         let mods = Modifiers::none();
         let goal = Goal::Scare { need: 1000, below: 1001 };
         let out =
-            race_for_band(&dict, &scorer, &tiles, &Geometry::default(), &mods, 1000, Some(1001), 8);
+            race_for_band(&dict, &scorer, &tiles, &Geometry::default(), &mods, 1000, Some(1001), &crate::pick::Context::default(), 8);
 
         assert!(out.lethal.is_none(), "no word on this board scores 1000, so the band is empty");
         let best = out.best.as_ref().expect("the scan still collects a best word");
@@ -1260,10 +1324,14 @@ mod tests {
 
         let played = out.choice_for(goal).expect("something is playable");
         assert_eq!(
-            played.score, least.score,
-            "a missed scare band must fall back to the gentlest word, not to {} at {}",
-            best.word, best.score
+            played.score, best.score,
+            "nothing reaches the floor, so the scare is off and chipping is the only play; \
+             expected {} at {}, got {} at {}",
+            best.word, best.score, played.word, played.score
         );
+        // Hitting hard here cannot commit the murder the ceiling guards against: the whole board is
+        // below `need`, and `need <= below`. That is what makes this direction safe as well as right.
+        assert!(played.score < 1000, "the hardest word is still under the floor");
 
         // The same band, the other intent, the opposite fallback.
         //
@@ -1287,6 +1355,44 @@ mod tests {
             out.choice_for(Goal::MaxDamage).map(|f| f.score),
             Some(best.score),
             "only a band goal changes direction"
+        );
+    }
+
+    /// The other direction: every word **overshoots** the ceiling, so the gentlest is the answer.
+    ///
+    /// The live failure, 2026-08-09: a murder warning backed the band down to `need 0, below 1`
+    /// against an enemy on 2 health. Nothing landed inside it, the fallback handed back `best` —
+    /// `VENEPUNCTURE`, 40 points — the game refused it as murder, the backoff lowered the ceiling
+    /// again, and the same word came back thirty times until the run was stopped by hand. "Aim as
+    /// low as you can" had come to mean "hit as hard as you can".
+    ///
+    /// Built from an `Outcome` directly rather than from a dictionary scan, because the thing under
+    /// test is the fallback rule and this is the one band that cannot be reproduced from the crypt
+    /// board — single letters on plain tiles score zero, so `need 0, below 1` is *satisfiable* there
+    /// and the bug never fires. That is exactly why the original test drifted onto the wrong fixture.
+    #[test]
+    fn a_scare_whose_ceiling_is_below_everything_plays_the_gentlest_word() {
+        let out = Outcome {
+            lethal: None,
+            best: Some(Found { word: "VENEPUNCTURE".into(), score: 40, slice: 0 }),
+            least: Some(Found { word: "AT".into(), score: 2, slice: 0 }),
+            longest: Some(Found { word: "VENEPUNCTURE".into(), score: 40, slice: 0 }),
+            words_considered: 900,
+        };
+        // Every word is at or above the floor, so the band was missed by overshooting the ceiling.
+        let goal = Goal::Scare { need: 0, below: 1 };
+        assert_eq!(
+            out.choice_for(goal).map(|f| f.word.as_str()),
+            Some("AT"),
+            "everything overshoots, so the nearest safe answer is the smallest hit"
+        );
+
+        // The control, and the whole point of the pair: the same `Outcome`, a floor nothing reaches,
+        // and the answer flips. Without this the rule could be "always play least" and still pass.
+        assert_eq!(
+            out.choice_for(Goal::Scare { need: 100, below: 200 }).map(|f| f.word.as_str()),
+            Some("VENEPUNCTURE"),
+            "nothing reaches the floor, so chip as hard as possible"
         );
     }
 
@@ -1436,7 +1542,7 @@ mod tests {
         let mut cornerless = Modifiers::none();
         cornerless.resist_cornerless = true;
 
-        let best = race_for_kill(&dict, &scorer, &board, &geometry, &cornerless, 100_000, 8)
+        let best = race_for_kill(&dict, &scorer, &board, &geometry, &cornerless, 100_000, &crate::pick::Context::default(), 8)
             .best
             .expect("something is playable");
         let typed = Typist::new(&board, &geometry).type_word(&best.word).unwrap();
@@ -1703,6 +1809,32 @@ mod tests {
             "considered {} of {} words -- the race did not stop early",
             out.words_considered,
             dict.len()
+        );
+
+        // **A band does the opposite, and deliberately.** With a ceiling, every qualifying word is
+        // an equally good outcome and the only thing left to choose on is what it spends — so the
+        // scan has to finish before anything can be ranked. Live 2026-08-10 it did not: a highwayman
+        // with a `17..=25` band was routed with a word that burned a solid gold tile, because the
+        // first in-band word any thread happened to reach won and stopped the rest.
+        //
+        // This pair is the control for each other. Removing the `below.is_none()` guard makes the
+        // first assertion fail; removing the ranking makes this one fail.
+        let banded = race_for_band(
+            &dict,
+            &scorer,
+            &crypt_board(),
+            &Geometry::default(),
+            &Modifiers::none(),
+            3,
+            Some(1_000),
+            &crate::pick::Context::default(),
+            8,
+        );
+        assert!(banded.lethal.is_some(), "3..1000 is satisfiable on this board");
+        assert_eq!(
+            banded.words_considered,
+            dict.len(),
+            "a band must see every candidate before it can rank them"
         );
     }
 

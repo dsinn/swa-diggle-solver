@@ -925,8 +925,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let need = health + armour;
             let t1 = std::time::Instant::now();
+            // Neutral ranking: this command asks "what kills", not "what kills most cheaply",
+            // and a dev probe should not silently apply the run's hoarding preferences.
+            let picking = diggle_solver::pick::Context::default();
             let out = diggle_solver::search::race_for_kill(
-                &dict, &scorer, &tiles, &geometry, &mods, need, threads,
+                &dict, &scorer, &tiles, &geometry, &mods, need, &picking, threads,
             );
             let elapsed = t1.elapsed();
             println!(
