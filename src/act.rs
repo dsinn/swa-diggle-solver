@@ -636,6 +636,35 @@ pub const PREGAME_START: Button = Button {
 /// The combat pregame is up. See [`PREGAME_START`].
 pub const PREGAME_START_PRESENT: f64 = 0.90;
 
+/// The same button with the game's **hotspot highlight** on it.
+///
+/// ## Why a second template rather than a lower bar
+///
+/// Opening the pregame moves the pointer onto `Start` and lights it:
+/// `input.setHotspotHighlight` calls `love.mouse.setPosition(unpack(hotspot))`
+/// (`utils/input.lua:94-96`). The highlighted artwork scores **0.4972** against [`PREGAME_START`],
+/// measured twice — at `l14` and at `l48_plaza` on 2026-08-14, identical to four decimals, which is
+/// what one artwork in one state looks like.
+///
+/// No threshold can cover that. 0.4972 sits *below* impostors already seen on other screens — the
+/// hero-select heading at 0.6049 and `Progress` at 0.5193 on those very frames — so a bar low enough
+/// to admit a hot `Start` would admit two screens that are not the pregame at all. The states differ
+/// by more than the screens do, which is precisely the case for matching both rather than loosening
+/// one.
+///
+/// The same argument, and the same shape, as [`CONTINUE_HOT`]: a state we cannot summon on demand,
+/// cropped out of a saved frame with `crop_template` rather than captured live.
+///
+/// Cut from `spike-frames-live/combat-no-screen-5.png`, the run's own photograph of a pregame it
+/// could not name. Kept as `tests/frames/pregame-hot.png` so the pair is measurable.
+pub const PREGAME_START_HOT: Button = Button {
+    name: "pregame Start (hot)",
+    template: "pregame-start-hot.png",
+    search: (827, 984, 1093, 1080),
+    origin: (835, 992),
+    click: (960, 1035),
+};
+
 /// An event's choice plaque — the fingerprint for **"this event is still on screen"**.
 ///
 /// Answering an event is a click, and until now nothing checked that the click landed.
@@ -1311,7 +1340,11 @@ pub fn identify(win: &GameWindow) -> Screen {
     if over(&COMBAT_HUD, COMBAT_HUD_PRESENT) {
         return Screen::CombatEntered;
     }
-    if over(&PREGAME_START, PREGAME_START_PRESENT) {
+    // Both states of the one button. The hot one is not a rare edge: the game lights whatever it
+    // put the pointer on, and it puts the pointer on `Start` every time this screen opens.
+    if over(&PREGAME_START, PREGAME_START_PRESENT)
+        || over(&PREGAME_START_HOT, PREGAME_START_PRESENT)
+    {
         return Screen::Pregame;
     }
     if over(&REWARD_CONFIRM, REWARD_SCREEN_PRESENT) {
@@ -1450,6 +1483,7 @@ pub const ALL: &[&Button] =
     &CHARACTER_STATS,
     &CHARACTER_BACK,
     &PREGAME_START,
+    &PREGAME_START_HOT,
     &SHRINE_PRAY,
     &SHRINE_CONSECRATE,
     &SHRINE_GOBACK,
@@ -2111,16 +2145,52 @@ mod threshold_tests {
         };
         // Both paths, because they answer different questions and only one is `identify`'s.
         let searched = score(&PREGAME_START, "pregame-graveyard.png").unwrap();
+        assert!(
+            exact >= PREGAME_START_PRESENT,
+            "a resting Start scored {exact:.4} at its origin (searched: {searched:.4}), under the \
+             {PREGAME_START_PRESENT:.2} bar"
+        );
         eprintln!("PREGAME_START on the give-up frame: exact {exact:.4}, searched {searched:.4}");
         if let Some(e2) = score_at_origin(&PREGAME_START, "pregame-graveyard-2.png") {
             let s2 = score(&PREGAME_START, "pregame-graveyard-2.png").unwrap();
             eprintln!("PREGAME_START on the second give-up frame: exact {e2:.4}, searched {s2:.4}");
         }
+        // The resting template must NOT claim a hot button — if it did, the pair would be
+        // indistinguishable and the second template pointless.
+        for f in ["pregame-hot.png", "pregame-hot-2.png"] {
+            let cold = score_at_origin(&PREGAME_START, f).unwrap();
+            assert!(cold < PREGAME_START_PRESENT, "{f}: resting template scored {cold:.4} on a hot button");
+        }
+    }
+
+    /// The highlighted `Start`, on the two frames a run photographed itself failing to read.
+    ///
+    /// Both are pregames the run could not name — `l14` and `l48_plaza`, 2026-08-14 — and on both
+    /// the resting template scored 0.4972. That number is the whole argument for a second template
+    /// rather than a lower bar: it sits *under* impostors the same frames carry, so no threshold
+    /// separates a hot pregame from a screen that is not a pregame.
+    #[test]
+    fn a_highlighted_start_is_still_the_pregame() {
+        let Some(hot) = score_at_origin(&PREGAME_START_HOT, "pregame-hot.png") else {
+            eprintln!("SKIP: frame corpus not present");
+            return;
+        };
+        assert!(hot >= PREGAME_START_PRESENT, "the frame it was cut from scored {hot:.4}");
+
+        // The one that matters: a *different* pregame, at a different location, with a different
+        // backdrop. Scoring 1.0000 against its own source frame would prove only that cropping works.
+        let other = score_at_origin(&PREGAME_START_HOT, "pregame-hot-2.png").unwrap();
         assert!(
-            exact >= PREGAME_START_PRESENT,
-            "the Start button a run gave up in front of scored {exact:.4} at its origin \
-             (searched: {searched:.4}), under the {PREGAME_START_PRESENT:.2} bar"
+            other >= PREGAME_START_PRESENT,
+            "a second hot pregame scored {other:.4}, under the {PREGAME_START_PRESENT:.2} bar"
         );
+
+        // And the hot template must not claim a resting button, or the two would be one.
+        for f in ["pregame-graveyard.png", "pregame-graveyard-2.png"] {
+            let cold = score_at_origin(&PREGAME_START_HOT, f).unwrap();
+            assert!(cold < PREGAME_START_PRESENT, "{f}: hot template scored {cold:.4} on a resting button");
+        }
+        eprintln!("PREGAME_START_HOT: source {hot:.4}, independent {other:.4}");
     }
 
     #[test]
