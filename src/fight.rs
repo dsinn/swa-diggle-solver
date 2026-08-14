@@ -229,12 +229,6 @@ impl Outcome {
 /// to contain the words cannot raise a false death.
 pub const GAME_OVER: &str = "game over";
 
-/// How long a turn waits for the board to report itself ready before going anyway.
-///
-/// Not a deadline for the board — a deadline for *waiting*. See the call site for why expiry no
-/// longer ends the fight.
-const BOARD_READY_WAIT: Duration = Duration::from_secs(8);
-
 pub struct Fight<'a> {
     pub win: &'a GameWindow,
     pub dict: &'a Dictionary,
@@ -645,37 +639,14 @@ impl Fight<'_> {
 
         let board = Board::new(self.win, &geom)?.with_click_frames(self.click_frames.clone());
         self.park();
-        // **Running out of patience is not a reason to end a fight.**
-        //
-        // Eight seconds, down from twenty. Twenty was sized as "surely long enough for anything",
-        // which is the right instinct when expiry is fatal and the wrong one now that it is not:
-        // every second past the point where the answer will not change is dead time on a turn that
-        // was always going to proceed. Eight still covers a boss intro comfortably.
-        //
-        // The readiness test is a guess about pixels, and a guess that says "not yet" forever ends
-        // the run just as surely as one that says "yes" too early. A boss intro card on 2026-08-12
-        // fooled it in the optimistic direction; tightening it to catch that trades the false yes
-        // for a false no, and a false no used to be fatal.
-        //
-        // Going anyway is safe in a way it was not before, because nothing downstream trusts this
-        // any more. A click is counted only once the word bar has grown, so one thrown too early is
-        // thrown again rather than silently dropped; and a word that fails clears against the bar
-        // too, so a baseline taken during an animation can be discarded and the word retried. The
-        // fight's own attempt limit still bounds it.
-        //
-        // So the timeout means "stop waiting", and the log says which of the two happened, because
-        // a turn that waited out the full twenty seconds is worth knowing about even when it goes on
-        // to play perfectly well.
-        if !board.wait_until_ready(BOARD_READY_WAIT)? {
-            log.push_str(
-                "  board never reported ready in 20s -- going anyway; clicks are confirmed \
-                 against the word bar\n",
-            );
+        if !board.wait_until_ready(Duration::from_secs(20))? {
+            log.push_str("  board never filled/settled -- not clicking into a moving board\n");
+            return Ok(Some(Outcome::BoardNeverSettled { turns }));
         }
         // Kept past the submission: if the game comes back with the avoidable-murder dialog, the
         // word survives the cancel and has to come off, and this is the only record of what the
         // board looked like before it went on.
-        match board.select_word(&steps) {
+        let placed = match board.select_word(&steps) {
             Ok(placed) => placed,
             Err(e) => {
                 *select_failures += 1;
@@ -790,7 +761,7 @@ impl Fight<'_> {
                     self.accept_murder(keys, log)?;
                     return Ok(None);
                 }
-                if !self.back_out_of_murder(keys, log, &board)? {
+                if !self.back_out_of_murder(keys, log, &board, &placed)? {
                     // Left as it is rather than dressed up as an outcome. The word is still on the
                     // board and the modal may still be over it, so the next turn's
                     // `wait_until_ready` will report `BoardNeverSettled` — which is exactly what
@@ -859,7 +830,7 @@ impl Fight<'_> {
     /// A click would also have to wait out the 0.625s fade before the plaque is solid enough to
     /// aim at; the key is live the moment the dialog is announced.
     fn back_out_of_murder(
-        &self, keys: &PostMessageInput, log: &mut String, board: &Board,
+        &self, keys: &PostMessageInput, log: &mut String, board: &Board, placed: &crate::combat::Placed,
     ) -> Result<bool, crate::Error> {
         for attempt in 1..=MURDER_CANCEL_TRIES {
             keys.focus();
@@ -877,7 +848,7 @@ impl Fight<'_> {
                 // and two letters — a number that cannot be right for every word. The board itself
                 // says when the word is off, and a clear that did not happen must not be reported
                 // as one.
-                if !board.clear_selection()? {
+                if !board.clear_selection(placed)? {
                     log.push_str("  WARNING the word would not come off the board\n");
                     self.shot("murder-stuck");
                     return Ok(false);

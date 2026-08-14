@@ -105,6 +105,12 @@ enum Rested {
 /// path because [`Run::confirm_consecrated`] polls and returns the moment the flag appears.
 const CONSECRATE_CONFIRM: Duration = Duration::from_secs(8);
 
+/// How long a resumed fight is left alone before the first word is played.
+///
+/// See the call site in [`drive`] for what it is for and why it is a fixed delay rather than a
+/// measurement. Eight seconds: long enough for a boss introduction, and paid at most once per run.
+const RESUME_SETTLE: Duration = Duration::from_secs(8);
+
 /// Empty visits to one rest site before it stops being a destination.
 ///
 /// Three, because the failures worth surviving come in ones — a click lost to a transition, a plaque
@@ -2001,6 +2007,25 @@ pub fn drive(
     if fight.combat_path.is_file() {
         r.log.push_str("0. resuming a fight already in progress
 ");
+        // **Sit still for eight seconds before touching anything.**
+        //
+        // Resuming drops us into a fight the game is still opening. On 2026-08-12 that meant a boss
+        // introduction — the combat HUD up, the enemy named across the screen, and no board drawn
+        // yet — and the first clicks went into it and were discarded. Nothing downstream could tell:
+        // the readiness check samples tile centres for brightness, and on that card they sample sky
+        // and sea, which are brighter than any tile. Sixteen of sixteen slots read as occupied on a
+        // screen with no board on it, so the wait it was supposed to perform never happened.
+        //
+        // A fixed delay, not a cleverer measurement. Measuring this properly means telling a tile
+        // from scenery, and two attempts at that on 2026-08-12 both shipped regressions that ended
+        // runs at the *start* of ordinary fights — the dev's call was to stop patching and take the
+        // blunt instrument. Eight seconds covers the introduction, costs eight seconds once per
+        // resumed fight, and cannot be fooled by what is on screen because it does not look.
+        //
+        // Scoped to the resume path deliberately. A fight entered by walking into it is announced on
+        // the console and already handled; this is the one entry the run does not watch happen.
+        std::thread::sleep(RESUME_SETTLE);
+        r.log.push_str(&format!("  waited {RESUME_SETTLE:?} for the fight to finish opening\n"));
         let mut fl = String::new();
         let outcome =
             fight.run(&mut r.feed, &r.keys, &mut fl, deadline.min(Instant::now() + Duration::from_secs(300)));

@@ -97,57 +97,6 @@ pub fn board_rect(g: &Geometry, client_w: i32, client_h: i32) -> (i32, i32, i32,
     (x0, y0, (x1.min(client_w) - x0).max(1), (y1.min(client_h) - y0).max(1))
 }
 
-/// Fraction of a tile's height that [`word_bar`] actually samples, centred on the tile.
-///
-/// Keeps the plank's rails out of the reading. See the note on [`word_bar`].
-pub const WORD_BAR_HEIGHT: f64 = 0.5;
-
-/// The strip across the top of the combat screen where the word being built is drawn.
-///
-/// **This is the only place a click can be confirmed against the game's own state rather than
-/// against a picture of the board.** `wordboard` draws one tile here per entry in `wordTiles`
-/// (`wordboard.lua:686-691`), so the strip is empty when nothing is selected and grows by a tile
-/// with every click that registers. Nothing else draws into it — not the combatants, not the board.
-///
-/// That independence is the point. Confirming a click by watching the tile it was aimed at reads a
-/// region the scene animates over, and on 2026-08-11 a fight resumed mid-animation, the first two
-/// clicks were discarded by a game not yet taking input, and the luminance check passed all ten
-/// because the animation was moving the tiles anyway. The word bar said the truth in one glance:
-/// empty after the first click, one tile after the third.
-///
-/// ## Where it is
-///
-/// `core.drawData = buildDrawDataTable(0, tileSize, 0.5, 0, 0, 1.41525)` (`wordboard.lua:16`) with
-/// `tileSize = 118` (`:12`), in the same `(screen-space, offset-in-own-size)` convention as every
-/// button: centre = `ss * client + offset * size`. So the centre sits at
-/// `y = 0*h + 1.41525*118 = 167` and the band is 108..226 at 1080p, which is where the tiles are in
-/// the saved frames.
-///
-/// Width is the full extent the bar can ever reach — `tileSize` shrinks past sixteen tiles
-/// (`:210`) so sixteen at full size is the widest it gets — because the bar is centred and grows
-/// outward, and the caller measures how much of the strip is occupied rather than where it ends.
-///
-/// ## Why it is inset vertically
-///
-/// The band is narrowed to the middle of a tile's height. The plank the bar sits on is framed by
-/// wooden rails top and bottom, and they fall within the tile band — so measured over the full 118
-/// every column runs from rail-dark to plank-light and reads as busy whether a tile is there or not.
-/// Measured with the rails in, an empty bar and an eight-letter word both scored 1748 of 1888.
-pub fn word_bar(client_w: i32, client_h: i32) -> (i32, i32, i32, i32) {
-    let s = scale(client_w, client_h);
-    let h = TILE_SIZE * s * WORD_BAR_HEIGHT;
-    let centre_y = 1.41525 * TILE_SIZE * s;
-    let w = TILE_SIZE * 16.0 * s;
-    let x = (client_w as f64 / 2.0 - w / 2.0).max(0.0);
-    let y = (centre_y - h / 2.0).max(0.0);
-    (
-        x.round() as i32,
-        y.round() as i32,
-        (w.round() as i32).min(client_w - x.round() as i32).max(1),
-        (h.round() as i32).min(client_h - y.round() as i32).max(1),
-    )
-}
-
 /// Half the on-screen width of a tile — the radius within which a click still lands on it.
 ///
 /// Useful as a tolerance: a mapping that is off by less than this still clicks the right tile, and
