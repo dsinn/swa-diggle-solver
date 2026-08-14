@@ -317,6 +317,24 @@ pub const ESCAPES: &[Escape] = &[
         threshold: crate::act::STATS_BACK_PRESENT,
         what: "the stats history page",
     },
+    // **Not an exit — the one entry here that presses on rather than backs out.**
+    //
+    // A fight at a corrupted shrine ends leaving the shrine screen up with `Consecrate` lit, and
+    // live 2026-08-12 the run pressed back instead: the classifier had no check for the button, so
+    // the back plaque answered first and the offer went unseen. `Consecrate` is only ever drawn when
+    // it will do something -- `majorShrine and hell ~= 0` (`shrine.lua:92-95`) -- so finding it lit
+    // on a screen we are already standing on means the trip and any fight are paid for and the only
+    // thing left is to take it.
+    //
+    // The mechanism is the same as every other escape: press the button, look again. What differs is
+    // the intent, and the reason it can share the mechanism is that pressing `Consecrate` also
+    // leaves — `shrine.lua:288` ends in `setActiveMode(overworld)`.
+    Escape {
+        screen: Screen::ShrineConsecrate,
+        button: &crate::act::SHRINE_CONSECRATE,
+        threshold: crate::act::SHRINE_CONSECRATE_PRESENT,
+        what: "the shrine screen, by consecrating it",
+    },
     // Normally the moment after `Pray`, where the slot now holds a greyed `Consecrate` and the only
     // thing left to do is leave. `shrineplay::play` deliberately stops at the Pray press and hands
     // the aftermath back here, so this is the ordinary exit rather than an error path.
@@ -365,7 +383,9 @@ pub enum Answer {
 /// being a wish.
 pub const fn answer_for(screen: Screen) -> Answer {
     match screen {
-        Screen::Character | Screen::StatsHistory | Screen::Shrine => Answer::Escape,
+        Screen::Character | Screen::StatsHistory | Screen::Shrine | Screen::ShrineConsecrate => {
+            Answer::Escape
+        }
         // The one `drive` plays out itself, because nothing else is watching for it.
         Screen::CombatEntered => Answer::Fight,
         // Reached through the affirmative slot rather than through `identify`: `drive` waits on
@@ -3559,6 +3579,29 @@ mod tests {
     /// Every escape's button must be in `act::ALL`, which is what subjects it to the registry's own
     /// invariants — chiefly that its search box can contain its template, the mismatch that once let
     /// a button measure perfectly offline while never matching in a live run.
+    #[test]
+    fn a_lit_consecrate_is_answered_by_pressing_it_not_by_leaving() {
+        use crate::act::{Screen, SHRINE_CONSECRATE, SHRINE_GOBACK};
+
+        // Both plaques are on the shrine screen at the same time, in slots that do not overlap --
+        // `Consecrate` on the right, the back arrow on the left. So `identify` can satisfy either
+        // check on the same frame and the ONLY thing separating them is which is asked first. That
+        // is what makes the ordering load-bearing rather than incidental, and on 2026-08-12 the back
+        // plaque won and a consecration was thrown away.
+        let (cx0, _, cx1, _) = SHRINE_CONSECRATE.search;
+        let (bx0, _, bx1, _) = SHRINE_GOBACK.search;
+        assert!(cx0 > bx1 || bx0 > cx1, "the two slots must be distinct for both to be present");
+
+        // And the answer to finding it lit is to press it. If this ever comes back as the go-back
+        // plaque, the screen is being escaped rather than used.
+        let e = ESCAPES
+            .iter()
+            .find(|e| e.screen == Screen::ShrineConsecrate)
+            .expect("a lit Consecrate must be answered");
+        assert!(std::ptr::eq(e.button, &SHRINE_CONSECRATE), "answered with {}", e.button.name);
+        assert_eq!(answer_for(Screen::ShrineConsecrate), Answer::Escape);
+    }
+
     #[test]
     fn every_escape_button_is_in_the_registry() {
         for e in ESCAPES {

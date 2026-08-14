@@ -1227,6 +1227,11 @@ pub enum Screen {
     Pregame,
     /// The stats history page — a dead end with no map, reachable by accident from a shrine.
     StatsHistory,
+    /// A shrine screen with a live `Consecrate` waiting to be pressed. See [`SHRINE_CONSECRATE`].
+    ///
+    /// Unlike [`Screen::Shrine`] this one means what it says: it is matched on the button's own
+    /// artwork, so it identifies both the screen and the opportunity.
+    ShrineConsecrate,
     /// A shrine's word screen, identified only by its back plaque. See [`SHRINE_GOBACK`].
     Shrine,
     /// A class-unlock announcement, which can interrupt a run after a fight. See [`UNLOCK_CONTINUE`].
@@ -1253,6 +1258,7 @@ impl Screen {
         Screen::MainMenu,
         Screen::Pregame,
         Screen::StatsHistory,
+        Screen::ShrineConsecrate,
         Screen::Shrine,
         Screen::Unlock,
         Screen::Unknown,
@@ -1406,6 +1412,18 @@ pub fn identify(win: &GameWindow) -> Screen {
     // The variant is still named `Shrine`, which is a worse name than the check deserves. Nothing
     // may read it as evidence that a shrine is underfoot — `WorldMap::worth_consecrating_here`
     // answers that from the save and should stay the only thing that does.
+    // **Above the back plaque, and that ordering is the whole point.**
+    //
+    // Both live in the same fall-through region, and the plaque wins on nothing but position. Live
+    // 2026-08-12 a fight at a corrupted shrine ended leaving the shrine screen up with `Consecrate`
+    // lit in the right-hand slot, and the classifier walked past it to "there is a way back from
+    // here" and pressed back. It saw the exit and not the offer.
+    //
+    // This is the same shape as the note on [`SHRINE_GOBACK`] below: a check that answers *is there
+    // a back plaque* must never pre-empt one that answers *what is this screen for*.
+    if over(&SHRINE_CONSECRATE, SHRINE_CONSECRATE_PRESENT) {
+        return Screen::ShrineConsecrate;
+    }
     if over(&SHRINE_GOBACK, SHRINE_GOBACK_PRESENT) {
         return Screen::Shrine;
     }
@@ -1433,6 +1451,7 @@ pub const ALL: &[&Button] =
     &CHARACTER_BACK,
     &PREGAME_START,
     &SHRINE_PRAY,
+    &SHRINE_CONSECRATE,
     &SHRINE_GOBACK,
     &STATS_BACK,
     &HEROSELECT_HEADER,
