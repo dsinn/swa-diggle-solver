@@ -2153,6 +2153,23 @@ pub fn drive(
         if screen == crate::act::Screen::Unknown && r.combat_expected {
             let by = Instant::now() + COMBAT_OPENS_BY;
             while Instant::now() < by {
+                // **Take the cursor back before looking.** Opening a screen moves the real mouse:
+                // `input.setHotspotHighlight` calls `love.mouse.setPosition(unpack(hotspot))` and
+                // hides the pointer (`utils/input.lua:94-96`), so the game parks it on that screen's
+                // hotspot — which on the pregame is `Start`. The button then draws in its hover art,
+                // and every template in the registry is cropped from the resting art.
+                //
+                // That is what four seconds of `Unknown` was, live 2026-08-14 at `l16sub5`: the
+                // screen was up and unmistakable to a human, and unreadable to us because we were
+                // holding a picture of it in a state the game had moved it out of. The frame that
+                // seemed to disprove this scored 1.0000 only because the *next* press parked the
+                // cursor before the capture — a photograph taken after the evidence had gone.
+                //
+                // Parking is already how this run keeps a hover out of a reading — see [`NEUTRAL`],
+                // chosen to sit clear of the view's own hotspot rectangle. Doing it inside the loop
+                // rather than once, because the warp follows the screen: whatever arrives during
+                // these four seconds may grab the pointer again on the way in.
+                r.park();
                 std::thread::sleep(Duration::from_millis(150));
                 r.pump();
                 screen = crate::act::identify(r.win);
@@ -2180,6 +2197,12 @@ pub fn drive(
                 // A number here settles it next time: a Start at 0.89 is a threshold or a hover
                 // state, a Start at 0.02 is a screen that was not drawn yet, and those want
                 // opposite fixes.
+                //
+                // Kept now that the cursor is taken back above, because the park is a counter to one
+                // mechanism rather than a proof there is only one. If this line ever prints a Start
+                // in the eighties again, the answer is the game's own hover art — `ButtonArt` in
+                // [`crate::observe::affirm`] already loads all five states from the game's files,
+                // and no hand-cropped template would be needed.
                 r.snap_screen("combat-no-screen");
                 r.log_button_scores();
             }
