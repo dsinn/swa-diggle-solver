@@ -2573,7 +2573,15 @@ impl WorldMap {
     /// asked on arrival instead, when the cost is only the shrine itself and not a detour.
     ///
     /// An uncorrupted shrine is always worth it. A corrupted one costs a fight, and earns it only
-    /// when we are walking through anyway.
+    /// when we are walking through anyway — **or when that fight has already been won**.
+    ///
+    /// That last clause is the whole point of the `completed` test below. Corruption is not a
+    /// property of the shrine, it is a bill: a fight standing between us and the shrine screen. Once
+    /// the node is complete the bill is paid and cannot be paid again, so refusing on the grounds of
+    /// cost is refusing over money already spent. Live 2026-08-12 a run resumed into the fight at
+    /// `shrine1`, won it in two turns, and walked away from the shrine because the node was still
+    /// flagged corrupted and no route to the anomaly was known — declining a free consecration on
+    /// the strength of a fight it had just finished.
     pub fn worth_consecrating_here(&self, key: &str) -> bool {
         let Some(p) = self.places.get(key) else { return false };
         if !p.type_is("shrine") || p.consecrated {
@@ -2583,7 +2591,7 @@ impl WorldMap {
         if !self.anomaly_is_open().unwrap_or(false) {
             return false;
         }
-        if !p.corrupted {
+        if !p.corrupted || p.completed {
             return true;
         }
         self.anomaly_route().map(|r| r.contains(&key.to_string())).unwrap_or(false)
@@ -5241,6 +5249,15 @@ mod tests {
         // because we are crossing it regardless, the dead end does not.
         assert!(m.worth_consecrating_here("mid"), "we are walking through it regardless");
         assert!(!m.worth_consecrating_here("detour"), "a corrupted dead end is not worth the fight");
+
+        // **And once the fight is won the objection is spent.** Corruption is a bill, not a
+        // property; `completed` means it has been paid and cannot be charged twice. The dead end is
+        // still a dead end and still off every route — that is what makes this the right control.
+        m.entry("detour").completed = true;
+        assert!(
+            m.worth_consecrating_here("detour"),
+            "the fight this was avoiding has already been fought"
+        );
     }
 
     #[test]
