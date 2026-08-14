@@ -725,7 +725,12 @@ impl Goal {
         if !p.heals {
             return kill;
         }
-        match crate::rested::aim(p.vitals, true, p.bleeding) {
+        // A gear flag heals without spending, so there is no charge to count and none to hoard.
+        let charges = match p.consumes_charge {
+            true => p.charges,
+            false => crate::rested::FREE,
+        };
+        match crate::rested::aim(p.vitals, charges, p.bleeding) {
             crate::rested::Aim::Best => kill,
             // Keep the charge: kill with an overkill of 0 or 1, which heals nothing. Only worth
             // doing when a charge is actually consumable -- a gear flag heals for free, so there is
@@ -777,6 +782,14 @@ pub struct PlayerState {
     /// decrement at `:1204-1210` only touches `statusEffects`, so a gear flag heals for free and
     /// there is nothing to conserve.
     pub consumes_charge: bool,
+    /// **How many** `wellRested*` stacks are banked, summed across campfire and inn.
+    ///
+    /// Meaningless when [`PlayerState::consumes_charge`] is false — a gear flag spends nothing, so
+    /// the caller passes [`crate::rested::FREE`] instead of this.
+    ///
+    /// Carried because the count changes the answer and a bool could not say it: see
+    /// [`crate::rested::aim`], and the run that spent itself down to 12/20 protecting four charges.
+    pub charges: i64,
     /// `bleed` skips the heal branch entirely (`:1080`).
     pub bleeding: bool,
 }
@@ -2163,11 +2176,14 @@ mod rested_goal_tests {
     use super::*;
     use crate::rested::Vitals;
 
+    /// One charge — the last one, so these keep describing the frugal case they were written for.
+    /// The count's own behaviour is [`crate::rested`]'s to test.
     fn player(current: i64, consumes_charge: bool) -> PlayerState {
         PlayerState {
             vitals: Vitals { current, max: 12 },
             heals: true,
             consumes_charge,
+            charges: crate::rested::KEEP_IN_RESERVE,
             bleeding: false,
         }
     }
@@ -2205,10 +2221,18 @@ mod rested_goal_tests {
     }
 
     #[test]
-    fn a_free_heal_is_never_conserved() {
+    fn a_free_heal_is_bought_rather_than_merely_not_avoided() {
         // A gear flag grants the heal without spending anything (the decrement at :1204-1210 only
-        // touches statusEffects), so there is no reason to avoid a scratch top-up.
-        assert_eq!(goal(Some(&player(10, false))), Goal::RankedKill { need: 11 });
+        // touches statusEffects), so there is nothing to conserve.
+        //
+        // This used to read `need: 11` — a plain kill. That was the *absence* of frugality rather
+        // than the presence of a heal: the frugal branch declined to apply and the goal fell through
+        // to the ordinary kill, which aims at nothing in particular and tops up only by luck.
+        //
+        // Missing 2, and the heal is `floor(overkill/2)`, so 4 of overkill buys it back: 10 + 4,
+        // plus `DAMAGE_BUFFER`. Free to ask for, because `need` is a threshold — nothing reaching it
+        // falls back to the best-scoring answer, exactly as a bad wound already does above.
+        assert_eq!(goal(Some(&player(10, false))), Goal::RankedKill { need: 15 });
     }
 
     #[test]

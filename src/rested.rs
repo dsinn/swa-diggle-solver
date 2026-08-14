@@ -84,21 +84,58 @@ pub fn spends_a_charge(damage: i64, enemy_health: i64) -> bool {
     heal_from(damage, enemy_health) > 0
 }
 
+/// Charges to keep banked. Above this, hoarding has nothing left to protect.
+///
+/// One. The whole argument for frugality is that a charge is scarce, and scarcity is a claim about
+/// the *last* one — a run holding several is not protecting a resource, it is declining to use one.
+///
+/// [`FREE`] is deliberately far above this: a gear flag that heals without spending has no last
+/// charge to keep.
+pub const KEEP_IN_RESERVE: i64 = 1;
+
+/// Enough missing health for a charge to buy something worth having.
+///
+/// Two, because the heal is `floor(overkill/2)`: topping up a single point is the "spending a charge
+/// on a scratch" this module was written to avoid, and that objection survives having plenty.
+const WORTH_A_CHARGE: i64 = 2;
+
+/// Passed as `charges` when overkill heals without spending anything — a gear flag rather than a
+/// status (`rpgview.lua:1204-1210` decrements only `statusEffects`).
+pub const FREE: i64 = i64::MAX;
+
 /// What to aim for this turn.
 ///
-/// `rested` is "a charge is available AND would actually heal" — the caller folds in the status,
-/// the gear flags, and the `overkillNoHeal` / `overkillHealToGold` cancellations, because those are
-/// properties of the loadout rather than of the choice. `bleeding` is separate because it blocks the
-/// heal at `rpgview.lua:1080` while leaving the charge untouched, so a bleeding turn should simply
-/// play normally.
-pub fn aim(v: Vitals, rested: bool, bleeding: bool) -> Aim {
-    if !rested || bleeding || v.missing() == 0 {
+/// `charges` is how many `wellRested*` stacks are banked, [`FREE`] when a gear flag grants the heal
+/// outright, and 0 when overkill will not heal at all — the caller folds in the gear flags and the
+/// `overkillNoHeal` / `overkillHealToGold` cancellations, because those are properties of the
+/// loadout rather than of the choice. `bleeding` is separate because it blocks the heal at
+/// `rpgview.lua:1080` while leaving the charge untouched, so a bleeding turn should simply play
+/// normally.
+///
+/// ## Why the count matters, and what taking a bool cost
+///
+/// This used to ask only *whether* a charge existed, so one stack and four were the same input. The
+/// policy above it — barely hurt, keep the charge — is a scarcity argument, and it kept being
+/// applied to a run that was not short of charges.
+///
+/// Live 2026-08-14: **12/20 health with ×4 banked**, and every kill for the whole run reported
+/// `keeps the rest charge`. `badly_hurt` is `missing * 2 > max`, and `8 * 2 = 16` is not over 20, so
+/// 40% health counted as barely hurt while four charges went unspent into a level 8 fight. Both
+/// halves of that were wrong, and only one of them is a threshold.
+pub fn aim(v: Vitals, charges: i64, bleeding: bool) -> Aim {
+    if charges <= 0 || bleeding || v.missing() == 0 {
         return Aim::Best;
     }
+    // Badly hurt spends whatever it has, down to the last charge: at that point the run is closer to
+    // ending than the charge is to being needed later.
     if v.badly_hurt() {
-        Aim::HealFully
-    } else {
-        Aim::Frugal
+        return Aim::HealFully;
+    }
+    // Not badly hurt, but holding more than the reserve — so spending one costs nothing we are
+    // keeping. This is the case a bool could not see.
+    match charges > KEEP_IN_RESERVE && v.missing() >= WORTH_A_CHARGE {
+        true => Aim::HealFully,
+        false => Aim::Frugal,
     }
 }
 
@@ -167,33 +204,64 @@ mod tests {
         assert!(spends_a_charge(12, 10));
     }
 
+    /// The last charge — the state every one of these tests used to describe, when the input was a
+    /// bool and "a charge" could only mean one.
+    const LAST: i64 = 1;
+
     #[test]
     fn full_health_plays_normally() {
-        assert_eq!(aim(FULL, true, false), Aim::Best);
+        assert_eq!(aim(FULL, LAST, false), Aim::Best);
+        // Nor does having plenty invent a reason to spend one.
+        assert_eq!(aim(FULL, 4, false), Aim::Best);
     }
 
     #[test]
-    fn a_scratch_keeps_the_charge() {
-        assert_eq!(aim(HURT, true, false), Aim::Frugal);
+    fn a_scratch_keeps_the_last_charge() {
+        assert_eq!(aim(HURT, LAST, false), Aim::Frugal);
         // Exactly half missing is still a scratch: the threshold is strictly more than half.
-        assert_eq!(aim(Vitals { current: 6, max: 12 }, true, false), Aim::Frugal);
+        assert_eq!(aim(Vitals { current: 6, max: 12 }, LAST, false), Aim::Frugal);
     }
 
     #[test]
     fn badly_hurt_spends_the_charge() {
-        assert_eq!(aim(BADLY, true, false), Aim::HealFully);
+        assert_eq!(aim(BADLY, LAST, false), Aim::HealFully);
     }
 
     #[test]
     fn bleeding_plays_normally_because_the_heal_is_blocked() {
         // rpgview.lua:1080 skips the whole heal branch while bleeding, so there is nothing to
         // protect and nothing to spend.
-        assert_eq!(aim(BADLY, true, true), Aim::Best);
+        assert_eq!(aim(BADLY, LAST, true), Aim::Best);
     }
 
     #[test]
     fn without_a_charge_nothing_changes() {
-        assert_eq!(aim(BADLY, false, false), Aim::Best);
+        assert_eq!(aim(BADLY, 0, false), Aim::Best);
+    }
+
+    /// The live state of 2026-08-14, and the reason the count is an input at all.
+    #[test]
+    fn a_stack_of_charges_is_spent_rather_than_guarded() {
+        // 12/20 with four banked. `badly_hurt` is false — `8 * 2` is not over 20 — so the old rule
+        // called this a scratch and every kill of that run reported `keeps the rest charge`.
+        let live = Vitals { current: 12, max: 20 };
+        assert!(!live.badly_hurt(), "the premise: this does not read as badly hurt");
+        assert_eq!(aim(live, 4, false), Aim::HealFully);
+
+        // The control, and the whole point of `KEEP_IN_RESERVE`: the same wound with one charge
+        // left still keeps it. Only the count differs between these two lines.
+        assert_eq!(aim(live, KEEP_IN_RESERVE, false), Aim::Frugal);
+
+        // A gear flag spends nothing, so it is never hoarded.
+        assert_eq!(aim(live, FREE, false), Aim::HealFully);
+    }
+
+    #[test]
+    fn plenty_of_charges_still_will_not_pay_for_a_single_point() {
+        // Spending a charge to heal one point is the waste this module was written about, and
+        // having four does not make it worth doing. `WORTH_A_CHARGE` is what holds that line.
+        assert_eq!(aim(Vitals { current: 19, max: 20 }, 4, false), Aim::Frugal);
+        assert_eq!(aim(Vitals { current: 18, max: 20 }, 4, false), Aim::HealFully);
     }
 
     #[test]

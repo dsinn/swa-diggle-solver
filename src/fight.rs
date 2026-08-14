@@ -1372,7 +1372,16 @@ fn player_state(
 
     // The charge lives in statusEffects; the gear flag grants the same heal permanently
     // (`rpgview.lua:1082-1083` accepts either source).
-    let consumes_charge = status("wellRestedCampfire") || status("wellRestedInn");
+    // **The stack count, not merely the presence.** `affectPlayerStatus` keeps these as numbers and
+    // the HUD draws them as `×4`; reading them with `is_some` threw that away, and the policy above
+    // was left unable to tell one charge from four. A status present but unreadable as a number
+    // counts as one, which is the old behaviour and the safe direction — it hoards.
+    let count = |k: &str| match status(k) {
+        true => cs.int_at(&format!("rpg.player.statusEffects.{k}")).unwrap_or(1).max(1),
+        false => 0,
+    };
+    let charges = count("wellRestedCampfire") + count("wellRestedInn");
+    let consumes_charge = charges > 0;
     let granted = consumes_charge || gear("wellRestedCampfire") || gear("wellRestedInn");
     if !granted {
         return None;
@@ -1386,6 +1395,7 @@ fn player_state(
         vitals: crate::rested::Vitals { current, max },
         heals: !cancelled,
         consumes_charge,
+        charges,
         bleeding: status("bleed"),
     })
 }
