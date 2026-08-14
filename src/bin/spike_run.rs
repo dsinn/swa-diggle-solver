@@ -61,6 +61,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// The stable name, always the most recent run. Kept alongside the timestamped copy because every
+/// habit and every note in `handoff/` points at it.
 const REPORT: &str = "spike-run.md";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -78,8 +80,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dict = diggle_solver::search::Dictionary::load(&cfg.game_dir)?;
     let letters = diggle_solver::letters::Weights::load(&cfg.game_dir)?;
 
+    // **A run must not overwrite the evidence of the last one.**
+    //
+    // Both files had fixed names, so each run erased its predecessor. That cost a real answer on
+    // 2026-08-12: asked why `Rest` had become the goal without a rest site in sight, the run that
+    // did it had already been overwritten twice and the question could not be settled at all. The
+    // same night, a diagnostic frame was lost the same way and got its own fix.
+    //
+    // Timestamped copies are the archive; `spike-run.md` and `spike-run-raw.log` stay as the
+    // "latest" names everything already refers to.
+    let stamp = diggle_solver::stamp::utc(std::time::SystemTime::now());
+    let raw_log = format!("spike-run-{stamp}.log");
+    let archive = format!("spike-run-{stamp}.md");
+
     let console = Console::take()?;
-    let mirror = LogMirror::create(Path::new("spike-run-raw.log"))?;
+    let mirror = LogMirror::create(Path::new(&raw_log))?;
     let launched = Instant::now();
     let mut game = diggle_solver::game::launch::GameProcess::launch(&cfg, &console)?;
     let win = game.wait_for_window(Duration::from_secs(20))?;
@@ -169,7 +184,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
                 if let Err(e) = start_new_run(&mut r, &cfg.game_dir) {
                     r.log.push_str(&format!("ABORT: {e}\n"));
-                    return finish(&mut game, &r.log);
+                    return finish(&mut game, &r.log, &archive);
                 }
             }
             Ok(q) => {
@@ -177,11 +192,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "ABORT: no Continue, and no `Start` either (best {q:.4}) — the menu may not \
                      have rendered\n"
                 ));
-                return finish(&mut game, &r.log);
+                return finish(&mut game, &r.log, &archive);
             }
             Err(e) => {
                 r.log.push_str(&format!("ABORT: no Continue; could not read `Start`: {e}\n"));
-                return finish(&mut game, &r.log);
+                return finish(&mut game, &r.log, &archive);
             }
         }
     }
@@ -192,7 +207,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if r.latest.is_none() {
         r.log.push_str("ABORT: no adjacency dump\n");
-        return finish(&mut game, &r.log);
+        return finish(&mut game, &r.log, &archive);
     }
     let mut health = r.apply_save();
     // The first reading counts too. `note_health` needs a before and an after, so on a resumed save
@@ -286,7 +301,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
     let out = r.log.clone();
-    finish(&mut game, &out)
+    finish(&mut game, &out, &archive)
 }
 
 /// Writes the report and, unless asked not to, closes the game.
@@ -299,16 +314,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Note this leaves the save unflushed: `mainSaveData` is written on screen *exit*, so a checkpoint
 /// taken while the game is still up records the last screen the player left, not the current one.
 fn finish(
-    game: &mut diggle_solver::game::launch::GameProcess, log: &str,
+    game: &mut diggle_solver::game::launch::GameProcess, log: &str, archive: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var("DIGGLE_KEEP_OPEN").as_deref() == Ok("1") {
+    // Both names, on every exit. `REPORT` is what habit and the handoff notes reach for; the
+    // archived copy is the one still there after the next run.
+    let write = |log: &str| -> std::io::Result<()> {
         std::fs::File::create(REPORT)?.write_all(log.as_bytes())?;
+        std::fs::File::create(archive)?.write_all(log.as_bytes())
+    };
+    if std::env::var("DIGGLE_KEEP_OPEN").as_deref() == Ok("1") {
+        write(log)?;
         println!("{log}");
         println!("\n-- game left running (DIGGLE_KEEP_OPEN=1); close it before any checkpoint --");
         return Ok(());
     }
     game.close(Duration::from_secs(15));
-    std::fs::File::create(REPORT)?.write_all(log.as_bytes())?;
+    write(log)?;
     println!("{log}");
+    println!("-- archived as {archive} --");
     Ok(())
 }

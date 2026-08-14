@@ -16,6 +16,7 @@ pub mod navigate;
 pub mod observe;
 pub mod overworld;
 pub mod score;
+pub mod stamp;
 pub mod rest;
 pub mod rested;
 pub mod flee;

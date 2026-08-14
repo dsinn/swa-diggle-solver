@@ -8,3 +8,8 @@
 # Run control and run artefacts, never source.
 .diggle-stop
 spike-run.md
+# The timestamped archive of each run's report and raw console. Kept on disk so a run cannot erase
+# the evidence of the one before it, and out of git because they are observations, not source — the
+# ones worth keeping get quoted into `handoff/` with the reasoning attached.
+spike-run-*.md
+spike-run-*.log
