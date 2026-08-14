@@ -1884,11 +1884,35 @@ impl WorldMap {
         let toward = |p: &Place| -> f64 {
             bearing.as_ref().and_then(|t| self.gap(&p.key, t)).unwrap_or(f64::MAX)
         };
-        // **Direction outranks distance once the portal is live**, and the dev's reason is the one
-        // that matters: node level scales with distance from the origin, so exploring *away* from
-        // the corruption does not merely waste hops, it walks into progressively worse fights.
-        // Live 2026-08-10, with no bearing available at all, "nearest unvisited" drifted outward
-        // from `l19` to `l28` to `l49` — a level 6 crypt — and the run died in it.
+        // **Direction outranks distance once the portal is live** — because that is where the
+        // objective is. Not because it is safer, which is what this comment used to say.
+        //
+        // ## The safety argument was backwards, and the generator says so
+        //
+        // The claim here was "node level scales with distance from the origin, so exploring away
+        // from the corruption walks into progressively worse fights". That holds only while the
+        // portal is **shut** — which is precisely when this branch does not steer. Opening it runs
+        // `overworld/generators/world.lua:496-501` over every corrupted location:
+        //
+        // ```lua
+        //   location.level = math.max(3, location.baseLevel, 7-location.baseLevel)
+        // ```
+        //
+        // `7-baseLevel` is an inversion, and it bites hardest exactly where `baseLevel` is lowest —
+        // the nodes nearest the origin. A level 1 neighbour of the portal becomes 6; a level 2
+        // becomes 5; `start` itself is set to 8 (`:507`). The level map stops being a bowl and
+        // becomes a **U**: high at the rim, high at the core, a floor of 3 in the band between.
+        //
+        // So steering inward is steering *into* the worse fights, not away from them. It is still
+        // right, for the only reason that survives: the anomaly is at the origin and finishing it is
+        // the run. What does not survive is the idea that the heuristic protects us — a run that
+        // aims at the corruption should expect the fights to get harder as it closes, and should
+        // arrive healthy rather than assume the approach is the safe part.
+        //
+        // The death this comment cited is still real and still argues for steering: live 2026-08-10,
+        // with no bearing at all, "nearest unvisited" drifted outward from `l19` to `l28` to `l49`,
+        // a level 6 crypt, and the run died there. Both rims are dangerous. Only one of them has the
+        // objective on it.
         //
         // Below distance is where this used to sit, on the argument that hops are what a run
         // actually spends. That holds while the anomaly is shut, when exploring is genuinely about
@@ -2934,8 +2958,10 @@ mod tests {
     /// Exploring with the portal live must walk **toward the corruption**, even when that is the
     /// longer way round in hops.
     ///
-    /// The dev's rule, and the reason is survival rather than speed: node level scales with distance
-    /// from the origin, so drifting outward meets progressively worse fights. Live 2026-08-10 a run
+    /// The dev's rule, and the reason is the objective rather than safety — see the note at the sort
+    /// itself. Level falls with distance from the origin only until the portal opens; after it,
+    /// `math.max(3, baseLevel, 7-baseLevel)` inverts the core (`world.lua:496-501`), so both the rim
+    /// and the middle are dangerous and only one of them has the anomaly on it. Live 2026-08-10 a run
     /// at full health explored `l19 -> l28 -> l49`, a level 6 crypt, and died in it — with no bearing
     /// available, "nearest unvisited" was the whole strategy.
     ///
