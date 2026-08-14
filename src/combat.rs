@@ -18,10 +18,11 @@
 //! and the zero-health last stand, so the turns where a stray is most likely are exactly the turns
 //! worth playing. So a failure puts the board back rather than giving up on it.
 //!
-//! Putting it back is `backspace`, pressed and checked until the board reads empty — see
-//! [`Board::clear_selection`], which records why the one-press `clearWord` is not usable. Clicking
-//! the offender back off would also work, since selection is a toggle (`wordboard.lua:132`) — but
-//! that needs to know *what* is selected, and after a stray that is precisely what is in doubt.
+//! Putting it back is `backspace`, pressed until the **word bar** reads empty — see
+//! [`Board::clear_selection`], which records why the one-press `clearWord` is not usable, and why
+//! the bar rather than the board answers this. Clicking the offender back off would also work,
+//! since selection is a toggle (`wordboard.lua:132`) — but that needs to know *what* is selected,
+//! and after a stray that is precisely what is in doubt.
 //! [`SelectFailure`] reports whether the clear was confirmed, because retrying onto a half-selected
 //! board submits a different word than the one that was scored.
 //!
@@ -179,25 +180,6 @@ pub enum SelectError {
     Win(crate::Error),
 }
 
-/// What a placed word left behind, so it can be taken off again later.
-///
-/// The board as it read *before* anything was clicked, plus the tiles that were already moving on
-/// their own. Both are needed to answer "is anything selected now?", and neither can be recovered
-/// afterwards — once a word is on the board there is no way to look at it and know what unselected
-/// looked like. Kept by the caller for exactly as long as the word might need clearing, which for
-/// the avoidable-murder path is until the game has finished arguing about it.
-///
-/// A baseline stays comparable for the whole word because **selecting a tile does not move any
-/// other tile**. `wordboard.select` (`wordboard.lua:125-162`) flips `tile.selected`, appends the
-/// tile to `wordTiles`, and never touches `tilegrid`; tiles leave the grid — and the rest fall —
-/// only when the word is submitted, through `tileboard.removeTiles` (`tileboard.lua:589`). So a
-/// fixed centre samples the same tile from the first click to the last, and every reading below
-/// compares like with like.
-#[derive(Debug, Clone)]
-pub struct Placed {
-    baseline: Vec<f64>,
-    restless: Vec<usize>,
-}
 
 /// A word that could not be placed, and whether the board was left fit to try another one.
 ///
@@ -293,15 +275,6 @@ enum Settled {
     Unexpected(Vec<usize>),
 }
 
-/// Is the word off the board?
-///
-/// A restless tile differs from the baseline for as long as it keeps animating, so it can never be
-/// waited out — excluded here for the same reason it is excluded from stray detection. Without that
-/// exclusion a board with one bomb on it can never be declared clear, and the fight is abandoned
-/// over a tile nobody touched.
-fn nothing_selected(selected: &[bool], restless: &[usize]) -> bool {
-    selected.iter().enumerate().all(|(i, c)| !c || restless.contains(&i))
-}
 
 /// Compares what the board shows as selected against what we asked for.
 ///
@@ -640,7 +613,7 @@ impl<'a> Board<'a> {
     /// is what [`crate::typist::Typed::steps`] yields. The baseline is taken once, before anything is
     /// clicked, so "selected" always means "differs from the untouched board" — comparing against
     /// the previous step instead would let a missed click look like a successful one.
-    pub fn select_word(&self, plan: &[(usize, Option<char>)]) -> Result<Placed, SelectFailure> {
+    pub fn select_word(&self, plan: &[(usize, Option<char>)]) -> Result<(), SelectFailure> {
         let dirty = |error| SelectFailure { error, board_is_clean: false };
 
         // **Nothing may be selected yet.** The baseline below is only meaningful against an empty
@@ -695,14 +668,13 @@ impl<'a> Board<'a> {
                 .collect()
         };
 
-        let placed = Placed { baseline, restless };
-        match self.place_all(plan, &placed.baseline, &placed.restless) {
-            Ok(()) => Ok(placed),
+        match self.place_all(plan, &baseline, &restless) {
+            Ok(()) => Ok(()),
             Err(error) => {
                 // The fight is not over because a word could not be typed, so the board is put back
                 // to something another word can be built on. Whether that worked is reported rather
                 // than assumed — a caller must not retry onto a half-selected board.
-                let board_is_clean = self.clear_selection(&placed).unwrap_or(false);
+                let board_is_clean = self.clear_selection().unwrap_or(false);
                 Err(SelectFailure { error, board_is_clean })
             }
         }
@@ -727,11 +699,21 @@ impl<'a> Board<'a> {
     /// **Press and check, never press a computed number of times.** A `QU` tile is one selection and
     /// two letters, so the tile count is not the letter count and the difference depends on the word.
     /// Counting is how the murder path ended up pressing `tiles + 2` times and hoping.
-    pub fn clear_selection(&self, placed: &Placed) -> Result<bool, crate::Error> {
+    pub fn clear_selection(&self) -> Result<bool, crate::Error> {
         let keys = PostMessageInput::new(*self.win);
         keys.focus();
         for _ in 0..CLEAR_PRESSES {
-            if nothing_selected(&self.selected_now(&placed.baseline)?, &placed.restless) {
+            // **The bar, not the baseline.** This used to ask whether the tiles still differed from
+            // `placed.baseline`, which cannot work in the one case that matters: a word fails to
+            // place *because* the baseline was wrong, and then the clear inherits the same wrong
+            // reference and can never see an empty board. Thirty-two backspaces later it reported
+            // failure, and a failed clear ends the fight — so every run that met a bad baseline died
+            // holding a retry it was never allowed to use.
+            //
+            // `wordboard.getWord()` is '' exactly when `wordTiles` is empty (`wordboard.lua:274`),
+            // and the bar is drawn from `wordTiles`, so an empty bar IS an empty selection. No
+            // reference frame, nothing to go stale.
+            if self.bar_busy()? == 0 {
                 return Ok(true);
             }
             keys.press_key(VK_BACK, SC_BACK)?;
@@ -927,21 +909,7 @@ mod tests {
         assert_eq!(compare_selection(&[0, 4], &[0, 4], &[4]), Settled::Yes);
     }
 
-    #[test]
-    fn an_empty_board_is_clear_and_a_letter_still_on_it_is_not() {
-        assert!(nothing_selected(&[false, false, false], &[]));
-        assert!(!nothing_selected(&[false, true, false], &[]));
-    }
 
-    #[test]
-    fn a_bomb_ticking_away_does_not_keep_the_board_dirty_forever() {
-        // The clear loop gives up when this stays false, so a restless tile counted as selected
-        // abandons a fight over a tile nothing clicked -- and it can never come good, because the
-        // bomb goes on pulsing whatever we press.
-        assert!(nothing_selected(&[false, true, false], &[1]));
-        // But a real letter alongside it still reads as dirty.
-        assert!(!nothing_selected(&[true, true, false], &[1]));
-    }
 
     #[test]
     fn luma_of_a_flat_frame_is_that_value() {
