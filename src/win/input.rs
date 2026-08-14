@@ -31,6 +31,82 @@ pub fn warp_cursor(x: i32, y: i32) -> Result<(), crate::Error> {
         .map_err(|e| crate::Error::Win32(e.to_string()))
 }
 
+/// Moves the cursor to `(x, y)` as **motion** rather than a teleport, in `steps` hops.
+///
+/// ## Why a warp is not enough, and what it cost
+///
+/// The game clears its hotspot highlight from the move event's delta, `main.lua:420`:
+///
+/// ```lua
+/// function love.mousemoved(x, y, dx, dy, istouch) if dx~=0 or dy~=0 or istouch then input.setHotspotHighlight() end
+/// ```
+///
+/// and it has to work that way, because `setHotspotHighlight` moves the pointer itself
+/// (`love.mouse.setPosition`, `utils\input.lua:96`) — a warp that reported a delta would clear the
+/// highlight it had just set. So a warp is precisely the one motion the game ignores.
+///
+/// [`warp_cursor`] is therefore unable to un-highlight anything. It moves the pointer off the
+/// button and the button stays lit, because what is lit is the *hotspot*, not a hover. Live
+/// 2026-08-14: a pregame sat unrecognised for four seconds with `Start` highlighted, while
+/// [`crate::navigate::Run::park`] warped the cursor away every 150 ms to no effect.
+///
+/// Stepping is the whole mechanism — consecutive positions differ, so each event carries a real
+/// delta. Same `SendInput` path and the same per-step pause as [`drag_in`], for the same reason:
+/// events delivered faster than the game renders are coalesced into one.
+///
+/// No buttons are pressed, so this cannot select, travel or drag. It is safe anywhere a warp was.
+pub fn travel_cursor_in(
+    win: &crate::win::window::GameWindow, to: (i32, i32), steps: usize,
+) -> Result<(), crate::Error> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetAncestor, GetCursorPos, WindowFromPoint, GA_ROOT,
+    };
+    // The destination only. Unlike `drag_in` nothing is held down, so passing over another window
+    // is harmless — but arriving on one would leave the pointer outside the game.
+    let under = unsafe { GetAncestor(WindowFromPoint(POINT { x: to.0, y: to.1 }), GA_ROOT) };
+    if under != win.hwnd {
+        return Err(crate::Error::Win32(format!(
+            "refusing to park at ({}, {}): {under:?} is in front of the game",
+            to.0, to.1
+        )));
+    }
+    let mut from = POINT { x: 0, y: 0 };
+    unsafe { GetCursorPos(&mut from) }.map_err(|e| crate::Error::Win32(e.to_string()))?;
+    // Already there is not nothing to do: the highlight is cleared by a delta, and standing still
+    // produces none. Nudge away first so the trip back has somewhere to come from.
+    let (from_x, from_y) = match (from.x == to.0, from.y == to.1) {
+        (true, true) => (to.0 - 16, to.1 - 16),
+        _ => (from.x, from.y),
+    };
+    let steps = steps.max(2);
+    for i in 1..=steps {
+        let t = i as f64 / steps as f64;
+        let x = from_x as f64 + (to.0 - from_x) as f64 * t;
+        let y = from_y as f64 + (to.1 - from_y) as f64 * t;
+        let (nx, ny) = absolute(x.round() as i32, y.round() as i32)?;
+        let ev = [INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: nx,
+                    dy: ny,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }];
+        let sent = unsafe { SendInput(&ev, std::mem::size_of::<INPUT>() as i32) };
+        if sent != 1 {
+            return Err(crate::Error::Win32("SendInput refused a move event".into()));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Ok(())
+}
+
 /// Types text at **driver level**, as `SendInput` unicode events.
 ///
 /// The same distinction that made clicking work applies here. `PostMessageInput::type_text` posts

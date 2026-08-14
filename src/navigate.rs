@@ -692,9 +692,19 @@ impl Run<'_> {
         }
     }
 
+    /// Puts the cursor somewhere harmless, **and clears the game's hotspot highlight**.
+    ///
+    /// The second half is the part a warp could not do. `main.lua:420` clears the highlight only on
+    /// a move event carrying a non-zero delta, and a warp reports none — it must not, since
+    /// `setHotspotHighlight` moves the pointer itself and would otherwise cancel its own highlight
+    /// (`utils/input.lua:96`). So `SetCursorPos` moved the pointer off the button and left the
+    /// button lit, which is exactly what a `Start` this run could not read for four seconds was.
+    ///
+    /// See [`crate::win::input::travel_cursor_in`]. Failures are swallowed as before: parking is a
+    /// tidying step and no caller has anything better to do if the pointer will not move.
     fn park(&self) {
         if let Ok((x, y)) = self.win.client_to_screen(NEUTRAL.0, NEUTRAL.1) {
-            let _ = warp_cursor(x, y);
+            let _ = crate::win::input::travel_cursor_in(self.win, (x, y), 4);
         }
     }
 
