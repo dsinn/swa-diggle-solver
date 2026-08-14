@@ -433,6 +433,41 @@ impl Place {
         self.heading.trim_end().ends_with(type_name)
     }
 
+    /// A major shrine — **by key**, the way the game decides it.
+    ///
+    /// ```lua
+    /// if hereData.key:sub(1,6)=='shrine' then
+    ///     ...
+    ///     hereData.majorShrine = true
+    /// ```
+    /// `overworld/generators/world.lua:87-90`. The key is the whole test there; the heading plays no
+    /// part in it.
+    ///
+    /// ## Why the heading is not enough, and what trusting it cost
+    ///
+    /// A [`Place`] learns its fields from two sources with different lifetimes. `completed`,
+    /// `corrupted` and `consecrated` come from save flags and so survive across runs. `heading`
+    /// comes from an adjacency dump, which only exists for somewhere this run has *seen*.
+    ///
+    /// So a shrine cleared in an earlier run is rebuilt from its flags alone and comes back
+    /// **unheaded** — and [`Place::type_is`] matches on the heading, so it is not a shrine to any
+    /// policy that asks. Live 2026-08-14: `shrine1` sat `[done] [corrupted]` and unconsecrated for
+    /// two consecutive runs, holding a free consecration nobody could see, because
+    /// `type_is("shrine")` was false on an empty string. Fixing the corrupted filter in
+    /// [`WorldMap::next_target`] did not help — that filter is downstream of this gate.
+    ///
+    /// Digits only after the prefix, which is narrower than the game's `sub(1,6)`. A shrine's own
+    /// subworld holds nodes keyed `shrine1sub7`, and those are places inside it rather than the
+    /// destination — matching them would make the planner target a node whose parent is where it
+    /// actually wants to go.
+    pub fn is_shrine(&self) -> bool {
+        self.type_is("shrine")
+            || self
+                .key
+                .strip_prefix("shrine")
+                .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+    }
+
     /// Would arriving here open the anomaly?
     ///
     /// Delegated to [`crate::subworld`], which owns what a parent node implies. The remaining
@@ -1681,7 +1716,7 @@ impl WorldMap {
         let pick_shrine = || {
             self.places
                 .values()
-                .filter(|p| p.key != here && !p.avoid && p.type_is("shrine"))
+                .filter(|p| p.key != here && !p.avoid && p.is_shrine())
                 .filter(|p| !self.abandoned.contains(&p.key))
                 .filter(|p| worth_a_trip(p))
                 .filter(|p| !(anomaly_open && p.corrupted && !p.completed))
@@ -2701,7 +2736,7 @@ impl WorldMap {
     /// the strength of a fight it had just finished.
     pub fn worth_consecrating_here(&self, key: &str) -> bool {
         let Some(p) = self.places.get(key) else { return false };
-        if !p.type_is("shrine") || p.consecrated {
+        if !p.is_shrine() || p.consecrated {
             return false;
         }
         // Consecrating needs the anomaly open at all (`shrine.lua:93-96`).
@@ -5462,6 +5497,35 @@ mod tests {
         // Same shrine, once corruption has reset it: now a fight we no longer need.
         m.entry("s1").corrupted = true;
         assert_ne!(m.next_target().unwrap().reason, Goal::Shrine);
+    }
+
+    #[test]
+    fn a_shrine_known_only_from_the_save_is_still_a_shrine() {
+        // The state both runs of 2026-08-14 held: `shrine1` cleared and corrupted in an earlier run,
+        // rebuilt this run from save flags alone, and so unheaded. `type_is` reads the heading, and
+        // an empty heading ends with nothing — so the free consecration was invisible.
+        let mut m = WorldMap::new();
+        let mut d = dump("here", "camp", vec![node("l2", "Quiet Glade meadow")]);
+        d.hidden = 1;
+        m.fold(&d);
+        m.hell = Some(0.1);
+        {
+            let p = m.entry("shrine1");
+            p.corrupted = true;
+            p.completed = true;
+        }
+        assert_eq!(m.entry("shrine1").heading, "", "the premise: nothing has seen it this run");
+        assert!(m.entry("shrine1").is_shrine(), "the game reads the key, not the heading");
+        assert!(m.worth_consecrating_here("shrine1"));
+
+        // A node *inside* a shrine's subworld is not the shrine. Targeting one would send the
+        // planner at a place whose parent is where it wanted to be.
+        assert!(!m.entry("shrine1sub7").is_shrine());
+        // And the heading still speaks when it is there — this widens the test, it does not move it.
+        assert!(m.entry("l40").is_shrine() == false);
+        let seen = m.entry("q1");
+        seen.heading = "Foggathorpe shrine".into();
+        assert!(seen.is_shrine(), "an unkeyed shrine is still named by its heading");
     }
 
     #[test]

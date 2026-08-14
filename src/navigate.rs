@@ -2616,7 +2616,7 @@ pub fn drive(
         // A shrine's `Visit` does not: `completed` is the shrine's *combat*, and the shrine stays
         // visitable until `used` records that something was prayed for.
         if let Some((p, tag)) = place.as_ref().and_then(|p| {
-            if p.type_is("shrine") {
+            if p.is_shrine() {
                 p.used.then_some((p, "visit-spent"))
             } else {
                 p.completed.then_some((p, "combat-spent"))
@@ -2630,7 +2630,7 @@ pub fn drive(
         }
         if let Some(p) = place
             .as_ref()
-            .filter(|p| p.type_is("shrine") && p.completed && !p.used)
+            .filter(|p| p.is_shrine() && p.completed && !p.used)
             .filter(|p| !r.shrines_tried.contains(&p.key))
         {
             let key = p.key.clone();
@@ -2722,7 +2722,7 @@ pub fn drive(
         // it. That is a loop whatever the reason for declining, so the guard belongs here — where
         // "we arrived and nothing happened" is known — rather than being added case by case as each
         // new reason to decline appears.
-        if place.as_ref().map(|p| p.type_is("shrine")).unwrap_or(false) {
+        if place.as_ref().map(|p| p.is_shrine()).unwrap_or(false) {
             r.map.abandon(&here);
         }
 
