@@ -790,17 +790,29 @@ pub struct Hop {
     pub routed: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a hop is being taken.
+///
+/// **A label, not a control switch.** Nothing branches on it except the log; it exists so that a
+/// report can be read afterwards and say what the run believed it was doing.
+///
+/// `Copy` was dropped when [`Goal::RouteTo`] arrived. It is not free — every match site had to be
+/// looked at — but the alternative was a parallel enum of "goals that can be sought", kept in step
+/// with this one by hand, which is the shape that produced `Screen::ALL` and its keeper test.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Goal {
     /// The anomaly is open and this is it. Everything else can wait.
-    Anomaly,
+    ///
+    /// Named against [`Goal::OpenAnomaly`]: one *triggers* the portal, this one *finishes* it. The
+    /// pair used to be `OpenTheAnomaly` and a bare `Anomaly`, which read as a step and its subject
+    /// rather than as two ends of the same job.
+    CloseAnomaly,
     /// A level > 3 surface node: arriving opens the anomaly.
-    OpenTheAnomaly,
+    OpenAnomaly,
     /// Health is down and somewhere nearby can restore it.
     Rest,
     /// A shrine we have not consecrated.
     ///
-    /// Ranked below [`Goal::OpenTheAnomaly`] because consecrating is *impossible* until the anomaly
+    /// Ranked below [`Goal::OpenAnomaly`] because consecrating is *impossible* until the anomaly
     /// is open — `showConsecrateButton` requires `hell ~= 0` (`shrine.lua:93-96`). Once it is open,
     /// corruption resets areas to incomplete, so a shrine needing a fight only earns a detour if it
     /// already lies on the route; one that is merely awaiting a `Visit` stays cheap.
@@ -830,6 +842,18 @@ pub enum Goal {
     Shrine,
     /// Somewhere unseen, to grow the map toward one of the above.
     Explore,
+    /// We know where we want to go and not how to get there, so we explore toward it.
+    ///
+    /// Carries the goal that was declined, because that is what the hop is really *for* and the log
+    /// had no way to say it. `Explore` used to cover this case too, which is how a reader concluded
+    /// that exploring meant the anomaly had not opened yet — while the run had in fact been unable to
+    /// route to an open portal for its entire length.
+    ///
+    /// **Not the same question as whether it can steer.** Knowing the destination is one thing;
+    /// having a position to aim at is another, and [`Plan::steered_by`] answers that separately. It
+    /// can be `None` while this is `Some`, and that combination is exactly the failure that walked a
+    /// run out of the corruption on 2026-08-12.
+    RouteTo(Box<Goal>),
     /// Hurt, and **everywhere** is hostile — so take the cheapest fight on the map.
     ///
     /// The last resort of [`WorldMap::next_target`]'s first pass. Distinct from the goals above
@@ -1678,7 +1702,7 @@ impl WorldMap {
         // rather go exploring — which is also how an unknown rest site gets found — and the second
         // pass takes it when there is genuinely nothing else.
         if let Some(p) = self.anomaly().filter(|p| ok(p)) {
-            return Some(Plan { target: p.key.clone(), reason: Goal::Anomaly, steered_by: None });
+            return Some(Plan { target: p.key.clone(), reason: Goal::CloseAnomaly, steered_by: None });
         }
 
 
@@ -1706,7 +1730,7 @@ impl WorldMap {
                     .then(a.key.cmp(&b.key))
             });
             if let Some(p) = candidates.first() {
-                return Some(Plan { target: p.key.clone(), reason: Goal::OpenTheAnomaly, steered_by: None });
+                return Some(Plan { target: p.key.clone(), reason: Goal::OpenAnomaly, steered_by: None });
             }
         }
 
@@ -1727,7 +1751,7 @@ impl WorldMap {
         //
         // Note what this does NOT do. "Take a corrupted shrine if it is on the direct path to the
         // anomaly" cannot be expressed here: while the anomaly is open and unfinished
-        // [`Goal::Anomaly`] outranks this branch, and once it is finished there is no path left. So
+        // [`Goal::CloseAnomaly`] outranks this branch, and once it is finished there is no path left. So
         // a corrupted shrine is never a *destination* — passing through one is judged on arrival,
         // by [`WorldMap::worth_consecrating_here`].
         // `anomaly_open`, `dist` and the shrine pick itself are all hoisted above the anomaly branch
@@ -1838,13 +1862,14 @@ impl WorldMap {
         //
         // The recursion terminates at one level: the inner call reaches this line too, takes the
         // `false` arm, and asks nothing further.
-        let bearing = match need_route {
-            true => self
-                .plan(skip_hostile, false)
-                .map(|p| p.target)
-                .filter(|k| !self.can_route_to(k)),
+        // The whole plan is kept, not just its target: the goal it names is what this hop is *for*,
+        // and dropping it is what left every such hop labelled `Explore` — indistinguishable from a
+        // run with nowhere to be.
+        let declined: Option<Plan> = match need_route {
+            true => self.plan(skip_hostile, false).filter(|p| !self.can_route_to(&p.target)),
             false => None,
         };
+        let bearing = declined.as_ref().map(|p| p.target.clone());
         // A direction heuristic, and it used to be argued *against* here on the grounds that this
         // branch is reached only when there is nothing above to head toward. Route-gating made that
         // false: the branches above can now yield while knowing perfectly well where they wanted to
@@ -1910,7 +1935,16 @@ impl WorldMap {
                 .then(b.hidden.unwrap_or(0).cmp(&a.hidden.unwrap_or(0)))
                 .then(a.key.cmp(&b.key))
         });
-        frontier.first().map(|p| Plan { target: p.key.clone(), reason: Goal::Explore, steered_by: steered_by.clone() })
+        // **What this hop is for**, which is a different question from whether it can be aimed.
+        // `RouteTo` whenever an errand was declined for want of a route, steered or not; plain
+        // `Explore` only when nothing was wanted in the first place.
+        let reason = match declined {
+            Some(p) => Goal::RouteTo(Box::new(p.reason)),
+            None => Goal::Explore,
+        };
+        frontier
+            .first()
+            .map(|p| Plan { target: p.key.clone(), reason: reason.clone(), steered_by: steered_by.clone() })
     }
 
     /// The single adjacent node to step to next, and the plan it serves.
@@ -2185,9 +2219,9 @@ impl WorldMap {
     /// commitment exactly when it is doing the most work. And not "we know no route to it": fog
     /// means no route is the *first* thing we know about anywhere, which is why `cross_toward` has a
     /// frontier fallback for walking toward a destination it cannot yet reach.
-    fn committed_exit(&self, parent: &str, errand: Option<Goal>) -> Option<String> {
+    fn committed_exit(&self, parent: &str, errand: Option<&Goal>) -> Option<String> {
         let (to, goal) = self.crossing_to.as_ref()?;
-        if errand != Some(*goal) || self.abandoned.contains(&exit_node_key(parent, to)) {
+        if errand != Some(goal) || self.abandoned.contains(&exit_node_key(parent, to)) {
             return None;
         }
         Some(to.clone())
@@ -2260,7 +2294,7 @@ impl WorldMap {
                 // not found: no destination, so explore — which for a fogged crossing is precisely
                 // right, because seeing an exit is the thing exploring achieves.
                 let errand = self.next_target().map(|p| p.reason);
-                let to = match self.committed_exit(&parent, errand) {
+                let to = match self.committed_exit(&parent, errand.as_ref()) {
                     Some(to) => Some(to),
                     None => self.choose_exit(exits).map(|(to, why)| {
                         self.door_reason = Some(why);
@@ -2939,7 +2973,7 @@ mod tests {
         m.entry("far").corrupted = true;
 
         // The portal, known and **unroutable** — which is the only case that produces a bearing at
-        // all: `Goal::Anomaly` declines for want of a way there, and exploring inherits the
+        // all: `Goal::CloseAnomaly` declines for want of a way there, and exploring inherits the
         // direction it wanted. Reached by giving it an edge to a component of its own, since a node
         // with no edges is not the same thing as a node we cannot get to. Its position is never
         // observed; this dump cannot be registered against the frame, so it places nothing, and the
@@ -3003,7 +3037,8 @@ mod tests {
         m.hell = Some(0.1);
 
         let plan = m.next_target().expect("something to explore");
-        assert_eq!(plan.reason, Goal::Explore);
+        // The pair that only this split can express: we know the errand, and we cannot aim at it.
+        assert_eq!(plan.reason, Goal::RouteTo(Box::new(Goal::CloseAnomaly)), "the errand is known");
         assert_eq!(plan.steered_by, None, "a bearing that cannot order the frontier is not steering");
         assert_eq!(plan.target, "away", "so it falls back to nearest unvisited, and says so");
 
@@ -3315,7 +3350,7 @@ mod tests {
             vec![node("l4", "Grim Barrow — level 4 crypt"), node("l2", "Quiet Glade meadow")],
         ));
         let plan = m.next_target().unwrap();
-        assert_eq!(plan.reason, Goal::OpenTheAnomaly);
+        assert_eq!(plan.reason, Goal::OpenAnomaly);
         assert_eq!(plan.target, "l4");
     }
 
@@ -3326,7 +3361,7 @@ mod tests {
         m.fold(&dump("start", "camp", vec![node("l4", "Grim Barrow — level 4 crypt")]));
         m.hell = Some(0.1); // the anomaly already opened
         let plan = m.next_target().unwrap();
-        assert_ne!(plan.reason, Goal::OpenTheAnomaly, "chasing a spent trigger wastes the run");
+        assert_ne!(plan.reason, Goal::OpenAnomaly, "chasing a spent trigger wastes the run");
     }
 
     #[test]
@@ -3345,13 +3380,17 @@ mod tests {
         // follows the second. Heard of through a save flag, `start` has no edges at all, so naming
         // it as the target would only have handed the move to `next_hop`'s fallback while the log
         // claimed an objective. Explore, which is what mends the gap.
-        assert_eq!(m.next_target().unwrap().reason, Goal::Explore, "no route, no nomination");
+        assert_eq!(
+            m.next_target().unwrap().reason,
+            Goal::RouteTo(Box::new(Goal::CloseAnomaly)),
+            "no route, so no nomination — but the errand it stands for is still on the record"
+        );
 
         // Learn one edge to it and it becomes the errand, with nothing else about the map changed.
         m.fold(&dump("l29", "Rookdale — level 3 crypt", vec![node("start", "")]));
         m.here = Some("l39".into());
         let plan = m.next_target().unwrap();
-        assert_eq!(plan.reason, Goal::Anomaly);
+        assert_eq!(plan.reason, Goal::CloseAnomaly);
         assert_eq!(plan.target, "start");
     }
 
@@ -3391,7 +3430,7 @@ mod tests {
         assert!(m.anomaly().is_none());
         m.hell = Some(0.1);
         let plan = m.next_target().unwrap();
-        assert_eq!(plan.reason, Goal::Anomaly);
+        assert_eq!(plan.reason, Goal::CloseAnomaly);
         assert_eq!(plan.target, "hp", "a named portal beats the `start` prior");
     }
 
@@ -3438,7 +3477,7 @@ mod tests {
         let hop = m.next_hop().unwrap();
         assert_eq!(hop.step, "l1", "step to the neighbour on the way");
         assert_eq!(hop.plan.target, "l4");
-        assert_eq!(hop.plan.reason, Goal::OpenTheAnomaly);
+        assert_eq!(hop.plan.reason, Goal::OpenAnomaly);
     }
 
     #[test]
@@ -3468,7 +3507,7 @@ mod tests {
         // is a level 4 trigger we cannot reach, so it stops being what we claim to be doing;
         // `next_hop`'s any-frontier fallback used to supply this same step under a goal that was
         // not being pursued. Now the goal is the step.
-        assert_eq!(hop.plan.reason, Goal::Explore);
+        assert_eq!(hop.plan.reason, Goal::RouteTo(Box::new(Goal::OpenAnomaly)));
         assert_eq!(hop.plan.target, "l2", "we say where we are actually going");
     }
 
@@ -3664,7 +3703,7 @@ mod tests {
 
         // Once health is back, the anomaly is the objective again.
         m.rested(crate::rest::Health { current: 12, max: 12 });
-        assert_eq!(m.next_target().unwrap().reason, Goal::Anomaly);
+        assert_eq!(m.next_target().unwrap().reason, Goal::CloseAnomaly);
     }
 
     /// Hurt, and the nearest anomaly trigger is an uncleared corrupted village: prefer the other
@@ -4621,7 +4660,7 @@ mod tests {
 
         assert!(!m.can_route_to("start"), "the fixture must actually have no route");
         let hop = m.next_hop().expect("a step");
-        assert_eq!(hop.plan.reason, Goal::Anomaly, "nothing routable, so aim at it anyway");
+        assert_eq!(hop.plan.reason, Goal::CloseAnomaly, "nothing routable, so aim at it anyway");
         assert_eq!(hop.plan.target, "start");
         assert!(m.gap("west", "start").unwrap() < m.gap("east", "start").unwrap());
         assert_eq!(hop.step, "west", "toward the anomaly, not the lower key");
@@ -4687,7 +4726,7 @@ mod tests {
 
         assert!(!m.can_route_to("start"), "so the anomaly branch yields");
         let plan = m.next_target().unwrap();
-        assert_eq!(plan.reason, Goal::Explore);
+        assert_eq!(plan.reason, Goal::RouteTo(Box::new(Goal::CloseAnomaly)));
         assert_eq!(plan.target, "zwest", "the alphabet says `aeast`; the corruption says west");
     }
 
@@ -5345,7 +5384,7 @@ mod tests {
         m.entry("detour").corrupted = true;
         assert_eq!(
             m.next_target().unwrap().reason,
-            Goal::Anomaly,
+            Goal::CloseAnomaly,
             "a corrupted shrine is never walked to, so the portal is the errand again"
         );
 
@@ -5397,7 +5436,7 @@ mod tests {
         ));
         m.hell = Some(0.0);
         let plan = m.next_target().unwrap();
-        assert_eq!(plan.reason, Goal::OpenTheAnomaly);
+        assert_eq!(plan.reason, Goal::OpenAnomaly);
         assert_eq!(plan.target, "l39");
     }
 

@@ -3311,7 +3311,12 @@ pub fn drive(
                 "  steering toward `{toward}` ({placed} of {total} candidates placed)
 "
             ));
-        } else if matches!(hop.plan.reason, crate::overworld::Goal::Explore) {
+        } else if matches!(
+            hop.plan.reason,
+            crate::overworld::Goal::Explore | crate::overworld::Goal::RouteTo(_)
+        ) {
+            // Both shapes of exploring, because the silent one is the interesting one: a `RouteTo`
+            // with nothing to aim by is a hop that knows its errand and is walking at random.
             r.log.push_str("  not steered — exploring by hops alone
 ");
         }
