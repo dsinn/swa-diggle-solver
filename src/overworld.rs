@@ -1668,6 +1668,15 @@ impl WorldMap {
         // A shrine still worth walking to. `Pray` retires on `areaUnused`; `Consecrate` needs
         // `hell ~= 0`, so an open portal makes an unconsecrated shrine live again whatever its
         // `_used` flag says. See the fuller account at the closed-portal branch below.
+        //
+        // **`corrupted` is a bill, not a verdict, and `completed` says whether it is still owed.**
+        // The filter reads `corrupted && !completed` for the same reason
+        // [`WorldMap::worth_consecrating_here`] does, and the two must agree: a shrine whose fight we
+        // have already won costs nothing more to consecrate than an uncorrupted one. Live
+        // 2026-08-14, they did not agree. `shrine1` sat `[done] [corrupted]` and unconsecrated for a
+        // whole run — the arrival test would have consecrated it on sight, while this filter dropped
+        // it before `ok` could even ask for a route, so the run never went. Dropping only the
+        // `completed` clause here is what let the pair drift apart.
         let worth_a_trip = |p: &Place| !p.used || (anomaly_open && !p.consecrated);
         let pick_shrine = || {
             self.places
@@ -1675,7 +1684,7 @@ impl WorldMap {
                 .filter(|p| p.key != here && !p.avoid && p.type_is("shrine"))
                 .filter(|p| !self.abandoned.contains(&p.key))
                 .filter(|p| worth_a_trip(p))
-                .filter(|p| !(anomaly_open && p.corrupted))
+                .filter(|p| !(anomaly_open && p.corrupted && !p.completed))
                 .filter(|p| ok(p))
                 .min_by_key(|p| dist_or_far(&dist, &p.key))
         };
@@ -1683,8 +1692,9 @@ impl WorldMap {
         // **With the portal live, a reachable shrine outranks the portal itself** — the dev's call,
         // 2026-08-10, and the argument is already written under [`Goal::Shrine`]. Consecrating is
         // *only* possible while `hell ~= 0` (`shrine.lua:93-96`), so the window is exactly now; it
-        // costs no fight at an uncorrupted shrine, which is why the corrupted ones are filtered out
-        // above; and it pays in gold- and silver-bordered wildcard tiles
+        // costs no fight at an uncorrupted shrine, nor at a corrupted one whose fight is already
+        // won, which is exactly the pair the filter above admits; and it pays in gold- and
+        // silver-bordered wildcard tiles
         // (`utils/blessings.lua:95-110`), the mechanic this solver handles best.
         //
         // So the ordering is not "reward before objective", it is **cheap preparation before a level
@@ -1752,8 +1762,9 @@ impl WorldMap {
         // Note what this does NOT do. "Take a corrupted shrine if it is on the direct path to the
         // anomaly" cannot be expressed here: while the anomaly is open and unfinished
         // [`Goal::CloseAnomaly`] outranks this branch, and once it is finished there is no path left. So
-        // a corrupted shrine is never a *destination* — passing through one is judged on arrival,
-        // by [`WorldMap::worth_consecrating_here`].
+        // a corrupted shrine **whose fight is still owed** is never a *destination* — passing through
+        // one is judged on arrival, by [`WorldMap::worth_consecrating_here`]. One already cleared is a
+        // destination like any other, since nothing is left to avoid.
         // `anomaly_open`, `dist` and the shrine pick itself are all hoisted above the anomaly branch
         // now, since the open-portal case has to choose a shrine before that branch runs.
         //
@@ -5451,6 +5462,33 @@ mod tests {
         // Same shrine, once corruption has reset it: now a fight we no longer need.
         m.entry("s1").corrupted = true;
         assert_ne!(m.next_target().unwrap().reason, Goal::Shrine);
+    }
+
+    #[test]
+    fn a_corrupted_shrine_we_already_cleared_is_a_destination_again() {
+        // Live 2026-08-14: `shrine1` finished its run `[done] [corrupted]` and unconsecrated, and
+        // was never once nominated. The picker dropped every corrupted shrine, so the fight won at
+        // the start of that very run bought nothing — while `worth_consecrating_here` would have
+        // taken the consecration for free had anything walked the run back there.
+        //
+        // The two tests that matter are on the same map: with the bill outstanding we stay away,
+        // and the ONLY thing that changes between them is `completed`.
+        let mut m = WorldMap::new();
+        let mut d = dump("here", "camp", vec![node("s1", "Faraway shrine"), node("l2", "Quiet Glade meadow")]);
+        d.hidden = 1;
+        m.fold(&d);
+        m.hell = Some(0.1);
+        m.entry("s1").corrupted = true;
+
+        assert_ne!(m.next_target().unwrap().reason, Goal::Shrine, "the fight is still owed");
+        assert!(!m.worth_consecrating_here("s1"), "and the arrival test agrees while it is owed");
+
+        m.entry("s1").completed = true;
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Shrine, "the bill is paid; corruption is no longer a reason");
+        assert_eq!(plan.target, "s1");
+        // The pair must not drift again: destination and arrival now say the same thing.
+        assert!(m.worth_consecrating_here("s1"));
     }
 
     #[test]
