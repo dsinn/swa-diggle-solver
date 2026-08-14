@@ -2944,14 +2944,15 @@ pub fn drive(
                 // like from here, and caps the rest.
                 let mut spent = 0usize;
                 let mut last = None;
+                // A drag that happened but could not be measured. Not a failure by itself — see the
+                // shared recovery below — but it does end this pulling loop, because `at` no longer
+                // describes anything: the view moved by an unknown amount.
+                let mut unmeasured = false;
                 while pan_again(at, cw, ch, last, spent) {
                     let want = pan::shift_to_reach(at, cw, ch);
                     let Some(got) = r.pan_map(want) else {
-                        return Stop::Failed(format!(
-                            "{what}: at ({:.0}, {:.0}), out of reach, and the pan could not be \
-                             measured — position is now unknown",
-                            at.0, at.1
-                        ));
+                        unmeasured = true;
+                        break;
                     };
                     at = pan::moved(at, got);
                     r.log.push_str(&format!(
@@ -2974,21 +2975,53 @@ pub fn drive(
                 //
                 // Bounded, because a node the map genuinely will not show must still end the run
                 // rather than spin.
-                if pan_again(at, cw, ch, None, 0) {
+                //
+                // **Two ways in, and they want the same cure.** A pan that measured cleanly but did
+                // not fetch the node is the case this branch was written for. A pan that could not
+                // be **measured** is the other, and it used to end the run on the spot — even though
+                // `pan::measure` returns `None` rather than a guess *precisely* so the caller can
+                // re-establish position, and says so in its own doc. Ending the run was the one
+                // response that never did. Live 2026-08-14: the road out of `l24` sat at (1381,
+                // 1230), the first drag came back unmeasured, and that was the run.
+                //
+                // Locate-me answers both, because it does not read the view — it *ends* the motion
+                // and asks the game where the player is. An unknown position is exactly what it
+                // repairs, and re-centring also moves the target, so a node that no drag could fetch
+                // may simply be on screen afterwards.
+                if unmeasured || pan_again(at, cw, ch, None, 0) {
                     if r.pan_retries >= MAX_PAN_RETRIES {
-                        return Stop::Failed(format!(
-                            "{what}: still out of reach at ({:.0}, {:.0}) after panning and \
-                             {MAX_PAN_RETRIES} re-centres",
-                            at.0, at.1
-                        ));
+                        return Stop::Failed(match unmeasured {
+                            true => format!(
+                                "{what}: last seen at ({:.0}, {:.0}); the pan could not be measured \
+                                 after {MAX_PAN_RETRIES} re-centres — position is unknown",
+                                at.0, at.1
+                            ),
+                            false => format!(
+                                "{what}: still out of reach at ({:.0}, {:.0}) after panning and \
+                                 {MAX_PAN_RETRIES} re-centres",
+                                at.0, at.1
+                            ),
+                        });
                     }
                     r.pan_retries += 1;
                     r.needs_recentre = true;
-                    r.log.push_str(&format!(
-                        "  `{what}` is at ({:.0}, {:.0}) and panning did not fetch it — re-centring \
-                         and deriving the step again (try {} of {MAX_PAN_RETRIES})\n",
-                        at.0, at.1, r.pan_retries
-                    ));
+                    r.log.push_str(&match unmeasured {
+                        // Deliberately "last seen at": after an unmeasured drag the coordinate is
+                        // where the node *was*, and reporting it as current is how a reader ends up
+                        // debugging a number that stopped meaning anything.
+                        true => format!(
+                            "  `{what}` was last seen at ({:.0}, {:.0}) and the pan could not be \
+                             measured — re-centring to re-establish position (try {} of \
+                             {MAX_PAN_RETRIES})\n",
+                            at.0, at.1, r.pan_retries
+                        ),
+                        false => format!(
+                            "  `{what}` is at ({:.0}, {:.0}) and panning did not fetch it — \
+                             re-centring and deriving the step again (try {} of \
+                             {MAX_PAN_RETRIES})\n",
+                            at.0, at.1, r.pan_retries
+                        ),
+                    });
                     continue;
                 }
                 r.pan_retries = 0;
