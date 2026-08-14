@@ -100,6 +100,28 @@ pub fn luma(frame: &Frame, cx: i32, cy: i32, radius: i32) -> f64 {
     }
 }
 
+/// Spread of luminance across a box — the brightest pixel minus the darkest.
+///
+/// Where [`luma`] asks how bright something is, this asks how *structured* it is. A tile has a lit
+/// face, an engraved letter and a shadowed border, so its spread is large; sky, sea and bare
+/// backboard are smooth whatever their brightness. That difference is what tells a board from a
+/// scene standing where a board will be.
+pub fn luma_range(frame: &Frame, cx: i32, cy: i32, radius: i32) -> f64 {
+    let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+    for y in (cy - radius).max(0)..=(cy + radius).min(frame.height - 1) {
+        for x in (cx - radius).max(0)..=(cx + radius).min(frame.width - 1) {
+            let v = luma(frame, x, y, 0);
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    if lo > hi {
+        0.0
+    } else {
+        hi - lo
+    }
+}
+
 /// Vertical luminance range that makes a column of the word bar "busy" rather than bare plank.
 ///
 /// Measured, not chosen — see [`bar_busy_columns`] for the figures.
@@ -826,6 +848,20 @@ mod tests {
             }
         }
         f
+    }
+
+    #[test]
+    fn brightness_cannot_tell_a_tile_from_open_sky_and_texture_can() {
+        // The 2026-08-12 failure in one assertion. A boss intro card leaves the combat HUD up and
+        // the board undrawn, so the tile centres sample sky and sea -- brighter than any tile, and
+        // perfectly smooth. `OCCUPIED` passed all sixteen slots on a screen with no board on it.
+        let sky = flat(64, 64, 200);
+        assert!(luma(&sky, 32, 32, 20) > OCCUPIED, "sky is brighter than the occupancy floor");
+        assert!(luma_range(&sky, 32, 32, 20) < 1.0, "and it is featureless");
+
+        // A tile: dark engraving on a lit face. Dimmer on average, unmistakable by structure.
+        let tile = bar_with_tiles(64, 64, 20..44);
+        assert!(luma_range(&tile, 32, 32, 20) > 100.0);
     }
 
     #[test]

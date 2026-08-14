@@ -996,6 +996,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => println!("no match at all  bounds={bounds:?}"),
             }
         }
+        "boardocc" => {
+            // Is a board actually on screen? Prints, per tile, the mean luminance the current
+            // OCCUPIED test uses and the luminance RANGE a texture test would use, so the two can
+            // be compared on real frames -- a combat screen and a boss intro card with no board.
+            let passive = args.get(1).ok_or("usage: boardocc <passive> <tiles> <frame.png>...")?;
+            let count: usize = args.get(2).and_then(|s| s.parse().ok()).ok_or("tile count")?;
+            let geom = diggle_solver::geometry::Geometry::for_passive(passive, count).geometry;
+            for path in args.iter().skip(3) {
+                let dec = png::Decoder::new(std::fs::File::open(path)?);
+                let mut rdr = dec.read_info()?;
+                let mut buf = vec![0; rdr.output_buffer_size()];
+                let info = rdr.next_frame(&mut buf)?;
+                let n = info.color_type.samples();
+                let mut bgra = Vec::with_capacity((info.width * info.height * 4) as usize);
+                for px in buf.chunks_exact(n) {
+                    bgra.extend_from_slice(&[px[2], px[1], px[0], 255]);
+                }
+                let f = Frame { width: info.width as i32, height: info.height as i32, bgra };
+                let centres =
+                    diggle_solver::layout::tile_centres(&geom, f.width, f.height);
+                let r = (diggle_solver::layout::tile_radius(f.width, f.height) * 0.55).round() as i32;
+                let means: Vec<f64> =
+                    centres.iter().map(|&(x, y)| diggle_solver::combat::luma(&f, x, y, r)).collect();
+                let ranges: Vec<f64> = centres
+                    .iter()
+                    .map(|&(x, y)| diggle_solver::combat::luma_range(&f, x, y, r))
+                    .collect();
+                let lo = |v: &Vec<f64>| v.iter().cloned().fold(f64::MAX, f64::min);
+                let hi = |v: &Vec<f64>| v.iter().cloned().fold(f64::MIN, f64::max);
+                println!(
+                    "{path}: mean {:.1}..{:.1} (OCCUPIED=40 -> {} of {} pass)   range {:.1}..{:.1}",
+                    lo(&means),
+                    hi(&means),
+                    means.iter().filter(|m| **m > 40.0).count(),
+                    means.len(),
+                    lo(&ranges),
+                    hi(&ranges),
+                );
+            }
+        }
         "wordbar" => {
             // The positive control for `bar_busy_columns`: run it over saved frames whose selected
             // word is known by eye, and check the reading rises with the word. Offline, so the
