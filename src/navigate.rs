@@ -964,6 +964,29 @@ impl Run<'_> {
         }
     }
 
+    /// Logs the loudest button fingerprints on whatever is currently on screen.
+    ///
+    /// For the case where [`crate::act::identify`] says `Unknown` and that answer is *surprising*.
+    /// `Unknown` is the absence of every check passing, so it names nothing and cannot distinguish
+    /// "no button is drawn" from "one is drawn and scored just under its bar" — and this project has
+    /// spent two runs on that distinction already.
+    ///
+    /// The top few only. The full registry is long, most of it scores near zero on any given screen,
+    /// and a wall of noughts in a run report is how a real reading gets missed.
+    fn log_button_scores(&mut self) {
+        let mut scored: Vec<(&str, f64)> = crate::act::ALL
+            .iter()
+            .filter_map(|b| crate::act::score_exact(self.win, b).ok().map(|q| (b.name, q)))
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let top: Vec<String> =
+            scored.iter().take(4).map(|(n, q)| format!("{n} {q:.4}")).collect();
+        match top.is_empty() {
+            true => self.log.push_str("  nothing could be scored — the capture itself failed\n"),
+            false => self.log.push_str(&format!("  loudest fingerprints: {}\n", top.join(", "))),
+        }
+    }
+
     fn snap_area_slot(&mut self, tag: &str) {
         // `default` is 250x100 (`ui/elements/button.lua:17`), and [`AREA_BUTTON`] is its centre.
         let (x, y) = (AREA_BUTTON.0 - 125, AREA_BUTTON.1 - 50);
@@ -2145,6 +2168,20 @@ pub fn drive(
                     "  pressed Combat and no screen arrived within {COMBAT_OPENS_BY:?} — treating \
                      it as still the map\n"
                 ));
+                // **Photograph and score before moving on**, because this branch has already been
+                // wrong once about what it was looking at.
+                //
+                // Live 2026-08-14 at `l16sub5`: the console printed `Pregame screen:` — its last
+                // line — so the screen was constructed, this poll ran its full four seconds naming
+                // nothing, and `gave-up.png` taken moments later scores **1.0000** for
+                // `PREGAME_START`. Three facts that cannot all be about the same instant, and no
+                // capture existed from inside the window to say which one moved.
+                //
+                // A number here settles it next time: a Start at 0.89 is a threshold or a hover
+                // state, a Start at 0.02 is a screen that was not drawn yet, and those want
+                // opposite fixes.
+                r.snap_screen("combat-no-screen");
+                r.log_button_scores();
             }
         }
         if screen != crate::act::Screen::Unknown {

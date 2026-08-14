@@ -2112,6 +2112,10 @@ mod threshold_tests {
         // Both paths, because they answer different questions and only one is `identify`'s.
         let searched = score(&PREGAME_START, "pregame-graveyard.png").unwrap();
         eprintln!("PREGAME_START on the give-up frame: exact {exact:.4}, searched {searched:.4}");
+        if let Some(e2) = score_at_origin(&PREGAME_START, "pregame-graveyard-2.png") {
+            let s2 = score(&PREGAME_START, "pregame-graveyard-2.png").unwrap();
+            eprintln!("PREGAME_START on the second give-up frame: exact {e2:.4}, searched {s2:.4}");
+        }
         assert!(
             exact >= PREGAME_START_PRESENT,
             "the Start button a run gave up in front of scored {exact:.4} at its origin \
