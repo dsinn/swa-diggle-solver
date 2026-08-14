@@ -1608,14 +1608,26 @@ impl WorldMap {
                 // "village", which is why nothing else here notices. Met live as
                 // `Ulrome — level 6 village [corrupted]`.
                 //
-                // **ASSUMED, NOT VERIFIED.** We take it that clearing the corruption frees the inn,
-                // so `completed` is the release and a corrupted site we have fought through serves
-                // like any other. Nothing has tested it: the MVP is to reach the anomaly *quickly*,
-                // shrines included, so no run has yet had reason to clear a corrupted village and
-                // then sleep in it. If an inn stays destroyed once corruption has had it —
-                // `destroyedAreaButtons` replaces the button set outright
-                // (`overworld/generators/village.lua:393-395`) — this filter is wrong and corrupted
-                // villages go back to being written off.
+                // **Verified, and it is a race.** The inn has three button sets
+                // (`overworld/generators/village.lua:360-393`) and only one of them can serve:
+                //
+                // ```text
+                //   areaButtons            Enter -> ui.inn             the innkeeper, rest works
+                //   underAttackAreaButtons Enter -> ui.building_empty  an empty shell, no rest
+                //   destroyedAreaButtons   a loot button only          the inn is gone for good
+                // ```
+                //
+                // So corruption does not merely gate the inn, it starts a clock: clear the village
+                // in time and the real inn comes back, leave it and the inn is destroyed
+                // permanently. Confirmed by the dev, 2026-08-12, and it replaces the guess that used
+                // to sit here — which had the release right and knew nothing about the deadline.
+                //
+                // `completed` is that release and the filter is correct for it. **The gap is the
+                // third state**: nothing here distinguishes a village still under attack from one
+                // whose inn is already rubble, because both are `corrupted` and neither is
+                // `completed`. Today that costs nothing — both are excluded — but a run that clears
+                // a long-corrupted village expecting a bed will find a loot pile, and `completed`
+                // will say it may sleep there. See task #26, which wants the loot anyway.
                 .filter(|p| p.key != here && !p.avoid && (!p.corrupted || p.completed) && ok(p))
                 .filter_map(|p| crate::rest::site(&p.heading).map(|s| (p, s)))
                 .filter(|(p, s)| crate::rest::can_rest_at(*s, self.gold, self.fuel, !p.used))
