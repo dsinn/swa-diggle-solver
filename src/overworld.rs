@@ -2958,8 +2958,12 @@ mod tests {
     /// Exploring with the portal live must walk **toward the corruption**, even when that is the
     /// longer way round in hops.
     ///
-    /// The dev's rule, and the reason is the objective rather than safety — see the note at the sort
-    /// itself. Level falls with distance from the origin only until the portal opens; after it,
+    /// The dev's rule, and their reason is simply that **the anomaly is there** — go where the goal
+    /// is. The survival argument this doc used to carry was never theirs; it was added here and then
+    /// cited back to them, which is worth remembering as a way of being wrong that leaves no trace.
+    ///
+    /// It was also false — see the note at the sort itself. Level falls with distance from the
+    /// origin only until the portal opens; after it,
     /// `math.max(3, baseLevel, 7-baseLevel)` inverts the core (`world.lua:496-501`), so both the rim
     /// and the middle are dangerous and only one of them has the anomaly on it. Live 2026-08-10 a run
     /// at full health explored `l19 -> l28 -> l49`, a level 6 crypt, and died in it — with no bearing
