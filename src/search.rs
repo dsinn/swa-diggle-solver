@@ -383,17 +383,42 @@ pub struct Outcome {
     pub lethal: Option<Found>,
     /// Highest-scoring word seen, for when nothing is lethal.
     pub best: Option<Found>,
-    /// Lowest-scoring word seen, for when nothing fits a band and hitting hard is the wrong miss.
+    /// Lowest-scoring word seen. The **last** resort for a band goal, behind [`Outcome::under`].
     ///
-    /// A goal with a ceiling cannot fall back on [`Outcome::best`]. Undershooting a scare costs a
-    /// turn; overshooting it kills the thing we were trying to frighten away — so when no word lands
-    /// inside the band, the nearest safe answer is the *smallest* hit available, not the largest.
+    /// A goal with a ceiling cannot fall back on [`Outcome::best`], which may be far over it. Where
+    /// anything at all sits under the ceiling, `under` is the answer — see its note. This field is
+    /// for the case where *nothing* does, and every word available overshoots.
     ///
     /// Live, 2026-08-09: a murder warning backed the band down to `need 0, below 1`, which no word
     /// can satisfy because no word scores zero. `choice` fell through to `best` and played the
     /// hardest-hitting word on the board, which raised the warning again — thirty times, until the
-    /// run was stopped by hand. Aiming as low as possible produced the most murderous word possible.
+    /// run was stopped by hand. When every option breaks the ceiling, the smallest hit is the least
+    /// bad of them.
     pub least: Option<Found>,
+    /// Hardest hit that still stays **under a band's ceiling**, for when nothing lands inside it.
+    ///
+    /// Only collected by [`race_for_band`], and only when a ceiling was given — with no ceiling
+    /// there is nothing to stay under and [`Outcome::best`] is already the answer.
+    ///
+    /// ## Why this is not just `best`, and not `least` either
+    ///
+    /// A band goal that misses its band is choosing among the words it *may* play, and both existing
+    /// fields answer a different question. `best` is the hardest word on the board and may be well
+    /// over the ceiling — for a scare that means killing the thing we meant to frighten off, which
+    /// for a human is murder. `least` is the gentlest word on the board, which is safe and barely
+    /// does anything.
+    ///
+    /// The words below the ceiling are all safe, so the only reason to pick a small one is if
+    /// smallness were itself worth something, and it is not: `need` tracks the enemy's health, so
+    /// **every point of damage lowers the band toward what the board can actually reach**. Chipping
+    /// with the hardest safe word is how an unreachable scare becomes reachable, and it costs
+    /// nothing the gentle word saves.
+    ///
+    /// Note that when the band is empty, "below the ceiling" and "below the floor" describe the same
+    /// set of words — anything in between would have been in the band. So this single field replaces
+    /// what used to be a two-way branch on `best.score < need`, and does strictly better in the case
+    /// that branch never covered: hard words that overshoot, with softer safe ones available.
+    pub under: Option<Found>,
     /// Longest makeable word seen. Tracked separately because the refresh rule is about LENGTH, and
     /// the highest-scoring word is not necessarily the longest — a short word of gold tiles can
     /// outscore a long one of wood. Free to collect: the only time it matters is when no lethal word
@@ -435,38 +460,41 @@ impl Outcome {
     /// The fallback direction is a property of the goal, not of the search, and reading it off the
     /// goal is what keeps the two from disagreeing.
     ///
-    /// Two goals carry a ceiling and they want opposite things when the band comes up empty:
+    /// Two goals carry a ceiling and they want different things when the band comes up empty:
     ///
     /// - [`Goal::Scare`]'s ceiling is a **constraint**. Overshooting kills something we meant to
-    ///   frighten off, so the fallback is the gentlest word we have.
+    ///   frighten off, so the fallback must stay under it: [`Outcome::under`].
     /// - [`Goal::FrugalKill`]'s ceiling is an **optimisation** — a rest charge saved by not
-    ///   overkilling. Missing it costs a charge; falling back to the gentlest word costs the fight,
-    ///   and did (see [`Goal::FrugalKill`]). So it falls back like every other kill: hardest hit.
-    /// ## Missing a scare band has two directions, and they want opposite answers
+    ///   overkilling. Missing it costs a charge; refusing to overshoot costs the fight, and did
+    ///   (see [`Goal::FrugalKill`]). So it falls back like every other kill: hardest hit.
     ///
-    /// Falling back to [`Outcome::least`] unconditionally was right for the failure it was written
-    /// for and catastrophic for the opposite one. Both are live:
+    /// ## The rule, and the two runs that paid for it
     ///
-    /// * **Everything overshoots.** A murder warning backed the band down to `need 0, below 1`; the
-    ///   hardest word raised the warning again, thirty times. The gentlest word is the answer.
+    /// **Play the hardest word that stays under the ceiling.** One rule, and it is the dev's, given
+    /// 2026-08-14 after watching the second of these:
+    ///
     /// * **Nothing reaches the floor.** 2026-08-10, a cultist at 127+33: the band was `98..=158` and
     ///   the best word on the board did 29. Seven turns of `SE`, `YA`, `PI`, `NA`, `EE`, `IF`, `GI`
-    ///   — one point each — while the board eroded from sixteen tiles to nine and the run died. The
-    ///   gentlest word does not scare, does not kill, and does not even buy time.
+    ///   — one point each — while the board eroded from sixteen tiles to nine and the run died.
+    /// * **Everything in reach overshoots.** 2026-08-14, a `4..=5` band on a 6hp cultist: nothing
+    ///   landed inside it, the hardest word would have killed her, and the fallback played `AA` for
+    ///   1. That one worked, because the enemy was small enough that a single point of chip brought
+    ///   the band into reach next turn — but it is the same mechanism as the run above, and against
+    ///   anything with real health it is the same chain of one-point strikes.
     ///
-    /// `best` tells them apart. If the hardest hit available is **below** `need`, no word can scare
-    /// and playing softly is strictly worse than playing hard — and it is safe to play hard, because
-    /// a word under the floor is also under the ceiling and so cannot commit the murder the ceiling
-    /// exists to prevent. Chipping also *lowers the band*: `need` tracks the enemy's health, so
-    /// hitting hard now is how the scare becomes reachable at all.
+    /// Both are the gentle fallback, and the fix for both is the same: among words that cannot
+    /// commit the murder the ceiling exists to prevent, smallness buys nothing. `need` tracks the
+    /// enemy's health, so **every point of damage lowers the band toward the board**; hitting as
+    /// hard as safety allows is how an unreachable scare becomes reachable.
+    ///
+    /// [`Outcome::least`] survives as the last resort, for the case that produced it: a murder
+    /// warning backed the band down to `need 0, below 1`, and no word scores zero, so nothing at all
+    /// is under that ceiling. The gentlest word is then the least bad of the words that overshoot.
     pub fn choice_for(&self, goal: Goal) -> Option<&Found> {
         match goal {
-            Goal::Scare { need, .. } => self.lethal.as_ref().or_else(|| {
-                match self.best.as_ref() {
-                    Some(b) if b.score < need => Some(b),
-                    _ => self.least.as_ref(),
-                }
-            }),
+            Goal::Scare { .. } => {
+                self.lethal.as_ref().or(self.under.as_ref()).or(self.least.as_ref())
+            }
             _ => self.choice(),
         }
     }
@@ -925,6 +953,8 @@ pub fn ranked_kill(
         // `Outcome::choice_for`. Left unset rather than collected, so that a goal which *did* want
         // it and came through here would fail loudly instead of quietly playing the hardest hit.
         least: None,
+        // Likewise: with no ceiling there is nothing to stay under.
+        under: None,
         longest: longest.into_inner().unwrap(),
         words_considered: considered.into_inner(),
     }
@@ -1010,8 +1040,10 @@ pub fn max_damage(
         lethal: None,
         best: best.into_inner().unwrap(),
         // `MaxDamage` is the one goal that explicitly wants the hardest hit, so the gentlest word is
-        // not merely unused here — asking for it would be a contradiction.
+        // not merely unused here — asking for it would be a contradiction. The same goes for a
+        // ceiling this goal does not have.
         least: None,
+        under: None,
         longest: longest.into_inner().unwrap(),
         words_considered: considered.into_inner(),
     }
@@ -1065,18 +1097,20 @@ pub fn race_for_band(
     let lethal: Mutex<Option<(Found, crate::pick::Rank)>> = Mutex::new(None);
     let best: Mutex<Option<Found>> = Mutex::new(None);
     let least: Mutex<Option<Found>> = Mutex::new(None);
+    let under: Mutex<Option<Found>> = Mutex::new(None);
     let longest: Mutex<Option<Found>> = Mutex::new(None);
     let considered = std::sync::atomic::AtomicUsize::new(0);
 
     std::thread::scope(|scope| {
         for (slice, part) in words.chunks(chunk).enumerate() {
-            let (stop, lethal, best, least, longest, considered, typist, mods) =
-                (&stop, &lethal, &best, &least, &longest, &considered, &typist, mods);
+            let (stop, lethal, best, least, under, longest, considered, typist, mods) =
+                (&stop, &lethal, &best, &least, &under, &longest, &considered, &typist, mods);
             scope.spawn(move || {
                 let mut seen = 0usize;
                 let mut local_lethal: Option<(Found, crate::pick::Rank)> = None;
                 let mut local_best: Option<Found> = None;
                 let mut local_least: Option<Found> = None;
+                let mut local_under: Option<Found> = None;
                 let mut local_longest: Option<Found> = None;
                 for word in part {
                     // Checked periodically rather than every word: an atomic load per word would
@@ -1140,6 +1174,15 @@ pub fn race_for_band(
                     {
                         local_least = Some(Found { word: word.clone(), score, slice });
                     }
+                    // The hardest word that still cannot break a ceiling. Every word reaching this
+                    // line missed the band, so `score < below` here also means `score < need` — the
+                    // in-between words left above. See [`Outcome::under`].
+                    if score >= MIN_MEANINGFUL_DAMAGE
+                        && below.is_some_and(|b| score < b)
+                        && local_under.as_ref().map(|u| score > u.score).unwrap_or(true)
+                    {
+                        local_under = Some(Found { word: word.clone(), score, slice });
+                    }
                     if local_longest
                         .as_ref()
                         .map(|b| word.chars().count() > b.word.chars().count())
@@ -1167,6 +1210,12 @@ pub fn race_for_band(
                         *l = Some(lst);
                     }
                 }
+                if let Some(lu) = local_under {
+                    let mut u = under.lock().unwrap();
+                    if u.as_ref().map(|cur| lu.score > cur.score).unwrap_or(true) {
+                        *u = Some(lu);
+                    }
+                }
                 if let Some(ll) = local_longest {
                     let mut l = longest.lock().unwrap();
                     if l.as_ref()
@@ -1184,6 +1233,9 @@ pub fn race_for_band(
         lethal: lethal.into_inner().unwrap().map(|(f, _)| f),
         best: best.into_inner().unwrap(),
         least: least.into_inner().unwrap(),
+        // Stays `None` when no ceiling was given, because the collector above requires one. That is
+        // the `race_for_kill` case, where nothing is out of bounds and `best` is already the answer.
+        under: under.into_inner().unwrap(),
         longest: longest.into_inner().unwrap(),
         words_considered: considered.into_inner(),
     }
@@ -1372,28 +1424,131 @@ mod tests {
     /// and the bug never fires. That is exactly why the original test drifted onto the wrong fixture.
     #[test]
     fn a_scare_whose_ceiling_is_below_everything_plays_the_gentlest_word() {
+        // `under` is what a search with THIS ceiling would have collected: nothing scores under 1,
+        // because nothing scores zero — which is the whole reason this band cannot be satisfied.
         let out = Outcome {
             lethal: None,
             best: Some(Found { word: "VENEPUNCTURE".into(), score: 40, slice: 0 }),
             least: Some(Found { word: "AT".into(), score: 2, slice: 0 }),
+            under: None,
             longest: Some(Found { word: "VENEPUNCTURE".into(), score: 40, slice: 0 }),
             words_considered: 900,
         };
-        // Every word is at or above the floor, so the band was missed by overshooting the ceiling.
-        let goal = Goal::Scare { need: 0, below: 1 };
+        assert_eq!(
+            out.choice_for(Goal::Scare { need: 0, below: 1 }).map(|f| f.word.as_str()),
+            Some("AT"),
+            "nothing at all is under this ceiling, so the least bad overshoot is the smallest hit"
+        );
+    }
+
+    /// The control for the test above, and the run it is named for.
+    ///
+    /// A separate `Outcome` rather than a second goal on the same one, because `under` is collected
+    /// *for a particular ceiling* — asking one search's result about a different band is a question
+    /// no live caller can ask, and the old shared fixture quietly encoded a state the search cannot
+    /// produce.
+    #[test]
+    fn a_scare_nothing_can_reach_chips_as_hard_as_the_ceiling_allows() {
+        // 2026-08-10, a cultist at 127+33: band `98..=158`, best word on the board 29. Every word is
+        // under the ceiling, so the hardest one is also the hardest safe one.
+        let out = Outcome {
+            lethal: None,
+            best: Some(Found { word: "VENEPUNCTURE".into(), score: 29, slice: 0 }),
+            least: Some(Found { word: "SE".into(), score: 1, slice: 0 }),
+            under: Some(Found { word: "VENEPUNCTURE".into(), score: 29, slice: 0 }),
+            longest: Some(Found { word: "VENEPUNCTURE".into(), score: 29, slice: 0 }),
+            words_considered: 900,
+        };
+        assert_eq!(
+            out.choice_for(Goal::Scare { need: 98, below: 159 }).map(|f| f.word.as_str()),
+            Some("VENEPUNCTURE"),
+            "seven turns of one-point words lost this run"
+        );
+    }
+
+    /// The case neither of the pair above covers, and the reason the rule is now one rule.
+    ///
+    /// 2026-08-14, a `4..=5` band on a 6hp cultist: nothing landed inside it, and the fallback chose
+    /// between a word that would murder her and a word that did 1. There was a third option all
+    /// along — the hardest hit that still leaves her standing — and the old two-way branch could not
+    /// express it, because `best` was over the floor and so the "chip hard" arm never ran.
+    #[test]
+    fn a_scare_that_can_only_overshoot_or_tickle_plays_the_hardest_safe_word() {
+        let out = Outcome {
+            lethal: None,
+            // Over the ceiling: playing this kills her, and she carries `fear`, so that is murder.
+            best: Some(Found { word: "SISSOO".into(), score: 25, slice: 0 }),
+            least: Some(Found { word: "AA".into(), score: 1, slice: 0 }),
+            under: Some(Found { word: "MIL".into(), score: 3, slice: 0 }),
+            longest: Some(Found { word: "SISSOO".into(), score: 25, slice: 0 }),
+            words_considered: 900,
+        };
+        let goal = Goal::Scare { need: 4, below: 6 };
         assert_eq!(
             out.choice_for(goal).map(|f| f.word.as_str()),
-            Some("AT"),
-            "everything overshoots, so the nearest safe answer is the smallest hit"
+            Some("MIL"),
+            "3 damage cannot murder and drops the band by three times as much as 1 does"
         );
 
-        // The control, and the whole point of the pair: the same `Outcome`, a floor nothing reaches,
-        // and the answer flips. Without this the rule could be "always play least" and still pass.
+        // A word inside the band still beats every fallback — this is a miss handler, not a policy.
+        let mut hit = out.clone();
+        hit.lethal = Some(Found { word: "LOWN".into(), score: 4, slice: 0 });
+        assert_eq!(hit.choice_for(goal).map(|f| f.word.as_str()), Some("LOWN"));
+    }
+
+    /// The producer, against the real dictionary — the tests above only exercise the consumer.
+    ///
+    /// Worth its own test because the two halves fail independently and identically from the
+    /// outside: a `choice_for` that prefers `under` and a search that never fills it in play the
+    /// gentlest word together, exactly as if nothing had been changed at all.
+    ///
+    /// The thresholds are derived from the board rather than guessed, so this asserts the *rule*
+    /// and not the crypt board's particular arithmetic.
+    #[test]
+    fn the_search_collects_the_hardest_word_under_a_ceiling() {
+        if !present() {
+            eprintln!("SKIP: game source not present");
+            return;
+        }
+        let dict = Dictionary::load(&game_dir()).unwrap();
+        let scorer = Scorer::new(&game_dir()).unwrap();
+        let (tiles, geom, mods) = (crypt_board(), Geometry::default(), Modifiers::none());
+        let pick = crate::pick::Context::default();
+        let band = |need, below| {
+            race_for_band(&dict, &scorer, &tiles, &geom, &mods, need, below, &pick, 8)
+        };
+
+        // A floor far above anything this board can reach, so nothing lands in the band and every
+        // word on it is under the ceiling. The hardest safe word is then the hardest word.
+        let free = band(1_000, Some(2_000));
+        assert!(free.lethal.is_none(), "the band must be out of reach for this to test anything");
+        let hardest = free.best.clone().expect("the crypt board makes words");
         assert_eq!(
-            out.choice_for(Goal::Scare { need: 100, below: 200 }).map(|f| f.word.as_str()),
-            Some("VENEPUNCTURE"),
-            "nothing reaches the floor, so chip as hard as possible"
+            free.under.as_ref().map(|u| u.score),
+            Some(hardest.score),
+            "with nothing over the ceiling, the hardest safe word is the hardest word"
         );
+
+        // Now drop the ceiling below the hardest word. `under` must fall with it — and must still be
+        // the hardest of what remains, which is the entire point.
+        let capped = band(1_000, Some(hardest.score));
+        let u = capped.under.clone().expect("softer words exist below the hardest one");
+        let softest = capped.least.clone().unwrap();
+        assert!(u.score < hardest.score, "{} is not under a ceiling of {}", u.score, hardest.score);
+        assert!(
+            u.score > softest.score,
+            "fell back to the gentlest word ({}) instead of the hardest safe one",
+            softest.score
+        );
+        assert_eq!(
+            capped.choice_for(Goal::Scare { need: 1_000, below: hardest.score }).map(|f| f.score),
+            Some(u.score),
+            "and it is what actually gets played"
+        );
+
+        // Control: with no ceiling nothing is out of bounds, so there is nothing to stay under and
+        // the field is left empty rather than quietly duplicating `best`.
+        assert!(race(&scorer, &dict, &tiles, &mods, 1_000).under.is_none());
     }
 
     #[test]
@@ -1402,6 +1557,7 @@ mod tests {
             lethal: Some(Found { word: "CAT".into(), score: 9, slice: 0 }),
             best: Some(Found { word: "CAT".into(), score: 9, slice: 0 }),
             least: None,
+            under: None,
             longest: Some(Found { word: "CAT".into(), score: 9, slice: 0 }),
             words_considered: 1,
         };
@@ -1412,6 +1568,7 @@ mod tests {
             lethal: None,
             best: Some(Found { word: "CAT".into(), score: 4, slice: 0 }),
             least: None,
+            under: None,
             longest: Some(Found { word: "CAT".into(), score: 4, slice: 0 }),
             words_considered: 1,
         };
@@ -1431,6 +1588,7 @@ mod tests {
             lethal: None,
             best: Some(Found { word: "JAY".into(), score: 20, slice: 0 }),
             least: None,
+            under: None,
             longest: Some(Found { word: "OATMEALS".into(), score: 12, slice: 1 }),
             words_considered: 10,
         };
