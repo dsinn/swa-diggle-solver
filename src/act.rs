@@ -2081,6 +2081,44 @@ mod threshold_tests {
         find_at_scale_in(&crop(&f, button.search), &tpl, 1.0, 1, None).map(|m| m.inliers)
     }
 
+    /// Scores a button the way [`identify`] does: the template-sized rect at `origin`, no sweep.
+    ///
+    /// The two paths are not interchangeable, and reporting one while the run uses the other is how
+    /// a regression test certifies a bug — see [`score`]'s note. `identify` calls [`score_exact`] for
+    /// every screen it names, so this is the measurement that speaks to what a run saw.
+    fn score_at_origin(button: &Button, name: &str) -> Option<f64> {
+        let f = frame(name)?;
+        let tpl = Template::load(&PathBuf::from("templates").join(button.template)).ok()?;
+        let (ox, oy) = button.origin;
+        let rect = (ox, oy, ox + tpl.width as i32, oy + tpl.height as i32);
+        find_at_scale_in(&crop(&f, rect), &tpl, 1.0, 1, None).map(|m| m.inliers)
+    }
+
+    /// Measures the frame a run stopped on with `Start` plainly on screen.
+    ///
+    /// 2026-08-14 at `l16sub14`: the run pressed Combat, the screen moved 0.975, and the next look
+    /// did not report `Screen::Pregame`. It re-derived the same step, pressed the same coordinate a
+    /// second time into a screen where it means nothing (0.011 of movement), and stopped with
+    /// `Combat did not open`. `spike-frames-live/gave-up.png` is the pregame, copied here.
+    ///
+    /// This is here to say which half is at fault, because an absent fingerprint and a fingerprint
+    /// nobody asked about produce the same log line and want opposite fixes.
+    #[test]
+    fn the_pregame_a_run_stopped_on_is_recognisable() {
+        let Some(exact) = score_at_origin(&PREGAME_START, "pregame-graveyard.png") else {
+            eprintln!("SKIP: frame corpus not present");
+            return;
+        };
+        // Both paths, because they answer different questions and only one is `identify`'s.
+        let searched = score(&PREGAME_START, "pregame-graveyard.png").unwrap();
+        eprintln!("PREGAME_START on the give-up frame: exact {exact:.4}, searched {searched:.4}");
+        assert!(
+            exact >= PREGAME_START_PRESENT,
+            "the Start button a run gave up in front of scored {exact:.4} at its origin \
+             (searched: {searched:.4}), under the {PREGAME_START_PRESENT:.2} bar"
+        );
+    }
+
     #[test]
     fn finish_is_told_apart_from_another_plank_and_from_bare_ground() {
         let Some(real) = score(&COMBAT_FINISH, "now.png") else {

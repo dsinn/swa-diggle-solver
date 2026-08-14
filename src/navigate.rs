@@ -259,6 +259,18 @@ const PAN_ATTEMPTS: usize = 3;
 /// genuinely will not show has to end the run rather than spin.
 const MAX_PAN_RETRIES: usize = 2;
 
+/// How long a pressed Combat button has to produce a screen we can name.
+///
+/// Generous on purpose. The cost of waiting too long is seconds; the cost of not waiting is the run,
+/// because the fallback is the map path pressing the same coordinate into whatever did arrive. The
+/// press has already been confirmed to land — [`Run::click_area_button`] measures the screen moving
+/// — so this is only ever waiting out a transition that is known to have started.
+///
+/// Four seconds against a `setActiveMode` cross-fade of 0.625s (`main.lua:191-195`), which leaves
+/// room for a boss introduction to draw itself. See [`RESUME_SETTLE`], which is the same problem met
+/// from the other side and answered with a blunter number for want of anything to measure.
+const COMBAT_OPENS_BY: Duration = Duration::from_secs(4);
+
 /// Is another drag worth spending to fetch `at` into reach?
 ///
 /// Three ways to answer no, and the middle one is the one that matters:
@@ -2095,7 +2107,46 @@ pub fn drive(
         //
         // Only screens that need naming are logged. The map is the ordinary case and reporting it
         // every iteration would bury everything else.
-        let screen = crate::act::identify(r.win);
+        let mut screen = crate::act::identify(r.win);
+        // **One look is not enough right after we asked for a fight.**
+        //
+        // `identify` is a set of `score_exact` comparisons, and mid-transition every template scores
+        // low — the same "a number below the threshold is not the same as the screen having moved
+        // on" that [`crate::act::score_exact`] warns about and that [`crate::act::wait_for`] exists
+        // for. Asking once and calling it Unknown commits this iteration to the map path.
+        //
+        // Live 2026-08-14 at `l16sub14`: the press landed (the screen moved 0.975), the single look
+        // came back Unknown, the map path re-derived the same step and pressed the same coordinate
+        // into the pregame, where it means nothing — 0.011 of movement — and the run stopped with
+        // `Combat did not open`. `spike-frames-live/gave-up.png` is that pregame, and its Start
+        // button scores **1.0000** against a 0.90 bar, on both the exact and searched paths. The
+        // fingerprint was never the problem; nothing asked it a second time.
+        //
+        // Scoped to `combat_expected`, which until now was carried only so the log could say whether
+        // a fight was walked into or asked for. Everywhere else Unknown is the ordinary answer —
+        // the map is Unknown — so polling for a name would cost every iteration the full timeout.
+        // Here we have just pressed a button whose whole purpose is to leave the map, so Unknown is
+        // a transition rather than a verdict, and it is worth waiting out.
+        if screen == crate::act::Screen::Unknown && r.combat_expected {
+            let by = Instant::now() + COMBAT_OPENS_BY;
+            while Instant::now() < by {
+                std::thread::sleep(Duration::from_millis(150));
+                r.pump();
+                screen = crate::act::identify(r.win);
+                if screen != crate::act::Screen::Unknown {
+                    break;
+                }
+            }
+            // Cleared either way: a press that opened nothing within the window is a press that
+            // failed, and leaving the flag up would make the *next* iteration wait all over again.
+            if screen == crate::act::Screen::Unknown {
+                r.combat_expected = false;
+                r.log.push_str(&format!(
+                    "  pressed Combat and no screen arrived within {COMBAT_OPENS_BY:?} — treating \
+                     it as still the map\n"
+                ));
+            }
+        }
         if screen != crate::act::Screen::Unknown {
             r.log.push_str(&format!("{step}. screen: {screen:?}\n"));
         }
