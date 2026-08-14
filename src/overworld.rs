@@ -634,6 +634,17 @@ pub struct WorldMap {
 pub struct Plan {
     pub target: String,
     pub reason: Goal,
+    /// What direction exploring was steered by, when it was steered at all.
+    ///
+    /// `(bearing, placed, total)` — the node being aimed at, how many frontier candidates could be
+    /// measured against it, and how many there were. Recorded because steering has three ways to do
+    /// nothing and the log could not tell them apart: no bearing at all, a bearing nothing can place,
+    /// and a bearing sitting on the node we are already standing on. All three come out as
+    /// `Goal::Explore` and a nearest-unvisited hop, which is what a run that had never heard of
+    /// steering would do — so "we fixed this" and "it went the wrong way" were both true and neither
+    /// was checkable. Live 2026-08-12 a run wandered out of the corruption into a bandit camp and
+    /// this is the field that would have said why.
+    pub steered_by: Option<(String, usize, usize)>,
 }
 
 /// Where the anomaly is, once it opens: the node we started on.
@@ -1519,7 +1530,7 @@ impl WorldMap {
         });
         candidates
             .first()
-            .map(|p| Plan { target: p.key.clone(), reason: Goal::EasiestHostile { level: p.level() } })
+            .map(|p| Plan { target: p.key.clone(), reason: Goal::EasiestHostile { level: p.level() }, steered_by: None })
     }
 
     /// The planner proper. `skip_hostile` excludes anywhere a fight is owed, on either axis;
@@ -1611,7 +1622,7 @@ impl WorldMap {
                 .collect();
             sites.sort_by(|(pa, sa), (pb, sb)| sb.rank().cmp(&sa.rank()).then(pa.key.cmp(&pb.key)));
             if let Some((p, _)) = sites.first() {
-                return Some(Plan { target: p.key.clone(), reason: Goal::Rest });
+                return Some(Plan { target: p.key.clone(), reason: Goal::Rest, steered_by: None });
             }
         }
 
@@ -1645,7 +1656,7 @@ impl WorldMap {
         // route, so this can only ever choose a shrine we can actually walk to.
         if anomaly_open {
             if let Some(p) = pick_shrine() {
-                return Some(Plan { target: p.key.clone(), reason: Goal::Shrine });
+                return Some(Plan { target: p.key.clone(), reason: Goal::Shrine, steered_by: None });
             }
         }
 
@@ -1655,7 +1666,7 @@ impl WorldMap {
         // rather go exploring — which is also how an unknown rest site gets found — and the second
         // pass takes it when there is genuinely nothing else.
         if let Some(p) = self.anomaly().filter(|p| ok(p)) {
-            return Some(Plan { target: p.key.clone(), reason: Goal::Anomaly });
+            return Some(Plan { target: p.key.clone(), reason: Goal::Anomaly, steered_by: None });
         }
 
 
@@ -1683,7 +1694,7 @@ impl WorldMap {
                     .then(a.key.cmp(&b.key))
             });
             if let Some(p) = candidates.first() {
-                return Some(Plan { target: p.key.clone(), reason: Goal::OpenTheAnomaly });
+                return Some(Plan { target: p.key.clone(), reason: Goal::OpenTheAnomaly, steered_by: None });
             }
         }
 
@@ -1740,7 +1751,7 @@ impl WorldMap {
         // where it now outranks it. Same selection, so it is the same closure rather than a second
         // copy of the filter chain that could drift from this one.
         if let Some(p) = pick_shrine() {
-            return Some(Plan { target: p.key.clone(), reason: Goal::Shrine });
+            return Some(Plan { target: p.key.clone(), reason: Goal::Shrine, steered_by: None });
         }
         // Nothing qualifying is known yet, so grow the map. Unvisited places first — standing on one
         // is what produces a dump — and among those prefer the ones still hiding neighbours.
@@ -1846,7 +1857,32 @@ impl WorldMap {
         // actually spends. That holds while the anomaly is shut, when exploring is genuinely about
         // growing the map and one direction is as good as another. It stops holding the moment
         // there is somewhere to be.
-        let steer = self.anomaly_is_open().unwrap_or(false) && bearing.is_some();
+        // **A bearing is a direction, not a name**, and this used to switch on the name.
+        //
+        // `bearing.is_some()` says only that somewhere was wanted. Whether it can *order* the
+        // frontier is a different question: `toward` needs `gap` to place both ends, and it returns
+        // `None` — leaving every candidate at `f64::MAX` and the comparison equal throughout —
+        // whenever the bearing has no position. The anomaly's own position is estimated from the
+        // centroid of corrupted nodes that are *already placed* (see [`WorldMap::pos_for`]), so a map
+        // whose corrupted nodes came from save flags rather than from dumps yields nothing to aim at.
+        //
+        // In that state the old flag read `true` while the term did nothing at all, and the run
+        // sorted by hops — nearest-unvisited — which is what it would have done with no steering
+        // written. Live 2026-08-12 that walked out of the corruption and into a bandit camp.
+        //
+        // A bearing that lands on the node we are standing on is the same failure wearing a
+        // different hat: every candidate is measured against a point already reached. `placed`
+        // counting only *finite* distances is what excludes both, because `gap` to an unplaced
+        // bearing and `gap` from an unplaced candidate are both `None`.
+        //
+        // Compared against the sentinel rather than with `is_finite`, which is the trap here:
+        // `toward` substitutes `f64::MAX` for an unmeasurable candidate, and `f64::MAX` *is* finite.
+        // The first version of this counted every candidate as placed and reported steering on a map
+        // with nothing to aim at — the exact bug it was written to catch.
+        let placed = frontier.iter().filter(|p| toward(p) < f64::MAX).count();
+        let steer = self.anomaly_is_open().unwrap_or(false) && placed > 0;
+        let steered_by =
+            steer.then(|| (bearing.clone().unwrap_or_default(), placed, frontier.len()));
         frontier.sort_by(|a, b| {
             let by_hops =
                 dist.get(&a.key).unwrap_or(&far).cmp(dist.get(&b.key).unwrap_or(&far));
@@ -1862,7 +1898,7 @@ impl WorldMap {
                 .then(b.hidden.unwrap_or(0).cmp(&a.hidden.unwrap_or(0)))
                 .then(a.key.cmp(&b.key))
         });
-        frontier.first().map(|p| Plan { target: p.key.clone(), reason: Goal::Explore })
+        frontier.first().map(|p| Plan { target: p.key.clone(), reason: Goal::Explore, steered_by: steered_by.clone() })
     }
 
     /// The single adjacent node to step to next, and the plan it serves.
@@ -2909,6 +2945,62 @@ mod tests {
         m.hell = Some(0.1);
         let open = m.next_target().expect("something to explore");
         assert_eq!(open.target, "toward", "must head at the corruption, not at the nearest node");
+        // Steering that worked says so, and says how much of the frontier it could measure.
+        let (toward, placed, total) = open.steered_by.expect("this hop was steered");
+        assert_eq!(toward, "start");
+        assert!(placed > 0 && placed <= total, "{placed} of {total}");
+    }
+
+    #[test]
+    fn a_bearing_nothing_can_place_does_not_count_as_steering() {
+        // The regression that let a run wander out of the corruption while the code believed it was
+        // steering. Everything is present except a *position* to aim at: the portal is open, known
+        // and unroutable, so a bearing is produced — but no corrupted node has ever been placed, so
+        // `pos_for` has no centroid to average and `gap` returns `None` for every candidate. The
+        // ordering key is then equal throughout and the frontier sorts by hops, which is precisely
+        // what a run with no steering written would do.
+        //
+        // The old test was `bearing.is_some()`, which is true here, so this state reported steering
+        // and did none. What separates the two is whether anything could be *measured*.
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "here",
+            "camp",
+            vec![node_at("away", "Westerly meadow", -100.0, 0.0), node_at("step", "Easterly road", 50.0, 0.0)],
+        ));
+        m.fold(&dump(
+            "step",
+            "Easterly road",
+            vec![
+                node_at("away", "Westerly meadow", -100.0, 0.0),
+                node_at("toward", "Furtherly meadow", 100.0, 0.0),
+            ],
+        ));
+        m.entry("away").connections = 3;
+        m.entry("toward").connections = 3;
+
+        // Corrupted, exactly as a save's area flags leave it: flagged, never seen, never placed.
+        m.entry("far").corrupted = true;
+        m.fold(&dump("island", "island camp", vec![node_at("start", "The Rift anomaly", 0.0, 0.0)]));
+        // **And unplaced.** Stated rather than assumed: the first draft of this test left it to the
+        // island dump failing to register, and it turned out to be placed anyway -- so the test
+        // measured a map with a perfectly good bearing and proved nothing. The state under test is
+        // "known, unroutable, nowhere", so it is written down.
+        m.entry("start").pos = None;
+        m.here = Some("here".into());
+        m.hell = Some(0.1);
+
+        let plan = m.next_target().expect("something to explore");
+        assert_eq!(plan.reason, Goal::Explore);
+        assert_eq!(plan.steered_by, None, "a bearing that cannot order the frontier is not steering");
+        assert_eq!(plan.target, "away", "so it falls back to nearest unvisited, and says so");
+
+        // The control: place that same corrupted node and the identical map now steers. Only
+        // `pos` changes, which is what pins the cause.
+        m.entry("far").pos = Some((200.0, 0.0));
+        let steered = m.next_target().expect("something to explore");
+        assert!(steered.steered_by.is_some(), "a placed corruption gives it something to aim at");
+        assert_eq!(steered.target, "toward");
     }
 
     fn dump(here: &str, heading: &str, nodes: Vec<Node>) -> Adjacency {

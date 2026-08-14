@@ -3302,6 +3302,19 @@ pub fn drive(
                 false => " — no route there; stepping the way it lies",
             }
         ));
+        // **Whether exploring was actually steered, and by what.** An `Explore` line looks identical
+        // whether the corruption pulled the choice or nearest-unvisited did, which is how a steering
+        // rule that had stopped working went unnoticed. `placed of total` is the honest part: a
+        // bearing that can measure two candidates out of nine is barely steering at all.
+        if let Some((toward, placed, total)) = &hop.plan.steered_by {
+            r.log.push_str(&format!(
+                "  steering toward `{toward}` ({placed} of {total} candidates placed)
+"
+            ));
+        } else if matches!(hop.plan.reason, crate::overworld::Goal::Explore) {
+            r.log.push_str("  not steered — exploring by hops alone
+");
+        }
         // What this hop is *for*, so that arriving there is recognised as arriving. See
         // [`Run::committed_to`].
         r.committed_to = Some(hop.plan.target.clone());
