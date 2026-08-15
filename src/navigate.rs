@@ -779,6 +779,20 @@ impl Run<'_> {
             .filter(|(x, y)| crate::observe::hud::is_map_point(*x, *y, cw, ch))
             .filter_map(|&(x, y)| pan::patch_from(&before, x, y, pan::PATCH).map(|t| (t, (x, y))))
             .max_by(|a, b| pan::variance(&a.0).total_cmp(&pan::variance(&b.0)))?;
+        // **Which spot, and how textured.** Instrumentation, added ahead of the fix rather than
+        // after it, because the failure this is here to explain is invisible in the log as it
+        // stands: on 2026-08-15 inside `l62` every drag came back unmeasured and the run ended
+        // there, and nothing recorded *what* had been tracked. `gave-up.png` shows the map drawn
+        // smaller than the window with black void to the right and below, and `(1300, 250)` — one of
+        // these four spots — sitting on the boundary between the two. A map/void edge is the
+        // highest-variance thing on such a screen and the one thing that is not map, so `max_by`
+        // would choose it every time. That is a hypothesis, not a finding; this line is what turns
+        // it into one either way.
+        let variance = pan::variance(&patch);
+        self.log.push_str(&format!(
+            "  pan patch from ({}, {}), variance {variance:.1}\n",
+            taken_at.0, taken_at.1
+        ));
 
         // Drag from a point that leaves room to travel in the wanted direction, and stay inside the
         // window: an endpoint outside it is refused outright by `drag_in`'s window guard.
@@ -801,7 +815,20 @@ impl Run<'_> {
         // Search generously: the clamp can swallow most of the requested movement, so the patch may
         // barely have moved at all, and the honest answer to that is a small measured shift.
         let radius = (want.dx.abs().max(want.dy.abs()) as i32 + pan::PATCH).max(200);
-        pan::measure(&after, &patch, taken_at, want, radius)
+        let got = pan::measure(&after, &patch, taken_at, want, radius);
+        if got.is_none() {
+            // The one outcome that ends a run, and until now it reported nothing but its own name.
+            // A patch that could not be found within `radius` of where it was asked to land is
+            // either a patch that was never map (see above) or a view that moved further than the
+            // search allowed, and the two want opposite fixes — so record enough to tell them apart:
+            // where we dragged, how far we asked to go, and how wide we looked.
+            self.log.push_str(&format!(
+                "  pan unmeasured: dragged ({sx}, {sy}) -> ({ex}, {ey}), wanted ({:.0}, {:.0}), \
+                 searched {radius} px around the landing place\n",
+                want.dx, want.dy
+            ));
+        }
+        got
     }
 
     /// Where this world's remembered map lives.
