@@ -2159,6 +2159,65 @@ fn skip_cinematic(r: &mut Run) -> Result<(), String> {
     Ok(())
 }
 
+/// Reads the three champion cards and returns the client x of the one to click.
+///
+/// See [`crate::heroselect`] for what is read and why that row. This is the part that has to survive
+/// the reading failing: a screen where nothing is recognised is not an error, it is the middle card
+/// — which is exactly where this function's predecessor clicked every time.
+///
+/// The one refusal is a screen with no playable champion on it at all, which stops the run rather
+/// than starting a class the router has never been written for.
+fn pick_a_champion(r: &mut Run, game_dir: &Path) -> Result<i32, String> {
+    /// Reads before giving up on the screen still drawing. The cards fade in, and a card read
+    /// mid-fade is a card whose icons are blended with the backdrop and match nothing — the
+    /// project's most repeated bug wearing a new hat.
+    const READS: usize = 3;
+    let centres = crate::heroselect::card_centres();
+    let middle = centres[centres.len() / 2];
+
+    let catalogue = match crate::items::Catalogue::load(game_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            r.log.push_str(&format!("  no item catalogue ({e}) — falling back to the middle card\n"));
+            return Ok(middle);
+        }
+    };
+
+    let (bx, by, bw, bh) = crate::heroselect::passives_band();
+    let mut cards = Vec::new();
+    for attempt in 1..=READS {
+        let frame = match crate::win::capture::capture_client_rect(r.win, bx, by, bw, bh) {
+            Ok(f) => f,
+            Err(e) => {
+                r.log.push_str(&format!("  could not capture the card band ({e})\n"));
+                break;
+            }
+        };
+        cards = centres
+            .iter()
+            .map(|&cx| crate::heroselect::read_card(&frame, (bx, by), &catalogue, game_dir, cx))
+            .collect::<Vec<_>>();
+        let recognised = cards
+            .iter()
+            .any(|c| c.scores.iter().any(|(_, s)| *s >= crate::heroselect::MARKER_PRESENT));
+        for c in &cards {
+            r.log.push_str(&format!("  card {}\n", c.summary()));
+        }
+        if recognised || attempt == READS {
+            break;
+        }
+        r.log.push_str("  no card recognised — the screen may still be drawing\n");
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    if cards.is_empty() {
+        r.log.push_str("  the cards could not be read — falling back to the middle card\n");
+        return Ok(middle);
+    }
+    let i = crate::heroselect::choose(&cards)?;
+    Ok(cards[i].centre_x)
+}
+
 /// Starts a fresh run: press `Start`, get through hero select, clear the pregame.
 ///
 /// ## Hero select is silent, so this does not try to see it
@@ -2230,11 +2289,12 @@ pub fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
     // Then `Space`, because `heroselect.lua:335` binds `mousereleased = userFunctions.affirmative`.
     // Select-then-confirm, exactly like the reward screen.
     //
-    // **The middle card, and the reason is honesty about what we can read.** Today's three were
-    // 6/12, 20/20 and 4/4 — a spread that decides runs, and health has ended every run this project
-    // has attempted. Choosing on it means reading those numbers off the screen, which is OCR and is
-    // not built. The middle card is picked because it needs no arithmetic, not because it is best;
-    // that it was the 20/20 Warrior today is luck and must not be mistaken for a policy.
+    // **Which card is now read off the screen.** This used to take the middle one and say so —
+    // *"picked because it needs no arithmetic, not because it is best"* — which was honest and was
+    // also a coin toss. The dev has since ruled two classes out and one in, and [`crate::heroselect`]
+    // names them from the art in each card's `Passives:` row. A reading that recognises nothing
+    // lands back on the middle card, so the worst this can do is what it replaced.
+    //
     // Aim at the NAME band, deliberately low on the card.
     //
     // The card body is a generous target, but it is not uniform: each card carries two `small`
@@ -2253,11 +2313,10 @@ pub fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
     // Still clear of the two `small` buttons along the card top — "Randomise cosmetics" and "Save
     // hero card" at `yOffset -5.4` (`ui/heroselect.lua:357-380`), rendering near y=268 — which an
     // earlier attempt hit, coming back with three recoloured champions and no selection.
-    const CARD_SPACING: i32 = 450;
-    let (cx, cy) = (960, 400);
+    let (cx, cy) = (pick_a_champion(r, game_dir)?, 400);
     let (sx, sy) =
         r.win.client_to_screen(cx, cy).map_err(|e| format!("cannot reach the card: {e}"))?;
-    r.log.push_str(&format!("  choosing the middle champion at ({cx},{cy})\n"));
+    r.log.push_str(&format!("  choosing the champion at ({cx},{cy})\n"));
     // The click's own result, not discarded. The previous version logged "choosing…" and threw the
     // `Result` away with `let _ =`, so the line recorded an *intention* — it could not distinguish a
     // click that landed from one that was refused. That is the whole reason the first attempt was
@@ -2321,7 +2380,6 @@ pub fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
     }
     r.log.push_str("  hero select cleared\n");
     std::thread::sleep(Duration::from_millis(1200));
-    let _ = CARD_SPACING;
 
     let deadline = Instant::now() + Duration::from_secs(120);
     for i in 1..=MAX_RETURNS {

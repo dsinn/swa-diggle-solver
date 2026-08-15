@@ -7,6 +7,7 @@ pub mod fight;
 pub mod game;
 pub mod gear;
 pub mod geometry;
+pub mod heroselect;
 pub mod innplay;
 pub mod layout;
 pub mod letters;

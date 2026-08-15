@@ -42,6 +42,14 @@ pub struct Catalogue {
     /// Key -> (depth it was declared at, kind). The depth is kept so a shallower declaration in a
     /// later file still wins — see [`scan`].
     kinds: HashMap<String, (i32, String)>,
+    /// Key -> (depth, `icon` path), on the same shallowest-wins rule as [`Catalogue::kinds`].
+    ///
+    /// The depth rule earns its keep here rather than being a formality. `items/boardshapes.lua:43`
+    /// declares `hench` with a nested `boardData = { boardGraphics = { icon = … } }` — a *board*
+    /// picture two levels down, filed under `boardGraphics`, while the item's own 32-pixel icon sits
+    /// at the surface. Reading the deeper one would hand [`crate::heroselect`] an image that is
+    /// never drawn on a champion card.
+    icons: HashMap<String, (i32, String)>,
     /// Files that could not be read, so a missing kind is visible rather than assumed absent.
     problems: Vec<String>,
 }
@@ -51,6 +59,7 @@ impl Catalogue {
     pub fn load(game_dir: &Path) -> Result<Self, crate::Error> {
         let dir = game_dir.join("items");
         let mut kinds = HashMap::new();
+        let mut icons = HashMap::new();
         let mut problems = Vec::new();
         for e in std::fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
             let path = e.path();
@@ -58,11 +67,19 @@ impl Catalogue {
                 continue;
             }
             match std::fs::read_to_string(&path) {
-                Ok(src) => scan(&src, &mut kinds),
+                Ok(src) => scan(&src, &mut kinds, &mut icons),
                 Err(err) => problems.push(format!("{}: {err}", path.display())),
             }
         }
-        Ok(Self { kinds, problems })
+        Ok(Self { kinds, icons, problems })
+    }
+
+    /// The `icon` path an item declares, relative to the game directory.
+    ///
+    /// `ui/elements/herodisplay.lua:196` blits exactly this file, with no scale arguments, for
+    /// every entry in a champion card's rows — which is what makes a card readable without OCR.
+    pub fn icon(&self, key: &str) -> Option<&str> {
+        self.icons.get(key).map(|(_, p)| p.as_str())
     }
 
     /// The declared `type` of an item, or `None` if the scan never saw one for that key.
@@ -99,7 +116,10 @@ impl Catalogue {
 /// mean a real item key could be overwritten by a field of the same name deeper in some other file.
 /// **Shallower wins**, so the item body — always nearer the surface than a field of one — keeps the
 /// entry.
-fn scan(src: &str, out: &mut HashMap<String, (i32, String)>) {
+fn scan(
+    src: &str, kinds: &mut HashMap<String, (i32, String)>,
+    icons: &mut HashMap<String, (i32, String)>,
+) {
     let mut depth = 0i32;
     // `openers[d]` is the key that opened depth `d+1`, or None where we could not read one (a
     // computed key such as `things[('scrapwood%d'):format(i)] = {`).
@@ -107,15 +127,21 @@ fn scan(src: &str, out: &mut HashMap<String, (i32, String)>) {
     let mut in_block_comment = false;
     for raw in src.lines() {
         let line = strip_comments(raw, &mut in_block_comment);
-        // Read the kind before moving the depth: it belongs to the table already open. A line that
-        // both opens a table and declares a kind cannot occur, because `type_value` requires the
-        // line to *start* with `type` — which is what keeps an inline `craft = { type = 'x' }` off
-        // the enclosing item.
-        if let (Some(t), true) = (type_value(&line), depth >= 1) {
+        // Read the fields before moving the depth: they belong to the table already open. A line
+        // that both opens a table and declares one cannot occur, because [`string_field`] requires
+        // the line to *start* with the field name — which is what keeps an inline
+        // `craft = { type = 'x' }` off the enclosing item.
+        if depth >= 1 {
             if let Some(Some(k)) = openers.get((depth - 1) as usize) {
-                let e = out.entry(k.clone()).or_insert((depth, t.clone()));
-                if depth < e.0 {
-                    *e = (depth, t);
+                for (field, out) in
+                    [(string_field(&line, "type"), &mut *kinds), (string_field(&line, "icon"), &mut *icons)]
+                {
+                    if let Some(v) = field {
+                        let e = out.entry(k.clone()).or_insert((depth, v.clone()));
+                        if depth < e.0 {
+                            *e = (depth, v);
+                        }
+                    }
                 }
             }
         }
@@ -232,10 +258,13 @@ fn opens_table(line: &str) -> Option<String> {
     Some(name.to_string())
 }
 
-/// `type = 'gear'` -> `Some("gear")`. Must not match `typeName = …`, hence the `=` check after the
-/// prefix rather than a bare `starts_with`.
-fn type_value(line: &str) -> Option<String> {
-    let rest = line.trim().strip_prefix("type")?.trim_start().strip_prefix('=')?.trim_start();
+/// `type = 'gear'` -> `Some("gear")` for `field = "type"`. Must not match `typeName = …`, hence the
+/// `=` check after the prefix rather than a bare `starts_with`.
+///
+/// The line must *start* with the field name, which is what keeps an inline
+/// `craft = { type = 'x' }` off the enclosing item — see [`scan`].
+fn string_field(line: &str, field: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix(field)?.trim_start().strip_prefix('=')?.trim_start();
     let q = rest.chars().next()?;
     if q != '\'' && q != '"' {
         return None;
@@ -261,7 +290,14 @@ mod tests {
     /// Scans one source and flattens away the depth, which only matters for collisions.
     fn scanned(src: &str) -> HashMap<String, String> {
         let mut out = HashMap::new();
-        scan(src, &mut out);
+        scan(src, &mut out, &mut HashMap::new());
+        out.into_iter().map(|(k, (_, t))| (k, t)).collect()
+    }
+
+    /// As [`scanned`], for the icon paths.
+    fn scanned_icons(src: &str) -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        scan(src, &mut HashMap::new(), &mut out);
         out.into_iter().map(|(k, (_, t))| (k, t)).collect()
     }
 
@@ -328,8 +364,13 @@ mod tests {
              \x20   },\n\
              }",
             &mut out,
+            &mut HashMap::new(),
         );
-        scan("return {\n\x20   goldIdol = {\n\x20       type = 'gear',\n\x20   },\n}", &mut out);
+        scan(
+            "return {\n\x20   goldIdol = {\n\x20       type = 'gear',\n\x20   },\n}",
+            &mut out,
+            &mut HashMap::new(),
+        );
         assert_eq!(out.get("goldIdol").map(|(_, t)| t.as_str()), Some("gear"));
     }
 
@@ -367,8 +408,61 @@ mod tests {
 
     #[test]
     fn typename_is_not_type() {
-        assert_eq!(type_value("typeName = 'gear',"), None);
-        assert_eq!(type_value("type = 'gear',"), Some("gear".into()));
+        assert_eq!(string_field("typeName = 'gear',", "type"), None);
+        assert_eq!(string_field("type = 'gear',", "type"), Some("gear".into()));
+    }
+
+    /// The icon a champion card blits is the item's own, not the tile board's.
+    ///
+    /// Abridged from `items/boardshapes.lua:43-85`, which is the real hazard: `hench` carries a
+    /// board picture at `boardData.boardGraphics.icon` two levels down *and* its own 32-pixel icon
+    /// at the surface. [`crate::heroselect`] matches the latter against a card's `Passives:` row, so
+    /// taking the deeper one would search for an image the card never draws.
+    #[test]
+    fn a_nested_board_icon_does_not_displace_the_items_own() {
+        let got = scanned_icons(
+            "return {\n\
+             \x20   hench = {\n\
+             \x20       type = 'passive',\n\
+             \x20       boardData = {\n\
+             \x20           boardGraphics = {\n\
+             \x20               icon = 'ui/graphics/tileboard/icon-5x3-hex3-16.png',\n\
+             \x20           },\n\
+             \x20       },\n\
+             \x20       icon = 'ui/graphics/items/class-hench-32.png',\n\
+             \x20   },\n\
+             }",
+        );
+        assert_eq!(
+            got.get("hench").map(|s| s.as_str()),
+            Some("ui/graphics/items/class-hench-32.png"),
+            "the shallower declaration must win"
+        );
+        assert_eq!(
+            got.get("boardGraphics").map(|s| s.as_str()),
+            Some("ui/graphics/tileboard/icon-5x3-hex3-16.png"),
+            "and the deeper one is filed under the table that opened it, not lost"
+        );
+    }
+
+    /// The keys [`crate::heroselect`] names must still resolve to art that is on disk.
+    #[test]
+    fn every_champion_marker_still_has_its_picture() {
+        if !present() {
+            eprintln!("SKIP: game source not present at {}", game_dir().display());
+            return;
+        }
+        let cat = Catalogue::load(&game_dir()).expect("the item catalogue should load");
+        for marker in crate::heroselect::MARKERS {
+            let icon = cat
+                .icon(marker.item)
+                .unwrap_or_else(|| panic!("`{}` declares no icon", marker.item));
+            assert!(
+                game_dir().join(icon).is_file(),
+                "`{}` points at {icon}, which is not on disk",
+                marker.item
+            );
+        }
     }
 
     /// An item built by a constructor call has no literal kind, and must not inherit the previous
