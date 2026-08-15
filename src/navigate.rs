@@ -1485,6 +1485,22 @@ impl Run<'_> {
 
     fn click_area_button(&mut self, what: &str) -> Result<bool, Box<dyn std::error::Error>> {
         let before = crate::win::capture::capture_window(self.win)?;
+        // **What the game itself thinks is selected, before we click at arithmetic.** Task #19, in
+        // its read-only first form: `AREA_BUTTON` is a coordinate transcribed by hand from `ss`/`os`
+        // multipliers in the Lua, and a transcription that is wrong looks exactly like one that is
+        // right until a run dies on it. When hotspot navigation is live the game has parked the real
+        // pointer on the centre of a control it computed itself, so the two can simply be compared.
+        //
+        // Reported, never acted on. `None` is the ordinary case — any real mouse movement clears the
+        // highlight (`main.lua:420`) — and a disagreement might equally mean the game has a
+        // *different* control selected, which is information rather than an error. See
+        // [`crate::win::cursor`] for why nothing here presses a direction key to find out.
+        if let Some(miss) = crate::win::cursor::miss_by(self.win, AREA_BUTTON) {
+            self.log.push_str(&format!(
+                "  the game has a control selected {miss:.0} px from where `{what}` is aimed
+"
+            ));
+        }
         let (bx, by) = self.win.client_to_screen(AREA_BUTTON.0, AREA_BUTTON.1)?;
         click_at_in(self.win, bx, by)?;
         self.park();
