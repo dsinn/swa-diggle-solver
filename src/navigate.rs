@@ -827,6 +827,31 @@ impl Run<'_> {
                  searched {radius} px around the landing place\n",
                 want.dx, want.dy
             ));
+            // **Which of the two unmeasureds was it?** `measure` folds them together: the patch was
+            // not found at all, or it was found and scored below [`pan::MIN_INLIERS`]. Those want
+            // opposite fixes — a view that moved further than we looked, against a patch too flat to
+            // recognise itself — and the log has never distinguished them.
+            //
+            // Repeating the search to find out is affordable exactly here, on the path that ends
+            // runs. The wide bounds are deliberate: this asks *where did it go*, not *did it land
+            // where we asked*.
+            let (bx, by) = (taken_at.0, taken_at.1);
+            let wide = Some((bx - 900, by - 900, bx + 900, by + 900));
+            match crate::observe::template::find_at_scale_in(&after, &patch, 1.0, 2, wide) {
+                Some(m) => self.log.push_str(&format!(
+                    "  best match for it was ({}, {}) at {:.4}, against the {:.2} bar — a shift of \
+                     ({}, {})\n",
+                    m.x,
+                    m.y,
+                    m.inliers,
+                    pan::MIN_INLIERS,
+                    m.x - bx,
+                    m.y - by
+                )),
+                None => self
+                    .log
+                    .push_str("  and it is nowhere within 900 px — the patch stopped existing\n"),
+            }
         }
         got
     }
