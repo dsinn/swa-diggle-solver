@@ -446,6 +446,13 @@ impl Place {
         self.type_is("inn")
     }
 
+    /// A village's general store. `typeName = 'general store'`
+    /// (`overworld/generators/village.lua:291-292`), read from the heading the same way
+    /// [`Place::is_inn`] reads its own.
+    pub fn is_general_store(&self) -> bool {
+        self.type_is("general store")
+    }
+
     pub fn type_is(&self, type_name: &str) -> bool {
         self.heading.trim_end().ends_with(type_name)
     }
@@ -599,6 +606,21 @@ pub struct WorldMap {
     /// routing has to obey — memory or a monotone measure, never a ranking. Read it before adding
     /// another.
     abandoned: std::collections::HashSet<String>,
+    /// Villages whose `Heart` we have already bought.
+    ///
+    /// **The standing assumption is the dev's: every village's general store starts with one.** So
+    /// the interesting state is not which villages have a heart — they all do — but which no longer
+    /// do, and this is that. A flag on `Place` was tried first and could only lie: it defaults to
+    /// false, so the errand could never fire on a village we had just heard of, which is every
+    /// village at the moment it becomes a candidate.
+    ///
+    /// The save *could* answer the stock question exactly. `shop.load` keeps it in
+    /// `areaFlags[<key>_shops][<storeType>].inventoryHash` (`shop.lua:364`), per item and per count
+    /// — the live save carries `l19_shops` with three inn items and their stocks. But that flag is
+    /// only written once a shop screen has been *opened*, so for a store nobody has visited there is
+    /// nothing to read and the stock is generated on the spot. The assumption is what makes this
+    /// plannable before the first visit; the save is what would confirm it after.
+    heart_bought: std::collections::HashSet<String>,
     /// Completed `<container>_path_to_<neighbour>` roads, by their own key.
     ///
     /// The other half of `areaOrExitToComplete` (`overworldview.lua:1312-1313`), and the reason it
@@ -781,6 +803,13 @@ pub const ANOMALY_BEATEN_KEY: &str = "start_corrupt";
 /// are worth spending to avoid one crossing, and the honest answer from watching it is "about six".
 pub const CROSSING: usize = 6;
 
+/// What a `Heart` costs at a general store — `cost = 100` (`items/ephemeral.lua:4-9`).
+///
+/// The item is `healthBuff`, *"Permanently increases your maximum health by 4; a whole heart"*, and
+/// it reaches a general store as `specialStock` rather than as a random roll, so a village that has
+/// one has it by construction rather than by luck.
+pub const HEART_COST: i64 = 100;
+
 /// Cost to `key`, or [`usize::MAX`] when no known route reaches it — so unreachable places sort
 /// last rather than first.
 ///
@@ -896,6 +925,11 @@ pub enum Goal {
     OpenAnomaly,
     /// Health is down and somewhere nearby can restore it.
     Rest,
+    /// A village whose general store sells a `Heart` — four maximum health for a hundred gold.
+    ///
+    /// Ranked with the shrine detours rather than with [`Goal::Rest`]: it is not a response to being
+    /// hurt, it is preparation bought while the road is free. See [`WorldMap::wants_a_heart`].
+    Heart,
     /// A shrine we have not consecrated.
     ///
     /// Ranked below [`Goal::OpenAnomaly`] because consecrating is *impossible* until the anomaly
@@ -2021,6 +2055,35 @@ impl WorldMap {
             if let Some(p) = pick_shrine() {
                 return Some(Plan { target: p.key.clone(), reason: Goal::Shrine, steered_by: None });
             }
+            // **A heart before the anomaly, if one can be had for nothing but walking.**
+            //
+            // The dev's rule, 2026-08-15, given the evening a run finally died going the right way:
+            // two level 6 corrupted crypts back to back, and the second ran the board dry against a
+            // five-deep queue. Four maximum health for a hundred gold is the cheapest preparation
+            // available, and the window is now — the anomaly is a level 8 fight.
+            //
+            // Every clause is the dev's: the goal must already be the anomaly, the gold must be
+            // *over* the price, the village must be reachable **without combat** (the same test the
+            // shrine detour uses, for the same reason — a detour paid for with a fight is not a
+            // detour, it is the fight), and a village whose store we have already emptied is not a
+            // destination. `has_heart` is the standing assumption the dev set: every village's
+            // general store starts with one.
+            if self.wants_a_heart() {
+                let heart = self
+                    .places
+                    .values()
+                    .filter(|p| p.key != here && !p.avoid && p.type_is("village"))
+                    .filter(|p| !self.heart_bought.contains(&p.key) && !self.abandoned.contains(&p.key))
+                    .filter(|p| self.reachable_without_a_fight(here, &p.key))
+                    .min_by_key(|p| dist_or_far(&dist, &p.key));
+                if let Some(p) = heart {
+                    return Some(Plan {
+                        target: p.key.clone(),
+                        reason: Goal::Heart,
+                        steered_by: None,
+                    });
+                }
+            }
         }
 
         // The anomaly is hostile by construction, so `ok` skips it too on the first pass. That is
@@ -3057,6 +3120,40 @@ impl WorldMap {
     /// The gold check is not an optimisation. `getCanRest` is a flat `getPlayerGold() >= 10`
     /// (`ui/rest.lua:49`), so walking a hurt run across a village with nine gold buys a wasted trip
     /// and the fights on the way back.
+    /// The general store inside `container`, while we are there to buy a heart.
+    ///
+    /// Shaped exactly like [`WorldMap::inn_inside`], including the `abandoned` filter: the driver's
+    /// record of having had its go is the only thing that separates "the fog still hides it" from
+    /// "we tried and it did not work", and conflating those is this project's oldest bounce.
+    fn store_inside(&self, container: &str) -> Option<&Place> {
+        if !self.wants_a_heart() {
+            return None;
+        }
+        self.places.values().find(|p| {
+            p.parent.as_deref() == Some(container)
+                && p.is_general_store()
+                && !self.abandoned.contains(&p.key)
+        })
+    }
+
+    /// Are we in a position to want a heart at all?
+    ///
+    /// The dev's rule, 2026-08-15: **while the goal is the anomaly and we hold more than
+    /// [`HEART_COST`] gold, a heart reachable without a fight is worth the detour.** The anomaly
+    /// costs a level 8 fight and the two before it cost this run its life at level 6 — four maximum
+    /// health for a hundred gold is the cheapest preparation on the board.
+    ///
+    /// `> HEART_COST` and not `>=`: arriving with exactly the price and nothing over is how a run
+    /// ends up unable to pay for the inn it needs afterwards.
+    /// The driver's record that a village's heart is spent — see [`WorldMap::heart_bought`].
+    pub fn bought_the_heart(&mut self, village: &str) {
+        self.heart_bought.insert(village.to_string());
+    }
+
+    pub fn wants_a_heart(&self) -> bool {
+        self.anomaly_is_open().unwrap_or(false) && self.gold > HEART_COST
+    }
+
     fn inn_inside(&self, container: &str) -> Option<&Place> {
         if !self.wants_rest || self.gold < crate::rest::INN_COST {
             return None;
@@ -5206,6 +5303,49 @@ mod tests {
         for junk in ["shrine2subs", "shrine2_shrine_", "shrine2_shrine_subs"] {
             assert!(!m.places.contains_key(junk), "the suffix strip must not mint `{junk}`");
         }
+    }
+
+    /// A heart before the anomaly, and every clause of the dev's rule.
+    ///
+    /// Given the evening a run died going the right way: two level 6 corrupted crypts back to back,
+    /// and the second ran the board dry against a five-deep queue. Four maximum health for a hundred
+    /// gold is the cheapest preparation there is, and the window is while the road is still free.
+    #[test]
+    fn a_heart_is_worth_the_walk_when_the_road_to_it_is_free() {
+        let village = |k: &str| node(k, "Rowlston Covert village");
+        let build = || {
+            let mut m = WorldMap::new();
+            m.fold(&dump("here", "camp", vec![village("l11"), node("l4", "Riccall — level 6 crypt")]));
+            m.here = Some("here".into());
+            m.hell = Some(0.1);
+            m.gold = HEART_COST + 1;
+            m
+        };
+
+        let mut m = build();
+        let plan = m.next_target().expect("a plan");
+        assert_eq!(plan.reason, Goal::Heart, "the anomaly is open, the gold is there, the road is free");
+        assert_eq!(plan.target, "l11");
+
+        // A pound short and it is not a plan. `>` and not `>=`: arriving with exactly the price and
+        // nothing over is how a run ends up unable to pay for anything afterwards.
+        let mut m = build();
+        m.gold = HEART_COST;
+        assert_ne!(m.next_target().unwrap().reason, Goal::Heart, "exactly the price is not enough");
+
+        // A fight on the way and it is not a detour, it is the fight.
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("l4", "Riccall — level 6 crypt")]));
+        m.fold(&dump("l4", "Riccall — level 6 crypt", vec![village("l11")]));
+        m.here = Some("here".into());
+        m.hell = Some(0.1);
+        m.gold = HEART_COST + 1;
+        assert_ne!(m.next_target().unwrap().reason, Goal::Heart, "the crypt is in the way");
+
+        // And a village we have already emptied is not a destination.
+        let mut m = build();
+        m.bought_the_heart("l11");
+        assert_ne!(m.next_target().unwrap().reason, Goal::Heart, "the shelf is bare");
     }
 
     /// A road that bends the wrong way is still the road.
