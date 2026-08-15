@@ -3374,9 +3374,35 @@ impl WorldMap {
             // and while looking for an inn, leaving is the move that abandons the errand.
             .filter(|p| !p.key.starts_with(&exit_prefix) || Some(&p.key) == dest.as_ref())
             .filter(|p| !p.nothing_left_to_reveal())
-            .filter_map(|p| hops.get(&p.key).map(|d| (!p.is_paved(), *d, &p.key)))
+            // **How much this node would teach us, before how near it is.**
+            //
+            // The dev, 2026-08-15, watching a village search take far too long: *it was making
+            // questionable choices about which frontier node to visit. Could it choose based on the
+            // number of connections on the unvisited node?*
+            //
+            // Yes, and it is the right question: standing on a node is what makes the game name its
+            // neighbours, so a node's degree is exactly how much of the interior one step buys. The
+            // old key was `(paved, distance)`, and distance is a measure of what a step *costs* with
+            // nothing at all about what it returns — so a two-connection dead end one hop away beat
+            // a six-connection crossroads two hops away, every time, and a village got searched a
+            // cul-de-sac at a time.
+            //
+            // **Unrevealed neighbours rather than raw degree**, which is the dev's count with the
+            // part we already know taken off it: `connections` is the game's own figure for the node
+            // (printed beside it in every dump) and `neighbours` is what we have seen named, so the
+            // difference is what a visit would actually add. A six-way node with five neighbours
+            // already named reveals one thing, and ranking it top would be ranking work we have
+            // already done. Same arithmetic as [`WorldMap::has_unexplored_roads`].
+            //
+            // Still under `is_paved`, which is a separate and older rule of the dev's and not one
+            // this touches: roads are the map's own structure, and this reorders which road to take
+            // rather than licensing the brush.
+            .filter_map(|p| {
+                let unrevealed = p.connections.saturating_sub(p.neighbours.len() as u32);
+                hops.get(&p.key).map(|d| (!p.is_paved(), std::cmp::Reverse(unrevealed), *d, &p.key))
+            })
             .min()
-            .map(|(_, _, k)| k.clone());
+            .map(|(_, _, _, k)| k.clone());
         if let Some(step) = frontier.and_then(|f| self.first_step_toward(&here, &f, false)) {
             return Some(match dest {
                 Some(toward) => Crossing::Probe { to: step, toward },
@@ -3401,11 +3427,21 @@ impl WorldMap {
                 // From the plaza the neighbours were `l9sub1` (unwalked), `l9sub2` (walked) and
                 // `l9sub3` (unwalked), and it took `l9sub2` twenty times.
                 let seen = p.map(|p| p.visited).unwrap_or(false);
+                // And the same question the routed frontier now asks, asked of a single step: of the
+                // neighbours we have not stood on, take the one that would name the most new places.
+                // This branch is the one a fogged village actually runs — there is no route to a
+                // frontier while the fog is hiding it — so ordering it by key alone was ordering it
+                // alphabetically, which is where "questionable choices" came from.
+                let reveal = |p: Option<&Place>| {
+                    p.map(|p| p.connections.saturating_sub(p.neighbours.len() as u32)).unwrap_or(0)
+                };
+                let gain = std::cmp::Reverse(reveal(p));
                 let better = match best {
                     None => true,
                     Some(b) => {
-                        let b_seen = self.places.get(b).map(|p| p.visited).unwrap_or(false);
-                        (seen, n) < (b_seen, b)
+                        let bp = self.places.get(b);
+                        let b_seen = bp.map(|p| p.visited).unwrap_or(false);
+                        (seen, gain, n) < (b_seen, std::cmp::Reverse(reveal(bp)), b)
                     }
                 };
                 if better {
@@ -4066,6 +4102,67 @@ mod tests {
 
     fn exit(to: &str) -> Exit {
         Exit { x: 0.0, y: 0.0, to_key: to.into(), to_heading: format!("{to} heading") }
+    }
+
+    /// A crossroads two hops away beats a dead end next door, because it names more of the village.
+    ///
+    /// The dev, 2026-08-15, after watching a settlement search crawl: *it was making questionable
+    /// choices about which frontier node to visit. Could it choose based on the number of
+    /// connections on the unvisited node?*
+    ///
+    /// It could not, and that is the bug in one line: the key was `(paved, distance)`, and distance
+    /// measures what a step **costs** with nothing about what it returns. So the nearest scrap of
+    /// unexplored ground won every time and a village got searched a cul-de-sac at a time.
+    ///
+    /// The fixture is the shape that loses under the old rule and wins under the new one: the dead
+    /// end is strictly nearer, so any ordering that puts distance first must pick it.
+    #[test]
+    fn a_frontier_is_chosen_by_what_it_would_reveal_not_by_how_near_it_is() {
+        let with_degree = |k: &str, n: u32| Node {
+            key: k.into(),
+            heading: format!("Rowlston Covert road"),
+            x: 0.0,
+            y: 0.0,
+            connections: n,
+        };
+        let mut m = WorldMap::new();
+        // Standing on a road inside the village. `dead` is adjacent and goes nowhere; `far` is a
+        // hop further out and is a six-way crossroads we have never stood on.
+        m.fold(&inside_dump(
+            "l11",
+            "l11sub1",
+            "Rowlston Covert road",
+            vec![with_degree("dead", 2), with_degree("mid", 3)],
+            vec![],
+        ));
+        m.fold(&inside_dump(
+            "l11",
+            "mid",
+            "Rowlston Covert road",
+            vec![with_degree("l11sub1", 3), with_degree("far", 6)],
+            vec![],
+        ));
+        // Back where we started, with `mid` now walked and both frontiers known.
+        m.fold(&inside_dump(
+            "l11",
+            "l11sub1",
+            "Rowlston Covert road",
+            vec![with_degree("dead", 2), with_degree("mid", 3)],
+            vec![],
+        ));
+        m.gold = 500;
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+
+        // The step taken is toward whichever frontier was chosen, so a one-hop `dead` would BE the
+        // step. Reaching `far` has to go through `mid`.
+        match m.cross_toward(&[]) {
+            Some(Crossing::Step { to, .. }) | Some(Crossing::Probe { to, .. })
+            | Some(Crossing::Seek { to }) => assert_eq!(
+                to, "mid",
+                "the six-way crossroads is worth the extra hop; `dead` is nearer and teaches us two"
+            ),
+            other => panic!("expected a step into the village, got {other:?}"),
+        }
     }
 
     #[test]
