@@ -128,6 +128,62 @@ pub struct Context {
 /// would be a lie — [`Rank::better_than`] is the comparison, and it is deliberately the only one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rank {
+    /// How many **burning** tiles this word takes off the board. Higher is better, and it is the
+    /// first thing asked.
+    ///
+    /// ## A count, not a threshold, and the dev had to correct me twice to get here
+    ///
+    /// The single-turn arithmetic says threshold. Damage is flat — `rpgview.lua:31,40` is
+    /// `burn ~= 0 and ceil(maxHealth / (burnWeak and 8 or 16)) or 0`, so one burning tile costs
+    /// exactly what six do — and `getBurningTileCount(true)` ignores tiles we have *selected*
+    /// (`tileboard.lua:873`). So clearing four of five changes this turn's damage not at all, and I
+    /// proposed ranking on "did we clear the last one".
+    ///
+    /// That is wrong over a fight, which is where the damage is taken. The dev, 2026-08-15:
+    ///
+    /// > let's say most of our entire board becomes burning because some enemy attacks can do that.
+    /// > If we manage to clear out the majority of them, then the next turn has a very high chance
+    /// > of clearing all burning tiles, whereas if we leave the majority of them and remove very
+    /// > few, then next turn the chance of clearing all burning tiles is very low.
+    ///
+    /// A word is at most a handful of tiles and a board is sixteen, so on a heavily burning board
+    /// **the threshold is unreachable this turn** — and a rule that only values reaching it values
+    /// nothing at all, declines every partial clear, and never arrives at the turn where zero is
+    /// possible. Burning tiles do not go away on their own quickly: `extra.burn` is a turn counter,
+    /// and until it expires the tile keeps costing `ceil(maxHealth/16)` every single turn.
+    ///
+    /// Counting has the threshold inside it for free. Six of six scores higher than five of six, so
+    /// a word that finishes the job still wins; when finishing is impossible, the count keeps
+    /// driving toward the turn when it is not.
+    ///
+    /// **Above `wood_only`**, which is the ordering the dev's example is about. The wood payout is
+    /// four armour, once. A burning board is three a turn at 36 maximum health, for as many turns as
+    /// it takes to clear — so letting a one-off bonus outrank fire is how a run pays that toll
+    /// repeatedly. And it costs nothing to prefer: every candidate being compared here has already
+    /// cleared the damage threshold.
+    ///
+    /// ## Imperfect, kept deliberately, and post-MVP work
+    ///
+    /// The dev's call, 2026-08-15: keep it, and write down that it is not the finished rule. It
+    /// rests on two assumptions, and **two items in the game break one each**:
+    ///
+    /// - **Burning tiles score nothing**, so eating them costs damage. `items/phoenixgear.lua` —
+    ///   the **Phoenix feather** — is *"Burning and burnt tiles score half instead of nothing"*
+    ///   (flag `bonusBurnTileMult`), plus 20% on fire-related words. Carrying it, fire is far
+    ///   cheaper to eat and the count should probably weigh more, not less.
+    /// - **A word is the only way off the board.** `items/alchemypieces.lua:159` — the
+    ///   **Calcinatory** — is *"Activate to have burning and burnt tiles fall off of the bottom of
+    ///   the tile board. Each that does has an additive 25% chance per alchemy piece to queue a gem
+    ///   wildcard."* That inverts this field twice over: fire leaves for free without spending word
+    ///   slots on it, and each burning tile becomes a *lottery ticket for a gem wildcard*, so eating
+    ///   them in a word is destroying a resource. It is an activated item, and Diggle activates
+    ///   nothing today — so carrying one would make this ranking actively wrong with no code here
+    ///   aware of it.
+    ///
+    /// A fixed slot in a lexicographic order cannot express either. Neither can it express the case
+    /// this ordering is weakest on: a single tile with one turn left burns out on its own, and four
+    /// armour is the better take. Post-MVP, and see the task.
+    pub fire_eaten: usize,
     /// Every tile used was wood, and the gear pays for that. Higher is better.
     pub wood_only: bool,
     /// This blow overkills deeply enough for the Well-Rested heal to close the whole deficit.
@@ -175,6 +231,9 @@ impl Rank {
     /// direction of each term is visible at the point it is applied — `deviation` runs the other way
     /// from the other two, which is exactly the kind of thing a tuple hides.
     pub fn better_than(&self, other: &Rank) -> bool {
+        if self.fire_eaten != other.fire_eaten {
+            return self.fire_eaten > other.fire_eaten;
+        }
         if self.wood_only != other.wood_only {
             return self.wood_only;
         }
@@ -326,6 +385,10 @@ pub fn rank(
     target: &Target, prefs: Preferences, damage: i64,
 ) -> Rank {
     Rank {
+        fire_eaten: consumed
+            .iter()
+            .filter(|&&i| tiles.get(i).and_then(|t| t.burn()).is_some_and(|b| b > 0))
+            .count(),
         wood_only: prefs.wood_only_pays && wood_only(tiles, consumed, scorer),
         heals_fully: prefs.heal_at.is_some_and(|at| damage >= at),
         hoarded: hoarded(tiles, consumed, scorer),
@@ -395,6 +458,41 @@ mod tests {
         assert_eq!(hoarded(&tiles, &[2], &sc), 0.0, "and a plain letter is free to spend");
     }
 
+    /// Fire is cleared by the count, and a partial clear is real progress.
+    ///
+    /// **This test exists because I got the rule wrong and argued for the wrong one.** The
+    /// single-turn arithmetic says a partial clear buys nothing — damage is flat, so four of five
+    /// costs exactly what five of five costs — and I proposed ranking on "did we clear the last
+    /// one". The dev's correction is the one that holds over a fight: a word is a handful of tiles
+    /// and a board is sixteen, so on a heavily burning board the threshold cannot be reached this
+    /// turn, and a rule that only values reaching it declines every partial clear and never arrives
+    /// at the turn where zero is possible.
+    ///
+    /// So the assertions are deliberately about the *middle* of the range, where a threshold rule
+    /// and a counting rule disagree. A test that only checked "all five beats four" would pass under
+    /// both and prove nothing.
+    #[test]
+    fn a_partial_fire_clear_beats_a_smaller_one_and_outranks_the_wood_payout() {
+        let r = |fire: usize, wood: bool| Rank {
+            fire_eaten: fire,
+            wood_only: wood,
+            heals_fully: false,
+            hoarded: 0.0,
+            hazard_fall: 0,
+            deviation: 0.0,
+        };
+        // Neither of these clears the board, so a threshold rule calls them equal. They are not.
+        assert!(r(4, false).better_than(&r(2, false)), "four off the board beats two");
+        assert!(r(1, false).better_than(&r(0, false)), "and one beats none");
+        // Above the wood payout, which is the ordering the dev's example turns on: four armour once
+        // against `ceil(maxHealth/16)` every turn until the board stops burning.
+        assert!(r(3, false).better_than(&r(0, true)), "fire outranks the wood bonus");
+        // And finishing the job still wins, because the count contains the threshold.
+        assert!(r(5, false).better_than(&r(4, true)));
+        // Equal fire falls through to the payouts, unchanged.
+        assert!(r(2, true).better_than(&r(2, false)));
+    }
+
     /// The dev's four tiers, 2026-08-15, in the order they stated them.
     ///
     /// > if a Well-Rested heal only heals for 3 while a wood-only kill provides 4 armour, we should
@@ -408,6 +506,7 @@ mod tests {
     #[test]
     fn a_wood_kill_outranks_a_heal_it_cannot_also_collect() {
         let tier = |wood: bool, heal: bool, hoarded: f64| Rank {
+            fire_eaten: 0,
             wood_only: wood,
             heals_fully: heal,
             hoarded,
@@ -445,18 +544,18 @@ mod tests {
     /// The rule in the shape it is actually used — a comparison between candidates, not a score.
     #[test]
     fn between_two_kills_the_one_that_spends_less_wins() {
-        let plain = Rank { wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 0, deviation: 9.0 };
-        let golden = Rank { wood_only: false, heals_fully: false, hoarded: 40.0, hazard_fall: 0, deviation: 0.0 };
+        let plain = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 0, deviation: 9.0 };
+        let golden = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 40.0, hazard_fall: 0, deviation: 0.0 };
         assert!(plain.better_than(&golden), "a tidier board is not worth a Q");
         assert!(!golden.better_than(&plain));
 
         // Below the payout, though. `wood_only` is gear paying out for real, and this is a saving.
-        let paid = Rank { wood_only: true, heals_fully: false, hoarded: 40.0, hazard_fall: 0, deviation: 9.0 };
+        let paid = Rank { fire_eaten: 0, wood_only: true, heals_fully: false, hoarded: 40.0, hazard_fall: 0, deviation: 9.0 };
         assert!(paid.better_than(&plain), "a payout in hand outranks a tile kept back");
 
         // And the wildcard case the dev asked for: same gold either way, so do not also burn one.
-        let gold_only = Rank { wood_only: false, heals_fully: false, hoarded: 10.0, hazard_fall: 0, deviation: 0.0 };
-        let gold_and_wild = Rank { wood_only: false, heals_fully: false, hoarded: 11.0, hazard_fall: 0, deviation: 0.0 };
+        let gold_only = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 10.0, hazard_fall: 0, deviation: 0.0 };
+        let gold_and_wild = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 11.0, hazard_fall: 0, deviation: 0.0 };
         assert!(gold_only.better_than(&gold_and_wild), "no reason to spend a wildcard as well");
     }
 
@@ -595,16 +694,16 @@ mod tests {
 
     #[test]
     fn a_payout_outranks_tidier_letters_and_wood_outranks_a_falling_hazard() {
-        let wood = Rank { wood_only: true, heals_fully: false, hoarded: 0.0, hazard_fall: 0, deviation: 99.0 };
-        let hazard = Rank { wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 5, deviation: 1.0 };
+        let wood = Rank { fire_eaten: 0, wood_only: true, heals_fully: false, hoarded: 0.0, hazard_fall: 0, deviation: 99.0 };
+        let hazard = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 5, deviation: 1.0 };
         assert!(wood.better_than(&hazard), "a wood-only kill outranks any number of falls");
 
-        let falls = Rank { wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 2, deviation: 50.0 };
-        let tidy = Rank { wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 1, deviation: 0.0 };
+        let falls = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 2, deviation: 50.0 };
+        let tidy = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 1, deviation: 0.0 };
         assert!(falls.better_than(&tidy), "a falling hazard outranks a tidier board");
 
-        let a = Rank { wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 1, deviation: 3.0 };
-        let b = Rank { wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 1, deviation: 4.0 };
+        let a = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 1, deviation: 3.0 };
+        let b = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 1, deviation: 4.0 };
         assert!(a.better_than(&b), "with the payouts equal, lower deviation wins");
         assert!(!b.better_than(&a));
         assert!(!a.better_than(&a), "better_than is strict");
