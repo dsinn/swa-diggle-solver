@@ -953,6 +953,24 @@ pub struct Hop {
     pub routed: bool,
 }
 
+/// What we can say about getting somewhere without taking a fight.
+///
+/// Three answers rather than two, because the missing one was doing damage. See
+/// [`WorldMap::access_without_a_fight`] for the dev's correction that produced it: a `false` that
+/// meant "a fight is in the way" and a `false` that meant "I have never looked over there" are not
+/// the same claim, and the second is not ours to make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// A route exists over recorded edges and takes no fight.
+    Free,
+    /// Every route we hold takes a fight, and the fight-free region around us is closed — every
+    /// place in it has all the roads the game says it has.
+    Blocked,
+    /// No route over what we hold, but the fight-free region touches roads we have not looked down,
+    /// so it may not end where our edges do. Go and see.
+    Unknown,
+}
+
 /// Why a hop is being taken.
 ///
 /// **A label, not a control switch.** Nothing branches on it except the log; it exists so that a
@@ -1861,17 +1879,74 @@ impl WorldMap {
     /// Breadth-first over the same edges as [`WorldMap::distances`] and deliberately *not* weighted:
     /// the question is whether such a route exists at all, not which one is cheapest.
     fn reachable_without_a_fight(&self, from: &str, to: &str) -> bool {
+        matches!(self.access_without_a_fight(from, to), Access::Free)
+    }
+
+    /// Does this place have roads we have never looked down?
+    ///
+    /// `connections` is the **game's** degree for the node, printed beside it in every dump
+    /// (`connections: 4`), while `neighbours` is what we have actually seen named. A gap between them
+    /// is not a guess: it is the game telling us there is more here than we have recorded.
+    ///
+    /// Deliberately not [`Place::is_frontier`], which is the other candidate and would be wrong.
+    /// That reads `!visited || hidden > 0`, and `visited` means "stood here **this run**" and is
+    /// pointedly not restored from the cache — so on a resumed run every place is a frontier and the
+    /// answer degenerates to "always". This one survives a restart because both halves of it do.
+    fn has_unexplored_roads(&self, key: &str) -> bool {
+        self.places
+            .get(key)
+            .map(|p| p.connections as usize > p.neighbours.len())
+            .unwrap_or(false)
+    }
+
+    /// [`WorldMap::reachable_without_a_fight`], with the two kinds of "no" kept apart.
+    ///
+    /// ## The dev's correction, 2026-08-15
+    ///
+    /// > It should be the navigator's responsibility to probe and build the in-memory cache of which
+    /// > nodes are accessible without combat, not to assume from the cache that they are
+    /// > inaccessible without combat.
+    ///
+    /// Right, and the bare `bool` is what made that impossible to honour: it collapsed *I know a
+    /// fight is in the way* into the same answer as *I have no edges over there at all*, and the
+    /// heart errand read both as "there is no heart to be had for free". Live 2026-08-15 the map held
+    /// `l28 Enholmes town` with **four** declared connections and exactly **one** recorded — three
+    /// roads never looked down — and the run reported it unreachable as a fact.
+    ///
+    /// [`Access::Unknown`] is that case: nothing in the fight-free region reaches the target, but the
+    /// region touches a node with unexplored roads, so it may not end where our edges do.
+    ///
+    /// ## What is *not* a source of pessimism, measured
+    ///
+    /// Recalled headings are not, and this is worth stating because it is the natural suspicion.
+    /// `AreaHeading` prints the level only when `locationHasCombat`, and that is
+    ///
+    /// ```lua
+    /// function core.locationHasCombat(location)
+    ///     if core.areaIsComplete(location.key) then return false end
+    ///     return not core.locationIsCompleteOnVisit(location)
+    /// end
+    /// ```
+    ///
+    /// (`overworldview.lua:305-310`). `locationIsCompleteOnVisit` is a property of the location's
+    /// *type* and does not change; `areaIsComplete` is a save flag we re-read every step and already
+    /// AND into [`Place::may_be_a_fight`]. So a recalled `— level N` can only stop being true through
+    /// the one input we already take live. Corruption moves it the other way and arrives in the save
+    /// too. Of the four surface nodes the 2026-08-15 run named live, four agreed with the cache.
+    ///
+    /// The edges are the whole of the gap, which is why this counts roads and not headings.
+    fn access_without_a_fight(&self, from: &str, to: &str) -> Access {
         let costly = |k: &str| {
             self.places.get(k).map(|p| !p.completed && p.may_be_a_fight()).unwrap_or(false)
         };
         if costly(to) {
-            return false;
+            return Access::Blocked;
         }
         let mut seen: BTreeSet<&str> = [from].into_iter().collect();
         let mut queue: std::collections::VecDeque<&str> = [from].into();
         while let Some(k) = queue.pop_front() {
             if k == to {
-                return true;
+                return Access::Free;
             }
             let Some(p) = self.places.get(k) else { continue };
             for n in &p.neighbours {
@@ -1882,7 +1957,45 @@ impl WorldMap {
                 queue.push_back(n);
             }
         }
-        false
+        // The target is out of reach over the edges we hold. Whether that is a fact about the map or
+        // a fact about our ignorance depends on whether the region we just walked has any way out we
+        // have not tried.
+        match seen.iter().any(|k| self.has_unexplored_roads(k)) {
+            true => Access::Unknown,
+            false => Access::Blocked,
+        }
+    }
+
+    /// The nearest place inside the fight-free region around `from` that still has roads we have not
+    /// looked down — somewhere to go and *find out*, rather than a target in itself.
+    ///
+    /// Walks the same region [`WorldMap::access_without_a_fight`] does, so a probe it returns is
+    /// reachable on the same terms as the errand that wanted one: no fight to get there.
+    fn probe_toward_the_unknown(
+        &self,
+        from: &str,
+        dist: &BTreeMap<String, usize>,
+    ) -> Option<&Place> {
+        let costly = |k: &str| {
+            self.places.get(k).map(|p| !p.completed && p.may_be_a_fight()).unwrap_or(false)
+        };
+        let mut seen: BTreeSet<&str> = [from].into_iter().collect();
+        let mut queue: std::collections::VecDeque<&str> = [from].into();
+        while let Some(k) = queue.pop_front() {
+            let Some(p) = self.places.get(k) else { continue };
+            for n in &p.neighbours {
+                if seen.contains(n.as_str()) || costly(n) {
+                    continue;
+                }
+                seen.insert(n);
+                queue.push_back(n);
+            }
+        }
+        seen.into_iter()
+            .filter(|k| *k != from && self.has_unexplored_roads(k))
+            .filter(|k| !self.abandoned.contains(*k))
+            .filter_map(|k| self.places.get(k))
+            .min_by_key(|p| dist_or_far(dist, &p.key))
     }
 
     /// Could [`WorldMap::next_hop`] actually set off toward `key`, over the edges we have recorded?
@@ -2174,11 +2287,14 @@ impl WorldMap {
             // destination. `has_heart` is the standing assumption the dev set: every village's
             // general store starts with one.
             if self.wants_a_heart() {
-                let heart = self
+                let shops: Vec<&Place> = self
                     .places
                     .values()
                     .filter(|p| p.key != here && !p.avoid && p.stocks_a_heart())
                     .filter(|p| !self.heart_bought.contains(&p.key) && !self.abandoned.contains(&p.key))
+                    .collect();
+                let heart = shops
+                    .iter()
                     .filter(|p| self.reachable_without_a_fight(here, &p.key))
                     .min_by_key(|p| dist_or_far(&dist, &p.key));
                 if let Some(p) = heart {
@@ -2187,6 +2303,31 @@ impl WorldMap {
                         reason: Goal::Heart,
                         steered_by: None,
                     });
+                }
+                // **"I have not looked" is not "there is nothing there", and the difference is a
+                // probe.** The dev's correction, 2026-08-15: the navigator's job is to go and find
+                // out which nodes are reachable without combat, not to conclude from an incomplete
+                // cache that none are.
+                //
+                // So a shop we cannot route to for free, whose [`Access`] is `Unknown` rather than
+                // `Blocked`, sends us to the nearest place with roads we have never looked down —
+                // still inside the fight-free region, so the probe costs walking and nothing else.
+                // Whatever it reveals lands in the map, and the next pass either routes to the shop
+                // or downgrades it to `Blocked` on evidence.
+                //
+                // Still `Goal::Heart`, because that is what the walk is *for*, and a log that said
+                // `Explore` here would hide the errand that chose it.
+                if shops
+                    .iter()
+                    .any(|p| self.access_without_a_fight(here, &p.key) == Access::Unknown)
+                {
+                    if let Some(p) = self.probe_toward_the_unknown(here, &dist) {
+                        return Some(Plan {
+                            target: p.key.clone(),
+                            reason: Goal::Heart,
+                            steered_by: None,
+                        });
+                    }
                 }
             }
         }
@@ -6888,6 +7029,75 @@ e	l4	l11
         m.entry("l49").completed = true;
         assert!(m.reachable_without_a_fight("here", "s1"));
         assert_eq!(m.next_target().unwrap().target, "s1");
+    }
+
+    /// "No route I can see" and "no route" are different claims, and only one of them is ours.
+    ///
+    /// The dev's correction, 2026-08-15, after a run bought one heart and went straight at a level 7
+    /// crypt: *it should be the navigator's responsibility to probe and build the in-memory cache of
+    /// which nodes are accessible without combat, not to assume from the cache that they are
+    /// inaccessible.*
+    ///
+    /// The live map is the fixture. `l28 Enholmes town` declared **four** connections with exactly
+    /// **one** recorded, so three of its roads had never been looked down — and the planner reported
+    /// it unreachable-without-a-fight as though that were a fact about the map.
+    #[test]
+    fn an_unlooked_road_is_unknown_access_and_a_closed_region_is_blocked() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("free", "Quiet Glade meadow")]));
+        m.fold(&dump("free", "Quiet Glade meadow", vec![node("l49", "Yokefleet — level 6 crypt")]));
+        m.fold(&dump("l49", "Yokefleet — level 6 crypt", vec![node("l28", "Enholmes town")]));
+        m.here = Some("here".into());
+
+        // Closed first: every free node has all the roads the game says it has, so the crypt really
+        // is the only way and saying so is honest.
+        for k in ["here", "free"] {
+            let n = m.entry(k).neighbours.len() as u32;
+            m.entry(k).connections = n;
+        }
+        assert_eq!(m.access_without_a_fight("here", "l28"), Access::Blocked);
+
+        // Now give `free` a road we have never looked down — the `l28` case, one node earlier. The
+        // answer must stop being a claim about the map.
+        let n = m.entry("free").neighbours.len() as u32;
+        m.entry("free").connections = n + 1;
+        assert_eq!(m.access_without_a_fight("here", "l28"), Access::Unknown);
+
+        // And an unlooked road never upgrades a *known* fight into a maybe: the crypt on the only
+        // recorded route is still a crypt.
+        assert_eq!(m.access_without_a_fight("here", "l49"), Access::Blocked, "the fight is not in doubt");
+    }
+
+    /// On `Unknown`, the heart errand walks to the unlooked road instead of abandoning the errand.
+    #[test]
+    fn a_heart_behind_the_fog_is_probed_rather_than_written_off() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("free", "Quiet Glade meadow")]));
+        m.fold(&dump("free", "Quiet Glade meadow", vec![node("l49", "Yokefleet — level 6 crypt")]));
+        m.fold(&dump("l49", "Yokefleet — level 6 crypt", vec![node("l28", "Enholmes town")]));
+        m.here = Some("here".into());
+        m.hell = Some(0.1);
+        m.gold = 500;
+        assert!(m.wants_a_heart(), "anomaly open and the price is affordable");
+
+        // Closed: nothing to look at, so the errand cannot be served and the run gets on with the
+        // anomaly. This half is what says the probe is evidence-driven rather than a wander.
+        for k in ["here", "free"] {
+            let n = m.entry(k).neighbours.len() as u32;
+            m.entry(k).connections = n;
+        }
+        assert_ne!(
+            m.next_target().map(|p| p.reason),
+            Some(Goal::Heart),
+            "a closed fight-free region really has no heart in it"
+        );
+
+        // One unlooked road, and the same map is worth walking into.
+        let n = m.entry("free").neighbours.len() as u32;
+        m.entry("free").connections = n + 1;
+        let plan = m.next_target().expect("something to do");
+        assert_eq!(plan.reason, Goal::Heart, "the walk is still the heart errand, and says so");
+        assert_eq!(plan.target, "free", "the probe is the node with the road we have not tried");
     }
 
     /// Not a crypt, and still a fight — the four nodes the first rule waved through.
