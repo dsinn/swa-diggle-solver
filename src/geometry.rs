@@ -76,6 +76,11 @@ pub struct Resolved {
     /// Non-empty means the shape is a guess. A caller in a `resistCornerless` fight must treat its
     /// scores as unreliable rather than acting on them.
     pub problems: Vec<String>,
+    /// Things worth saying that are **not** faults — the board being legitimately ragged, and what
+    /// that costs. Kept apart from [`Resolved::problems`] because the two want opposite responses:
+    /// a problem means the geometry is a guess and scores cannot be trusted, while a note means the
+    /// geometry is right and the board is simply in a worse state than a full one.
+    pub notes: Vec<String>,
 }
 
 impl Geometry {
@@ -143,6 +148,7 @@ impl Geometry {
     /// the corners on the wrong letters and that is worse than admitting ignorance.
     pub fn from_save(save: &Table, tile_count: usize) -> Resolved {
         let mut problems = Vec::new();
+        let mut notes: Vec<String> = Vec::new();
         let mut geometry = Geometry::default();
 
         let passives: Vec<&str> = save
@@ -214,11 +220,37 @@ impl Geometry {
                 geometry.total_tiles()
             ));
         }
-        if geometry.corners.iter().any(|&c| geometry.flat_of(c).is_none()) {
-            problems.push("a corner coordinate falls outside the board".to_string());
+        // **A corner that is no longer on the board is a state, not a fault.**
+        //
+        // The dev, 2026-08-15: *there's a possibility that we will have a bomb tile or an
+        // exclamation tile cause our board to be not full when we encounter the shield boss.*
+        // Exactly right, and the anomaly run of that evening printed this warning on three of its
+        // nine turns while playing perfectly well.
+        //
+        // Corners are fixed when the board is built — `tileboard.lua:86` sets `data.corners` once
+        // and nothing moves them — while the columns shorten as tiles fall off. So a `!` tile
+        // reaching the bottom, or a bomb going off, can take the tile a corner names and the
+        // coordinate simply stops resolving. The game behaves the same way and does not treat it as
+        // an error: `getSelectedCornerTileCount` (`:122-131`) walks the corner list and indexes the
+        // grid, and a missing tile is one it cannot count.
+        //
+        // **Which matters because of the shield boss.** `resistCornerless` scales damage by
+        // `getSelectedCornerTileCount(word) / getCornerCount()` (`utils/words.lua:238-240`), and the
+        // denominator is `#corners` — the full set, whether or not the tiles are still there. So a
+        // board that has lost a corner tile **cannot reach full damage against that enemy at all**,
+        // and no word will ever be found that does. That is the game's rule, faithfully; what would
+        // be a fault is not knowing we are in it, so it is reported as a ceiling rather than as a
+        // complaint.
+        let missing = geometry.corners.iter().filter(|&&c| geometry.flat_of(c).is_none()).count();
+        if missing > 0 {
+            notes.push(format!(
+                "{missing} of {} corner tiles have fallen off the board; against `resistCornerless`                  the most any word can do is {:.0}% damage",
+                geometry.corners.len(),
+                100.0 * (geometry.corners.len() - missing) as f64 / geometry.corners.len() as f64
+            ));
         }
 
-        Resolved { geometry, problems }
+        Resolved { geometry, problems, notes }
     }
 }
 
@@ -507,5 +539,44 @@ mod ragged_board_tests {
         // And column 1, which is full, reaches higher still than the short column's top.
         let top_of_full = centres[3]; // C
         assert!(top_of_full.1 < top_of_short.1, "the full column has a tile where column 2 has a gap");
+    }
+
+    /// A board that has lost a corner is playable, not broken — and against the shield boss it has
+    /// a ceiling.
+    ///
+    /// The dev, 2026-08-15: *there's a possibility that we will have a bomb tile or an exclamation
+    /// tile cause our board to be not full when we encounter the shield boss.* The anomaly run that
+    /// evening printed `WARNING a corner coordinate falls outside the board` on three of nine turns
+    /// while playing perfectly well, which is a warning that trains you to ignore warnings.
+    ///
+    /// Two assertions, and the second is the one with teeth: the geometry is **not** a guess (so
+    /// scores stay trustworthy), and the ceiling against `resistCornerless` is said out loud —
+    /// because `getCornerCount` is `#corners` whether or not the tiles are still there
+    /// (`utils/words.lua:238-240`), so a lost corner caps damage below full for the whole fight and
+    /// no word will ever be found that reaches it.
+    #[test]
+    fn a_corner_that_fell_off_is_a_ceiling_and_not_a_fault() {
+        // Fifteen tiles on a board whose shape is four columns of four: the last column is a tile
+        // short, which is exactly what a `!` tile reaching the bottom leaves behind.
+        let save = crate::game::save::parse(
+            r#"return { passives = {}, rpg = { player = { gearFlags = {} } },
+                 tileboard = { columns = { 4, 4, 4, 3 } } }"#,
+        )
+        .unwrap();
+        let r = Geometry::from_save(&save, 15);
+        assert_eq!(r.geometry.rows_per_col, vec![4, 4, 4, 3], "the save's own heights");
+        assert!(
+            r.problems.is_empty(),
+            "a ragged board is not a broken one: {:?}",
+            r.problems
+        );
+        // The default shape corners include (4,4), which no longer exists.
+        let gone = r.geometry.corners.iter().filter(|&&c| r.geometry.flat_of(c).is_none()).count();
+        assert!(gone > 0, "the fixture must actually lose a corner, or it tests nothing");
+        assert_eq!(r.notes.len(), 1, "and it is reported: {:?}", r.notes);
+        assert!(r.notes[0].contains("resistCornerless"), "named for the fight it matters in");
+        // The denominator does not shrink with the board — that is the game's rule and the whole
+        // reason this is worth saying.
+        assert_eq!(r.geometry.corner_count(), r.geometry.corners.len());
     }
 }

@@ -110,6 +110,10 @@ pub struct Modifiers {
     pub overkill_gold: bool,
     /// Reasons the search should not be trusted. Non-empty means a score here is a guess.
     pub problems: Vec<String>,
+    /// True facts about the board that are not faults — see [`crate::geometry::Resolved::notes`].
+    /// A ragged board against `resistCornerless` is the one that matters: the scores are right and
+    /// the ceiling is simply lower than full.
+    pub notes: Vec<String>,
     /// The quitting status this enemy carries, if any (`fear`, `terror`, `caution`).
     ///
     /// Read from `rpg.enemy.statusEffects`, which the save does carry
@@ -161,6 +165,7 @@ impl Modifiers {
         let lexica = crate::lexica::Lexica::load(game_dir)?;
         let resolved = Geometry::from_save(save, tile_count);
 
+        let notes = resolved.notes.clone();
         let mut problems = resolved.problems.clone();
         problems.extend(lexica.problems().iter().cloned());
         problems.extend(lexica.unmodelled(&statuses));
@@ -208,6 +213,7 @@ impl Modifiers {
                 resist_cornerless: statuses.contains_key("resistCornerless"),
                 overkill_gold,
                 problems,
+                notes,
                 nerve: ["fear", "terror", "caution"]
                     .iter()
                     .find(|k| statuses.contains_key(**k))
@@ -233,6 +239,7 @@ impl Modifiers {
             resist_cornerless: false,
             overkill_gold: false,
             problems: Vec::new(),
+            notes: Vec::new(),
             nerve: None,
             immobile: false,
             bonuses: Vec::new(),
