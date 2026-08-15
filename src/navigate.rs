@@ -810,6 +810,20 @@ impl Run<'_> {
     /// save file — two saves of the same seed describe the same terrain, and a new seed must not
     /// inherit a stale graph. `None` when the save cannot be read, which is the same condition that
     /// makes everything else here unavailable.
+    ///
+    /// The terrain really is a pure function of that one integer, which is what makes the key safe:
+    /// `overworld/generators/world.lua:64-65` opens `generate` with
+    /// `local rng = love.math.newRandomGenerator(seed)`, and `overworldview.lua:672` calls it with
+    /// `overworldData.seed`. Its only other argument that could vary, `worldSettings`, is a global
+    /// that is never assigned anywhere in the game tree — `nil` at both call sites.
+    ///
+    /// The seed is not a fingerprint, though: `overworldview.lua:1569` sets it to
+    /// `#(love.filesystem.getDirectoryItems'saveStats' or {})` — the number of recorded runs at the
+    /// moment the character was made — unless `userConfig.gameplay.overworld.seed` pins one
+    /// (`ui/classselection.lua:50,950`). Two consequences. A repeat of the counter is harmless,
+    /// because the same integer regenerates the same world. But **every new character draws a fresh
+    /// seed and therefore starts blind**; the cache only pays off across restores of one save. A
+    /// cold start on a new character is the design working, not a regression.
     fn map_cache_path(&self) -> Option<PathBuf> {
         let save = crate::game::save::load(&self.save_dir.join("mainSaveData")).ok()?;
         let seed = save.int_at("overworld.seed")?;
