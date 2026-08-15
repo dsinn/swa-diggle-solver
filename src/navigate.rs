@@ -1134,7 +1134,7 @@ impl Run<'_> {
     ///
     /// The top few only. The full registry is long, most of it scores near zero on any given screen,
     /// and a wall of noughts in a run report is how a real reading gets missed.
-    fn log_button_scores(&mut self) {
+    pub fn log_button_scores(&mut self) {
         let mut scored: Vec<(&str, f64)> = crate::act::ALL
             .iter()
             .filter_map(|b| crate::act::score_exact(self.win, b).ok().map(|q| (b.name, q)))
@@ -3699,6 +3699,45 @@ pub fn drive(
             let inside_before = r.map.inside().map(str::to_string);
             r.snap_area_slot("combat-live");
             if !matches!(r.click_area_button("Combat"), Ok(true)) {
+                // **A screen diff is a worse witness than the observer, so ask the observer.**
+                //
+                // `click_area_button` judges a press by how much the window changed one second
+                // later. That is a reasonable *first* question and a terrible last one: the pregame
+                // animates in, and a frame caught before it starts is identical to the map it
+                // replaced. The dev has said the observer belongs here as the fallback, and they are
+                // right — `identify` names the screen whatever the diff happened to catch.
+                //
+                // Live 2026-08-15 at `l16sub5`: `clicked Combat: screen moved 0.002`, run over.
+                // `gave-up.png` from that stop is unmistakably the pregame — `Bursall Hedge — level
+                // 2 road` across the top, `Start` at the bottom — with the scene behind it still
+                // black because it had not finished rendering. The press had landed. Nothing looked.
+                //
+                // Bounded by the same [`COMBAT_OPENS_BY`] the other post-press re-look uses, so a
+                // press that genuinely did nothing still ends the run rather than spinning.
+                let by = Instant::now() + COMBAT_OPENS_BY;
+                let mut opened = None;
+                while Instant::now() < by {
+                    let s = crate::act::identify(r.win);
+                    if matches!(s, crate::act::Screen::Pregame | crate::act::Screen::CombatEntered) {
+                        opened = Some(s);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                match opened {
+                    Some(s) => {
+                        r.log.push_str(&format!(
+                            "  the diff saw nothing but the observer found {s:?} — the press landed                              after all
+"
+                        ));
+                        r.combat_expected = true;
+                        continue;
+                    }
+                    None => {
+                        r.snap_screen("combat-no-diff");
+                        r.log_button_scores();
+                    }
+                }
                 return Stop::Failed(format!("Combat did not open at {here}"));
             }
             r.combat_expected = true;

@@ -294,7 +294,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the log's last line, which names the step that noticed the problem rather than the state that
     // caused it: three runs reported "no pan dump after locate-me" while sitting in combat with
     // `Finish` on screen, and the map path was never the fault.
+    //
+    // **And ask the observer what it is looking at, every single time.** The dev's rule, and this is
+    // the one place every give-up in `drive` passes through, so it is the one place it can be
+    // obeyed without twenty separate edits. A stop message names the step that noticed a problem;
+    // `identify` names the state that caused it, and the two disagree often enough to be the whole
+    // diagnosis. On 2026-08-15 a run ended `Combat did not open at l16sub5` while sitting on a
+    // perfectly ordinary pregame that had simply not finished animating in.
+    //
+    // Diagnostic only. Nothing here decides anything — the run is already over — but the next reader
+    // gets the screen's name beside the excuse instead of having to open the frame and guess.
     if !matches!(stop, Stop::AnomalyBeaten) {
+        let seen = diggle_solver::act::identify(r.win);
+        r.log.push_str(&format!("the observer calls the stop screen **{seen:?}**
+"));
+        r.log_button_scores();
         match diggle_solver::win::capture::capture_window(r.win) {
             Ok(f) => {
                 let path = PathBuf::from(FRAMES).join("gave-up.png");
