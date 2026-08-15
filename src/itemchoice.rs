@@ -82,6 +82,27 @@ pub type Offer = (String, i32, i32);
 /// independently: `healthHeal4.isUseless` is `health + 2 >= maxHealth` (`items/ephemeral.lua:41-45`),
 /// and `filterUselessBoons` drops it before the roll. So a heal boon on offer is *already* one the
 /// game thought we could use — this ranking is the second, stricter opinion.
+///
+/// # ⚠ This policy is NOT HOOKED UP
+///
+/// Nothing supplies it. [`choose`] builds an empty boon list, every offer reads "no boon", and the
+/// pick is decided entirely by [`PREFERRED_KINDS`] exactly as it was before any of this existed. The
+/// code below is a decision waiting for an input, and it is deliberately not pretending otherwise.
+///
+/// **The console does not carry the attachment.** `ui/itemselection.lua:413-428` prints each item's
+/// key, name and screen position and nothing else; the boon is held in `extras.bonuses[item]` and
+/// never logged. The game is never modified, so that is the end of the console route.
+///
+/// **The screen does carry it, and the dev has ruled that route out.** `:102-114` draws the boon
+/// item's own 32x32 icon at 2x inside the item button and `:395` puts a lens flare over the lucky
+/// pedestal, so three templates and the button transform would read it. The dev, 2026-08-15: *I'd
+/// prefer not to rely on the rendering.* Recorded here so nobody re-derives it as a fresh idea and
+/// spends an evening on it — it is a known option that was considered and declined.
+///
+/// **What is left** is deriving the roll: `overworld.lua:1120` seeds
+/// `love.math.newRandomGenerator(seed * location.seed * 1000)` when `playerData.overworld.seedDrops`
+/// is set, and every draw after that is arithmetic we could in principle reproduce. That is a real
+/// route and a deep one, and it is not being started on a guess about whether it is wanted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Boon {
     /// `gearSlotsBuff` — a permanent extra gear slot. Taken eagerly, whatever it is stapled to.
@@ -300,10 +321,9 @@ pub fn choose(
             .join(", ")
     ));
 
-    // **The boon, where one is on offer.** See [`Boon`] for the policy and where the three come
-    // from. `boons` is empty until the screen is read for them — the console does not carry the
-    // attachment (`ui/itemselection.lua:413-428` prints key, name and position, and nothing else),
-    // so this is a hook with the decision behind it built and tested, and the reading still to come.
+    // **NOT HOOKED UP.** This is always empty, so every branch below it is inert and the pick is
+    // exactly what it was before boons existed. See [`Boon`] for the policy, which is built and
+    // tested; what is missing is any way to learn *which* offer carries *which* boon.
     let boons: Vec<(String, Boon)> = Vec::new();
     let boon_on = |key: &str| boons.iter().find(|(k, _)| k == key).map(|(_, b)| *b);
 
