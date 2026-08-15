@@ -99,10 +99,17 @@ pub type Offer = (String, i32, i32);
 /// prefer not to rely on the rendering.* Recorded here so nobody re-derives it as a fresh idea and
 /// spends an evening on it — it is a known option that was considered and declined.
 ///
-/// **What is left** is deriving the roll: `overworld.lua:1120` seeds
+/// **Deriving the roll is also declined.** `overworld.lua:1120` seeds
 /// `love.math.newRandomGenerator(seed * location.seed * 1000)` when `playerData.overworld.seedDrops`
-/// is set, and every draw after that is arithmetic we could in principle reproduce. That is a real
-/// route and a deep one, and it is not being started on a guess about whether it is wanted.
+/// is set, so the draws are in principle reproducible offline. The dev, 2026-08-15: *I do not want
+/// you to derive the roll.* Both remaining guesses are therefore closed, and neither is a gap to be
+/// filled by whoever reads this next.
+///
+/// **The plan is upstream.** The dev has asked the game's author for `_VERBOSE` output naming the
+/// boon and the item it is attached to. When that lands, the whole of the work here is parsing it
+/// into `boons` — the policy below is already written and tested against the dev's rules, so the
+/// hook is one line and this warning comes off. Until then this stays inert **on purpose**, and a
+/// run that picks by kind alone is behaving correctly rather than missing a feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Boon {
     /// `gearSlotsBuff` — a permanent extra gear slot. Taken eagerly, whatever it is stapled to.
