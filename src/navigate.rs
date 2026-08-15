@@ -123,6 +123,22 @@ const RESUME_SETTLE: Duration = Duration::from_secs(8);
 /// which live was a village abandoned at 7/20.
 const REST_GIVE_UP: usize = 3;
 
+/// How long to wait for a back plaque before deciding there is not one.
+///
+/// Short, because this is asked in a loop whose *last* iteration is always the one that finds
+/// nothing: leaving the inn costs exactly one of these at the end, every time. The plaque is chrome
+/// declared with its screen rather than something that animates in, so if it is coming it is there
+/// within a frame or two of the screen changing — and [`Run::back_one_screen`] has already slept
+/// 600ms after the previous press before asking.
+const BACK_WAIT: Duration = Duration::from_millis(1200);
+
+/// How many back presses before we accept that this is not the inn we thought we were in.
+///
+/// The inn is two screens deep at most — the rest screen over the inn — so three is one spare.
+/// Unbounded pressing at a screen we have misread is the failure this replaces, and it is worse than
+/// the one it replaces because it never ends.
+const LEAVE_INN_CLICKS: usize = 3;
+
 /// Points tried, in order, when looking for map with no location under it.
 ///
 /// One fixed point cannot be right everywhere — a subworld packs its nodes into a much smaller area
@@ -1380,7 +1396,7 @@ impl Run<'_> {
             };
             let Some(data) = innplay::parse_rest_data(self.feed.since(mark)) else {
                 self.log.push_str("  rest: the rest screen printed no `Rest data` block\n");
-                self.leave_inn(1);
+                // No press of our own here: `leave_inn` walks out from wherever this is.
                 break;
             };
             let gold = self.map.gold();
@@ -1396,7 +1412,6 @@ impl Run<'_> {
                     false => "  rest: done — the inn will not serve us\n",
                     true => "  rest: done — nothing left to heal\n",
                 });
-                self.leave_inn(1);
                 nothing_to_do = true;
                 break;
             }
@@ -1446,19 +1461,23 @@ impl Run<'_> {
                 }
             }
             if stalled {
-                self.leave_inn(1);
                 break;
             }
             // The dream has already put us back on the inn. Otherwise we are still on the rest
-            // screen, and the next round's `Rest` press needs something to hit.
-            if !dreamt {
-                self.leave_inn(1);
+            // screen, and the next round's `Rest` press needs something to hit — so this is the one
+            // place that wants a single screen back rather than the way out.
+            //
+            // A `false` means the inn is not confirmed underfoot, and pressing `Rest` at an unknown
+            // screen is how a run spends its budget clicking at scenery. Stop, and let `leave_inn`
+            // find the way out from wherever this turned out to be.
+            if !dreamt && !self.back_to_inn() {
+                break;
             }
         }
         self.log.push_str(&format!("  rest: {done} press(es) landed\n"));
 
-        // 4. Out of the inn itself.
-        self.leave_inn(1);
+        // 4. Out, however many screens deep that turns out to be.
+        self.leave_inn();
         match (done, nothing_to_do) {
             (0, true) => Rested::NothingToDo,
             (0, false) => Rested::Failed,
@@ -1466,48 +1485,90 @@ impl Run<'_> {
         }
     }
 
-    /// Presses the back plaque `screens` times, confirming the inn's own announcement in between.
+    /// Clicks the back plaque, if there is one, and reports whether it was there.
     ///
-    /// The rest screen and the inn declare the plaque identically (`ui/inn.lua:68-71`,
-    /// `ui/rest.lua:517-520`), so leaving is the same press twice — and the first of the two lands
-    /// back on the inn, which says so on the console. That gives the sequence a checkpoint in the
-    /// middle instead of two blind clicks in a row.
-    fn leave_inn(&mut self, screens: usize) {
-        for _ in 0..screens {
-            // **Look before pressing.** Counting screens was wrong and a run showed exactly how:
-            // three presses filled the bar, the rest screen closed *itself*, and the `leave_inn(1)`
-            // that expected to be standing on it walked out of the inn as well. The next round then
-            // hunted for `Rest` in the village, and the inn screen it had left behind was read by
-            // the screen identifier as a shrine.
-            //
-            // Now the two screens are recognised rather than assumed, using the same templates the
-            // presses use. `None` from both means we are already out and another press would land
-            // on the map — which is the failure this replaces, one screen further on.
-            let on_rest = matches!(crate::act::locate(self.win, &crate::act::REST_CONFIRM), Ok(Some(_)));
-            let on_inn = matches!(crate::act::locate(self.win, &crate::act::INN_REST), Ok(Some(_)));
-            if !on_rest && !on_inn {
-                self.log.push_str("  rest: already out of the inn\n");
-                break;
+    /// **The plaque is the instrument, not the screen behind it.** The dev's call, and it is the
+    /// right one: "the bottom-left arrow button is the correct thing to look out for and click when
+    /// we wish to exit the inn". Leaving used to be decided by asking whether `Rest` was on screen,
+    /// which is a question about *this* screen's purpose — and that made the exit depend on a
+    /// template we had just clicked and were therefore hovering. It read absent, and the run
+    /// concluded it was outside while standing in the inn.
+    ///
+    /// The plaque has none of that against it:
+    ///
+    /// - **It is the same artwork everywhere it appears.** `ui/inn.lua:68-71` and
+    ///   `ui/rest.lua:517-520` both declare a `small` button at `ss(0, 0.9)`, `xOffset 1.13`, with
+    ///   `ui/graphics/icons/back.png`. [`crate::act::SHRINE_GOBACK`]'s template was cut from a
+    ///   *shrine*, and it scores **1.0000** against the inn frame in the corpus at exactly its own
+    ///   origin — the plaque is opaque, so the room behind it never reaches the pixels.
+    /// - **We never hover it before looking.** The press it follows is `Rest`, at the other end of
+    ///   the screen, and [`Run::park`] runs after this click too.
+    /// - **Its absence is the answer we want.** No plaque means no way back from here, which is what
+    ///   "out of the inn" means. Measured 0.3437 on a screen without one, against a 0.90 bar.
+    ///
+    /// [`crate::act::identify`] already reached this conclusion from the other side: it returns
+    /// `Screen::Shrine` for any screen with a back plaque, notes that it fired on an inn once, and
+    /// says the press was right even where the label was fiction. This is that fallback made
+    /// deliberate, inside the flow that needs it.
+    ///
+    /// `click_when_ready` locates before it clicks, so a `false` here is a *measured* absence rather
+    /// than a click sent into the dark.
+    fn back_one_screen(&mut self) -> bool {
+        match crate::act::click_when_ready(self.win, &crate::act::SHRINE_GOBACK, BACK_WAIT) {
+            Ok(_) => {
+                // Off the plaque before anything reads this corner again — the next look is either
+                // this function on the screen behind, or `identify`.
+                self.park();
+                std::thread::sleep(Duration::from_millis(600));
+                self.pump();
+                true
             }
-            let mark = self.feed.mark();
-            if !self.click_button(&crate::innplay::BACK) {
-                self.log.push_str("  rest: could not click the back plaque\n");
-                return;
-            }
-            // Leaving the rest screen lands on the inn, which announces itself. Leaving the inn
-            // lands on the map, which announces nothing until asked — so only the first is
-            // confirmable, and which one we just did is now known rather than counted.
-            if on_rest && !self.wait_for_line(mark, crate::innplay::ENTERED, Duration::from_secs(6)) {
-                self.log.push_str("  rest: the rest screen did not close\n");
-                return;
-            }
-            // Off the plaque, for the same reason the `Rest` press parks: the back plaque is
-            // fingerprinted too — `act::SHRINE_GOBACK` is this exact corner — and the next thing to
-            // look at this screen is either this loop's own check or `identify`.
-            self.park();
-            std::thread::sleep(Duration::from_millis(600));
+            Err(_) => false,
         }
-        self.pump();
+    }
+
+    /// Leaves the rest screen and lands back on the inn, which announces itself.
+    ///
+    /// The round loop needs this rather than [`Run::leave_inn`]: the next round's `Rest` press has
+    /// to have an inn to hit, and going all the way out would leave it pressing at the map.
+    ///
+    /// Returns whether the inn is confirmed underfoot. `false` means we do not know where we are —
+    /// the plaque was missing, or it was pressed and no [`crate::innplay::ENTERED`] followed — and
+    /// the caller's only safe move is to stop resting and let `leave_inn` clean up.
+    fn back_to_inn(&mut self) -> bool {
+        let mark = self.feed.mark();
+        if !self.back_one_screen() {
+            self.log.push_str("  rest: no back plaque on the rest screen\n");
+            return false;
+        }
+        if !self.wait_for_line(mark, crate::innplay::ENTERED, Duration::from_secs(6)) {
+            self.log.push_str("  rest: the rest screen did not close\n");
+            return false;
+        }
+        true
+    }
+
+    /// Presses back until there is no back plaque left to press.
+    ///
+    /// Counting screens was wrong twice over, in opposite directions: `leave_inn(1)` from the rest
+    /// screen left the run one screen short of the map, and the same call from the inn walked it one
+    /// screen too far. Neither can happen to a loop that stops on the plaque being gone.
+    ///
+    /// Bounded because a screen we do not understand could carry a back plaque of its own, and
+    /// pressing at one for ever is worse than reporting that we are stuck in it. The inn is two
+    /// screens deep at most, so anything past [`LEAVE_INN_CLICKS`] is not the inn.
+    fn leave_inn(&mut self) {
+        for n in 1..=LEAVE_INN_CLICKS {
+            if !self.back_one_screen() {
+                return;
+            }
+            if n == LEAVE_INN_CLICKS {
+                self.log.push_str(&format!(
+                    "  rest: still on a screen with a way back after {n} presses\n"
+                ));
+                self.snap_screen("leave-inn-stuck");
+            }
+        }
     }
 
     /// Clicks `Wake up` until the inn announces itself again.

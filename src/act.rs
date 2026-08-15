@@ -2581,6 +2581,35 @@ mod threshold_tests {
         );
     }
 
+    /// The back plaque is one button wearing several screens, and that is what makes it the exit.
+    ///
+    /// [`SHRINE_GOBACK`]'s template was cut from a **shrine**. This scores it against an **inn**,
+    /// through [`score_at_origin`] because that is the path `identify` and `click_when_ready` take.
+    /// `ui/inn.lua:68-71` and `ui/rest.lua:517-520` declare the same `small` button at `ss(0, 0.9)`,
+    /// `xOffset 1.13`, with the same `back.png` icon, and the plaque is opaque — so the two rooms
+    /// behind them never reach the pixels.
+    ///
+    /// This is the measurement [`crate::navigate::Run::back_one_screen`] rests on: leaving the inn
+    /// is keyed on this plaque rather than on `Rest`, because the plaque is not the button we just
+    /// clicked and so is never the one we are hovering.
+    #[test]
+    fn the_back_plaque_is_the_same_button_at_a_shrine_and_at_an_inn() {
+        let Some(q) = score_at_origin(&SHRINE_GOBACK, "inn-rest-hovered.png") else {
+            eprintln!("SKIP: frame corpus not present");
+            return;
+        };
+        // Held to [`SHRINE_GOBACK_PRESENT`] rather than to the [`MIN_INLIERS`] that `locate` — and
+        // so `back_one_screen` — actually gates on. The stricter bar is deliberate: this is a claim
+        // that the two screens share one piece of artwork, not merely that they are close enough to
+        // pass. Measured 1.0000, so there is nothing being squeezed through here.
+        assert!(
+            q >= SHRINE_GOBACK_PRESENT,
+            "the shrine's back plaque scores {q:.4} on an inn screen, under the \
+             {SHRINE_GOBACK_PRESENT:.4} this test holds it to. If this fails the two screens no \
+             longer share the artwork, and leaving the inn needs a template of its own."
+        );
+    }
+
     /// Pins the inversion itself, because it is the reason [`REWARD_SCREEN_PRESENT`] cannot simply be
     /// tuned down again: bare ground scores **higher** than a real reward screen whose item has been
     /// selected. Anyone lowering the threshold to catch the active state will re-admit the map.
