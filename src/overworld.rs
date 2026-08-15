@@ -1694,29 +1694,40 @@ impl WorldMap {
         self.plan(false, true).or_else(|| self.plan(false, false))
     }
 
-    /// Is there a known route to `key` that takes no crypt fight on the way?
+    /// Is there a known route to `key` that takes **no fight at all** on the way?
     ///
-    /// The dev's rule for shrine targets while the anomaly is open. A shrine is worth walking to
-    /// because it is *cheap* — no fight, and it pays in wildcard tiles — and a route that spends a
-    /// level 6 crypt to get there has given that away.
+    /// The dev's rule, stated many times and finally written down here: *go toward the anomaly
+    /// unless there is an accessible shrine that does not require combat*. A shrine is worth the
+    /// detour because it is free — it pays in wildcard tiles and costs only walking — and the moment
+    /// a fight is on the way it is not free, it is the anomaly's budget spent early.
     ///
-    /// **Crypt-ness comes from the heading, and only an unfinished one counts.** `completed` is what
-    /// says whether a fight is still owed, exactly as it does everywhere else here: a crypt we have
-    /// already cleared is ordinary ground to walk over. The destination itself is exempt — refusing
-    /// to path to where we were told to go is failure, not avoidance — but a shrine is not a crypt,
-    /// so that exemption is a formality rather than a loophole.
+    /// **Combat, not crypts.** The first version of this tested `type_is("crypt")`, because the run
+    /// that prompted it had died in one. That is the example, not the rule, and the difference is
+    /// most of a map: `l22` is a bandit camp, `l24` a level 3 spider forest, `l40` a level 5
+    /// graveyard — every one of them a fight, none of them a crypt, and all four sat on the route
+    /// this function called free on 2026-08-15. The test is [`heading_has_combat`], which is the
+    /// same one the rest of this file uses to know a fight when it sees one.
+    ///
+    /// **Only an unfinished fight counts**, because `completed` is what says whether one is still
+    /// owed — the same reading as everywhere else here.
+    ///
+    /// **The destination is not exempt**, unlike [`WorldMap::step_avoiding`]'s blocked set. There,
+    /// refusing to path to where we were told to go would be failure; here the question *is*
+    /// whether going costs a fight, and a shrine whose own node still has to be fought for costs one
+    /// — `Swanland — level 6 shrine` is a real heading from this very save.
     ///
     /// Breadth-first over the same edges as [`WorldMap::distances`] and deliberately *not* weighted:
     /// the question is whether such a route exists at all, not which one is cheapest.
-    fn reachable_without_a_crypt(&self, from: &str, to: &str) -> bool {
+    fn reachable_without_a_fight(&self, from: &str, to: &str) -> bool {
         let costly = |k: &str| {
-            k != to
-                && self
-                    .places
-                    .get(k)
-                    .map(|p| !p.completed && p.type_is("crypt"))
-                    .unwrap_or(false)
+            self.places
+                .get(k)
+                .map(|p| !p.completed && heading_has_combat(&p.heading))
+                .unwrap_or(false)
         };
+        if costly(to) {
+            return false;
+        }
         let mut seen: BTreeSet<&str> = [from].into_iter().collect();
         let mut queue: std::collections::VecDeque<&str> = [from].into();
         while let Some(k) = queue.pop_front() {
@@ -1990,7 +2001,7 @@ impl WorldMap {
                 // The cost is bounded and the benefit is not: a shrine bought with a crypt fight is
                 // no longer cheap preparation, it is the level 8 fight's budget spent early.
                 .filter(|p| !anomaly_open || (!p.corrupted && !p.consecrated))
-                .filter(|p| !anomaly_open || self.reachable_without_a_crypt(here, &p.key))
+                .filter(|p| !anomaly_open || self.reachable_without_a_fight(here, &p.key))
                 .filter(|p| ok(p))
                 .min_by_key(|p| dist_or_far(&dist, &p.key))
         };
@@ -6383,10 +6394,12 @@ mod tests {
         assert_eq!(plan.target, "s1");
     }
 
-    /// A shrine on the far side of a crypt is not cheap, so it is not a destination.
+    /// A shrine on the far side of any fight is not cheap, so it is not a destination.
     ///
-    /// The dev's rule: reachable without fighting a crypt. `l49` — Yokefleet, level 6 — is what the
-    /// run of 2026-08-15 walked into on its way to the next shrine.
+    /// The dev's rule: *go toward the anomaly unless there is an accessible shrine that does not
+    /// require combat.* Crypts were the example the first version generalised from, and the
+    /// generalisation was wrong by most of a map — the route this admitted on 2026-08-15 ran through
+    /// a bandit camp, a level 3 spider forest and a level 5 graveyard, not one of them a crypt.
     #[test]
     fn a_shrine_behind_a_crypt_is_not_worth_the_trip() {
         let mut m = WorldMap::new();
@@ -6395,14 +6408,51 @@ mod tests {
         m.here = Some("here".into());
         m.hell = Some(0.1);
 
-        assert!(!m.reachable_without_a_crypt("here", "s1"), "the only way through is the crypt");
+        assert!(!m.reachable_without_a_fight("here", "s1"), "the only way through is the crypt");
         assert_ne!(m.next_target().unwrap().reason, Goal::Shrine, "so it is not the plan");
 
         // Clear the crypt and the same shrine is suddenly cheap: `completed` is what says whether a
         // fight is still owed, here as everywhere else.
         m.entry("l49").completed = true;
-        assert!(m.reachable_without_a_crypt("here", "s1"));
+        assert!(m.reachable_without_a_fight("here", "s1"));
         assert_eq!(m.next_target().unwrap().target, "s1");
+    }
+
+    /// Not a crypt, and still a fight — the four nodes the first rule waved through.
+    ///
+    /// Rebuilt from the route the run of 2026-08-15 took out of `shrine1`: a bandit camp, a spider
+    /// forest and a graveyard, chasing a shrine while the only corrupted node it could reach sat one
+    /// hop the other way.
+    #[test]
+    fn a_bandit_camp_is_a_fight_even_though_it_is_not_a_crypt() {
+        for heading in [
+            "Norton Firth — level 3 bandit camp",
+            "Sancton Regrow — level 3 spider forest",
+            "Fosholme Growth — level 5 graveyard",
+            "Swanland — level 6 shrine",
+        ] {
+            let mut m = WorldMap::new();
+            m.fold(&dump("here", "camp", vec![node("mid", heading)]));
+            m.fold(&dump("mid", heading, vec![node("s1", "Faraway shrine")]));
+            m.here = Some("here".into());
+            m.hell = Some(0.1);
+            assert!(
+                !m.reachable_without_a_fight("here", "s1"),
+                "`{heading}` is a fight on the way, whatever it is called"
+            );
+        }
+    }
+
+    /// And the shrine's own node counts, which is why the destination is not exempt.
+    #[test]
+    fn a_shrine_we_would_have_to_fight_for_is_not_free_either() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("s1", "Swanland — level 6 shrine")]));
+        m.here = Some("here".into());
+        m.hell = Some(0.1);
+        assert!(!m.reachable_without_a_fight("here", "s1"), "the shrine itself is the fight");
+        m.entry("s1").completed = true;
+        assert!(m.reachable_without_a_fight("here", "s1"), "and cleared, it is free again");
     }
 
     #[test]
