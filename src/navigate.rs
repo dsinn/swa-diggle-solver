@@ -343,12 +343,24 @@ pub const ESCAPES: &[Escape] = &[
     // The mechanism is the same as every other escape: press the button, look again. What differs is
     // the intent, and the reason it can share the mechanism is that pressing `Consecrate` also
     // leaves — `shrine.lua:288` ends in `setActiveMode(overworld)`.
-    Escape {
-        screen: Screen::ShrineConsecrate,
-        button: &crate::act::SHRINE_CONSECRATE,
-        threshold: crate::act::SHRINE_CONSECRATE_PRESENT,
-        what: "the shrine screen, by consecrating it",
-    },
+    // **The `Consecrate` entry was removed on 2026-08-15, and the premise above is why.**
+    //
+    // "`Consecrate` is only ever drawn when it will do something" is not what the source says. The
+    // gate is `showConsecrateButton` = `ShowAGoodButton() and majorShrine` (`shrine.lua:92-95`), and
+    // `ShowAGoodButton()` is `hasWon() and not heretic` (`:36-40`) — so the button is drawn **greyed
+    // until the shrine's word is solved**, and being on screen says nothing about being pressable.
+    //
+    // Live 2026-08-15 at `shrine1`: this entry fired, logged `left the shrine screen, by
+    // consecrating it`, and one step later the shrine driver found the slot at **0.8564** — which
+    // `SHRINE_CONSECRATE_PRESENT`'s own table names as the greyed state — and reported
+    // `shrine: left unconsecrated`. The run then believed it had failed, and because `worth_a_trip`
+    // is `!p.used` and consecrating never sets `used`, it walked four hops to `shrine2` and on
+    // toward `shrine6`, out of the corruption it was supposed to be closing.
+    //
+    // Consecration belongs to the shrine driver, which solves the word first and therefore knows the
+    // button is earned before it presses. One actor per action: an escape route exists to get *off*
+    // a screen, and the moment it also performs the objective, two things race for the same button
+    // and the loser reports a failure that did not happen.
     // Normally the moment after `Pray`, where the slot now holds a greyed `Consecrate` and the only
     // thing left to do is leave. `shrineplay::play` deliberately stops at the Pray press and hands
     // the aftermath back here, so this is the ordinary exit rather than an error path.
@@ -397,9 +409,11 @@ pub enum Answer {
 /// being a wish.
 pub const fn answer_for(screen: Screen) -> Answer {
     match screen {
-        Screen::Character | Screen::StatsHistory | Screen::Shrine | Screen::ShrineConsecrate => {
-            Answer::Escape
-        }
+        Screen::Character | Screen::StatsHistory | Screen::Shrine => Answer::Escape,
+        // Not escaped any more: pressing `Consecrate` is the shrine driver's job, because only it
+        // has solved the word that makes the button pressable. See the note where its `Escape` used
+        // to be.
+        Screen::ShrineConsecrate => Answer::Elsewhere("the shrine driver, which solves the word first"),
         // The one `drive` plays out itself, because nothing else is watching for it.
         Screen::CombatEntered => Answer::Fight,
         // Reached through the affirmative slot rather than through `identify`: `drive` waits on
@@ -3817,14 +3831,15 @@ mod tests {
         let (bx0, _, bx1, _) = SHRINE_GOBACK.search;
         assert!(cx0 > bx1 || bx0 > cx1, "the two slots must be distinct for both to be present");
 
-        // And the answer to finding it lit is to press it. If this ever comes back as the go-back
-        // plaque, the screen is being escaped rather than used.
-        let e = ESCAPES
-            .iter()
-            .find(|e| e.screen == Screen::ShrineConsecrate)
-            .expect("a lit Consecrate must be answered");
-        assert!(std::ptr::eq(e.button, &SHRINE_CONSECRATE), "answered with {}", e.button.name);
-        assert_eq!(answer_for(Screen::ShrineConsecrate), Answer::Escape);
+        // And **nothing on the escape path may press it**. The button is drawn greyed until the
+        // shrine's word is solved (`ShowAGoodButton()`, `shrine.lua:36-40`), so an actor that has
+        // not solved it cannot know whether pressing does anything — which is how a consecration
+        // came to be reported twice, once as done and once as failed. The shrine driver owns it.
+        assert!(
+            !ESCAPES.iter().any(|e| e.screen == Screen::ShrineConsecrate),
+            "the escape path must not press Consecrate; the shrine driver solves the word first"
+        );
+        assert!(matches!(answer_for(Screen::ShrineConsecrate), Answer::Elsewhere(_)));
     }
 
     #[test]
