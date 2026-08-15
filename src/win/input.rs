@@ -425,6 +425,12 @@ pub const SC_DELETE: u16 = 0x53;
 /// tells it from Left Shift, since Windows reports both under a generic `VK_SHIFT` on some paths.
 pub const VK_RSHIFT: u16 = 0xA1;
 pub const SC_RSHIFT: u16 = 0x36;
+/// Page Down, which the game binds to `scrollDown5` (`utils/defaultbinds/keyboard.lua:30`) and so to
+/// one step of zooming the map out. Extended, like the arrows: send it with `press_extended_key`.
+///
+/// It carries no `_mod` entry, so unlike `delete` it is reachable from posted input.
+pub const VK_NEXT: u16 = 0x22;
+pub const SC_NEXT: u16 = 0x51;
 pub const VK_UP: u16 = 0x26;
 pub const SC_UP: u16 = 0x48;
 pub const VK_DOWN: u16 = 0x28;

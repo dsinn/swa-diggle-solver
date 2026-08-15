@@ -49,7 +49,8 @@ use crate::observe::feed::Feed;
 use crate::observe::pan;
 use crate::overworld::{Goal, WorldMap};
 use crate::win::input::{
-    click_at_in, warp_cursor, Input, PostMessageInput, SC_RETURN, SC_SPACE, VK_RETURN, VK_SPACE,
+    click_at_in, warp_cursor, Input, PostMessageInput, SC_NEXT, SC_RETURN, SC_SPACE, VK_NEXT,
+    VK_RETURN, VK_SPACE,
 };
 use crate::win::window::GameWindow;
 use std::path::{Path, PathBuf};
@@ -652,6 +653,10 @@ pub struct Run<'a> {
     /// a re-centre cures, and a node the map will not scroll to, which nothing does. See
     /// [`MAX_PAN_RETRIES`].
     pub pan_retries: usize,
+    /// Whether the map has already been pulled back a step. See [`Run::zoom_out`], which explains
+    /// why once is the only useful number: the game clamps `targetZoomMul` at `0.5`
+    /// (`overworldview.lua:996`) and the default is `1`.
+    pub zoomed_out: bool,
 }
 
 impl Run<'_> {
@@ -1518,6 +1523,43 @@ impl Run<'_> {
     /// step needs one, so this was a race that was mostly won. `positions_stale_at` makes the wait
     /// deliberate — a dump counted before the invalidation cannot satisfy this, whatever it says
     /// about panning.
+    /// Pulls the map back a step, so a node no drag can fetch is simply drawn nearer the middle.
+    ///
+    /// Returns whether it did anything: **once per run, and once is all the game offers.** A step
+    /// out halves `targetZoomMul`, clamped to `0.5` (`overworldview.lua:996`), so from the default
+    /// `1` the first press is already at the floor.
+    ///
+    /// Every screen coordinate we hold is invalidated by this, which is the cost task #29 records:
+    /// a dump prints `xoffset + posX*zoomMult` (`:1033`), so the same node prints differently either
+    /// side of the change and comparing across it is meaningless. That is not a reason to avoid the
+    /// zoom, it is a reason to say so — `positions_stale_at` is the existing machinery for exactly
+    /// this, and it is what a finished fight already does to the same coordinates for the same
+    /// reason. The camera also moves under `UpdateZoom` (`:1087-1097`), so the view is still
+    /// settling when this returns; `needs_recentre` covers that as it does everywhere else.
+    fn zoom_out(&mut self) -> bool {
+        if self.zoomed_out {
+            return false;
+        }
+        self.zoomed_out = true;
+        self.keys.focus();
+        std::thread::sleep(Duration::from_millis(120));
+        if self.keys.press_extended_key(VK_NEXT, SC_NEXT).is_err() {
+            self.log.push_str("  could not press pagedown to zoom out\n");
+            return false;
+        }
+        // The zoom is lerped rather than snapped (`zoomMult` toward `targetZoomMul` at `dt*10`,
+        // `:1091`), so this waits for the animation rather than the keystroke.
+        std::thread::sleep(Duration::from_millis(900));
+        self.pump();
+        self.positions_stale_at = self.dumps;
+        self.needs_recentre = true;
+        self.log.push_str(
+            "  zoomed the map out a step — every held coordinate is stale, re-centring to get \
+             fresh ones\n",
+        );
+        true
+    }
+
     fn settled_dump(&mut self, within: Duration) -> Option<Adjacency> {
         let by = Instant::now() + within;
         let (cw, ch) = self.win.client_size().unwrap_or((1920, 1080));
@@ -3248,6 +3290,25 @@ pub fn drive(
                 // repairs, and re-centring also moves the target, so a node that no drag could fetch
                 // may simply be on screen afterwards.
                 if unmeasured || pan_again(at, cw, ch, None, 0) {
+                    // **Before spending a retry: make the map smaller.**
+                    //
+                    // Dragging has two failure modes here and zooming answers both. A node below the
+                    // window comes back inside it because everything halves toward the centre; and a
+                    // patch that will not correlate stops mattering, because the fresh dump after
+                    // the zoom carries new coordinates for everything rather than a measured delta.
+                    // Task #29, and the dev's call after three runs died on the same exit.
+                    //
+                    // One press does the whole job. `pagedown` is bound to `scrollDown5`
+                    // (`utils/defaultbinds/keyboard.lua:30`), which is `love.wheelmoved(0, -5)`
+                    // (`main.lua:467`), and the overworld's handler is
+                    // `core.setZoom(y > 0)` (`overworldview.lua:1529-1531`) — one step whatever the
+                    // magnitude. A step out halves `targetZoomMul` and it is clamped at `0.5`
+                    // (`:996`), so from the default `1` a single press reaches the floor and further
+                    // presses are silent no-ops. That is why this fires once per run and not once
+                    // per retry.
+                    if r.zoom_out() {
+                        continue;
+                    }
                     if r.pan_retries >= MAX_PAN_RETRIES {
                         return Stop::Failed(match unmeasured {
                             true => format!(
