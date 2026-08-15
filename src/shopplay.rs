@@ -46,6 +46,49 @@ const ROW: [f64; 2] = [0.3, 0.6];
 /// `relativeIndex` by 8 (`shop.lua:205-232`).
 pub const PER_PAGE: usize = COL.len() * ROW.len();
 
+/// The paging arrows, in the same window fractions as the grid.
+///
+/// `shop.lua:202-236` declares **four** of them — a left and a right at `y = 0.3`, and the same pair
+/// again at `y = 0.6` — and all four run the identical body, `relativeIndex = relativeIndex ± 8`
+/// followed by `refreshButtons(true)`. So there is nothing to choose between them and this uses the
+/// upper pair.
+///
+/// Both carry `showIf = function() return #shopInventory>8 end`, so on a short shelf they are not
+/// drawn at all and the coordinate holds nothing. Their `activeIf` bounds the ends: a right arrow on
+/// the last page is inactive and a press does nothing, which is a state the caller has to detect
+/// rather than assume away — see [`crate::navigate`]'s paging, which verifies by watching the grid
+/// change.
+pub const ARROW_LEFT: (f64, f64) = (0.085, 0.3);
+pub const ARROW_RIGHT: (f64, f64) = (0.915, 0.3);
+
+/// The grid region, as a client rectangle `(x, y, w, h)` — what a page turn visibly changes.
+///
+/// Wide enough to hold all eight slots and their labels, and clear of both the arrows (`x = 0.085`
+/// and `0.915`) and the edge preview items `refreshButtons` draws at `x = 0` and `x = 1`. Those
+/// previews shift with the page too, so including them would still be correct; leaving them out
+/// keeps the comparison about the thing being bought.
+pub fn grid_region(win: &GameWindow) -> Option<(i32, i32, i32, i32)> {
+    let (cw, ch) = win.client_size().ok()?;
+    let x0 = (cw as f64 * 0.16).round() as i32;
+    let x1 = (cw as f64 * 0.84).round() as i32;
+    let y0 = (ch as f64 * 0.20).round() as i32;
+    let y1 = (ch as f64 * 0.78).round() as i32;
+    Some((x0, y0, x1 - x0, y1 - y0))
+}
+
+/// The `relativeIndex` that puts 1-based inventory `index` on screen.
+///
+/// Always a multiple of [`PER_PAGE`], because the arrows only ever move in whole pages.
+pub fn page_of(index: usize) -> usize {
+    index.saturating_sub(1) / PER_PAGE * PER_PAGE
+}
+
+/// Where an arrow is, in client pixels.
+pub fn arrow_at(win: &GameWindow, arrow: (f64, f64)) -> Option<(i32, i32)> {
+    let (cw, ch) = win.client_size().ok()?;
+    Some(((cw as f64 * arrow.0).round() as i32, (ch as f64 * arrow.1).round() as i32))
+}
+
 /// Where the item at 1-based inventory `index` is drawn, given the current page offset.
 ///
 /// `None` when it is not on this page — the caller pages first rather than clicking a slot that
@@ -191,10 +234,11 @@ Shop inventory = {
         }
     }
 
-    /// A ninth item is on the next page, and refusing to place it is the safe answer.
+    /// A ninth item has no slot on the first page, and refusing to place it is the safe answer.
     ///
     /// There is no confirmation dialogue on this screen (`ui/elements/shopitem.lua:147-165` buys on
-    /// release), so a slot we cannot place is a purchase of whatever else is sitting in it.
+    /// release), so a slot we cannot place is a purchase of whatever else is sitting in it. Paging
+    /// to it is [`page_of`]'s business, and the click still only happens once the offset matches.
     #[test]
     fn an_item_past_the_first_page_has_no_slot_yet() {
         assert_eq!(PER_PAGE, 8);
@@ -202,5 +246,33 @@ Shop inventory = {
         // what this pins without one.
         let n = 9usize - 1 - 0;
         assert!(n >= PER_PAGE, "item nine is off the first page");
+    }
+
+    /// Which page an item is on, and the boundaries either side of it.
+    ///
+    /// The arrows move `relativeIndex` in whole steps of eight from zero (`shop.lua:205-232`), so
+    /// every answer here is a multiple of eight — item 8 is the last of page one, item 9 the first
+    /// of page two.
+    #[test]
+    fn the_page_offset_is_always_a_whole_number_of_pages() {
+        assert_eq!(page_of(1), 0);
+        assert_eq!(page_of(8), 0, "the eighth item is the last on the first page");
+        assert_eq!(page_of(9), 8, "the ninth opens the second");
+        assert_eq!(page_of(16), 8);
+        assert_eq!(page_of(17), 16);
+        for index in 1..40 {
+            assert_eq!(page_of(index) % PER_PAGE, 0, "item {index} lands mid-page");
+            assert!(page_of(index) < index, "item {index} is behind its own page");
+            assert!(index - page_of(index) <= PER_PAGE, "item {index} is past its own page");
+        }
+    }
+
+    /// Paged to, every item lands in a slot — which is the property the buyer depends on.
+    #[test]
+    fn every_item_has_a_slot_once_its_page_is_turned_to() {
+        for index in 1..40usize {
+            let n = index - 1 - page_of(index);
+            assert!(n < PER_PAGE, "item {index} is not on its own page");
+        }
     }
 }

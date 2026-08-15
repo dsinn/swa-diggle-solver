@@ -2159,6 +2159,76 @@ fn skip_cinematic(r: &mut Run) -> Result<(), String> {
     Ok(())
 }
 
+/// Turns shop pages until `index` is on screen, and reports the offset actually reached.
+///
+/// **Every press is verified by watching the grid change, and that is the whole design.** The shop
+/// has no confirmation dialogue — `ui/elements/shopitem.lua:147-165` buys on release — so clicking a
+/// slot whose page we are not sure of is a purchase of whatever is sitting in it. Nor is the console
+/// any help: `refreshButtons` prints nothing, and the inventory is dumped once, in `onActive`
+/// (`shop.lua:248-256`). The screen is the only witness a page turn has.
+///
+/// The comparison is deliberately lopsided. [`inliers_between`] returns 1.0 for two identical
+/// captures, and a page of different items is different artwork end to end — so the bar is set at
+/// **half**, far below anything a still screen could drift to and far above what a real turn would
+/// score. Being wrong in the cautious direction costs a purchase we could have made; being wrong the
+/// other way spends a hundred gold on something we did not choose.
+///
+/// A press that changes nothing is the ordinary way the right arrow ends: `activeIf` is
+/// `(relativeIndex+8)<#shopInventory` (`shop.lua:215`), so it goes inert on the last page rather
+/// than refusing audibly.
+fn page_the_shop_to(r: &mut Run, index: usize) -> usize {
+    let want = crate::shopplay::page_of(index);
+    let mut at = 0usize;
+    if want == 0 {
+        return at;
+    }
+    let (Some(region), Some((ax, ay))) = (
+        crate::shopplay::grid_region(r.win),
+        crate::shopplay::arrow_at(r.win, crate::shopplay::ARROW_RIGHT),
+    ) else {
+        r.log.push_str("  cannot place the shop's paging arrow\n");
+        return at;
+    };
+    let shot = |r: &Run| {
+        crate::win::capture::capture_client_rect(r.win, region.0, region.1, region.2, region.3).ok()
+    };
+    while at < want {
+        let Some(before) = shot(r) else {
+            r.log.push_str("  could not photograph the shelf before paging\n");
+            return at;
+        };
+        let Ok((sx, sy)) = r.win.client_to_screen(ax, ay) else { return at };
+        if click_at_in(r.win, sx, sy).is_err() {
+            r.log.push_str("  the paging arrow could not be clicked\n");
+            return at;
+        }
+        r.park();
+        std::thread::sleep(Duration::from_millis(500));
+        let Some(after) = shot(r) else {
+            r.log.push_str("  could not photograph the shelf after paging\n");
+            return at;
+        };
+        let same = crate::observe::template::inliers_between(&before, &after);
+        if same >= SHOP_PAGE_TURNED {
+            r.log.push_str(&format!(
+                "  the shelf did not change after the paging arrow ({same:.4}) — stopping at \
+                 offset {at}\n"
+            ));
+            return at;
+        }
+        at += crate::shopplay::PER_PAGE;
+        r.log.push_str(&format!("  paged right to offset {at} (the shelf changed, {same:.4})\n"));
+    }
+    at
+}
+
+/// How alike two captures of the shop's grid may be and still count as the same page.
+///
+/// See [`page_the_shop_to`] — 0.5 is not a measured boundary between two states, it is a floor
+/// chosen so that only an unmistakable change counts. Nothing here is calibrated against a
+/// confusable, because the confusable is *no change at all*, which reads 1.0000.
+const SHOP_PAGE_TURNED: f64 = 0.5;
+
 /// Reads the three champion cards and returns the client x of the one to click.
 ///
 /// See [`crate::heroselect`] for what is read and why that row. This is the part that has to survive
@@ -3417,16 +3487,19 @@ pub fn drive(
 ");
                             false
                         }
-                        Some(i) => match crate::shopplay::slot_at(r.win, i, 0) {
-                            // Paging is not written: `relativeIndex` steps by eight
-                            // (`shop.lua:205-232`) and a heart has never yet been anywhere but the
-                            // first page. Refusing to click is the safe half of that — there is no
-                            // confirmation dialogue on this screen, so a slot we cannot place is a
-                            // purchase of whatever else is sitting in it.
+                        // **Paged to first, then placed.** `page_the_shop_to` returns the offset it
+                        // actually reached rather than the one it wanted, so a press that did not
+                        // take leaves `slot_at` unable to place the item — and the `None` arm below
+                        // refuses, exactly as it did when paging did not exist at all.
+                        Some(i) => match crate::shopplay::slot_at(r.win, i, page_the_shop_to(r, i)) {
+                            // There is no confirmation dialogue on this screen, so a slot we cannot
+                            // place is a purchase of whatever else is sitting in it. That was the
+                            // whole reason paging was left out, and it is still the answer when
+                            // paging fails.
                             None => {
                                 r.log.push_str(&format!(
-                                    "  the heart is item {i}, which is off the first page — paging                                      is not implemented, so nothing is pressed
-"
+                                    "  the heart is item {i}, and the shelf could not be paged to \
+                                     it — nothing is pressed\n"
                                 ));
                                 false
                             }
