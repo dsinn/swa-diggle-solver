@@ -383,6 +383,29 @@ const TRANSITION_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// `completed` flag rather than by seeing a button.
 pub const VISIT_CLICK: (i32, i32) = (188, 918);
 
+/// How long to wait for the shrine screen to come **back** after a consecration.
+///
+/// Consecrating is a round trip, not an exit. `shrine.lua:250-253` takes `returnMode =
+/// getActiveMode()` when `areaUnused(key)` — which is exactly the case where a blessing is still
+/// owed — then `setActiveMode(overworld)` (`:283`) hands the screen to the beam animation, and the
+/// beam's `onDecay` puts it back with `setActiveMode(returnMode)` (`:276-278`). So the shrine screen
+/// closing is the *middle* of the interaction, and a driver that reads it as the end walks away
+/// between the two halves.
+///
+/// Three seconds of animation, from `hellportal.lua:122-138`: the beam's alpha ramps to 1 at
+/// `+delta` per second, then `life` (passed as `1` at `shrine.lua:260`) burns down at the same rate,
+/// then alpha falls back to 0, and only then does `onDecay` fire. Twelve seconds is four times that,
+/// because the cost of being wrong is asymmetric — waiting a few seconds too long costs a few
+/// seconds, and giving up too early abandons the reward the whole trip was for.
+const BEAM_RETURN: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// How long to look for a `Pray` that should already be on screen.
+///
+/// Short, because this only ever asks about a button the game draws immediately if it draws it at
+/// all — either the word was solved on an earlier visit, or it was not. The cost of asking is paid
+/// once per shrine entry; the cost of not asking is a blessing left behind on every revisit.
+const PRAY_ALREADY_THERE: std::time::Duration = std::time::Duration::from_millis(2500);
+
 // A `leave()` helper used to live here, pressing the back plaque and confirming it gone. It moved
 // out rather than being deleted: [`crate::act::SHRINE_GOBACK`] and `Screen::Shrine` are how the
 // observer loop leaves this screen now, so the exit is handled once, by the code that handles every
@@ -403,6 +426,46 @@ pub struct Played {
     pub consecrated: bool,
     /// Human-readable trail, for the run report.
     pub log: String,
+}
+
+/// Presses `Pray` if it is in the slot, and records what happened.
+///
+/// Every caller here is asking the same question — *is the blessing claimable now?* — of a slot that
+/// holds one of several buttons, so the button is **identified** rather than the rect counted as
+/// occupied. `Pray`'s artwork against an active `Consecrate` scores ~0.856 against a 0.92 threshold
+/// (see [`crate::act::SHRINE_PRAY_PRESENT`]), which is the margin this depends on.
+///
+/// A miss is not an error. `showPrayButton` (`shrine.lua:98-102`) has three conjuncts, and the
+/// honest report for "one of them is false" is a logged score, not a failure — the run has better
+/// things to do than stop over an unclaimed bonus.
+fn claim_blessing(
+    win: &crate::win::window::GameWindow,
+    out: &mut Played,
+    wait: std::time::Duration,
+) -> Result<bool, crate::Error> {
+    let found =
+        crate::act::wait_for(win, &crate::act::SHRINE_PRAY, crate::act::SHRINE_PRAY_PRESENT, wait);
+    if !found.found() {
+        out.log.push_str(&format!(
+            "  shrine: no `Pray` in the slot (best {:.4} < {:.2})\n",
+            found.best,
+            crate::act::SHRINE_PRAY_PRESENT
+        ));
+        return Ok(false);
+    }
+    let score = found.score.unwrap_or(found.best);
+    crate::act::click_exact(win, &crate::act::SHRINE_PRAY, crate::act::SHRINE_PRAY_PRESENT)?;
+    // The button going away is the confirmation available on screen; the flag behind it is
+    // `<key>_used`, which `doPray` writes and saves immediately (`shrine.lua:132-135`), so the
+    // caller's `apply_save` sees it without waiting for a screen exit.
+    out.prayed = crate::act::wait_until_gone(
+        win,
+        &crate::act::SHRINE_PRAY,
+        crate::act::SHRINE_PRAY_PRESENT,
+        std::time::Duration::from_secs(6),
+    );
+    out.log.push_str(&format!("  shrine: prayed={} (Pray scored {score:.4})\n", out.prayed));
+    Ok(out.prayed)
 }
 
 /// Plays the word at the shrine we are standing on, then prays.
@@ -429,6 +492,22 @@ pub struct Played {
 /// (`overworld/generators/world.lua:86-89`). So at an unconsecrated shrine with the portal live,
 /// `Pray` **cannot** be drawn and the slot holds `Consecrate`.
 ///
+/// ## `Consecrate` **then** `Pray`, not one or the other
+///
+/// That rule says which button comes *first*, and this function used to read it as saying which
+/// button comes *instead*. `showPrayButton`'s middle conjunct is
+/// `(not majorShrine or hell == 0 or isConsecrated or isDesecrated)` — consecrating satisfies it, so
+/// the press that spends the solve is also the press that unlocks the blessing. Both rewards are
+/// available on the same visit, in that order, and the game even walks the screen back for us: the
+/// consecration takes `returnMode` when the area is unused (`shrine.lua:250-253`) and restores it
+/// when the beam decays (`:276-278`).
+///
+/// Live 2026-08-15, with the portal open: five shrines consecrated, none prayed at. The run logged
+/// success at each one and left the blessing behind every time. The symptom the dev saw was not the
+/// missing blessing but the wandering — `doPray` is what calls `setAreaUsed` (`:133`), so an
+/// unprayed shrine keeps `_used` false, `worth_a_trip` stays true, and the planner walks back to a
+/// shrine it has already finished instead of going to the anomaly.
+///
 /// Live 2026-08-10, before this argument was passed: `shrine6` was solved in four guesses, the slot
 /// scored **0.8560** — the measured signature of an active `Consecrate`, see
 /// [`crate::act::SHRINE_PRAY_PRESENT`] — and the run logged `solved but no Pray button` and walked
@@ -451,6 +530,25 @@ pub fn play(
     input.click(VISIT_CLICK.0, VISIT_CLICK.1)?;
     std::thread::sleep(TRANSITION_WAIT);
     out.log.push_str("  shrine: entered\n");
+
+    // 1b. **Is the word already solved?** A win is not a property of this visit. `hasWon()` is
+    //     `word == submitions[#submitions-1]` (`shrineview.lua:57-59`), and the submissions list is
+    //     saved to `<dataKey>subs` on every accepted guess (`:267`) and handed back to the view on
+    //     the next entry (`shrine.lua:495`). So a shrine solved in an earlier run — or in an earlier
+    //     visit this run — opens already won, with its reward waiting in the slot.
+    //
+    //     Asked of the screen rather than of the save, because the screen answers for every route
+    //     into this state at once: solved-then-consecrated, solved-with-the-portal-shut, or solved
+    //     and interrupted. The save would need a different question for each.
+    //
+    //     This matters right now rather than hypothetically: the 2026-08-15 run left five shrines
+    //     consecrated and unprayed, so every one of them is a shrine this branch will meet. Without
+    //     it, `play` types a probe letter into a finished board and reads the colouring of a row
+    //     that is not accepting input.
+    if claim_blessing(win, &mut out, PRAY_ALREADY_THERE)? {
+        out.log.push_str("  shrine: the word was already solved from an earlier visit\n");
+        return Ok(out);
+    }
 
     // 2. Find out how long the word is, by typing one letter and seeing which grid it landed in.
     //    Retried a couple of times because the screen transition may still be fading.
@@ -619,33 +717,52 @@ pub fn play(
                 "  shrine: consecrated={} (slot scored {slot:.4})\n",
                 out.consecrated
             ));
+
+            // **And now the other half of the trip.** Consecrating unlocks the blessing rather than
+            // replacing it: `showPrayButton` (`shrine.lua:98-102`) is held shut at a major shrine
+            // while the portal burns *until* `isConsecrated`, at which point `Pray` becomes drawable
+            // for the first time. The doc above this function had the first half of that rule right
+            // and stopped there, so every consecration this project ever performed walked away from
+            // a blessing it had just earned. Live 2026-08-15: five of them, and none noticed.
+            //
+            // The game does the walking back. `shrine.lua:250-253` captures `returnMode` precisely
+            // when `areaUnused(key)` — when a blessing is still owed — and the beam's `onDecay`
+            // restores it (`:276-278`). So the screen we just watched disappear comes back on its
+            // own, and the right move is to wait for it rather than to click anything.
+            //
+            // Waiting is also the *safe* move, which is the stronger argument. The animation runs
+            // with `setInteractionEnabled(false)` (`:258`), so a driver that returns to its loop here
+            // spends the next three seconds clicking into a dead screen. That is not hypothetical
+            // either: on 2026-08-15 the run did exactly that, missed four locate-me probes, and
+            // opened the stats history page by accident before the shrine screen came back.
+            if out.consecrated {
+                let back = crate::act::wait_for(
+                    win,
+                    &crate::act::SHRINE_GOBACK,
+                    crate::act::SHRINE_GOBACK_PRESENT,
+                    BEAM_RETURN,
+                );
+                if back.found() {
+                    out.log.push_str("  shrine: the screen came back after the beam\n");
+                    claim_blessing(win, &mut out, Duration::from_secs(6))?;
+                } else {
+                    // It did not come back, so either the beam is slower than `hellportal.lua`
+                    // suggests or `returnMode` was never taken. Re-entering costs one click and
+                    // `claim_blessing` refuses to press anything it cannot identify, so the failure
+                    // mode of guessing wrong here is a wasted second rather than a wrong button.
+                    out.log.push_str(&format!(
+                        "  shrine: no return to the shrine screen within {BEAM_RETURN:?} (best \
+                         {:.4}) — re-entering to pray\n",
+                        back.best
+                    ));
+                    input.click(VISIT_CLICK.0, VISIT_CLICK.1)?;
+                    std::thread::sleep(TRANSITION_WAIT);
+                    claim_blessing(win, &mut out, Duration::from_secs(6))?;
+                }
+            }
         }
     } else if out.solved.is_some() {
-        let found = crate::act::wait_for(
-            win,
-            &crate::act::SHRINE_PRAY,
-            crate::act::SHRINE_PRAY_PRESENT,
-            Duration::from_secs(6),
-        );
-        if found.found() {
-            crate::act::click_exact(win, &crate::act::SHRINE_PRAY, crate::act::SHRINE_PRAY_PRESENT)?;
-            out.prayed = crate::act::wait_until_gone(
-                win,
-                &crate::act::SHRINE_PRAY,
-                crate::act::SHRINE_PRAY_PRESENT,
-                Duration::from_secs(6),
-            );
-            out.log.push_str(&format!(
-                "  shrine: prayed={} (Pray scored {:.4})\n",
-                out.prayed,
-                found.score.unwrap_or(found.best)
-            ));
-        } else {
-            out.log.push_str(&format!(
-                "  shrine: solved but no Pray button (best {:.4}) — not clicking the slot blind\n",
-                found.best
-            ));
-        }
+        claim_blessing(win, &mut out, Duration::from_secs(6))?;
     }
 
     // 5. Stop here, whatever happened, and hand the screen back to the observer loop.

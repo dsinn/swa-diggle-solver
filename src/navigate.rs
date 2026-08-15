@@ -2861,6 +2861,17 @@ pub fn drive(
                             "  shrine: left un{}\n",
                             if anomaly_open { "consecrated" } else { "prayed" }
                         ));
+                    } else if played.consecrated && !played.prayed {
+                        // The half-finished trip, and it needs its own line because the old one
+                        // could not see it: `consecrated || prayed` reported success, and a
+                        // consecration that never came back for its blessing looked identical to a
+                        // complete visit. Worth naming loudly for a second reason — `_used` is what
+                        // `worth_a_trip` reads, so a shrine left here stays a destination, and the
+                        // run will come back for it instead of going to the anomaly.
+                        r.log.push_str(
+                            "  shrine: consecrated but **left unprayed** — the blessing is still \
+                             owed, and this shrine still counts as unused\n",
+                        );
                     }
                 }
                 Err(e) => r.log.push_str(&format!("  shrine failed: {e}\n")),

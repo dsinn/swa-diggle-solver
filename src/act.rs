@@ -2492,6 +2492,28 @@ mod threshold_tests {
         }
     }
 
+    #[test]
+    fn praying_cannot_be_fooled_by_the_button_it_replaces() {
+        // The cap above is the ceiling; this is the floor, and it is the one that has teeth.
+        //
+        // `shrineplay::claim_blessing` presses `Pray` on this threshold alone, with no second
+        // opinion, and the rect it reads is shared with `Consecrate`. The dangerous neighbour is not
+        // an *active* Consecrate — that state means the blessing is genuinely not claimable yet, and
+        // pressing it there would spend the solve early — it is the greyed one, measured live at
+        // `shrine1` on 2026-08-15 while the word was still unsolved.
+        //
+        // Lowering the bar past that figure does not merely make a match noisier: it makes "the
+        // blessing is ready" indistinguishable from "the word has not been solved", which is the
+        // pair this whole slot exists to separate.
+        const GREYED_CONSECRATE: f64 = 0.8564;
+        assert!(
+            SHRINE_PRAY_PRESENT > GREYED_CONSECRATE,
+            "SHRINE_PRAY_PRESENT is {SHRINE_PRAY_PRESENT:.4}, at or below the {GREYED_CONSECRATE:.4} \
+             a greyed `Consecrate` scores against Pray's artwork — an unsolved shrine would read as \
+             a claimable blessing"
+        );
+    }
+
     /// Pins the inversion itself, because it is the reason [`REWARD_SCREEN_PRESENT`] cannot simply be
     /// tuned down again: bare ground scores **higher** than a real reward screen whose item has been
     /// selected. Anyone lowering the threshold to catch the active state will re-admit the map.
