@@ -3367,14 +3367,39 @@ pub fn drive(
                                 false
                             }
                             Some((x, y)) => {
-                                r.log.push_str(&format!("  the heart is item {i}, at ({x}, {y})
-"));
+                                // **Empty the shelf, do not take one off it.** The dev's
+                                // correction, 2026-08-15: settlements stock more than one heart and
+                                // the single purchase was leaving them behind.
+                                //
+                                // Bounded by two numbers and the smaller wins. The shop printed the
+                                // stock when it opened, and `hearts_affordable` is the purse with
+                                // `INN_COST` held back — a reserve over the whole visit, not just
+                                // the first item, so a shelf of four cannot spend us out of a bed.
+                                //
+                                // Same slot every time. `reduceStock` decrements in place
+                                // (`shop.lua:101-106`) and the grid is rebuilt from the same list,
+                                // so the heart does not move while we are buying it; and a click on
+                                // a sold-out item does nothing, because `mousereleased` checks
+                                // stock before it takes the gold
+                                // (`ui/elements/shopitem.lua:147-165`). Overshooting is therefore
+                                // harmless, which is what makes clicking to a count safe without a
+                                // fresh dump between presses — there isn't one, the inventory is
+                                // printed on open only.
+                                let stock = crate::shopplay::stock_of(&inv, crate::shopplay::HEART);
+                                let want = stock.min(r.map.hearts_affordable()).max(0);
+                                r.log.push_str(&format!(
+                                    "  the heart is item {i}, at ({x}, {y}) — {stock} in stock, \
+                                     {} gold, buying {want}\n",
+                                    r.map.gold()
+                                ));
                                 match r.win.client_to_screen(x, y) {
                                     Ok((sx, sy)) => {
-                                        let _ = click_at_in(r.win, sx, sy);
-                                        std::thread::sleep(Duration::from_millis(700));
+                                        for _ in 0..want {
+                                            let _ = click_at_in(r.win, sx, sy);
+                                            std::thread::sleep(Duration::from_millis(700));
+                                        }
                                         r.pump();
-                                        true
+                                        want > 0
                                     }
                                     Err(e) => {
                                         r.log.push_str(&format!("  could not aim at it: {e}
@@ -3784,9 +3809,22 @@ pub fn drive(
             // `WorldMap::wants_a_heart`. The gate is otherwise identical, corruption clause and all:
             // corruption is a level rather than a locked door, and a cleared corrupted village has
             // its shops back.
-            let rest_here = p.type_is("village")
+            //
+            // **`is_settlement`, not `type_is("village")`.** A town is a settlement too, and the
+            // planner's heart filter has always known that while this line did not — which is the
+            // whole of the `l28 <-> l27` bounce the dev stopped by hand. See [`Place::is_settlement`].
+            //
+            // **And a bed is now worth stopping for whenever we are passing one.** The dev's rule,
+            // 2026-08-15: *if we're at a settlement, have less than full health, and have the gold
+            // to rest at the inn, go rest.* That is a weaker condition than `wants_rest`, which
+            // waits for half health or a four-point drop — deliberately, because those are the bars
+            // for making a *detour*. Standing in the doorway is not a detour, and ten gold for six
+            // health before the next fight is the cheapest trade on the board.
+            let top_up = r.map.top_up_at(&p.key);
+            let rest_here = p.is_settlement()
                 && (!p.corrupted || p.completed)
                 && ((r.map.wants_rest() && r.map.gold() >= crate::rest::INN_COST)
+                    || top_up
                     || (r.map.wants_a_heart() && !r.map.heart_is_spent(&p.key)));
             if p.subworld_container || rest_here {
                 let heading_for = r.map.next_hop().map(|h| h.plan.target);

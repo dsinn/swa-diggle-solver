@@ -106,6 +106,16 @@ pub fn index_of(inv: &[(String, i64)], item_type: &str) -> Option<usize> {
     inv.iter().position(|(t, stock)| t == item_type && *stock > 0).map(|i| i + 1)
 }
 
+/// How many of `item_type` are on the shelf, as the shop just printed it.
+///
+/// **A settlement can stock more than one, and assuming otherwise left them behind.** The dev found
+/// it on 2026-08-15. `specialStock` seeds the shelf (`shop.lua:372-379`) and nothing caps it at a
+/// single item, so the count has to be read rather than assumed — and it is right there in the dump
+/// the shop prints on opening.
+pub fn stock_of(inv: &[(String, i64)], item_type: &str) -> i64 {
+    inv.iter().find(|(t, _)| t == item_type).map(|(_, n)| *n).unwrap_or(0)
+}
+
 /// The `Heart`: `healthBuff`, four maximum health for a hundred gold (`items/ephemeral.lua:4-9`).
 pub const HEART: &str = "healthBuff";
 

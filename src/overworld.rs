@@ -494,6 +494,25 @@ impl Place {
     /// (`shop.lua:372-379`) and a purchase decrements `shopData`, not this — which is why *whether
     /// it is still for sale* is a different question, asked of the save.
     pub fn stocks_a_heart(&self) -> bool {
+        self.is_settlement()
+    }
+
+    /// A village or a town — somewhere with an inn and shops inside.
+    ///
+    /// **The name every gate should have been using.** All three settlement nouns are the same
+    /// *kind* of place to walk into; only the shelf differs.
+    ///
+    /// Live 2026-08-15, and the dev's word for it was brittleness. The planner's heart filter asked
+    /// [`Place::stocks_a_heart`] — village **or town** — while the driver's arrival gate and both
+    /// `seeking_*` predicates asked `type_is("village")`. So `l28 Enholmes town` could be chosen and
+    /// could never be entered: the run arrived, the gate declined, and the planner immediately
+    /// re-picked the next settlement out. `l28 -> l27 (for l44, Heart)`, `l27 -> l28 (for l28,
+    /// Heart)`, fourteen times, until the run was stopped by hand.
+    ///
+    /// That is the third bounce in this project with one shape: **the planner and the driver asking
+    /// different questions about the same place.** Any predicate that chooses a destination has to
+    /// be the one that greets us on arriving at it.
+    pub fn is_settlement(&self) -> bool {
         self.type_is("village") || self.type_is("town")
     }
 
@@ -693,6 +712,12 @@ pub struct WorldMap {
     gold: i64,
     /// Campfire fuel carried, which makes a campfire usable even at a used area.
     fuel: i64,
+    /// `player.health` / `player.maxHealth`, as of the last save read.
+    ///
+    /// Kept here for the same reason `gold` is: the decision it feeds is "where to go next". See
+    /// [`WorldMap::top_up_at`], which is the one rule that needs the *exact* reading rather than
+    /// the half-health line [`WorldMap::wants_rest`] is set from.
+    health: Option<crate::rest::Health>,
     /// The surface node we were standing on when we entered the subworld we are in.
     ///
     /// `None` on the surface. Its one job is to let [`WorldMap::exit_toward`] recognise the entrance,
@@ -857,6 +882,13 @@ pub const CROSSING: usize = 6;
 /// it reaches a general store as `specialStock` rather than as a random roll, so a village that has
 /// one has it by construction rather than by luck.
 pub const HEART_COST: i64 = 100;
+
+/// The purse a heart errand needs before it will set off: the price, plus a bed.
+///
+/// The dev's number, 2026-08-15 — *at least 110 gold before buying so that we can rest if needed
+/// afterwards.* Buying down to nothing trades four maximum health for the ability to heal six at a
+/// time, which is the wrong way round for a run that keeps dying just short.
+pub const HEART_FLOOR: i64 = HEART_COST + crate::rest::INN_COST;
 
 /// Cost to `key`, or [`usize::MAX`] when no known route reaches it — so unreachable places sort
 /// last rather than first.
@@ -1803,6 +1835,7 @@ impl WorldMap {
         // of them. See [`WorldMap::note_health_level`] for what it does with the number; it sets
         // below half, clears at full, and deliberately leaves a partial heal alone.
         if let Some(h) = crate::rest::Health::from_save(save) {
+            self.health = Some(h);
             self.note_health_level(h);
         }
     }
@@ -3421,8 +3454,12 @@ impl WorldMap {
     /// costs a level 8 fight and the two before it cost this run its life at level 6 — four maximum
     /// health for a hundred gold is the cheapest preparation on the board.
     ///
-    /// `> HEART_COST` and not `>=`: arriving with exactly the price and nothing over is how a run
-    /// ends up unable to pay for the inn it needs afterwards.
+    /// **The floor is the price plus a bed**, which the dev raised to that on 2026-08-15 after
+    /// watching the errand drain a purse: *I want us to be at at least 110 gold before buying so
+    /// that we can rest if needed afterwards.* Spending down to nothing buys four maximum health and
+    /// removes the six-a-press that keeps a run alive between fights, which is a bad trade at any
+    /// price. So [`HEART_COST`] plus [`crate::rest::INN_COST`], and the same reserve is held back
+    /// again when emptying a shelf.
     /// Has this village's heart already been bought? See [`WorldMap::heart_bought`].
     pub fn heart_is_spent(&self, village: &str) -> bool {
         self.heart_bought.contains(village)
@@ -3434,7 +3471,43 @@ impl WorldMap {
     }
 
     pub fn wants_a_heart(&self) -> bool {
-        self.anomaly_is_open().unwrap_or(false) && self.gold > HEART_COST
+        self.anomaly_is_open().unwrap_or(false) && self.gold >= HEART_FLOOR
+    }
+
+    /// How many hearts this purse can take off a shelf, holding a bed back.
+    ///
+    /// **Settlements stock more than one.** The standing assumption was one each; the dev found it
+    /// wrong on 2026-08-15, so the shop empties the shelf instead of taking a single item off it.
+    /// Every one still leaves [`crate::rest::INN_COST`] behind — the reserve is a floor under the
+    /// whole visit, not a check on the first purchase.
+    pub fn hearts_affordable(&self) -> i64 {
+        ((self.gold - crate::rest::INN_COST) / HEART_COST).max(0)
+    }
+
+    /// Should we stop for a bed at `key`, purely because we are standing at one?
+    ///
+    /// The dev's rule, 2026-08-15: **at a settlement, below full health, with the inn's price in
+    /// pocket — rest.** Deliberately weaker than [`WorldMap::wants_rest`], which waits for half
+    /// health or a four-point drop, because those are the bars for making a *detour*. Standing in
+    /// the doorway is not a detour: six health for ten gold before the next fight is the cheapest
+    /// trade on the board, and this run keeps dying two points short.
+    ///
+    /// Takes `&mut self` because deciding is also *recording*. Everything that walks us to the inn
+    /// from inside — `inn_inside`, `seeking_a_rest`, `cross_toward` — is written around
+    /// `wants_rest`, so a top-up that did not set it would be a decision the rest of the map never
+    /// heard about. That is the planner/driver split this same commit is fixing elsewhere, and it is
+    /// not worth re-introducing one flag lower down.
+    ///
+    /// `false` when health has never been read: an unknown reading is not evidence of a wound, and
+    /// the errand costs a subworld crossing.
+    pub fn top_up_at(&mut self, key: &str) -> bool {
+        let settlement = self.places.get(key).map(|p| p.is_settlement()).unwrap_or(false);
+        let hurt = self.health.map(|h| !h.is_full()).unwrap_or(false);
+        if !(settlement && hurt && self.gold >= crate::rest::INN_COST) {
+            return false;
+        }
+        self.wants_rest = true;
+        true
     }
 
     fn inn_inside(&self, container: &str) -> Option<&Place> {
@@ -3473,7 +3546,7 @@ impl WorldMap {
         if !self.wants_a_heart() || self.heart_bought.contains(container) {
             return false;
         }
-        if !self.places.get(container).map(|p| p.type_is("village")).unwrap_or(false) {
+        if !self.places.get(container).map(|p| p.is_settlement()).unwrap_or(false) {
             return false;
         }
         !self.places.values().any(|p| {
@@ -3487,7 +3560,7 @@ impl WorldMap {
         if !self.wants_rest || self.gold < crate::rest::INN_COST {
             return false;
         }
-        if !self.places.get(container).map(|p| p.type_is("village")).unwrap_or(false) {
+        if !self.places.get(container).map(|p| p.is_settlement()).unwrap_or(false) {
             return false;
         }
         !self
@@ -5655,20 +5728,22 @@ mod tests {
             m.fold(&dump("here", "camp", vec![village("l11"), node("l4", "Riccall — level 6 crypt")]));
             m.here = Some("here".into());
             m.hell = Some(0.1);
-            m.gold = HEART_COST + 1;
+            m.gold = HEART_FLOOR;
             m
         };
 
-        let mut m = build();
+        let m = build();
         let plan = m.next_target().expect("a plan");
         assert_eq!(plan.reason, Goal::Heart, "the anomaly is open, the gold is there, the road is free");
         assert_eq!(plan.target, "l11");
 
-        // A pound short and it is not a plan. `>` and not `>=`: arriving with exactly the price and
-        // nothing over is how a run ends up unable to pay for anything afterwards.
+        // A pound short and it is not a plan. **The bar is the price plus a bed**, not the price:
+        // the dev raised it to 110 on 2026-08-15 after watching the errand spend a run down to
+        // nothing, which trades four maximum health for the six-a-press that keeps it alive.
         let mut m = build();
-        m.gold = HEART_COST;
-        assert_ne!(m.next_target().unwrap().reason, Goal::Heart, "exactly the price is not enough");
+        m.gold = HEART_FLOOR - 1;
+        assert_ne!(m.next_target().unwrap().reason, Goal::Heart, "the price alone is not enough");
+        assert_eq!(HEART_FLOOR, HEART_COST + crate::rest::INN_COST, "the reserve is exactly one night");
 
         // A fight on the way and it is not a detour, it is the fight.
         let mut m = WorldMap::new();
@@ -5676,13 +5751,89 @@ mod tests {
         m.fold(&dump("l4", "Riccall — level 6 crypt", vec![village("l11")]));
         m.here = Some("here".into());
         m.hell = Some(0.1);
-        m.gold = HEART_COST + 1;
+        m.gold = HEART_FLOOR;
         assert_ne!(m.next_target().unwrap().reason, Goal::Heart, "the crypt is in the way");
 
         // And a village we have already emptied is not a destination.
         let mut m = build();
         m.bought_the_heart("l11");
         assert_ne!(m.next_target().unwrap().reason, Goal::Heart, "the shelf is bare");
+    }
+
+    /// A town is a settlement, and both halves of the program have to agree about that.
+    ///
+    /// The `l28 <-> l27` bounce of 2026-08-15, in the smallest form that reproduces it. The planner
+    /// chose `l28 Enholmes town` because [`Place::stocks_a_heart`] counts towns; the driver's arrival
+    /// gate asked `type_is("village")` and declined; the planner re-picked the settlement beyond it;
+    /// and the run walked back and forth fourteen times until it was stopped by hand.
+    ///
+    /// This pins the predicate the two now share. The driver's own gate cannot be reached from a
+    /// test — it needs a live game — so what is pinned here is that there is one question rather
+    /// than two, which is the part that was wrong.
+    #[test]
+    fn a_town_is_a_settlement_everywhere_that_asks() {
+        let town = Place { heading: "Enholmes town".into(), ..Default::default() };
+        let village = Place { heading: "Rowlston Covert village".into(), ..Default::default() };
+        let hamlet = Place { heading: "Wetwang hamlet".into(), ..Default::default() };
+        let forest = Place { heading: "Bursall Hedge — level 2 forest".into(), ..Default::default() };
+        for p in [&town, &village] {
+            assert!(p.is_settlement(), "{} is somewhere to walk into", p.heading);
+            assert_eq!(p.stocks_a_heart(), p.is_settlement(), "one question, not two");
+        }
+        // A hamlet has neither buff (`village.lua:5-14`), so it is not a heart destination. It is
+        // still not a *fight*, which is a separate axis and not this predicate's business.
+        assert!(!hamlet.is_settlement());
+        assert!(!forest.is_settlement());
+    }
+
+    /// Standing at a settlement, short of full, with the price in pocket: rest.
+    ///
+    /// The dev's rule, 2026-08-15. Deliberately weaker than [`WorldMap::wants_rest`] — half health
+    /// or a four-point drop are the bars for a *detour*, and standing in the doorway is not one.
+    #[test]
+    fn passing_a_settlement_at_less_than_full_health_is_worth_a_bed() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("l28", "Enholmes town")]));
+        m.gold = 50;
+        m.health = Some(crate::rest::Health { current: 18, max: 20 });
+        assert!(!m.wants_rest(), "two points down is nowhere near the detour bar");
+        assert!(m.top_up_at("l28"), "but we are standing at the door");
+        assert!(m.wants_rest(), "and the errand machinery has to hear about it");
+
+        // Full health buys nothing.
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("l28", "Enholmes town")]));
+        m.gold = 50;
+        m.health = Some(crate::rest::Health { current: 20, max: 20 });
+        assert!(!m.top_up_at("l28"));
+
+        // Nor does a purse that cannot pay the innkeeper.
+        m.health = Some(crate::rest::Health { current: 18, max: 20 });
+        m.gold = crate::rest::INN_COST - 1;
+        assert!(!m.top_up_at("l28"));
+        m.gold = crate::rest::INN_COST;
+        assert!(m.top_up_at("l28"), "exactly the price is enough for a bed — `getCanRest` is `>=`");
+
+        // And a forest is not a settlement, whatever our health is.
+        m.fold(&dump("here", "camp", vec![node("l16", "Bursall Hedge — level 2 forest")]));
+        m.gold = 500;
+        assert!(!m.top_up_at("l16"));
+    }
+
+    /// The shelf is emptied, and the bed is never spent.
+    #[test]
+    fn the_purse_always_keeps_one_night_back() {
+        let mut m = WorldMap::new();
+        m.gold = 110;
+        assert_eq!(m.hearts_affordable(), 1, "110 buys one and leaves the inn's ten");
+        m.gold = 209;
+        assert_eq!(m.hearts_affordable(), 1, "nine short of the second");
+        m.gold = 210;
+        assert_eq!(m.hearts_affordable(), 2);
+        m.gold = 1040;
+        assert_eq!(m.hearts_affordable(), 10);
+        m.gold = 0;
+        assert_eq!(m.hearts_affordable(), 0, "never negative, whatever the purse");
     }
 
     /// Inside the village, the errand is the general store.
@@ -5698,7 +5849,7 @@ mod tests {
             vec![node("l11sub2", "Rowlston Covert general store"), node("l11sub3", "Rowlston Covert house")],
             vec![]));
         m.hell = Some(0.1);
-        m.gold = HEART_COST + 1;
+        m.gold = HEART_FLOOR;
 
         match m.cross_toward(&[]) {
             Some(Crossing::Step { to, toward }) | Some(Crossing::Probe { to, toward }) => {

@@ -156,6 +156,9 @@ impl Event {
             .find(|c| {
                 !harmful(&c.text)
                     && !costs_everything(&c.text)
+                    // Priced goods, screened out with the same standing as being robbed: see
+                    // [`costs_gold`]. The purse belongs to the heart errand and the inn.
+                    && !costs_gold(&c.text)
                     && !(avoid_combat && starts_combat(&c.text))
             })
             .or_else(|| self.safe_choice())
@@ -213,6 +216,48 @@ pub fn starts_combat(text: &str) -> bool {
 /// as this interface offers — and it does not need translating, unlike "Your money".
 pub fn costs_everything(text: &str) -> bool {
     text.contains("[-All gold]")
+}
+
+/// Does this choice want gold for goods — the travelling merchant and his like?
+///
+/// **We do not shop at events.** The dev's rule, 2026-08-15, after a run paid the merchant:
+/// *when we encounter the merchant that sells us items with -500 gold, -300 gold, and -200 options,
+/// simply refuse to buy anything.*
+///
+/// Live that day at Scorborough Spinny, verbatim off the console:
+///
+/// ```text
+/// ["[-500g] - Get two random gear items.",
+///  "[-300g] - Pick one of two random gear items.",
+///  "[-200g] - Get one random gear item.",
+///  "Leave."]
+/// ```
+///
+/// The run took the first and five hundred gold went on random gear. That is five hearts, or fifty
+/// nights at an inn, for items nothing in this program knows how to evaluate — and the purse is
+/// what the heart errand and the rest errand both spend. `Leave.` is free, always last, and always
+/// there.
+///
+/// Matched on the price tag rather than on prose, the same way [`costs_everything`] is: the game
+/// builds choice text from coloured segments and the bracketed cost is the part that is structural.
+/// A bare `[-…g]` or `[-… gold]` is a price; anything else is left to the other predicates.
+pub fn costs_gold(text: &str) -> bool {
+    let mut rest = text;
+    while let Some(open) = rest.find("[-") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find(']') else { break };
+        let tag = after[..close].trim();
+        let digits = tag.trim_end_matches(|c: char| c.is_ascii_alphabetic() || c.is_whitespace());
+        let unit = tag[digits.len()..].trim().to_ascii_lowercase();
+        if !digits.is_empty()
+            && digits.chars().all(|c| c.is_ascii_digit())
+            && (unit == "g" || unit == "gold")
+        {
+            return true;
+        }
+        rest = &after[close..];
+    }
+    false
 }
 
 pub fn harmful(text: &str) -> bool {
@@ -499,6 +544,8 @@ Choices = {
         assert!(!harmful("Test your skill"));
         assert!(!harmful("Continue"));
         assert!(!harmful("Pay 50 gold"));
+        // The merchant is not harmful, he is expensive — a different predicate. See `costs_gold`.
+        assert!(!harmful("[-500g] - Get two random gear items."));
     }
 
     #[test]
@@ -601,5 +648,43 @@ Choices = {
         assert!(!costs_everything("Pay 50 gold"));
         assert!(!costs_everything("[Shop] - \"Show me what you've got.\""));
         assert!(costs_everything("[-All gold] - Your money"));
+    }
+
+    /// The travelling merchant, off the console verbatim, and the answer is `Leave.`
+    ///
+    /// The dev's rule after a run paid him five hundred gold for random gear: refuse to buy
+    /// anything. That purse is what the heart errand and every inn are spent from, and nothing in
+    /// this program can evaluate a gear item.
+    #[test]
+    fn the_travelling_merchant_is_refused() {
+        let ev = Event {
+            title: "Travelling merchant at Scorborough Spinny north guard post".into(),
+            text: String::new(),
+            choices: vec![
+                Choice { text: "[-500g] - Get two random gear items.".into(), x: 960, y: 432 },
+                Choice { text: "[-300g] - Pick one of two random gear items.".into(), x: 960, y: 486 },
+                Choice { text: "[-200g] - Get one random gear item.".into(), x: 960, y: 540 },
+                Choice { text: "Leave.".into(), x: 960, y: 594 },
+            ],
+        };
+        // The run of 2026-08-15 took the first of these. It is the most expensive option on the
+        // screen and it was chosen because nothing screened it out.
+        assert_eq!(ev.safe_choice_avoiding_combat(false).unwrap().text, "Leave.");
+        assert_eq!(ev.safe_choice_avoiding_combat(true).unwrap().text, "Leave.");
+    }
+
+    /// A price tag is a price tag; prose about gold is not.
+    #[test]
+    fn a_bracketed_price_is_what_marks_a_purchase() {
+        assert!(costs_gold("[-500g] - Get two random gear items."));
+        assert!(costs_gold("[-50 gold] - Pay the toll"));
+        assert!(!costs_gold("Leave."));
+        assert!(!costs_gold("Pay 50 gold"), "unbracketed prose is not the game's own tag");
+        assert!(!costs_gold("[Shop] - \"Show me what you've got.\""));
+        // The highwayman is a different refusal with a different reason, and neither should start
+        // catching the other: this one is "we are not shopping", that one is "we are being robbed".
+        assert!(!costs_gold("[-All gold] - Your money"));
+        // A reward is not a cost. `[+…]` must not trip a predicate that reads `[-`.
+        assert!(!costs_gold("[+200g] - Take the purse"));
     }
 }
