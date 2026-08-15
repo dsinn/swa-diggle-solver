@@ -4024,6 +4024,32 @@ mod tests {
         }
     }
 
+    /// **And the other direction, which is the one that traps runs.**
+    ///
+    /// `answer_for` is exhaustive over [`Screen`], so a new variant cannot be added without somebody
+    /// deciding what happens. That check has a blind side: deciding `Answer::Escape` and then not
+    /// writing the [`ESCAPES`] entry compiles, passes every test, and produces a screen the run
+    /// recognises and cannot leave.
+    ///
+    /// Which is not hypothetical. `ShrineConsecrate` was moved off `Escape` on 2026-08-15 for a good
+    /// reason and back onto it later the same day for a better one; in between, `identify` preferred
+    /// it to `Shrine` whenever the slot was occupied, so it shadowed the ordinary shrine exit and a
+    /// live run spent its whole length bouncing between that screen and the stats page.
+    ///
+    /// Two lists agreeing by hand is the shape of half the faults in this file. This is the pair that
+    /// can be checked, so it is checked.
+    #[test]
+    fn every_screen_that_says_escape_has_somewhere_to_go() {
+        for &s in Screen::ALL {
+            if matches!(answer_for(s), Answer::Escape) {
+                assert!(
+                    ESCAPES.iter().any(|e| e.screen == s),
+                    "{s:?} is answered by escaping and has no escape — it is a trap"
+                );
+            }
+        }
+    }
+
     /// The screens nothing answers, written down.
     ///
     /// This is the test the project actually needed. `Screen` had no in-combat variant, so a run that
