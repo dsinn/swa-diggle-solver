@@ -2215,6 +2215,10 @@ impl WorldMap {
         // Health before exploration: walking into the next fight hurt is how a run ends. Ranked by
         // site — a campfire costs nothing and needs no subworld — then by whether we can actually
         // rest there, which for an inn means carrying the ten gold it charges.
+        //
+        // Hoisted above the rest branch so both can use it. It used to be computed below, which is
+        // why the bed was the one thing on this ladder chosen with no idea how far away it was.
+        let dist = self.distances(here);
         if self.wants_rest {
             let mut sites: Vec<(&Place, crate::rest::Site)> = self
                 .places
@@ -2250,7 +2254,31 @@ impl WorldMap {
                 .filter_map(|p| crate::rest::site(&p.heading).map(|s| (p, s)))
                 .filter(|(p, s)| crate::rest::can_rest_at(*s, self.gold, self.fuel, !p.used))
                 .collect();
-            sites.sort_by(|(pa, sa), (pb, sb)| sb.rank().cmp(&sa.rank()).then(pa.key.cmp(&pb.key)));
+            // **Site, then distance, then key.** The middle term is new, and its absence is the
+            // whole of the dev's question of 2026-08-15: *"after we completed the level 7 crypt, why
+            // did the navigator choose such a distant village to rest at instead of the ones we
+            // bought healthBuffs from?"*
+            //
+            // Because the tie-break was `pa.key.cmp(&pb.key)` and nothing else. Two inns of equal
+            // rank were separated **alphabetically**, so the run walked four hops to `l11` while
+            // `l19` — rested at earlier in that same run, and two hops away through `l9` — lost the
+            // comparison to a string. `spike-run-20260815-1913Z.md` steps 49-53 are that walk. It is
+            // not a near miss either: `l100` sorts before `l11`, which sorts before `l2`.
+            //
+            // Distance is in hops rather than anything cleverer, because hops are what we have —
+            // see #21. Unreachable sites sort last rather than being dropped: `next_target` runs the
+            // whole ladder a second time with the route requirement lifted, and a bed we cannot yet
+            // plot a course to is still better than no bed at all.
+            //
+            // The key stays as the final tie-break so the choice is deterministic, which several
+            // tests depend on. **It is no longer ordering anything that matters.**
+            let far = |p: &Place| dist.get(&p.key).copied().unwrap_or(usize::MAX);
+            sites.sort_by(|(pa, sa), (pb, sb)| {
+                sb.rank()
+                    .cmp(&sa.rank())
+                    .then(far(pa).cmp(&far(pb)))
+                    .then(pa.key.cmp(&pb.key))
+            });
             if let Some((p, _)) = sites.first() {
                 return Some(Plan { target: p.key.clone(), reason: Goal::Rest, steered_by: None });
             }
@@ -2258,7 +2286,6 @@ impl WorldMap {
 
 
         let anomaly_open = self.anomaly_is_open().unwrap_or(false);
-        let dist = self.distances(here);
         // A shrine still worth walking to. `Pray` retires on `areaUnused`; `Consecrate` needs
         // `hell ~= 0`, so an open portal makes an unconsecrated shrine live again whatever its
         // `_used` flag says. See the fuller account at the closed-portal branch below.
@@ -4708,6 +4735,52 @@ mod tests {
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Rest);
         assert_eq!(plan.target, "start", "the campfire, not the village");
+    }
+
+    /// **The dev's question, reproduced.** *"After we completed the level 7 crypt, why did the
+    /// navigator choose such a distant village to rest at instead of the ones we bought healthBuffs
+    /// from?"*
+    ///
+    /// Because two inns of equal rank were separated by `pa.key.cmp(&pb.key)` — alphabetically —
+    /// and `l11` sorts before `l19`. The map here is the one from
+    /// `spike-run-20260815-1913Z.md` steps 49-53, cut down to the part that decides: standing at
+    /// `l1`, with `l19` two hops away through `l9` and `l11` four hops away through `l9`, `l10` and
+    /// `l4`.
+    ///
+    /// The second assertion is the positive control, and without it this test proves nothing: it
+    /// pins the fact that the two candidates really are in the order that used to lose, so a fix
+    /// that quietly stopped offering `l11` at all would not pass by accident.
+    #[test]
+    fn the_nearer_of_two_inns_wins_however_the_keys_happen_to_sort() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("l1", "Weedley Copse crypt", vec![node("l9", "Kelk Wold — level 2 forest")]));
+        m.fold(&dump(
+            "l9",
+            "Kelk Wold — level 2 forest",
+            vec![
+                node("l1", "Weedley Copse crypt"),
+                node("l19", "Dane village"),
+                node("l10", "Ulrome — level 3 forest"),
+            ],
+        ));
+        m.fold(&dump("l10", "Ulrome — level 3 forest", vec![node("l4", "Bainton Clump — level 1 forest")]));
+        m.fold(&dump("l4", "Bainton Clump — level 1 forest", vec![node("l11", "Rowlston Covert village")]));
+        // Back where the run was when it chose, and hurt enough to want a bed.
+        m.fold(&dump("l1", "Weedley Copse crypt", vec![node("l9", "Kelk Wold — level 2 forest")]));
+        m.gold = 50;
+        m.note_health(
+            crate::rest::Health { current: 20, max: 20 },
+            crate::rest::Health { current: 9, max: 20 },
+        );
+        assert!(m.wants_rest());
+
+        assert!(
+            "l11" < "l19",
+            "the control: the far inn is the one an alphabetical tie-break would pick"
+        );
+        let plan = m.next_target().expect("a bed should be planned");
+        assert_eq!(plan.reason, Goal::Rest);
+        assert_eq!(plan.target, "l19", "two hops beats four, whatever the keys say");
     }
 
     #[test]
