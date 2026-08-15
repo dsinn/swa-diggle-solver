@@ -1773,6 +1773,20 @@ impl WorldMap {
         }
         self.gold = save.int_at("player.gold").unwrap_or(0);
         self.fuel = crate::rest::fuel_from_save(save);
+        // **Health belongs here with gold and fuel, not in the hands of whoever took the reading.**
+        //
+        // It used to be the caller's job: four sites in the driver did `let now = r.apply_save()`
+        // and then `note_health_level(now)` by hand, and the fifth — the one at the end of a rest —
+        // read the save, printed `health is now 20/20`, and dropped the reading on the floor. Live
+        // 2026-08-15 at The Quacking Duck the errand therefore survived its own completion and the
+        // run walked back into the inn it had just filled up in.
+        //
+        // A fact that has to be re-plumbed at every call site is a fact that will be missed at one
+        // of them. See [`WorldMap::note_health_level`] for what it does with the number; it sets
+        // below half, clears at full, and deliberately leaves a partial heal alone.
+        if let Some(h) = crate::rest::Health::from_save(save) {
+            self.note_health_level(h);
+        }
     }
 
     /// Where to go next.
@@ -4835,6 +4849,41 @@ mod tests {
         assert!(!m.wants_rest(), "nothing observed yet");
         m.note_health_level(crate::rest::Health { current: 4, max: 12 });
         assert!(m.wants_rest(), "4/12 is below half");
+    }
+
+    /// The save is where every other fact arrives from, and health must not be the exception.
+    ///
+    /// Live 2026-08-15 at The Quacking Duck: three presses took 2/20 to 20/20, the driver re-read the
+    /// save, printed `health is now 20/20` — and threw the reading away, because noting it was a
+    /// thing four *other* call sites in the driver remembered to do. `wants_rest` stayed set, the
+    /// arrival dispatch saw an inn under its feet, and the run walked straight back in to be told
+    /// `healthNeed = 0`.
+    ///
+    /// `gold` and `fuel` were already read here. This is the field that was being passed around by
+    /// hand next to them.
+    #[test]
+    fn a_full_bar_in_the_save_ends_the_rest_errand() {
+        let mut m = WorldMap::default();
+        m.note_health_level(crate::rest::Health { current: 2, max: 20 });
+        assert!(m.wants_rest(), "2/20 asks for a bed");
+        let save = crate::game::save::parse(
+            r#"return { player = { health = 20, maxHealth = 20, gold = 1010 } }"#,
+        )
+        .unwrap();
+        m.apply_save(&save);
+        assert!(!m.wants_rest(), "the save says the bar is full, and that is the whole errand");
+    }
+
+    /// And the other direction, which is the one that must not need a watched drop to fire.
+    #[test]
+    fn a_low_bar_in_the_save_asks_for_a_rest_with_no_before_reading() {
+        let mut m = WorldMap::default();
+        let save = crate::game::save::parse(
+            r#"return { player = { health = 4, maxHealth = 12, gold = 107 } }"#,
+        )
+        .unwrap();
+        m.apply_save(&save);
+        assert!(m.wants_rest(), "a resumed run at a third health has no delta to observe");
     }
 
     #[test]

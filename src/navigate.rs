@@ -1303,7 +1303,28 @@ impl Run<'_> {
                 let mark = self.feed.mark();
                 match crate::act::click_when_ready(self.win, &crate::act::INN_REST, innplay::REST_WAIT)
                 {
-                    Ok(q) => self.log.push_str(&format!("  rest: `Rest` found at {q:.4}\n")),
+                    Ok(q) => {
+                        self.log.push_str(&format!("  rest: `Rest` found at {q:.4}\n"));
+                        // **Get off the button before anything looks at it again.**
+                        //
+                        // A click leaves the pointer on the artwork, and `button.lua:122,159` then
+                        // draws `button-up-hover.jpg` over it until a `mousemoved` says otherwise
+                        // (`:223-269`). There is no timeout on that; it is a state, not an
+                        // animation. `act::INN_REST`'s template is the un-hovered plaque, and the
+                        // hovered one scores 0.5452 against it — see
+                        // `act::a_hovered_plaque_does_not_match_its_own_template`.
+                        //
+                        // Live 2026-08-15 at The Quacking Duck: three presses filled the bar, the
+                        // next round went looking for `Rest` to open another one, and found nothing
+                        // for twelve seconds while the plaque sat in plain view. Then `leave_inn`
+                        // ran the same `locate`, decided we were already outside, and left the run
+                        // standing on an inn screen that the identifier went on to call a shrine.
+                        //
+                        // Parking is how this run keeps a hover out of a reading everywhere else —
+                        // `click_area_button` has done it since the `Start` it could not read for
+                        // four seconds. This path simply never did.
+                        self.park();
+                    }
                     Err(e) => {
                         // **Not a verdict — try again.** This used to `break`, which meant
                         // [`innplay::REST_TRIES`] covered only the "pressed it and nothing opened"
@@ -1318,11 +1339,16 @@ impl Run<'_> {
                         // of it just did not reach.
                         //
                         // The cost of retrying is bounded and small — `REST_TRIES` × `REST_WAIT`,
-                        // ~12s — and it is only paid when the button genuinely never comes. One
-                        // case where it does: at full health the plaque reads `+0 (full)` and does
-                        // not match this artwork at all, so a needless inn visit now waits the full
-                        // budget. Harmless, since `presses_needed` would be 0 anyway, but it is why
-                        // the last try photographs the screen rather than the first.
+                        // ~12s — and it is only paid when the button genuinely never comes.
+                        //
+                        // **RETRACTED 2026-08-15.** This used to claim the budget was spent at full
+                        // health, because "the plaque reads `+0 (full)` and does not match this
+                        // artwork at all". It does not: `ui/inn.lua:55` declares a constant `Rest`
+                        // with no `activeIf`, and the very next visit in that same run matched it at
+                        // 1.0000 with the bar already full. The twelve seconds were real and the
+                        // cause was the pointer, not the health — see the `Ok` arm above. The
+                        // reading was invented from the behaviour rather than taken from the screen,
+                        // and the screen was one `snap_screen` away the whole time.
                         self.log.push_str(&format!(
                             "  rest: `Rest` not on screen yet (try {try_n} of {}) — {e}\n",
                             innplay::REST_TRIES
@@ -1475,6 +1501,10 @@ impl Run<'_> {
                 self.log.push_str("  rest: the rest screen did not close\n");
                 return;
             }
+            // Off the plaque, for the same reason the `Rest` press parks: the back plaque is
+            // fingerprinted too — `act::SHRINE_GOBACK` is this exact corner — and the next thing to
+            // look at this screen is either this loop's own check or `identify`.
+            self.park();
             std::thread::sleep(Duration::from_millis(600));
         }
         self.pump();
@@ -2340,7 +2370,6 @@ pub fn drive(
                 if let (Some(b), Some(a)) = (health.clone(), now) {
                     r.map.note_health(b, a);
                     r.map.rested(a);
-                    r.map.note_health_level(a);
                 }
                 *health = now;
             }
@@ -2515,7 +2544,6 @@ pub fn drive(
                     if let (Some(b), Some(a)) = (health.clone(), now) {
                         r.map.note_health(b, a);
                         r.map.rested(a);
-                        r.map.note_health_level(a);
                     }
                     *health = now;
                     continue;
@@ -2761,7 +2789,6 @@ pub fn drive(
             if let (Some(b), Some(a)) = (*health, now) {
                 r.map.note_health(b, a);
                 r.map.rested(a);
-                r.map.note_health_level(a);
             }
             *health = now;
             continue;
@@ -4016,7 +4043,6 @@ pub fn drive(
         if let (Some(b), Some(a)) = (*health, now) {
             r.map.note_health(b, a);
             r.map.rested(a);
-            r.map.note_health_level(a);
         }
         *health = now;
         let _ = Goal::Explore;

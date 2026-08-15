@@ -2550,6 +2550,37 @@ mod threshold_tests {
         );
     }
 
+    /// **A button under the pointer is not the button we have a template for.**
+    ///
+    /// `ui/elements/button.lua:122,159` draws `<img>-up-hover.jpg` over `<img>-up.jpg` at
+    /// `hover_alpha`, and `hover` is set purely from `mousemoved` (`:223-269`) — so a plaque keeps
+    /// its hover artwork for as long as the pointer sits inside it, with nothing to time out. Every
+    /// template in this file was cut with the pointer somewhere else.
+    ///
+    /// `inn-rest-hovered.png` is the live frame from 2026-08-15 at The Quacking Duck, captured after
+    /// the run had clicked `Rest` and left the pointer on it. The plaque is plainly drawn, at the
+    /// coordinate the arithmetic predicts, and it scores **0.5452** — so far under [`MIN_INLIERS`]
+    /// that no threshold could split the two. The run read that as "the inn is not there yet", spent
+    /// [`crate::innplay::REST_TRIES`] × 1.5s hunting it, and then `leave_inn`'s presence check —
+    /// the same `locate` — concluded it was already out of the inn while standing in it.
+    ///
+    /// The fix is not a looser bar or a second template: it is to move the pointer off the artwork
+    /// before reading it, which [`crate::navigate::Run::park`] already exists to do. This test is
+    /// what says the hazard is real, and it is the reason that call is not optional.
+    #[test]
+    fn a_hovered_plaque_does_not_match_its_own_template() {
+        let Some(hovered) = score(&INN_REST, "inn-rest-hovered.png") else {
+            eprintln!("SKIP: frame corpus not present");
+            return;
+        };
+        assert!(
+            hovered < MIN_INLIERS,
+            "`inn Rest` scores {hovered:.4} on the hovered frame, at or above MIN_INLIERS \
+             {MIN_INLIERS:.4}. If this now passes, the hover artwork or the metric changed — and \
+             the parking in `rest_at_inn` was justified by this measurement."
+        );
+    }
+
     /// Pins the inversion itself, because it is the reason [`REWARD_SCREEN_PRESENT`] cannot simply be
     /// tuned down again: bare ground scores **higher** than a real reward screen whose item has been
     /// selected. Anyone lowering the threshold to catch the active state will re-admit the map.

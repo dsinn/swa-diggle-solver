@@ -228,12 +228,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => r.log.push_str("no map remembered for this world — starting from the save alone\n"),
     }
-    // The first reading counts too. `note_health` needs a before and an after, so on a resumed save
-    // there is nothing for it to compare and the intent is never set — which is how a run that
-    // opened at 4/12 walked straight into a village fight without once considering a rest.
-    if let Some(h) = health {
-        r.map.note_health_level(h);
-    }
+    // The first reading counted too, and used to be taken by hand here: `note_health` needs a before
+    // and an after, so on a resumed save there is nothing for it to compare and the intent was never
+    // set — which is how a run that opened at 4/12 walked straight into a village fight without once
+    // considering a rest. `WorldMap::apply_save` now reads health alongside gold and fuel, so the
+    // `apply_save` above has already done it.
     r.log.push_str(&format!(
         "start at **{}**, portal {:?}, anomaly open {:?}, health {:?}\n\n",
         r.map.here().unwrap_or("?"),
