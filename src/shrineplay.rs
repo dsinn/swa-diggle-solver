@@ -609,10 +609,29 @@ fn spend_the_solve(
 /// scored **0.8560** — the measured signature of an active `Consecrate`, see
 /// [`crate::act::SHRINE_PRAY_PRESENT`] — and the run logged `solved but no Pray button` and walked
 /// away from a blessing it had already earned.
+/// ## `already_open`: the game sometimes opens the shrine for us, and that is a gift
+///
+/// Winning a fight *at* a shrine does not put us back on the map. `overworld.lua:1070-1079`:
+///
+/// ```lua
+/// if runSaveData.rpg.scenario.shrine then
+///     local shrine = require'shrine'
+///     shrine:load({ back = self, location = ..., directFromCombat = true })
+///     postgame.setBackMode(shrine)
+/// ```
+///
+/// So the postgame screen's way back **is** the shrine, and dismissing it lands on a fully live
+/// shrine screen — `directFromCombat` only skips rebuilding the backdrop the fight already drew
+/// (`shrine.lua:514`). That is the game handing us the consecration on the way out of the fight.
+///
+/// Pass `true` there and step 1 is skipped. It has to be skipped rather than merely wasted: the
+/// `Visit` click shares its coordinate with the shrine screen's own right-hand slot, which is where
+/// `Consecrate` and `Pray` live (`shrine.lua:241`, `:296`).
 pub fn play(
     win: &crate::win::window::GameWindow,
     input: &dyn crate::win::input::Input,
     anomaly_open: bool,
+    already_open: bool,
 ) -> Result<Played, crate::Error> {
     use crate::shrine::{max_guesses, show, solved, Baked, Band, Solver};
     use crate::win::capture::capture_window;
@@ -624,9 +643,14 @@ pub fn play(
     // 1. Open the word screen. `Visit` is a plain click: there is no template for it, and the
     //    confirmation is the grid answering the length probe below rather than the button vanishing.
     let before_visit = capture_window(win)?;
-    input.click(VISIT_CLICK.0, VISIT_CLICK.1)?;
-    std::thread::sleep(TRANSITION_WAIT);
-    out.log.push_str("  shrine: entered\n");
+    match already_open {
+        true => out.log.push_str("  shrine: already open — the fight handed it to us\n"),
+        false => {
+            input.click(VISIT_CLICK.0, VISIT_CLICK.1)?;
+            std::thread::sleep(TRANSITION_WAIT);
+            out.log.push_str("  shrine: entered\n");
+        }
+    }
 
     // 1b. **Is the word already solved?** A win is not a property of this visit. `hasWon()` is
     //     `word == submitions[#submitions-1]` (`shrineview.lua:57-59`), and the submissions list is

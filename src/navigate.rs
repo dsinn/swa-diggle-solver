@@ -462,6 +462,11 @@ pub enum Answer {
 /// being a wish.
 pub const fn answer_for(screen: Screen) -> Answer {
     match screen {
+        // `Shrine` is the escape **fallback**, and still has to be: the check behind it is "there is
+        // a back plaque here", which has fired on an inn. But `drive` looks first, and if the *save*
+        // says a shrine underfoot is worth consecrating it plays it where it stands rather than
+        // pressing back — see the branch above `ESCAPES`. The escape is what happens when the save
+        // says there is nothing here, which is the only case it was ever right for.
         Screen::Character | Screen::StatsHistory | Screen::Shrine => Answer::Escape,
         // Not escaped any more: pressing `Consecrate` is the shrine driver's job, because only it
         // has solved the word that makes the button pressable. See the note where its `Escape` used
@@ -2616,6 +2621,52 @@ pub fn drive(
                 Err(e) => return Stop::Failed(format!("could not play the fight out: {e}")),
             }
         }
+        // **A shrine screen after a shrine fight is not a dead end, it is the handoff.**
+        //
+        // The dev, 2026-08-15: "Upon completing the combat at shrine1, we should immediately
+        // Consecrate instead of having to rely on the fallback."
+        //
+        // Right, and the game agrees — `overworld.lua:1070-1079` wires the postgame screen's way
+        // back to a freshly loaded shrine when the scenario was a shrine, so dismissing the rewards
+        // lands us *on* the shrine with `directFromCombat = true`. Escaping that and walking back in
+        // through `Visit` is refusing a door the game opened.
+        //
+        // The save decides, not the screen. [`crate::act::Screen::Shrine`] means no more than
+        // "there is a way back from here" — it has fired on an inn — so what makes this safe is
+        // `worth_consecrating_here`, which reads `_consecrated` and the corruption flags and is
+        // documented as the only thing allowed to answer "is a shrine underfoot".
+        //
+        // Re-read first: `completed` reaches the save when the *screen* is exited, so the flag from
+        // the fight we have just won can be one read behind. Same reason, same fix, as the arrival
+        // branch's own re-read.
+        if screen == crate::act::Screen::Shrine {
+            r.apply_save();
+            let here = r.map.here().map(str::to_string);
+            if let Some(key) = here.filter(|k| {
+                r.map.worth_consecrating_here(k) && !r.shrines_tried.contains(k)
+            }) {
+                r.log.push_str(&format!(
+                    "  the fight left us on `{key}`'s shrine screen — consecrating here rather \
+                     than walking back in\n"
+                ));
+                r.shrines_tried.insert(key.clone());
+                r.map.abandon(&key);
+                let anomaly_open = r.map.anomaly_is_open().unwrap_or(false);
+                match crate::shrineplay::play(r.win, &r.keys, anomaly_open, true) {
+                    Ok(played) => {
+                        r.log.push_str(&played.log);
+                        if played.consecrated && !r.confirm_consecrated(&key, CONSECRATE_CONFIRM) {
+                            r.log.push_str(
+                                "  shrine: the screen closed but `_consecrated` never landed\n",
+                            );
+                        }
+                    }
+                    Err(e) => r.log.push_str(&format!("  shrine failed: {e}\n")),
+                }
+                r.apply_save();
+                continue;
+            }
+        }
         // Every dead end that is left by pressing one button. See [`ESCAPES`] for which, and why
         // each is in the list.
         if let Some(esc) = ESCAPES.iter().find(|e| e.screen == screen) {
@@ -3136,7 +3187,8 @@ pub fn drive(
             // rather than being discovered by a failed match afterwards. Unknown reads as closed —
             // the conservative direction, since it only costs the older `Pray` attempt.
             let anomaly_open = r.map.anomaly_is_open().unwrap_or(false);
-            match crate::shrineplay::play(r.win, &r.keys, anomaly_open) {
+            // Reached from the map, so the shrine still has to be opened with `Visit`.
+            match crate::shrineplay::play(r.win, &r.keys, anomaly_open, false) {
                 Ok(played) => {
                     let log = played.log.clone();
                     r.log.push_str(&log);
