@@ -2332,12 +2332,51 @@ impl WorldMap {
             return None;
         }
         let entrance = self.entered_from.clone();
-        let target = self.next_target().map(|p| p.target);
+        // **Ask the question from outside the forest.**
+        //
+        // `next_target` plans from `self.here`, and while we are inside a subworld `here` is an
+        // interior node. Nothing links an interior node to its container in this map — the two are
+        // separate components, as [`WorldMap::exit_toward`]'s doc has said all along — so every
+        // surface place is unroutable, `plan` returns nothing, and the whole ranked branch below is
+        // skipped. What is left is `SafestOfWhatIsLeft`: a door picked for safety with **no
+        // reference to where we are going**.
+        //
+        // That is not a rare degenerate case, it is what happens every single time we cross a
+        // subworld, and it cost three runs on 2026-08-15. From inside `l62` it chose the exit to
+        // `shrine7` — a dead end already consecrated, prayed at and finished — walked there, turned
+        // round, re-entered the forest, and then chose `l40` to the south-east while `l57` to the
+        // south-west stood open on a road already walked and reaching every remaining shrine.
+        //
+        // The container is a surface node with surface edges, and it is where we will be standing
+        // the moment we step out. So plan from there. Every exit's `to_key` is a surface node too,
+        // which is why the ranking below works at all once it is given a target it can measure.
+        let outside = self.inside().map(|container| {
+            let mut m = WorldMap { here: Some(container.to_string()), ..WorldMap::default() };
+            m.places.clone_from(&self.places);
+            m.abandoned.clone_from(&self.abandoned);
+            m.roads_done.clone_from(&self.roads_done);
+            m.hell = self.hell;
+            m.wants_rest = self.wants_rest;
+            m.gold = self.gold;
+            m
+        });
+        let target = outside.as_ref().unwrap_or(self).next_target().map(|p| p.target);
         if let Some(target) = target.as_ref() {
             let dist = self.distances(target);
+            // A door whose road we have written off is not a door. `abandoned` is the driver's
+            // record of having had its go, and it is recorded against the *interior road node*
+            // (`l9_path_to_l1`), not against the surface node beyond it — so ranking by surface
+            // distance alone walks straight back onto a road we already gave up on. The safety
+            // fallback happened to respect this and the ranked branch did not, which stayed hidden
+            // for as long as the ranked branch never ran.
+            let written_off = |to: &str| {
+                self.inside()
+                    .map(|c| self.abandoned.contains(&exit_node_key(c, to)))
+                    .unwrap_or(false)
+            };
             if let Some(best) = exits
                 .iter()
-                .filter(|e| dist.contains_key(&e.to_key))
+                .filter(|e| dist.contains_key(&e.to_key) && !written_off(&e.to_key))
                 .min_by_key(|e| dist_or_far(&dist, &e.to_key))
             {
                 // Retreating through the entrance is only right when it is genuinely the way on —
@@ -4949,6 +4988,56 @@ mod tests {
         assert!(m.gap("west", "start").unwrap() < m.gap("east", "start").unwrap());
         assert_eq!(hop.step, "west", "toward the anomaly, not the lower key");
         assert!(!hop.routed, "and the log has to say so");
+    }
+
+    /// Which door out of the forest, asked the way the dev asked it.
+    ///
+    /// Standing inside `l62`, three exits open: `shrine7`, which is finished; `l40` to the
+    /// south-east; `l57` to the south-west, on a road already walked and reaching the shrine we
+    /// want. The planner took `shrine7`, walked to a dead end, came back, and then took `l40` — the
+    /// one exit whose road it would have to carve, and the one whose exit node has stalled a run
+    /// three times.
+    ///
+    /// It was not choosing badly. It was not choosing at all: `next_target` plans from `here`, `here`
+    /// was an interior node, no interior node reaches the surface in this map, so the ranked branch
+    /// was skipped every time and `SafestOfWhatIsLeft` picked the door.
+    #[test]
+    fn the_door_out_of_a_forest_is_chosen_from_outside_it() {
+        use crate::observe::adjacency::Exit;
+        let door = |to: &str| Exit {
+            x: 0.0,
+            y: 0.0,
+            to_key: to.into(),
+            to_heading: format!("{to} heading"),
+        };
+
+        let mut m = WorldMap::default();
+        for (a, b) in [("l62", "shrine7"), ("l62", "l40"), ("l62", "l57"), ("l57", "shrine9")] {
+            m.entry(a).neighbours.insert(b.into());
+            m.entry(b).neighbours.insert(a.into());
+        }
+        m.entry("shrine9").heading = "Somewhere shrine".into();
+        m.entry("shrine9").completed = true;
+        // Inside the forest, on an interior node that borders nothing on the surface — which is the
+        // whole of the problem this test is about.
+        m.entry("l62sub18").parent = Some("l62".into());
+        m.here = Some("l62sub18".into());
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = { hell = 0.1 },
+                     completedAreas = { l62_path_to_l57 = true } } }",
+            )
+            .unwrap(),
+        );
+        assert_eq!(m.inside(), Some("l62"), "the fixture must actually be inside the forest");
+
+        // `choose_exit` rather than `exit_toward`, because the reason is the point: picking `l57`
+        // by luck out of the safety fallback would pass the first assertion and fix nothing.
+        let (chosen, why) = m
+            .choose_exit(&[door("shrine7"), door("l40"), door("l57")])
+            .expect("three doors is not no doors");
+        assert_eq!(chosen, "l57", "the door that leads to the shrine, not the one that is merely safe");
+        assert_eq!(why.why(), "nearest to the target", "and it was ranked, not fallen back on");
     }
 
     /// The route the dev asked for twice, and the reason it was not taken.
