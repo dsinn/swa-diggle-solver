@@ -92,6 +92,21 @@ pub struct Place {
     /// (`overworldview.lua:215-218`). For a campfire this is the difference between a free rest and
     /// a wasted walk.
     pub used: bool,
+    /// This heading came out of the map cache and no dump has confirmed it this run.
+    ///
+    /// **A recalled heading cannot prove safety.** It carries the node's level, and corruption
+    /// *raises* levels (`world.lua:499-502`) — so a node corrupted after the cache was written reads
+    /// as tamer than it is, and the difference is the whole of a fight.
+    ///
+    /// Live 2026-08-15: the cache held `p l4 Riccall crypt`, with no level in it at all. The live
+    /// dump says `Riccall — level 6 crypt`. Every danger test we have reads that heading, so all of
+    /// them saw an ordinary crypt on the route to a village, and the run walked into a level 6 fight
+    /// at 20/20 and came out at 2/20.
+    ///
+    /// Cleared the moment a dump names the place — `fold` already prefers a live heading to a stored
+    /// one, for the same reason spelled out at its own call site. This only marks the gap between
+    /// remembering and seeing.
+    pub heading_recalled: bool,
     /// `<key>subs` in `areaFlags` — **the shrine's word has been played at least once.**
     ///
     /// No underscore: the game builds it as `data.dataKey..'subs'` (`shrineview.lua:267`), and it
@@ -449,6 +464,28 @@ impl Place {
     /// A village's general store. `typeName = 'general store'`
     /// (`overworld/generators/village.lua:291-292`), read from the heading the same way
     /// [`Place::is_inn`] reads its own.
+    /// Might walking onto this cost a fight? **Unverified is not safe.**
+    ///
+    /// The dev's rule, 2026-08-15: the cache's levels are not to be assumed, and the console dump is
+    /// what the navigator's knowledge is built from. So three things count as a fight in waiting,
+    /// and only the first is a reading:
+    ///
+    /// - a heading with a level in it, which is the ordinary case;
+    /// - a heading we only *recalled*, which cannot prove anything either way
+    ///   ([`Place::heading_recalled`]);
+    /// - corruption, because it raises a node's level whatever the stored heading says
+    ///   (`world.lua:499-502`).
+    ///
+    /// `completed` is checked by the caller, since it is what says whether a fight is still owed.
+    ///
+    /// This is deliberately pessimistic and will refuse routes that would have been fine. That is
+    /// the trade the dev chose after a run walked into `Riccall — level 6 crypt` because the cache
+    /// remembered it as `Riccall crypt`: an unverified heading is a reason to look, not a licence to
+    /// walk.
+    pub fn may_be_a_fight(&self) -> bool {
+        heading_has_combat(&self.heading) || self.heading_recalled || self.corrupted
+    }
+
     pub fn is_general_store(&self) -> bool {
         self.type_is("general store")
     }
@@ -1064,6 +1101,8 @@ impl WorldMap {
                     if place.heading.is_empty() {
                         if let Some(h) = heading.filter(|h| !h.is_empty()) {
                             place.heading = h.to_string();
+                            // Remembered, not seen — see `Place::heading_recalled`.
+                            place.heading_recalled = true;
                         }
                     }
                     if place.pos.is_none() {
@@ -1439,6 +1478,7 @@ impl WorldMap {
             p.subworld_container = true;
             if !heading.trim().is_empty() {
                 p.heading = heading.clone();
+                p.heading_recalled = false;
             }
         }
 
@@ -1462,6 +1502,7 @@ impl WorldMap {
         {
             let here = self.entry(&a.here_key);
             here.heading = a.here_heading.clone();
+            here.heading_recalled = false;
             here.visited = true;
             here.hidden = Some(a.hidden);
             here.parent = parent.clone();
@@ -1479,6 +1520,7 @@ impl WorldMap {
             let p = parent.clone();
             let place = self.entry(&n.key);
             place.heading = n.heading.clone();
+            place.heading_recalled = false;
             place.connections = n.connections;
             if place.parent.is_none() {
                 place.parent = p;
@@ -1516,6 +1558,7 @@ impl WorldMap {
                 let place = self.entry(&e.to_key);
                 if place.heading.is_empty() {
                     place.heading = e.to_heading.clone();
+                    place.heading_recalled = false;
                 }
                 place.neighbours.insert(container.clone());
                 self.entry(container).neighbours.insert(e.to_key.clone());
@@ -1754,10 +1797,7 @@ impl WorldMap {
     /// the question is whether such a route exists at all, not which one is cheapest.
     fn reachable_without_a_fight(&self, from: &str, to: &str) -> bool {
         let costly = |k: &str| {
-            self.places
-                .get(k)
-                .map(|p| !p.completed && heading_has_combat(&p.heading))
-                .unwrap_or(false)
+            self.places.get(k).map(|p| !p.completed && p.may_be_a_fight()).unwrap_or(false)
         };
         if costly(to) {
             return false;
@@ -5440,6 +5480,40 @@ mod tests {
         );
     }
 
+    /// `l4`: remembered as `Riccall crypt`, met as `Riccall — level 6 crypt`.
+    ///
+    /// The level is in a heading only while a fight is owed (`AreaHeading`,
+    /// `overworldview.lua:388-389`), so a heading cached while the node was clear says nothing about
+    /// the node after corruption reset it. The dev's rule: the cache's levels are not to be assumed,
+    /// and the dump is what updates us.
+    #[test]
+    fn a_remembered_heading_cannot_prove_a_node_is_safe() {
+        let cached = "p	l4	Riccall crypt	951	275	4	0	
+p	l11	Rowlston Covert village	900	300	2	0	
+e	l4	l11
+";
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("l4", "")]));
+        assert!(m.absorb_cache(cached) > 0);
+        m.here = Some("here".into());
+        m.hell = Some(0.1);
+        m.gold = HEART_COST + 1;
+
+        let l4 = m.get("l4").expect("recalled");
+        assert!(l4.heading_recalled, "the heading came from the cache and nothing has confirmed it");
+        assert!(l4.may_be_a_fight(), "so it cannot be used to prove there is no fight");
+        assert!(
+            !m.reachable_without_a_fight("here", "l11"),
+            "and the village behind it is not a free trip"
+        );
+
+        // A dump names it, and the recalled flag goes with it. Now the heading is a reading: no
+        // level in it means no fight owed, and the route is genuinely free.
+        m.fold(&dump("l4", "Riccall crypt", vec![node("l11", "Rowlston Covert village")]));
+        assert!(!m.get("l4").unwrap().heading_recalled, "seeing beats remembering");
+        assert!(m.reachable_without_a_fight("here", "l11"));
+    }
+
     /// A road that bends the wrong way is still the road.
     ///
     /// `l40sub25` as the dump printed it on 2026-08-15, with the `l36` door at (233, 105):
@@ -6528,6 +6602,15 @@ mod tests {
 
         // Now hand it back what it had already learned.
         assert!(fresh.absorb_cache(&text) > 0, "the cache carried no edges");
+        // **And say which of that ground is cleared**, which is the save's job rather than the
+        // cache's. Since 2026-08-15 a recalled heading cannot prove a node is safe to cross — the
+        // level is in the heading only while a fight is owed (`AreaHeading`,
+        // `overworldview.lua:388-389`), so a heading remembered from before corruption reads tamer
+        // than the node now is. Without this the fixture asserts something it never meant to: that
+        // unwalked ground with a remembered name is known to be fightless.
+        for k in ["here", "mid"] {
+            fresh.entry(k).completed = true;
+        }
         let plan = fresh.next_target().expect("a plan");
         assert_eq!(plan.reason, Goal::Shrine, "the route was known all along");
         assert_eq!(plan.target, "s1");
