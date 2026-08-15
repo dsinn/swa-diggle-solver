@@ -660,21 +660,35 @@ impl Fight<'_> {
         // Kept past the submission: if the game comes back with the avoidable-murder dialog, the
         // word survives the cancel and has to come off, and this is the only record of what the
         // board looked like before it went on.
-        // **Which tiles count themselves down, from the save rather than from watching.** A digit
-        // tile is a bomb (`rpg/effects/material/default.lua:54-56`) and its number ticks, so it
-        // differs from any baseline taken before it moved — see `Board::select_word`, and the
-        // anomaly run of 2026-08-15 that this stopped eight turns in.
-        let counting: Vec<usize> = tiles
+        // **Which tiles animate on their own, from the save rather than from watching.**
+        //
+        // Two kinds, and both trip the stray-click guard the same way — they differ from a baseline
+        // taken before they moved, and `Board::select_word`'s 250ms sample only catches whichever
+        // happens to be mid-change during that quarter second.
+        //
+        // - **Bombs.** A digit tile *is* a bomb (`rpg/effects/material/default.lua:54-56`) and its
+        //   number ticks down. This stopped a run eight turns into the anomaly on 2026-08-15.
+        // - **Burning tiles.** `tile.extra.burn` is a turn counter — *"This tile is burning. It has
+        //   0 score. Having burning tiles damages you. Turns remaining: %d"* (`tileboard.lua:170`) —
+        //   and the tile is drawn with a fire overlay whose `fireAlpha` is advanced every frame
+        //   (`tileboard.lua:1713-1715`). So a burning tile is *always* moving, which makes it a
+        //   worse false positive than the bomb: the bomb at least holds still between ticks.
+        //
+        // The dev asked for the second before it had cost a run, which is the right time to ask.
+        let restless: Vec<usize> = tiles
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.letter.chars().all(|c| c.is_ascii_digit()) && !t.letter.is_empty())
+            .filter(|(_, t)| {
+                let bomb = !t.letter.is_empty() && t.letter.chars().all(|c| c.is_ascii_digit());
+                bomb || t.burn().is_some_and(|b| b > 0)
+            })
             .map(|(i, _)| i)
             .collect();
-        if !counting.is_empty() {
-            log.push_str(&format!("  bomb tiles counting down at {counting:?}
+        if !restless.is_empty() {
+            log.push_str(&format!("  tiles that move on their own: {restless:?}
 "));
         }
-        let placed = match board.select_word(&steps, &counting) {
+        let placed = match board.select_word(&steps, &restless) {
             Ok(placed) => placed,
             Err(e) => {
                 *select_failures += 1;

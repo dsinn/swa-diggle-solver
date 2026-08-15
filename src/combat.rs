@@ -750,6 +750,28 @@ mod bomb_tests {
         // A multi-letter tile is not a digit, and must not be one by accident.
         assert!(!counting.contains(&10));
     }
+
+    /// A burning tile is restless for a different reason, and a worse one.
+    ///
+    /// `tile.extra.burn` is a turn counter (`tileboard.lua:170`: *"This tile is burning. It has 0
+    /// score. Having burning tiles damages you. Turns remaining: %d"*) and the tile carries a fire
+    /// overlay whose alpha is advanced every frame (`:1713-1715`). So unlike a bomb — which holds
+    /// still between ticks — a burning tile is moving continuously, and the 250ms sample can miss it
+    /// only by luck.
+    ///
+    /// `burn = 0` is the burnt-out state, still drawn but no longer counting
+    /// (`:234-242` gives it its own tooltip branch), so it is not restless and not damaging.
+    #[test]
+    fn a_burning_tile_is_restless_and_a_burnt_out_one_is_not() {
+        let burn: [Option<i64>; 5] = [None, Some(3), Some(0), None, Some(1)];
+        let restless: Vec<usize> = burn
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.is_some_and(|b| b > 0))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(restless, vec![1, 4]);
+    }
 }
 
 #[cfg(test)]
