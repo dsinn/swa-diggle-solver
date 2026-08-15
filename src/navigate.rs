@@ -3288,10 +3288,21 @@ pub fn drive(
             // Deliberately not built yet — the MVP has one errand, and inventing the abstraction
             // around a single case is how you get the wrong abstraction. Task #18, raised by the dev
             // for the post-MVP shop work.
+            // **Corruption is a level, not a locked door — `completed` is what says whether a fight
+            // is still owed.** A corrupted village that has been cleared has its inn back; it is a
+            // harder fight than an ordinary village and that is the whole of the difference.
+            //
+            // The planner already knew this — its rest-site filter reads `(!p.corrupted ||
+            // p.completed)` (`overworld::plan`) — and this line did not, so the two disagreed: the
+            // planner would route to a cleared corrupted village *for the rest* and the driver would
+            // arrive and decline to take it. A disagreement between planner and driver is the shape
+            // that produced the `shrine1 -> l10 -> shrine1` bounce, and the same omission is what
+            // left `shrine1` unconsecrated for four runs — a filter testing `corrupted` without
+            // asking `completed`.
             let rest_here = r.map.wants_rest()
                 && r.map.gold() >= crate::rest::INN_COST
                 && p.type_is("village")
-                && !p.corrupted;
+                && (!p.corrupted || p.completed);
             if p.subworld_container || rest_here {
                 let heading_for = r.map.next_hop().map(|h| h.plan.target);
                 let stuck_here =
