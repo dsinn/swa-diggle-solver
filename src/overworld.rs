@@ -2462,9 +2462,27 @@ impl WorldMap {
         let toward = |k: &String| -> i64 {
             target.as_ref().and_then(|t| self.gap(k, t)).map(|d| d as i64).unwrap_or(i64::MAX)
         };
+        // **Safety outranks direction only while we want a rest.**
+        //
+        // The dev's ruling, given for destination choice and repeated here for doors: risk ordering
+        // is what a hurt run needs, and it is counterproductive on the way to the anomaly, because
+        // corruption *is* high node levels — ranking those last points the run away from the one
+        // place it is trying to reach. The comment this replaces called promoting direction "a
+        // tuning decision that wants evidence from a run rather than an argument". Three runs on
+        // 2026-08-15 supplied it: safest-first walked out of `l62` to a finished dead end, and then
+        // out again by the south-east door while the south-west one stood open toward everything
+        // that was left.
+        //
+        // So the two keys swap on `wants_rest`, and nothing else about the ordering changes: the
+        // entrance is still last, and the key still breaks ties so the choice cannot flap.
         ranked.sort_by_key(|e| {
-            let risk = self.places.get(&e.to_key).map(|p| p.risk()).unwrap_or(Risk::Unseen);
-            (Some(&e.to_key) == entrance.as_ref(), risk, toward(&e.to_key), &e.to_key)
+            let risk = self.places.get(&e.to_key).map(|p| p.risk()).unwrap_or(Risk::Unseen) as i64;
+            let dir = toward(&e.to_key);
+            let (first, second) = match self.wants_rest {
+                true => (risk, dir),
+                false => (dir, risk),
+            };
+            (Some(&e.to_key) == entrance.as_ref(), first, second, &e.to_key)
         });
         let best = ranked.first()?;
         let why = match toward(&best.to_key) {
@@ -4988,6 +5006,75 @@ mod tests {
         assert!(m.gap("west", "start").unwrap() < m.gap("east", "start").unwrap());
         assert_eq!(hop.step, "west", "toward the anomaly, not the lower key");
         assert!(!hop.routed, "and the log has to say so");
+    }
+
+    /// Safety decides the door only when we are looking for a bed.
+    ///
+    /// The dev's ruling, given first for destinations and then again for doors. Corruption *is* high
+    /// node levels, so ranking risk first points a run away from the anomaly — the one place it is
+    /// trying to reach. This is the disagreement in its purest form: the corrupted door is the one
+    /// the objective lies behind, and the safe door leads away from it.
+    ///
+    /// Fallback territory on purpose. The anomaly comes from the save with no edges, so no exit is
+    /// measurable by route, and this ordering is the whole of the decision.
+    #[test]
+    fn safety_decides_the_door_only_when_we_want_a_bed() {
+        use crate::observe::adjacency::Exit;
+        let door = |to: &str| Exit {
+            x: 0.0,
+            y: 0.0,
+            to_key: to.into(),
+            to_heading: format!("{to} heading"),
+        };
+        let at = |key: &str, heading: &str, x: f64| Node {
+            key: key.into(),
+            heading: heading.into(),
+            x,
+            y: 0.0,
+            connections: 2,
+        };
+
+        let mut m = WorldMap::new();
+        // West lies a corrupted spider forest; east, a road already cleared. Both border `l62`.
+        m.fold(&dump(
+            "l62",
+            "Fangfoss Chaparral — level 7 spider forest",
+            vec![at("l57", "Harswell Coppice — level 6 spider forest", -200.0), at("l40", "Fosholme road", 200.0)],
+        ));
+        m.entry("l40").completed = true;
+        // Both doors have been stood on, so neither is a frontier and `Explore` has nothing to
+        // offer. That leaves the anomaly as the only target, which is the state this ordering exists
+        // for — and the state the live run was in.
+        m.entry("l57").visited = true;
+        m.entry("l40").visited = true;
+        m.entry("l62sub18").parent = Some("l62".into());
+        m.here = Some("l62sub18".into());
+        // The anomaly is open and known only by key, and the corruption around `l57` is what gives
+        // it a bearing at all — see `pos_for`.
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = {
+                     hell = 0.1, start_first_corrupt_time = 12, l57_first_corrupt_time = 12,
+                 } } }",
+            )
+            .unwrap(),
+        );
+        assert_eq!(m.get("l57").map(|p| p.risk()), Some(Risk::Corrupt), "the fixture must disagree");
+        assert_eq!(m.get("l40").map(|p| p.risk()), Some(Risk::Free));
+
+        let doors = [door("l57"), door("l40")];
+        let (going, why) = m.choose_exit(&doors).expect("two doors");
+        assert_eq!(going, "l57", "toward the anomaly, through the corruption, because that is where it is");
+        assert_eq!(why.why(), "safest, and toward the anomaly");
+
+        // Hurt, and the same map answers the other way.
+        m.note_health_level(crate::rest::Health { current: 1, max: 20 });
+        assert!(m.wants_rest());
+        assert_eq!(
+            m.choose_exit(&doors).map(|(k, _)| k).as_deref(),
+            Some("l40"),
+            "a run that needs a bed takes the safe door, which is the whole point of the ordering"
+        );
     }
 
     /// Which door out of the forest, asked the way the dev asked it.
