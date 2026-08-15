@@ -45,6 +45,12 @@ const BOMB: &str = "bomb";
 pub struct Preferences {
     /// Is a wood-only kill worth constraining the word for?
     pub wood_only_pays: bool,
+    /// Damage at which a killing blow's overkill covers the **whole** health deficit, if the
+    /// Well-Rested heal is available and wanted. `None` when there is no heal to collect.
+    ///
+    /// `lethal + 2 * missing`, because the heal is `floor(overkill/2)` capped at the deficit
+    /// (`rpgview.lua:1195-1196`). See [`Rank::heals_fully`] for why this is a rank and not a floor.
+    pub heal_at: Option<i64>,
 }
 
 impl Preferences {
@@ -91,7 +97,16 @@ impl Preferences {
         let heals = has_flag("onWoodKillGainHealth") && injured && !bleeding;
         let armours = has_flag("onWoodKillGainArmour") && armour_room;
         let braced = has_flag("onWoodKillQueueWoodbraced");
-        Preferences { wood_only_pays: heals || armours || braced }
+        Preferences { wood_only_pays: heals || armours || braced, heal_at: None }
+    }
+
+    /// Records the damage at which the Well-Rested heal covers the whole deficit.
+    ///
+    /// Separate from [`Preferences::from_flags`] because the two answer to different things: the
+    /// flags are gear, this is the player's health and charges, and only the search knows the
+    /// enemy's. See [`Rank::heals_fully`].
+    pub fn healing_at(self, damage: Option<i64>) -> Self {
+        Preferences { heal_at: damage, ..self }
     }
 }
 
@@ -115,6 +130,27 @@ pub struct Context {
 pub struct Rank {
     /// Every tile used was wood, and the gear pays for that. Higher is better.
     pub wood_only: bool,
+    /// This blow overkills deeply enough for the Well-Rested heal to close the whole deficit.
+    ///
+    /// **Below `wood_only`, and that ordering is the dev's rule**, 2026-08-15: *first check if
+    /// there's a wood-only kill that triggers both the Well-Rested heal and the armour bonus;
+    /// otherwise go for the best wood-only kill, and only if that's not possible, go for the
+    /// Well-Rested heal.* Two booleans in that order give exactly those four tiers:
+    ///
+    /// ```text
+    ///   wood_only  heals_fully
+    ///     true       true       both payouts -- the one to want
+    ///     true       false      the gear's armour or health, no heal
+    ///     false      true       the heal alone
+    ///     false      false      an ordinary kill
+    /// ```
+    ///
+    /// It is a **rank** rather than a threshold on purpose. Asking for the heal as a floor is what
+    /// the search used to do, and a floor cannot express "I would rather have the wood word that
+    /// heals nothing": every candidate under it is discarded before anything compares them. The
+    /// floor drops to plain lethal whenever the wood payout is live, and this field carries the heal
+    /// into the comparison instead — see [`crate::search::Goal::killing_blow`].
+    pub heals_fully: bool,
     /// What this word spends from the board's stock of tiles worth keeping. **Lower** is better.
     ///
     /// See [`hoarded`]. Ranked below `wood_only`, which is a payout the gear actually pays, and above
@@ -141,6 +177,9 @@ impl Rank {
     pub fn better_than(&self, other: &Rank) -> bool {
         if self.wood_only != other.wood_only {
             return self.wood_only;
+        }
+        if self.heals_fully != other.heals_fully {
+            return self.heals_fully;
         }
         if self.hoarded != other.hoarded {
             return self.hoarded < other.hoarded;
@@ -284,10 +323,11 @@ pub fn remaining_counts(tiles: &[Tile], consumed: &[usize]) -> [usize; ALPHABET]
 /// The full ranking for one candidate.
 pub fn rank(
     tiles: &[Tile], geometry: &crate::geometry::Geometry, consumed: &[usize], scorer: &Scorer,
-    target: &Target, prefs: Preferences,
+    target: &Target, prefs: Preferences, damage: i64,
 ) -> Rank {
     Rank {
         wood_only: prefs.wood_only_pays && wood_only(tiles, consumed, scorer),
+        heals_fully: prefs.heal_at.is_some_and(|at| damage >= at),
         hoarded: hoarded(tiles, consumed, scorer),
         hazard_fall: hazard_fall(tiles, geometry, consumed, scorer),
         deviation: target.deviation(&remaining_counts(tiles, consumed)),
@@ -355,23 +395,68 @@ mod tests {
         assert_eq!(hoarded(&tiles, &[2], &sc), 0.0, "and a plain letter is free to spend");
     }
 
+    /// The dev's four tiers, 2026-08-15, in the order they stated them.
+    ///
+    /// > if a Well-Rested heal only heals for 3 while a wood-only kill provides 4 armour, we should
+    /// > first check if there's a wood-only kill that triggers both the Well-Rested heal and armour
+    /// > bonus; otherwise, go for the best wood-only kill, and only if that's not possible, go for
+    /// > the Well-Rested heal.
+    ///
+    /// Deliberately asserted with the *other* fields set against each tier — the heal-only word is
+    /// given a spotless board and the wood word a wasteful one — because that is what proves the
+    /// order is the priority and not an accident of the hygiene terms.
+    #[test]
+    fn a_wood_kill_outranks_a_heal_it_cannot_also_collect() {
+        let tier = |wood: bool, heal: bool, hoarded: f64| Rank {
+            wood_only: wood,
+            heals_fully: heal,
+            hoarded,
+            hazard_fall: 0,
+            deviation: 0.0,
+        };
+        let both = tier(true, true, 99.0);
+        let wood_only_kill = tier(true, false, 99.0);
+        let heal_only = tier(false, true, 0.0);
+        let ordinary = tier(false, false, 0.0);
+
+        assert!(both.better_than(&wood_only_kill), "both payouts beat one, spendthrift or not");
+        assert!(wood_only_kill.better_than(&heal_only), "the gear's payout outranks the heal");
+        assert!(heal_only.better_than(&ordinary), "and a heal still beats no payout at all");
+        // Transitive, so the whole order holds rather than just its neighbours.
+        assert!(both.better_than(&ordinary));
+        assert!(wood_only_kill.better_than(&ordinary));
+        assert!(!heal_only.better_than(&wood_only_kill), "strictly, in one direction only");
+    }
+
+    /// With no heal to collect, the field must not sway anything.
+    #[test]
+    fn the_heal_rank_is_inert_when_there_is_no_heal() {
+        let prefs = Preferences { wood_only_pays: true, heal_at: None };
+        // `rank` is what sets the field, and `heal_at: None` is how the caller says the heal is
+        // unavailable -- no charge, cancelled by gear, or already at full health.
+        assert!(!prefs.heal_at.is_some_and(|at| 9999 >= at), "no threshold, so nothing clears it");
+        let with = Preferences::default().healing_at(Some(20));
+        assert!(with.heal_at.is_some_and(|at| 20 >= at), "exactly the threshold heals fully");
+        assert!(!with.heal_at.is_some_and(|at| 19 >= at), "a point short does not");
+    }
+
     /// Two words that both kill: the one that keeps the good tiles wins.
     ///
     /// The rule in the shape it is actually used — a comparison between candidates, not a score.
     #[test]
     fn between_two_kills_the_one_that_spends_less_wins() {
-        let plain = Rank { wood_only: false, hoarded: 0.0, hazard_fall: 0, deviation: 9.0 };
-        let golden = Rank { wood_only: false, hoarded: 40.0, hazard_fall: 0, deviation: 0.0 };
+        let plain = Rank { wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 0, deviation: 9.0 };
+        let golden = Rank { wood_only: false, heals_fully: false, hoarded: 40.0, hazard_fall: 0, deviation: 0.0 };
         assert!(plain.better_than(&golden), "a tidier board is not worth a Q");
         assert!(!golden.better_than(&plain));
 
         // Below the payout, though. `wood_only` is gear paying out for real, and this is a saving.
-        let paid = Rank { wood_only: true, hoarded: 40.0, hazard_fall: 0, deviation: 9.0 };
+        let paid = Rank { wood_only: true, heals_fully: false, hoarded: 40.0, hazard_fall: 0, deviation: 9.0 };
         assert!(paid.better_than(&plain), "a payout in hand outranks a tile kept back");
 
         // And the wildcard case the dev asked for: same gold either way, so do not also burn one.
-        let gold_only = Rank { wood_only: false, hoarded: 10.0, hazard_fall: 0, deviation: 0.0 };
-        let gold_and_wild = Rank { wood_only: false, hoarded: 11.0, hazard_fall: 0, deviation: 0.0 };
+        let gold_only = Rank { wood_only: false, heals_fully: false, hoarded: 10.0, hazard_fall: 0, deviation: 0.0 };
+        let gold_and_wild = Rank { wood_only: false, heals_fully: false, hoarded: 11.0, hazard_fall: 0, deviation: 0.0 };
         assert!(gold_only.better_than(&gold_and_wild), "no reason to spend a wildcard as well");
     }
 
@@ -510,16 +595,16 @@ mod tests {
 
     #[test]
     fn a_payout_outranks_tidier_letters_and_wood_outranks_a_falling_hazard() {
-        let wood = Rank { wood_only: true, hoarded: 0.0, hazard_fall: 0, deviation: 99.0 };
-        let hazard = Rank { wood_only: false, hoarded: 0.0, hazard_fall: 5, deviation: 1.0 };
+        let wood = Rank { wood_only: true, heals_fully: false, hoarded: 0.0, hazard_fall: 0, deviation: 99.0 };
+        let hazard = Rank { wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 5, deviation: 1.0 };
         assert!(wood.better_than(&hazard), "a wood-only kill outranks any number of falls");
 
-        let falls = Rank { wood_only: false, hoarded: 0.0, hazard_fall: 2, deviation: 50.0 };
-        let tidy = Rank { wood_only: false, hoarded: 0.0, hazard_fall: 1, deviation: 0.0 };
+        let falls = Rank { wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 2, deviation: 50.0 };
+        let tidy = Rank { wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 1, deviation: 0.0 };
         assert!(falls.better_than(&tidy), "a falling hazard outranks a tidier board");
 
-        let a = Rank { wood_only: false, hoarded: 0.0, hazard_fall: 1, deviation: 3.0 };
-        let b = Rank { wood_only: false, hoarded: 0.0, hazard_fall: 1, deviation: 4.0 };
+        let a = Rank { wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 1, deviation: 3.0 };
+        let b = Rank { wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 1, deviation: 4.0 };
         assert!(a.better_than(&b), "with the payouts equal, lower deviation wins");
         assert!(!b.better_than(&a));
         assert!(!a.better_than(&a), "better_than is strict");

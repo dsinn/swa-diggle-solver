@@ -300,7 +300,7 @@ impl Fight<'_> {
                 Err(_) => {
                     // A reward screen is the common next thing, but not the only one.
                     if feed.seen_since(began, "Item selection:") {
-                        return self.take_reward(feed, keys, log, turns, deadline);
+                        return self.take_reward(feed, keys, log, turns, deadline, self.player_is_hurt());
                     }
                     // Not proof of anything yet: see `SAVE_SETTLE`. Give the rewrite time to finish
                     // and the reward screen time to announce itself.
@@ -370,7 +370,7 @@ impl Fight<'_> {
                         }
                     }
                     if feed.seen_since(began, "Item selection:") {
-                        return self.take_reward(feed, keys, log, turns, deadline);
+                        return self.take_reward(feed, keys, log, turns, deadline, self.player_is_hurt());
                     }
                     std::thread::sleep(Duration::from_millis(400));
                 }
@@ -399,7 +399,7 @@ impl Fight<'_> {
             }
 
             if feed.seen_since(began, "Item selection:") {
-                return self.take_reward(feed, keys, log, turns, deadline);
+                return self.take_reward(feed, keys, log, turns, deadline, self.player_is_hurt());
             }
         }
         Ok(Outcome::Exhausted { turns })
@@ -492,8 +492,42 @@ impl Fight<'_> {
                 mods.enemy_status_tick
             ));
         }
+        let armour_room = {
+            let now = cs.int_at("rpg.player.armour");
+            let max = cs.int_at("rpg.player.maxHealth").map(|m| {
+                if cs.path("rpg.player.gearFlags.maxArmourHalved").is_some() { m / 2 } else { m }
+            });
+            match (now, max) {
+                (Some(a), Some(m)) => a < m,
+                _ => true,
+            }
+        };
+        // **Built before the goal, because the goal now depends on it.** Whether the wood gear is
+        // paying decides whether the Well-Rested heal is a floor or merely a rank — see
+        // `search::Goal::killing_blow`, and `pick::Rank::heals_fully` for the four tiers.
+        let prefs = crate::pick::Preferences::from_flags(
+            |f| cs.path(&format!("rpg.player.gearFlags.{f}")).is_some(),
+            // Any missing health counts as injured: the buckler heals 4, so at 19/20 the payout is
+            // real and merely smaller than its cap. No threshold is invented here.
+            player.as_ref().map(|p| p.vitals.missing() > 0).unwrap_or(false),
+            // Bleeding cancels the heal (`rpgview.lua:1080`), and with it the reason to chase a
+            // wood-only word. Read from the same `PlayerState` the rested goals already use, so
+            // there is one reading of the status per turn rather than two that could disagree.
+            player.as_ref().map(|p| p.bleeding).unwrap_or(false),
+            armour_room,
+        )
+        // The damage at which overkill closes the whole deficit: `lethal + 2 * missing`, since the
+        // heal is `floor(overkill/2)` capped at what is missing (`rpgview.lua:1195-1196`). `None`
+        // when there is no heal to collect -- no charge, cancelled by gear, or already full -- which
+        // is exactly when it must not sway a ranking.
+        .healing_at(
+            player
+                .as_ref()
+                .filter(|p| p.heals && p.vitals.missing() > 0)
+                .map(|p| deciding_health + armour + 2 * p.vitals.missing()),
+        );
         let mut goal =
-            Goal::for_enemy(&mods, deciding_health, armour, Some(peak), player.as_ref());
+            Goal::for_enemy(&mods, deciding_health, armour, Some(peak), player.as_ref(), prefs);
         // **Aim lower than last time if the game called the last attempt murder.**
         //
         // Our arithmetic said that hit was survivable and the game's estimate said it kills, so the
@@ -583,29 +617,9 @@ impl Fight<'_> {
         // Unknown counts as **room available**, the opposite of how unknown health is treated when
         // deciding whether to fight. The asymmetry is deliberate: guessing wrong about health can
         // end the save, while guessing wrong here costs a slightly worse word.
-        let armour_room = {
-            let now = cs.int_at("rpg.player.armour");
-            let max = cs.int_at("rpg.player.maxHealth").map(|m| {
-                if cs.path("rpg.player.gearFlags.maxArmourHalved").is_some() { m / 2 } else { m }
-            });
-            match (now, max) {
-                (Some(a), Some(m)) => a < m,
-                _ => true,
-            }
-        };
         let picking = crate::pick::Context {
             target: self.letters.target(tiles.len()),
-            prefs: crate::pick::Preferences::from_flags(
-                |f| cs.path(&format!("rpg.player.gearFlags.{f}")).is_some(),
-                // Any missing health counts as injured: the buckler heals 4, so at 19/20 the payout
-                // is real and merely smaller than its cap. No threshold is invented here.
-                player.as_ref().map(|p| p.vitals.missing() > 0).unwrap_or(false),
-                // Bleeding cancels the heal (`rpgview.lua:1080`), and with it the reason to chase a
-                // wood-only word. Read from the same `PlayerState` the rested goals already use, so
-                // there is one reading of the status per turn rather than two that could disagree.
-                player.as_ref().map(|p| p.bleeding).unwrap_or(false),
-                armour_room,
-            ),
+            prefs,
         };
         let out = search::search(self.dict, self.scorer, &tiles, &geom, &mods, goal, &picking, 8);
         let letters: String = tiles.iter().map(|t| t.letter.as_str()).collect();
@@ -1060,20 +1074,34 @@ impl Fight<'_> {
     pub fn claim_reward(
         &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, deadline: Instant,
     ) -> Result<Outcome, crate::Error> {
-        self.take_reward(feed, keys, log, 0, deadline)
+        self.take_reward(feed, keys, log, 0, deadline, self.player_is_hurt())
+    }
+
+    /// Are we below full health, for the reward screen's boon ranking?
+    ///
+    /// Read from `combatSaveData` rather than plumbed down: `take_reward` is reached from three
+    /// places and none of them is holding a reading, and this is the same file every turn's
+    /// [`player_state`] comes from. Unreadable counts as **not hurt**, which is the safe direction —
+    /// it only ever demotes the Heal boon, never promotes one. See [`crate::itemchoice::Boon`].
+    fn player_is_hurt(&self) -> bool {
+        let Ok(cs) = crate::game::save::load(&self.combat_path) else { return false };
+        match (cs.int_at("rpg.player.health"), cs.int_at("rpg.player.maxHealth")) {
+            (Some(now), Some(max)) => now < max,
+            _ => false,
+        }
     }
 
     /// Picks a reward, confirms it, and clears the postgame.
     fn take_reward(
         &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, turns: usize,
-        deadline: Instant,
+        deadline: Instant, hurt: bool,
     ) -> Result<Outcome, crate::Error> {
         // Marked BEFORE `choose`, because `choose` is what presses Confirm. A mark taken afterwards
         // races the game: `Postgame screen:` can already be in the feed by the time we start
         // watching for it, and `seen_since` would then wait out its whole timeout for a line that
         // had already arrived.
         let mark = feed.mark();
-        match crate::itemchoice::choose(self.win, feed, keys, &self.game_dir, log, deadline)? {
+        match crate::itemchoice::choose(self.win, feed, keys, &self.game_dir, log, deadline, hurt)? {
             crate::itemchoice::Chosen::Took(key) => {
                 return self.after_confirm(feed, keys, log, turns, deadline, Some(key), mark);
             }

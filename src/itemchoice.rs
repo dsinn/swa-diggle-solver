@@ -49,6 +49,88 @@ const PICK_ATTEMPTS: usize = 3;
 /// One item on offer: its key, and where the game says it is drawn.
 pub type Offer = (String, i32, i32);
 
+/// The extra the game sometimes staples to **one** of the offered items.
+///
+/// ## Where these come from, and why there are exactly three
+///
+/// `overworld.lua:1119-1127` rolls `rarity = random(0,9)` and, on `rarity <= 2`, picks a single
+/// lucky item out of the drops and hangs `getRewardBoons(rng, luckyKey, rarity==0 and 'rare' or
+/// 'uncommon', class)` on it. `getRewardBoons` (`:640-656`) joins the source item's own declared
+/// boons with everything whose `sources` name `<type>RewardBoon` or `rewardBoon` at that rarity,
+/// filters for class and usefulness, and returns **one**. The whole pool in `items/`:
+///
+/// ```text
+///   gearSlotsBuff   Gear item slot   gearRewardBoon = 'rare'       items/ephemeral.lua:69
+///   gold50          Pile of 50 gold  rewardBoon = 'uncommon'       items/ephemeral.lua:103
+///   healthHeal4     Heal 4           rewardBoon = 'uncommon'       items/ephemeral.lua:37
+/// ```
+///
+/// So the gear slot is *rare* and only ever attaches to a gear-type item; the other two are
+/// *uncommon*. Anything else is an item declaring its own `uncommonRewardBoons`, which is what
+/// [`Boon::Other`] covers.
+///
+/// ## The policy is the dev's, 2026-08-15
+///
+/// > If there is a gear slot, eagerly take the bonus gear slot. Then the bonus reward only becomes a
+/// > tiebreaker: 50 gold always holds value, whereas the heal only holds value if we are below max
+/// > health. The consumable holds the least value of the bonuses.
+///
+/// [`Boon::GearSlot`] is therefore not a tiebreaker at all — see [`Boon::is_eager`]. The rest rank
+/// by [`Boon::worth`] and only separate offers that the kind ranking has already tied.
+///
+/// The game agrees about the heal, which is worth noting because it is a rule arrived at twice
+/// independently: `healthHeal4.isUseless` is `health + 2 >= maxHealth` (`items/ephemeral.lua:41-45`),
+/// and `filterUselessBoons` drops it before the roll. So a heal boon on offer is *already* one the
+/// game thought we could use — this ranking is the second, stricter opinion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Boon {
+    /// `gearSlotsBuff` — a permanent extra gear slot. Taken eagerly, whatever it is stapled to.
+    GearSlot,
+    /// `gold50` — fifty gold, which is always worth something.
+    Gold,
+    /// `healthHeal4` — four health, worth nothing at all when we are already full.
+    Heal,
+    /// Anything else: an item's own declared boon, which is a consumable in practice.
+    Other,
+}
+
+impl Boon {
+    /// Which item key this is, as the game names it.
+    pub fn from_key(key: &str) -> Boon {
+        match key {
+            "gearSlotsBuff" => Boon::GearSlot,
+            "gold50" => Boon::Gold,
+            "healthHeal4" => Boon::Heal,
+            _ => Boon::Other,
+        }
+    }
+
+    /// Does this override the item ranking rather than merely break its ties?
+    ///
+    /// Only the gear slot. It is the one boon that changes what the *rest of the run* can equip:
+    /// `playerHasGearEquipped` is `has <= getPlayerGearSlotCount()` (`overworld.lua:307-310`) with a
+    /// default of three, so every piece of gear past the third is carried and inert. A slot converts
+    /// dead weight already in the bag into working gear, which no single item on a pedestal can do.
+    pub fn is_eager(self) -> bool {
+        self == Boon::GearSlot
+    }
+
+    /// Tiebreak value, **higher is better**, given whether we are below full health.
+    ///
+    /// `hurt` is the whole of the heal's worth: at full health `affectPlayerHealth(4)` does nothing
+    /// at all, so it ranks under the consumable rather than over it.
+    pub fn worth(self, hurt: bool) -> u8 {
+        match self {
+            Boon::GearSlot => 4,
+            Boon::Gold => 3,
+            Boon::Heal if hurt => 2,
+            Boon::Other => 1,
+            // Nothing is gained, so it loses to the consumable we might at least drink later.
+            Boon::Heal => 0,
+        }
+    }
+}
+
 /// Kinds we can make use of, best first. Anything not listed ranks below all of them.
 ///
 /// ## Why passive beats gear
@@ -169,9 +251,12 @@ pub enum Chosen {
 ///
 /// Does **not** handle whatever comes next — a postgame, a shop returning to the map — because that
 /// differs per caller. This gets as far as a confirmed selection and stops.
+/// `hurt` is the one thing a boon ranking needs that the screen cannot say: the Heal boon is worth
+/// nothing at full health. Callers hold a health reading already; passing `false` when they do not
+/// is the safe direction, since it only ever demotes the heal.
 pub fn choose(
     win: &GameWindow, feed: &mut Feed, keys: &PostMessageInput, game_dir: &std::path::Path,
-    log: &mut String, deadline: Instant,
+    log: &mut String, deadline: Instant, hurt: bool,
 ) -> Result<Chosen, crate::Error> {
     // Poll rather than parse a single pump: the screen being up and its block reaching the feed are
     // not the same instant, and this can be entered a whole step after the screen appeared.
@@ -215,9 +300,42 @@ pub fn choose(
             .join(", ")
     ));
 
+    // **The boon, where one is on offer.** See [`Boon`] for the policy and where the three come
+    // from. `boons` is empty until the screen is read for them — the console does not carry the
+    // attachment (`ui/itemselection.lua:413-428` prints key, name and position, and nothing else),
+    // so this is a hook with the decision behind it built and tested, and the reading still to come.
+    let boons: Vec<(String, Boon)> = Vec::new();
+    let boon_on = |key: &str| boons.iter().find(|(k, _)| k == key).map(|(_, b)| *b);
+
+    // Eager, and ahead of everything: a gear slot is not a tiebreak, it is a change to what the
+    // whole bag can equip. The dev's word for it was "eagerly".
+    let eager: Vec<&Offer> =
+        found.iter().filter(|(k, _, _)| boon_on(k).is_some_and(Boon::is_eager)).collect();
+
     let best = found.iter().map(|(k, _, _)| rank(kind_of(k).as_deref())).min().unwrap_or(0);
-    let shortlist: Vec<&Offer> =
+    let by_kind: Vec<&Offer> =
         found.iter().filter(|(k, _, _)| rank(kind_of(k).as_deref()) == best).collect();
+    // Only *then* the boon, and only between offers the kind ranking already called equal — which
+    // is what "the bonus reward only becomes a tiebreaker" means.
+    let shortlist: Vec<&Offer> = match eager.is_empty() {
+        false => eager,
+        true => {
+            let top = by_kind
+                .iter()
+                .map(|(k, _, _)| boon_on(k).map(|b| b.worth(hurt)).unwrap_or(0))
+                .max()
+                .unwrap_or(0);
+            match top {
+                0 => by_kind,
+                _ => by_kind
+                    .into_iter()
+                    .filter(|(k, _, _)| {
+                        boon_on(k).map(|b| b.worth(hurt)).unwrap_or(0) == top
+                    })
+                    .collect(),
+            }
+        }
+    };
 
     // Seeded from the clock so repeated runs do not always take the same position when the shortlist
     // has more than one item — an arbitrary-but-fixed choice would hide a click that only ever works
@@ -279,6 +397,44 @@ pub fn choose(
     std::thread::sleep(Duration::from_millis(300));
     keys.press_key(VK_SPACE, SC_SPACE)?;
     Ok(Chosen::Took(key))
+}
+
+#[cfg(test)]
+mod boon_tests {
+    use super::*;
+
+    /// The dev's ordering, 2026-08-15, stated as a policy rather than a set of numbers.
+    #[test]
+    fn a_gear_slot_is_taken_eagerly_and_the_rest_only_break_ties() {
+        assert!(Boon::GearSlot.is_eager(), "a slot changes what the whole bag can equip");
+        for b in [Boon::Gold, Boon::Heal, Boon::Other] {
+            assert!(!b.is_eager(), "{b:?} is a tiebreaker, not an override");
+        }
+    }
+
+    #[test]
+    fn gold_always_holds_value_and_the_heal_only_when_hurt() {
+        // Hurt: gold, then the heal, then the consumable.
+        assert!(Boon::Gold.worth(true) > Boon::Heal.worth(true));
+        assert!(Boon::Heal.worth(true) > Boon::Other.worth(true));
+        // Full: the heal restores nothing, so it drops under the consumable rather than merely
+        // level with it. `affectPlayerHealth(4)` at full health is the whole reason.
+        assert!(Boon::Other.worth(false) > Boon::Heal.worth(false));
+        assert_eq!(Boon::Heal.worth(false), 0);
+        // And gold is unmoved by our health, which is what "always holds value" means.
+        assert_eq!(Boon::Gold.worth(true), Boon::Gold.worth(false));
+    }
+
+    /// The keys are the game's, and a boon we do not recognise must not outrank one we do.
+    #[test]
+    fn the_three_known_boons_are_named_from_the_game() {
+        assert_eq!(Boon::from_key("gearSlotsBuff"), Boon::GearSlot);
+        assert_eq!(Boon::from_key("gold50"), Boon::Gold);
+        assert_eq!(Boon::from_key("healthHeal4"), Boon::Heal);
+        // An item's own `uncommonRewardBoons` -- a consumable in practice.
+        assert_eq!(Boon::from_key("healthPotion"), Boon::Other);
+        assert!(Boon::Gold.worth(true) > Boon::Other.worth(true));
+    }
 }
 
 #[cfg(test)]

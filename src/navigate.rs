@@ -2355,6 +2355,9 @@ pub fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
                 game_dir,
                 &mut il,
                 deadline,
+                // No health reading on this path, and `false` is the safe direction: it only ever
+                // demotes the Heal boon, never promotes one.
+                false,
             );
             r.log.push_str(&il.lines().map(|l| format!("    {l}\n")).collect::<String>());
             return match picked {
@@ -2827,6 +2830,9 @@ pub fn drive(
                 &fight.game_dir,
                 &mut il,
                 deadline.min(Instant::now() + Duration::from_secs(45)),
+                // The map's own reading, which this path does have. See `itemchoice::Boon`: a Heal
+                // boon is worth nothing at full health.
+                r.map.is_hurt(),
             );
             r.log.push_str(&il.lines().map(|l| format!("    {l}
 ")).collect::<String>());

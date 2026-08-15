@@ -1334,6 +1334,14 @@ impl WorldMap {
         }
     }
 
+    /// Below full health, as of the last save read. Unknown counts as **not** hurt.
+    ///
+    /// The narrow reading [`crate::itemchoice::Boon`] needs — worth nothing at full health — kept
+    /// apart from [`WorldMap::wants_rest`], which is about whether to make a trip.
+    pub fn is_hurt(&self) -> bool {
+        self.health.map(|h| !h.is_full()).unwrap_or(false)
+    }
+
     pub fn wants_rest(&self) -> bool {
         self.wants_rest
     }

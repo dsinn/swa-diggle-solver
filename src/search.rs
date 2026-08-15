@@ -640,7 +640,7 @@ impl Goal {
     /// threshold and the fight simply continues.
     pub fn for_enemy(
         mods: &Modifiers, health: i64, armour: i64, max_health: Option<i64>,
-        player: Option<&PlayerState>,
+        player: Option<&PlayerState>, prefs: crate::pick::Preferences,
     ) -> Goal {
         // What actually kills. Kept exact, because it is also the ceiling a scare must stay under —
         // buffering it in one direction would license the very kill we are avoiding.
@@ -659,13 +659,13 @@ impl Goal {
         // `immobile` suppresses fleeing outright (`rpgview.lua:1646`) -- it cannot run, so trying to
         // frighten it just leaves it alive and swinging.
         if mods.immobile {
-            return Self::killing_blow(kill, lethal, player);
+            return Self::killing_blow(kill, lethal, player, prefs);
         }
         let (Some(nerve), Some(max)) = (mods.nerve, max_health) else {
-            return Self::killing_blow(kill, lethal, player);
+            return Self::killing_blow(kill, lethal, player, prefs);
         };
         let Some(top) = nerve.leaves_at_or_below(max) else {
-            return Self::killing_blow(kill, lethal, player);
+            return Self::killing_blow(kill, lethal, player, prefs);
         };
         let below = lethal;
         // Armour absorbs first, so reaching `top` health costs the difference plus the armour.
@@ -684,7 +684,7 @@ impl Goal {
             // So `player` is dropped on this path and the plain kill is used. Aiming past lethal
             // could never help here — the charge is worth less than not overshooting something we
             // would rather have frightened off, and the dev's ordering is the right one.
-            return Self::killing_blow(kill, lethal, None);
+            return Self::killing_blow(kill, lethal, None, prefs);
         }
         // Buffer both edges by as much as the band can spare. `slack` is the width of the raw
         // non-lethal band `scare_need ..= below - 1`; see `affordable_buffer` for why this shrinks
@@ -708,7 +708,7 @@ impl Goal {
         // conclusion the `scare_need >= below` check above reaches by a different route — so it
         // ends the same way, killing without the rested-charge optimisation.
         if need >= ceiling {
-            return Self::killing_blow(kill, lethal, None);
+            return Self::killing_blow(kill, lethal, None, prefs);
         }
         Goal::Scare { need, below: ceiling }
     }
@@ -720,7 +720,10 @@ impl Goal {
     /// [`crate::rested`] for the mechanic in full.
     /// `lethal` is the EXACT damage that kills, unbuffered, because every branch here is arithmetic
     /// about overkill and a padded threshold would silently shift the free window.
-    fn killing_blow(kill: Goal, lethal: i64, player: Option<&PlayerState>) -> Goal {
+    fn killing_blow(
+        kill: Goal, lethal: i64, player: Option<&PlayerState>,
+        prefs: crate::pick::Preferences,
+    ) -> Goal {
         let Some(p) = player else { return kill };
         if !p.heals {
             return kill;
@@ -764,8 +767,29 @@ impl Goal {
             // depth past a full heal is worth nothing to want. So a board could spend its `Q` on a
             // heal a wood word would also have completed. [`crate::pick::Rank`] answers it now,
             // including what the word costs the board (`pick::hoarded`).
+            //
+            // ## Unless the wood gear is also paying, in which case the floor comes off
+            //
+            // The dev's rule, 2026-08-15: *if a Well-Rested heal only heals for 3 while a wood-only
+            // kill provides 4 armour, first check if there's a wood-only kill that triggers both;
+            // otherwise go for the best wood-only kill, and only if that's not possible, go for the
+            // Well-Rested heal.*
+            //
+            // A raised floor cannot say that. It discards every word under `2 * missing` before
+            // anything is compared, so the wood word that kills without healing is never seen — and
+            // that word is the dev's *second* choice, ahead of the heal. So when the wood payout is
+            // live the floor drops to plain lethal and [`crate::pick::Rank`] carries the heal as its
+            // second key, below `wood_only`. Same four tiers, in the stated order, and the search
+            // still sees every candidate.
+            //
+            // When no wood gear is paying there is nothing to trade the heal against, and the floor
+            // stays where it was: a heal we can reach is simply worth reaching.
             crate::rested::Aim::HealFully => {
-                Goal::RankedKill { need: lethal + 2 * p.vitals.missing() + DAMAGE_BUFFER }
+                let heal_at = lethal + 2 * p.vitals.missing();
+                match prefs.wood_only_pays {
+                    true => Goal::RankedKill { need: lethal + DAMAGE_BUFFER },
+                    false => Goal::RankedKill { need: heal_at + DAMAGE_BUFFER },
+                }
             }
         }
     }
@@ -909,6 +933,7 @@ pub fn ranked_kill(
                                 scorer,
                                 &picking.target,
                                 picking.prefs,
+                                score,
                             );
                             let take = match &local_lethal {
                                 Some((_, cur)) => rank.better_than(cur),
@@ -1152,6 +1177,7 @@ pub fn race_for_band(
                             scorer,
                             &picking.target,
                             picking.prefs,
+                            score,
                         );
                         // **Only a band ranks.** With no ceiling this is `race_for_kill`, whose
                         // contract is `Goal::FirstKill`'s: every lethal word ends the exchange, so
@@ -1799,12 +1825,12 @@ mod tests {
         .unwrap();
         let (mods, _) = Modifiers::from_save(&game_dir(), &save, 16).unwrap();
         assert!(mods.overkill_gold);
-        assert_eq!(Goal::for_enemy(&mods, 3, 0, None, None), Goal::MaxDamage);
+        assert_eq!(Goal::for_enemy(&mods, 3, 0, None, None, crate::pick::Preferences::default()), Goal::MaxDamage);
         // An ordinary enemy ranks its kills instead of racing for the first. Gold does not scale
         // with the excess here, so there is nothing to spend the extra damage on and the board the
         // word leaves behind is what the choice is for.
         assert_eq!(
-            Goal::for_enemy(&Modifiers::none(), 3, 2, None, None),
+            Goal::for_enemy(&Modifiers::none(), 3, 2, None, None, crate::pick::Preferences::default()),
             Goal::RankedKill { need: 6 }
         );
     }
@@ -1922,6 +1948,7 @@ mod tests {
                     &scorer,
                     &picking.target,
                     picking.prefs,
+                    score,
                 )
             })
         };
@@ -2052,7 +2079,7 @@ mod scare_goal_tests {
     fn a_frightenable_enemy_with_no_room_keeps_its_band_rather_than_losing_it() {
         // health 4 of a maximum 6: fleeing needs it at or below (6-1)/2 = 2, so 2 damage; 4 kills.
         // The raw band is 2..=3, one point of slack, and half of that is nothing to spend.
-        let g = Goal::for_enemy(&feared(), 4, 0, Some(6), None);
+        let g = Goal::for_enemy(&feared(), 4, 0, Some(6), None, crate::pick::Preferences::default());
         assert_eq!(g, Goal::Scare { need: 2, below: 4 }, "unbuffered, but still a scare");
     }
 
@@ -2061,13 +2088,13 @@ mod scare_goal_tests {
         // health 6 of a maximum 6: flee at or below 2, so 4 damage; 6 kills. Raw band 4..=5 is one
         // wide -- still nothing. Widen the enemy and the buffer appears.
         assert_eq!(
-            Goal::for_enemy(&feared(), 6, 0, Some(6), None),
+            Goal::for_enemy(&feared(), 6, 0, Some(6), None, crate::pick::Preferences::default()),
             Goal::Scare { need: 4, below: 6 }
         );
         // health 12 of 12: flee at or below 5, so 7 damage; 12 kills. Raw band 7..=11 has four to
         // spare, so a full point goes to each edge.
         assert_eq!(
-            Goal::for_enemy(&feared(), 12, 0, Some(12), None),
+            Goal::for_enemy(&feared(), 12, 0, Some(12), None, crate::pick::Preferences::default()),
             Goal::Scare { need: 8, below: 11 }
         );
     }
@@ -2075,7 +2102,7 @@ mod scare_goal_tests {
     /// The buffer must never turn a survivable scare into a kill.
     #[test]
     fn the_buffered_ceiling_still_leaves_the_enemy_alive() {
-        let g = Goal::for_enemy(&feared(), 12, 0, Some(12), None);
+        let g = Goal::for_enemy(&feared(), 12, 0, Some(12), None, crate::pick::Preferences::default());
         let Goal::Scare { need, below } = g else { panic!("expected a scare, got {g:?}") };
         assert!(below <= 12, "damage below this must not reach the 12 that kills");
         assert!(need < below, "the band must not be empty");
@@ -2095,7 +2122,7 @@ mod scare_goal_tests {
         // A cultist at full health: 12 of 12, no armour. It leaves at 5 or below, so we need 7 and
         // must stay under 12.
         assert_eq!(
-            Goal::for_enemy(&feared(), 12, 0, Some(12), None),
+            Goal::for_enemy(&feared(), 12, 0, Some(12), None, crate::pick::Preferences::default()),
             Goal::Scare { need: 8, below: 11 }
         );
     }
@@ -2105,7 +2132,7 @@ mod scare_goal_tests {
         // Armour absorbs first, so reaching the threshold costs the difference plus the armour, and
         // the lethal line moves out by the same amount.
         assert_eq!(
-            Goal::for_enemy(&feared(), 12, 3, Some(12), None),
+            Goal::for_enemy(&feared(), 12, 3, Some(12), None, crate::pick::Preferences::default()),
             Goal::Scare { need: 11, below: 14 }
         );
     }
@@ -2123,7 +2150,7 @@ mod scare_goal_tests {
         // where `scare_need` goes to zero.
         for health in 1..=6 {
             for armour in 0..=2 {
-                let g = Goal::for_enemy(&feared(), health, armour, Some(12), None);
+                let g = Goal::for_enemy(&feared(), health, armour, Some(12), None, crate::pick::Preferences::default());
                 if let Goal::Scare { need, below } = g {
                     assert!(
                         need >= MIN_MEANINGFUL_DAMAGE,
@@ -2139,7 +2166,7 @@ mod scare_goal_tests {
     fn an_enemy_already_below_the_line_just_needs_a_non_lethal_word() {
         // It will run at the start of its own turn; our only job is not to kill it first.
         assert_eq!(
-            Goal::for_enemy(&feared(), 4, 0, Some(12), None),
+            Goal::for_enemy(&feared(), 4, 0, Some(12), None, crate::pick::Preferences::default()),
             Goal::Scare { need: 1, below: 3 }
         );
     }
@@ -2149,25 +2176,25 @@ mod scare_goal_tests {
         // rpgview.lua:1646 -- the flee branch requires `not currentEnemy.immobile`. Trying to scare
         // one would leave it alive and still attacking.
         let m = Modifiers { immobile: true, ..feared() };
-        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12), None), Goal::RankedKill { need: 13 });
+        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12), None, crate::pick::Preferences::default()), Goal::RankedKill { need: 13 });
     }
 
     #[test]
     fn without_a_known_maximum_we_do_not_guess() {
-        assert_eq!(Goal::for_enemy(&feared(), 12, 0, None, None), Goal::RankedKill { need: 13 });
+        assert_eq!(Goal::for_enemy(&feared(), 12, 0, None, None, crate::pick::Preferences::default()), Goal::RankedKill { need: 13 });
     }
 
     #[test]
     fn overkill_gold_still_wants_the_corpse() {
         // Gold scales with the excess, so this fight is the exception.
         let m = Modifiers { overkill_gold: true, ..feared() };
-        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12), None), Goal::MaxDamage);
+        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12), None, crate::pick::Preferences::default()), Goal::MaxDamage);
     }
 
     #[test]
     fn a_one_health_maximum_offers_no_non_lethal_scare() {
         // leaves_at_or_below is None below 2 max health, so there is no room to hurt without killing.
-        assert_eq!(Goal::for_enemy(&feared(), 1, 0, Some(1), None), Goal::RankedKill { need: 2 });
+        assert_eq!(Goal::for_enemy(&feared(), 1, 0, Some(1), None, crate::pick::Preferences::default()), Goal::RankedKill { need: 2 });
     }
 }
 
@@ -2189,8 +2216,11 @@ mod rested_goal_tests {
     }
 
     /// Enemy on 10 with no armour, so the plain kill needs 10.
+    ///
+    /// No wood gear paying, which is the case where the Well-Rested heal stays a floor. The
+    /// alternative is its own test — see `a_wood_kill_outranks_a_heal_it_cannot_also_collect`.
     fn goal(p: Option<&PlayerState>) -> Goal {
-        Goal::for_enemy(&Modifiers::none(), 10, 0, None, p)
+        Goal::for_enemy(&Modifiers::none(), 10, 0, None, p, crate::pick::Preferences::default())
     }
 
     #[test]
@@ -2254,7 +2284,7 @@ mod rested_goal_tests {
         let m = Modifiers { nerve: Some(crate::flee::Nerve::Fear), ..Modifiers::none() };
         let p = player(4, true);
         assert_eq!(
-            Goal::for_enemy(&m, 12, 0, Some(12), Some(&p)),
+            Goal::for_enemy(&m, 12, 0, Some(12), Some(&p), crate::pick::Preferences::default()),
             Goal::Scare { need: 8, below: 11 }
         );
     }
