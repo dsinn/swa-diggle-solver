@@ -753,8 +753,25 @@ impl Door {
 /// whichever node turns out to be the portal.
 pub const ANOMALY_BEATEN_KEY: &str = "start_corrupt";
 
-/// Hops to `key`, or [`usize::MAX`] when no known route reaches it — so unreachable places sort
+/// What a hop costs when the game will not simply let us walk it — see [`WorldMap::step_cost`].
+///
+/// Six, measured rather than chosen. Crossing `l62` on 2026-08-15 took **five interior hops**
+/// (`l62sub10`, `l62sub2`, `l62sub5`, `l62sub18`, then the exit road) on top of the press that
+/// entered it, and that was a crossing which *worked*; the same forest ended two runs at the exit it
+/// could not reach. Fights on the road are extra and not counted here, so this is a floor.
+///
+/// Being roughly right matters more than being exactly right. The number decides how many free hops
+/// are worth spending to avoid one crossing, and the honest answer from watching it is "about six".
+pub const CROSSING: usize = 6;
+
+/// Cost to `key`, or [`usize::MAX`] when no known route reaches it — so unreachable places sort
 /// last rather than first.
+///
+/// **Cost, not hops.** It was hops until 2026-08-15, and reads like hops for any map we have not
+/// cleared anything on, because every edge is worth [`CROSSING`] there and the ordering is the
+/// uniform one. Once ground is cleared the two diverge — see [`WorldMap::step_cost`] — and the
+/// number stops being countable in moves. Every consumer sorts and compares with it, which is why
+/// the unit could change at all; none of them may start testing it against a literal.
 fn dist_or_far(dist: &BTreeMap<String, usize>, key: &str) -> usize {
     dist.get(key).copied().unwrap_or(usize::MAX)
 }
@@ -2945,21 +2962,56 @@ impl WorldMap {
     /// Used to prefer the nearest frontier. Avoided places are still traversed here — this measures
     /// how far away things are, and [`WorldMap::next_hop`] is where the shunning happens.
     fn distances(&self, from: &str) -> BTreeMap<String, usize> {
-        let mut out = BTreeMap::new();
-        out.insert(from.to_string(), 0usize);
-        let mut queue: std::collections::VecDeque<String> = [from.to_string()].into();
-        while let Some(key) = queue.pop_front() {
-            let d = out[&key];
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        let mut out: BTreeMap<String, usize> = BTreeMap::new();
+        let mut heap: BinaryHeap<(Reverse<usize>, String)> = BinaryHeap::new();
+        heap.push((Reverse(0), from.to_string()));
+        while let Some((Reverse(d), key)) = heap.pop() {
+            if out.contains_key(&key) {
+                continue;
+            }
+            out.insert(key.clone(), d);
             if let Some(p) = self.places.get(&key) {
                 for n in &p.neighbours {
                     if !out.contains_key(n) {
-                        out.insert(n.clone(), d + 1);
-                        queue.push_back(n.clone());
+                        heap.push((Reverse(d + self.step_cost(&key, n)), n.clone()));
                     }
                 }
             }
         }
         out
+    }
+
+    /// What one hop from `a` to `b` is really worth, in hops.
+    ///
+    /// **A hop we can walk and a hop we have to carve are not the same move, and this map counted
+    /// them the same.** An edge into a subworld container is one line in the graph and up to a dozen
+    /// actions in the world: enter, cross the interior node by node, fight what stands on the road,
+    /// find the exit and leave. Counting that as `1` is what made a route through a level 7 spider
+    /// forest look shorter than a route around it.
+    ///
+    /// Live 2026-08-15, twice, and reported both times by the dev. From `shrine7` the planner picked
+    /// `l62 -> l36`, two hops to the target, and paid for it with a five-node crossing that then
+    /// stalled on an exit it could not pan to. `l62 -> l57` was **one hop longer on paper and free in
+    /// practice**: `l62_path_to_l57` was already complete, so `canTravelToDirect` allowed it
+    /// outright, and `l57` reaches every unprayed shrine without touching `l62` again.
+    ///
+    /// [`WorldMap::can_step`] is the whole test, which is why it had to learn about walked roads
+    /// first — before that it could not tell the free hop from the expensive one either.
+    ///
+    /// ## Why this does not quietly become "prefer the ground we know"
+    ///
+    /// On unexplored map nothing is complete and no road is walked, so **every** edge costs
+    /// [`CROSSING`] and the ordering is exactly the uniform one this replaced. The weighting only
+    /// starts to matter once we have cleared something, which is precisely when there is a cheap
+    /// route to prefer. A run that has explored nothing still explores by hop count.
+    fn step_cost(&self, a: &str, b: &str) -> usize {
+        match self.can_step(a, b) {
+            true => 1,
+            false => CROSSING,
+        }
     }
 
     /// First move on a shortest known path from `from` to `to`, or `None` if we know of no route.
@@ -3340,9 +3392,14 @@ mod tests {
         m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post", vec![],
             vec![exit("l19"), exit("l7")]));
         // l19 -> l10 -> l7 is now a path, so l7 is two hops from where we entered rather than absent.
+        //
+        // Both hops cost [`CROSSING`], because nothing in this fixture has been cleared and no road
+        // in it has been walked — which is the ordinary state of unexplored map, and the reason
+        // weighting the edges left every existing route ordering alone. What the test is about is
+        // that the far side is *reachable at all* and ranks behind the near side.
         let d = m.distances("l7");
-        assert_eq!(d.get("l10"), Some(&1));
-        assert_eq!(d.get("l19"), Some(&2));
+        assert_eq!(d.get("l10"), Some(&CROSSING));
+        assert_eq!(d.get("l19"), Some(&(2 * CROSSING)));
     }
 
     #[test]
@@ -4639,8 +4696,9 @@ mod tests {
         m.entry("far").heading = "Distant crossroads".into();
         m.entry("near").neighbours.insert("far".into());
         m.entry("far").neighbours.insert("near".into());
-        assert_eq!(m.distances("here").get("near"), Some(&1));
-        assert_eq!(m.distances("here").get("far"), Some(&2));
+        // One hop and two, at the uncleared-ground price every edge in this fixture carries.
+        assert_eq!(m.distances("here").get("near"), Some(&CROSSING));
+        assert_eq!(m.distances("here").get("far"), Some(&(2 * CROSSING)));
         // Nothing has been stood on this run but `here`: that is what a resume looks like.
         assert!(!m.get("near").unwrap().visited && !m.get("far").unwrap().visited);
         // What the save told us, and the only thing that separates them.
@@ -4891,6 +4949,48 @@ mod tests {
         assert!(m.gap("west", "start").unwrap() < m.gap("east", "start").unwrap());
         assert_eq!(hop.step, "west", "toward the anomaly, not the lower key");
         assert!(!hop.routed, "and the log has to say so");
+    }
+
+    /// The route the dev asked for twice, and the reason it was not taken.
+    ///
+    /// Standing on `l62`, a level 7 spider forest, with a shrine somewhere past `l42`. Two ways on:
+    ///
+    /// ```text
+    ///   l62 -> l36 -> l42     two hops, and the first is a five-node crossing of the forest
+    ///   l62 -> l57 -> l42     two hops, and the first is free: `l62_path_to_l57` is walked
+    /// ```
+    ///
+    /// Counted in hops those are the same move, which is why the planner kept picking the crossing —
+    /// and the crossing is what ended two runs at an exit they could not pan to. Counted in what
+    /// they cost, one is worth six of the other.
+    #[test]
+    fn a_route_round_a_forest_beats_a_route_through_it() {
+        let mut m = WorldMap::default();
+        for (a, b) in
+            [("l62", "l36"), ("l62", "l57"), ("l36", "l42"), ("l57", "l42"), ("l42", "shrine9")]
+        {
+            m.entry(a).neighbours.insert(b.into());
+            m.entry(b).neighbours.insert(a.into());
+        }
+        // The road out to `l57` has been walked; nothing else here has been cleared.
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { completedAreas = { l62_path_to_l57 = true } } }",
+            )
+            .unwrap(),
+        );
+
+        let d = m.distances("l62");
+        assert_eq!(d.get("l57"), Some(&1), "a walked road is one cheap step");
+        assert_eq!(d.get("l36"), Some(&CROSSING), "and the forest crossing is not");
+        // The shrine is three edges away either way. Through the forest that is three unwalked
+        // edges; round it, the first one is free, and the whole route is a crossing cheaper.
+        assert_eq!(
+            d.get("shrine9"),
+            Some(&(1 + 2 * CROSSING)),
+            "the route is costed round the forest, not through it ({} would be through)",
+            3 * CROSSING
+        );
     }
 
     /// Rebuilt from the save as it stood at the stop of the run of 2026-08-15.
