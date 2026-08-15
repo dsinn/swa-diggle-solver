@@ -210,6 +210,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return finish(&mut game, &r.log, &archive);
     }
     let mut health = r.apply_save();
+    // **What earlier runs learned, before this one decides where to go.**
+    //
+    // The save carries which areas are complete and which are corrupted; it does not carry a single
+    // edge or coordinate, because the world is generated into memory from the seed and never
+    // written down. So without this a resumed run knows `shrine1` exists, is cleared and is
+    // unconsecrated, and has no idea how to walk there — which is exactly what kept a free
+    // consecration untaken across four runs.
+    //
+    // Loaded *before* the first dump registers, deliberately: `registration` anchors a new dump
+    // against any node that already carries a position, so restoring the old positions first makes
+    // this run adopt the earlier frame instead of inventing a fresh one.
+    match r.load_map_cache() {
+        Some((edges, path)) => {
+            r.log.push_str(&format!("recalled {edges} edges from `{path}`\n"));
+        }
+        None => r.log.push_str("no map remembered for this world — starting from the save alone\n"),
+    }
     // The first reading counts too. `note_health` needs a before and an after, so on a resumed save
     // there is nothing for it to compare and the intent is never set — which is how a run that
     // opened at 4/12 walked straight into a village fight without once considering a rest.
@@ -258,6 +275,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let stop = drive(&mut r, &fight, &mut health, Instant::now() + budget);
     r.log.push_str(&format!("\n## Stopped\n\n{stop:?}\n\n"));
+
+    // **Before anything else, and on every ending including death.** What a run learned about the
+    // terrain outlives the character that learned it: the seed is the same, the roads are the same,
+    // and the next run should not have to rediscover them. A death is in fact the case that most
+    // needs it, since that is when the map is largest and the next run starts furthest back.
+    r.save_map_cache();
 
     // Photograph whatever beat us, once, here.
     //

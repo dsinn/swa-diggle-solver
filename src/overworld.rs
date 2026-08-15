@@ -778,23 +778,31 @@ pub enum Crossing {
     /// Move to this adjacent node, which is on the known route to `toward`.
     Step { to: String, toward: String },
     /// No route is known yet. Move here to learn more of the interior.
-    Explore { to: String, toward: String },
+    ///
+    /// **Named `Probe`, not `Explore`, and that is not cosmetic.** It shared a name with
+    /// [`Goal::Explore`] while meaning something unrelated — one is an overworld objective ("nowhere
+    /// in particular to be"), the other a step inside a subworld whose exit we cannot yet route to.
+    /// A run pursuing the shrine with every hop labelled `RouteTo(Shrine)` still printed
+    /// `exploring \`l16\` via \`l16sub28\`` on the lines in between, which reads as the objective
+    /// having been abandoned. The dev raised the collision twice; it was argued down once and
+    /// re-proposed as a fresh idea the second time, which is worse than either.
+    Probe { to: String, toward: String },
     /// Standing on the interior destination — the inn — with the errand still to do.
     ///
     /// The counterpart of [`Crossing::Leave`] for a destination that is *inside* rather than out.
     Arrive { at: String },
     /// Looking for a destination we have not seen yet. Move here to open the fog.
     ///
-    /// Distinct from [`Crossing::Explore`], which knows where it is going and is only short of a
+    /// Distinct from [`Crossing::Probe`], which knows where it is going and is only short of a
     /// route. This one has no target at all, so it must not be told to head for an exit: leaving is
     /// precisely the thing that would abandon the errand. Its own variant rather than a flag,
-    /// because `Step` and `Explore` already log identically and a third silent case would make an
+    /// because `Step` and `Probe` already log identically and a third silent case would make an
     /// old log unreadable.
     Seek { to: String },
     /// No route to the destination, but the last dump printed where it *is* — so step to whichever
     /// neighbour that dump puts closer to it.
     ///
-    /// The middle ground between [`Crossing::Step`] and [`Crossing::Explore`], and it exists because
+    /// The middle ground between [`Crossing::Step`] and [`Crossing::Probe`], and it exists because
     /// a door's key arrives long after its position does. Its own variant for the reason `Seek` is:
     /// three decision procedures that print one line make a log that cannot be read, which cost the
     /// crossing of `l2` a whole run's diagnosis.
@@ -904,6 +912,118 @@ impl WorldMap {
 
     pub fn here(&self) -> Option<&str> {
         self.here.as_deref()
+    }
+
+    /// The learned map, as text, for keeping between runs.
+    ///
+    /// ## Why this exists
+    ///
+    /// A `Place` is assembled from two sources with different lifetimes, and only one of them
+    /// survives a restart. `completed`, `corrupted` and `consecrated` come from save flags, so they
+    /// come back. **Edges and positions come from dumps, and dumps are per-run**, so every restart
+    /// begins knowing the *names* of places it has cleared and nothing about where they are or how
+    /// they connect.
+    ///
+    /// That is what makes an old objective unreachable. Live 2026-08-14: `shrine1` had been fought
+    /// and stood on in an earlier run, and came back `[done] [corrupted]` with no edges — so
+    /// `can_route_to("shrine1")` was false, the shrine could only ever be a `RouteTo` bearing, and
+    /// the ten corrupted nodes had no positions between them, which is why steering has never once
+    /// switched on. Not one of the ten was named in a single dump of that run.
+    ///
+    /// ## Positions are worth keeping, and the frame makes that non-obvious
+    ///
+    /// A frame's origin is arbitrary — the first dump that registers *defines* it
+    /// ([`WorldMap::registration`]), so two runs need not agree. Restoring positions anyway is
+    /// correct because of how registration works: it anchors a new dump against any node that
+    /// **already** carries a position, so a run that loads this file adopts the earlier run's frame
+    /// rather than inventing its own. Restoring the edges alone would leave the compass empty.
+    ///
+    /// Tab-separated and hand-rolled, for the reason [`crate::stamp`] gives: this is a private file
+    /// we both write and read, and a serialisation crate is a dependency and a build cost for
+    /// something a `split('\t')` does. Unknown leading tokens are skipped rather than rejected, so a
+    /// newer writer cannot break an older reader.
+    pub fn cache_text(&self) -> String {
+        let mut out = String::from("# diggle map cache v1\n");
+        for p in self.places.values() {
+            let (x, y) = match p.pos {
+                Some((x, y)) => (x.to_string(), y.to_string()),
+                None => ("-".to_string(), "-".to_string()),
+            };
+            out.push_str(&format!(
+                "p\t{}\t{}\t{x}\t{y}\t{}\t{}\t{}\n",
+                p.key,
+                p.heading,
+                p.connections,
+                p.hidden.map(|h| h.to_string()).unwrap_or_else(|| "-".into()),
+                p.parent.clone().unwrap_or_default(),
+            ));
+            for n in &p.neighbours {
+                out.push_str(&format!("e\t{}\t{n}\n", p.key));
+            }
+        }
+        out
+    }
+
+    /// Folds a [`WorldMap::cache_text`] back in, and reports how many edges it restored.
+    ///
+    /// **Additive, and never authoritative over this run.** Anything the live game has already told
+    /// us wins: a heading is only filled in where we have none, and a position only where we have
+    /// none, so a stale cache cannot overwrite a fresh dump. `visited` is deliberately *not*
+    /// restored — it means "we have stood here **this run**", and the frontier ordering leans on
+    /// that meaning.
+    ///
+    /// `completed` is not restored either. The save carries it, and the save is the game's own
+    /// answer rather than our recollection.
+    pub fn absorb_cache(&mut self, text: &str) -> usize {
+        let mut edges = 0;
+        for line in text.lines() {
+            let mut f = line.split('\t');
+            match f.next() {
+                Some("p") => {
+                    let Some(key) = f.next().filter(|k| !k.is_empty()) else { continue };
+                    let (heading, x, y) = (f.next(), f.next(), f.next());
+                    let (conns, hidden, parent) = (f.next(), f.next(), f.next());
+                    let place = self.entry(key);
+                    if place.heading.is_empty() {
+                        if let Some(h) = heading.filter(|h| !h.is_empty()) {
+                            place.heading = h.to_string();
+                        }
+                    }
+                    if place.pos.is_none() {
+                        if let (Some(Ok(x)), Some(Ok(y))) =
+                            (x.map(str::parse::<f64>), y.map(str::parse::<f64>))
+                        {
+                            place.pos = Some((x, y));
+                        }
+                    }
+                    if place.connections == 0 {
+                        if let Some(Ok(c)) = conns.map(str::parse::<u32>) {
+                            place.connections = c;
+                        }
+                    }
+                    if place.hidden.is_none() {
+                        if let Some(Ok(h)) = hidden.map(str::parse::<usize>) {
+                            place.hidden = Some(h);
+                        }
+                    }
+                    if place.parent.is_none() {
+                        if let Some(p) = parent.filter(|p| !p.is_empty()) {
+                            place.parent = Some(p.to_string());
+                        }
+                    }
+                }
+                Some("e") => {
+                    if let (Some(a), Some(b)) = (f.next(), f.next()) {
+                        if !a.is_empty() && !b.is_empty() {
+                            self.entry(a).neighbours.insert(b.to_string());
+                            edges += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        edges
     }
 
     /// Records that we have had our one attempt at `key` and it should stop being a destination.
@@ -2614,7 +2734,7 @@ impl WorldMap {
             .map(|(_, _, k)| k.clone());
         if let Some(step) = frontier.and_then(|f| self.first_step_toward(&here, &f, false)) {
             return Some(match dest {
-                Some(toward) => Crossing::Explore { to: step, toward },
+                Some(toward) => Crossing::Probe { to: step, toward },
                 None => Crossing::Seek { to: step },
             });
         }
@@ -2656,7 +2776,7 @@ impl WorldMap {
             .or_else(|| pick(false))
             .or_else(|| place.neighbours.iter().min().cloned())?;
         Some(match dest {
-            Some(toward) => Crossing::Explore { to: step, toward },
+            Some(toward) => Crossing::Probe { to: step, toward },
             None => Crossing::Seek { to: step },
         })
     }
@@ -3295,7 +3415,7 @@ mod tests {
             vec![node("l10sub7", "Ulrome east guard post")], vec![exit("l19")]));
         assert_eq!(
             m.cross_toward(&[exit("l19")]),
-            Some(Crossing::Explore { to: "l10sub7".into(), toward: "l10_path_to_l19".into() })
+            Some(Crossing::Probe { to: "l10sub7".into(), toward: "l10_path_to_l19".into() })
         );
     }
 
@@ -4392,7 +4512,7 @@ mod tests {
         m.fold(&inside_dump("l2", "l2sub7", "Dotterel Hedge house",
             vec![at("l2sub13", 926.0, 413.0), at("l2sub4", 840.0, 636.0)],
             vec![door.clone()]));
-        assert!(matches!(m.cross_toward(&[door.clone()]), Some(Crossing::Explore { .. })),
+        assert!(matches!(m.cross_toward(&[door.clone()]), Some(Crossing::Probe { .. })),
             "nothing to descend on until a move has been measured");
 
         // Arrived at `l2sub13`, which the dump above placed -- so the measure rolls forward.
@@ -4435,7 +4555,7 @@ mod tests {
             vec![at("l2sub12", 200.0, 900.0), at("l2sub9", 150.0, 1000.0)],
             vec![door.clone()]));
         match m.cross_toward(&[door]) {
-            Some(Crossing::Explore { .. }) => {}
+            Some(Crossing::Probe { .. }) => {}
             other => panic!("expected exploring rather than a sideways steer, got {other:?}"),
         }
     }
@@ -4466,7 +4586,7 @@ mod tests {
         assert!(m.get("e1sub67").unwrap().nothing_left_to_reveal());
         assert!(!m.get("e1sub75").unwrap().nothing_left_to_reveal());
         match m.cross_toward(&[]) {
-            Some(Crossing::Seek { to }) | Some(Crossing::Explore { to, .. }) => {
+            Some(Crossing::Seek { to }) | Some(Crossing::Probe { to, .. }) => {
                 assert_eq!(to, "e1sub75", "the leaf has nothing behind it");
             }
             other => panic!("expected a step past the leaf, got {other:?}"),
@@ -4572,7 +4692,7 @@ mod tests {
     fn a_fogged_arrival_explores_instead_of_giving_up() {
         let mut m = a_lost_woods();
         match m.cross_toward(&[]) {
-            Some(Crossing::Seek { to }) | Some(Crossing::Explore { to, .. }) => {
+            Some(Crossing::Seek { to }) | Some(Crossing::Probe { to, .. }) => {
                 assert_eq!(to, "e1sub3", "the crossroads: paved outranks the rest");
             }
             other => panic!("fog is not a dead end, got {other:?}"),
@@ -4891,7 +5011,7 @@ mod tests {
         m.cross_toward(&[dane.clone(), cowlam.clone()]);
         m.abandon("l9_path_to_l1");
         match m.cross_toward(&[dane, cowlam]) {
-            Some(Crossing::Step { toward, .. } | Crossing::Explore { toward, .. }) => assert_eq!(
+            Some(Crossing::Step { toward, .. } | Crossing::Probe { toward, .. }) => assert_eq!(
                 toward, "l9_path_to_l19",
                 "re-derived, and `exit_toward` skips the road we wrote off"
             ),
@@ -4937,7 +5057,7 @@ mod tests {
         // No route to `l9_path_to_l19` is known -- it is not even on the map yet -- so this is the
         // explore fallback, which is the code under test.
         match m.cross_toward(&exits) {
-            Some(Crossing::Explore { to, .. }) => {
+            Some(Crossing::Probe { to, .. }) => {
                 assert_ne!(to, "l9_path_to_l1", "that is a way OUT, by the wrong door");
                 assert_eq!(to, "l9sub26", "the road, and unvisited");
             }
@@ -4999,7 +5119,7 @@ mod tests {
             9,
         );
         match m.cross_toward(&[exit("l19"), exit("l7")]) {
-            Some(Crossing::Step { toward, .. }) | Some(Crossing::Explore { toward, .. }) => {
+            Some(Crossing::Step { toward, .. }) | Some(Crossing::Probe { toward, .. }) => {
                 assert!(toward.starts_with("l10_path_to_"), "heading out, not to the bar: {toward}");
             }
             other => panic!("expected an exit crossing, got {other:?}"),
@@ -5041,7 +5161,7 @@ mod tests {
         );
         m.abandon("l10sub4");
         match m.cross_toward(&[exit("l19"), exit("l7")]) {
-            Some(Crossing::Step { toward, .. }) | Some(Crossing::Explore { toward, .. }) => {
+            Some(Crossing::Step { toward, .. }) | Some(Crossing::Probe { toward, .. }) => {
                 assert!(toward.starts_with("l10_path_to_"), "back to crossing: {toward}");
             }
             other => panic!("expected an exit crossing, got {other:?}"),
@@ -5060,7 +5180,7 @@ mod tests {
         m.note_health_level(crate::rest::Health { current: 20, max: 20 });
         assert!(!m.wants_rest());
         match m.cross_toward(&[exit("l19"), exit("l7")]) {
-            Some(Crossing::Step { toward, .. }) | Some(Crossing::Explore { toward, .. }) => {
+            Some(Crossing::Step { toward, .. }) | Some(Crossing::Probe { toward, .. }) => {
                 assert!(toward.starts_with("l10_path_to_"), "straight through: {toward}");
             }
             other => panic!("expected an exit crossing, got {other:?}"),
@@ -5108,7 +5228,7 @@ mod tests {
         // Standing on the plaza, `l9sub2` is the one neighbour with nothing left to teach us, and it
         // is the one the run took -- twenty times.
         match m.cross_toward(&[exit("l19")]) {
-            Some(Crossing::Explore { to, .. }) => {
+            Some(Crossing::Probe { to, .. }) => {
                 assert_ne!(to, "l9sub2", "that is the way we came, and it is fully walked");
                 assert_eq!(to, "l9sub1", "an unwalked road, nearest and paved");
             }
@@ -5136,7 +5256,7 @@ mod tests {
         m.abandon("l9sub16");
         // Not `None`, which would be a stall, and not a wander: the one neighbour there is.
         match m.cross_toward(&[exit("l19")]) {
-            Some(Crossing::Explore { to, .. }) => assert_eq!(to, "l9sub16"),
+            Some(Crossing::Probe { to, .. }) => assert_eq!(to, "l9sub16"),
             other => panic!("expected the fallback to step onto it anyway, got {other:?}"),
         }
     }
@@ -5160,7 +5280,7 @@ mod tests {
         m.note_health_level(crate::rest::Health { current: 1, max: 20 });
         m.abandon("l9sub16");
         match m.cross_toward(&[exit("l19")]) {
-            Some(Crossing::Explore { to, .. }) | Some(Crossing::Step { to, .. }) => {
+            Some(Crossing::Probe { to, .. }) | Some(Crossing::Step { to, .. }) => {
                 assert_eq!(to, "l9sub18", "round the blocker, by the road");
             }
             other => panic!("expected a step round it, got {other:?}"),
@@ -5264,7 +5384,7 @@ mod tests {
 
         // Nearest-first says `l9sub21` at one hop. The rule says the road at two.
         match m.cross_toward(&exits) {
-            Some(Crossing::Explore { to, toward }) => {
+            Some(Crossing::Probe { to, toward }) => {
                 assert_eq!(toward, "l9_path_to_l19", "still the committed door");
                 assert_eq!(to, "l9sub10", "toward the unwalked road, not into the brush");
             }
@@ -5497,6 +5617,58 @@ mod tests {
         // Same shrine, once corruption has reset it: now a fight we no longer need.
         m.entry("s1").corrupted = true;
         assert_ne!(m.next_target().unwrap().reason, Goal::Shrine);
+    }
+
+    #[test]
+    fn a_map_kept_between_runs_gives_the_planner_a_route_it_had_walked() {
+        // The live failure of 2026-08-14, in miniature. An earlier run walked `here -> mid -> s1`
+        // and stood on the shrine; a later run starts knowing only what the save carries — that
+        // `s1` exists, is complete, is corrupted and is not consecrated — and therefore cannot
+        // route to it. `RouteTo(Shrine)` for a whole run, and a free consecration never taken.
+        let mut walked = WorldMap::new();
+        walked.fold(&dump("here", "camp", vec![node("mid", "Quiet Glade meadow")]));
+        walked.fold(&dump("mid", "Quiet Glade meadow", vec![node("s1", "Faraway shrine")]));
+        let text = walked.cache_text();
+
+        // The restart: flags only, exactly as `apply_save` leaves it.
+        let mut fresh = WorldMap::new();
+        fresh.fold(&dump("here", "camp", vec![]));
+        fresh.hell = Some(0.1);
+        {
+            let p = fresh.entry("s1");
+            p.corrupted = true;
+            p.completed = true;
+        }
+        assert!(
+            !matches!(fresh.next_target().map(|p| p.reason), Some(Goal::Shrine)),
+            "the premise: with no edges the shrine cannot be planned"
+        );
+
+        // Now hand it back what it had already learned.
+        assert!(fresh.absorb_cache(&text) > 0, "the cache carried no edges");
+        let plan = fresh.next_target().expect("a plan");
+        assert_eq!(plan.reason, Goal::Shrine, "the route was known all along");
+        assert_eq!(plan.target, "s1");
+    }
+
+    #[test]
+    fn a_cache_never_overwrites_what_this_run_has_seen() {
+        // A stale cache must lose to a live dump, or a moved node or a changed heading would be
+        // believed for the whole run. Only gaps are filled.
+        let mut fresh = WorldMap::new();
+        fresh.fold(&dump("here", "camp", vec![node("mid", "Quiet Glade meadow")]));
+        let seen = fresh.entry("mid").pos;
+        assert!(seen.is_some(), "the premise: this run placed it");
+
+        let stale = "p\tmid\tSomewhere Else crypt\t999\t999\t7\t3\t\n";
+        fresh.absorb_cache(stale);
+        assert_eq!(fresh.entry("mid").pos, seen, "a cache moved a node this run had placed");
+        assert_eq!(fresh.entry("mid").heading, "Quiet Glade meadow", "a cache renamed a live node");
+
+        // But a place the run has never heard of is taken whole.
+        fresh.absorb_cache("p\tfar\tBorsea shrine\t12\t34\t2\t1\t\n");
+        assert_eq!(fresh.entry("far").heading, "Borsea shrine");
+        assert_eq!(fresh.entry("far").pos, Some((12.0, 34.0)));
     }
 
     #[test]

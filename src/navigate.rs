@@ -56,6 +56,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const FRAMES: &str = "spike-frames-live";
+/// Where the learned map is kept between runs. See [`Run::save_map_cache`].
+pub const MAP_CACHE: &str = "map-cache";
 const AREA_BUTTONS: crate::win::capture::Region =
     crate::win::capture::Region { nx: 0.0, ny: 0.68, nw: 0.45, nh: 0.18 };
 const SHOW_AREA_BUTTONS: (i32, i32) = (32, 918);
@@ -786,6 +788,46 @@ impl Run<'_> {
         // barely have moved at all, and the honest answer to that is a small measured shift.
         let radius = (want.dx.abs().max(want.dy.abs()) as i32 + pan::PATCH).max(200);
         pan::measure(&after, &patch, taken_at, want, radius)
+    }
+
+    /// Where this world's remembered map lives.
+    ///
+    /// Keyed by `overworld.seed`, because the map is a property of the world rather than of the
+    /// save file — two saves of the same seed describe the same terrain, and a new seed must not
+    /// inherit a stale graph. `None` when the save cannot be read, which is the same condition that
+    /// makes everything else here unavailable.
+    fn map_cache_path(&self) -> Option<PathBuf> {
+        let save = crate::game::save::load(&self.save_dir.join("mainSaveData")).ok()?;
+        let seed = save.int_at("overworld.seed")?;
+        Some(PathBuf::from(MAP_CACHE).join(format!("world-{seed}.txt")))
+    }
+
+    /// Folds in what earlier runs learned about this world. Returns the edge count and the file.
+    pub fn load_map_cache(&mut self) -> Option<(usize, String)> {
+        let path = self.map_cache_path()?;
+        let text = std::fs::read_to_string(&path).ok()?;
+        let edges = self.map.absorb_cache(&text);
+        Some((edges, path.display().to_string()))
+    }
+
+    /// Writes what this run learned, for the next one.
+    ///
+    /// Failures are swallowed and reported into the log rather than raised: a run that has just
+    /// finished has nothing better to do about an unwritable cache, and losing the memory is a
+    /// slower next run rather than a broken one.
+    pub fn save_map_cache(&mut self) {
+        let Some(path) = self.map_cache_path() else {
+            self.log.push_str("could not read the seed — this run's map is not remembered\n");
+            return;
+        };
+        let text = self.map.cache_text();
+        let wrote = std::fs::create_dir_all(MAP_CACHE).and_then(|()| std::fs::write(&path, &text));
+        match wrote {
+            Ok(()) => self
+                .log
+                .push_str(&format!("remembered {} places in `{}`\n", self.map.len(), path.display())),
+            Err(e) => self.log.push_str(&format!("could not write {}: {e}\n", path.display())),
+        }
     }
 
     pub fn apply_save(&mut self) -> Option<crate::rest::Health> {
@@ -3006,9 +3048,9 @@ pub fn drive(
                 // `l2_path_to_l1` was not a node in our graph until a dump finally named it as a
                 // neighbour — at the second-to-last step. The run explored the whole village because
                 // routing to the door was not something it could do, and the log said otherwise.
-                Crossing::Explore { to, toward } => match fresh.nodes.iter().find(|n| &n.key == to) {
+                Crossing::Probe { to, toward } => match fresh.nodes.iter().find(|n| &n.key == to) {
                     Some(n) => (
-                        format!("`{toward}` is not on any route we know — exploring `{container}` via `{to}`"),
+                        format!("`{toward}` is not on any route we know — probing `{container}` via `{to}`"),
                         (n.x, n.y),
                     ),
                     None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
@@ -3036,7 +3078,7 @@ pub fn drive(
                     Some(n) => (
                         match r.map.seeking_an_inn(&container) {
                             true => format!("searching `{container}` for its inn via `{to}`"),
-                            false => format!("no way out of `{container}` in sight — exploring via `{to}`"),
+                            false => format!("no way out of `{container}` in sight — probing via `{to}`"),
                         },
                         (n.x, n.y),
                     ),
