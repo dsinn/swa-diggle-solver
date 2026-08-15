@@ -197,6 +197,18 @@ pub enum Stop {
     // terminus — see the arrival branch in `drive`.
     /// Standing on a subworld whose interior we cannot yet clear.
     AtSubworld(String),
+    /// The general store's screen is open and the buying is not written yet.
+    ///
+    /// A deliberate terminus, asked for by the dev: the errand drives all the way to the counter and
+    /// stops there, so the shop screen can be photographed and its controls measured from a real run
+    /// rather than guessed at. Everything up to here is ordinary navigation; what follows needs
+    /// numbers nobody has taken.
+    ///
+    /// The console already does most of the reading. `shop.onActive` prints `Opened shop UI` and
+    /// then the entire inventory through `table.repr` (`shop.lua:248-256`), in the same
+    /// serialisation `mainSaveData` uses. So what this stop is really for is the *clicking*: whether
+    /// an item's index in that dump survives to its slot in the 2x4 grid at `shop.lua:287-292`.
+    AtShop(String),
     NoPlan,
     Failed(String),
     Fought(String),
@@ -3151,6 +3163,26 @@ pub fn drive(
             // back to it, and the run spends its budget walking between the gate and the bar. The
             // planner and the driver must not disagree about what is still worth walking to.
             if let Crossing::Arrive { at } = &mv {
+                // **Which errand are we standing on?** The two share this branch because reaching
+                // them is identical; what happens next is not.
+                if r.map.get(at).map(|p| p.is_general_store()).unwrap_or(false) {
+                    r.log.push_str(&format!("{step}. at **{at}** in `{container}` - the general store
+"));
+                    // The same press as every other area button, confirmed the same way. `Shop` sits
+                    // in the slot `Visit` and `Combat` share (`village.lua:312-320`), so this is
+                    // machinery that already works.
+                    if !matches!(r.click_area_button("Shop"), Ok(true)) {
+                        r.map.abandon(at);
+                        r.log.push_str("  the shop did not open - writing the store off
+");
+                        continue;
+                    }
+                    // The console is the instrument here, not the screen: the pump is what carries
+                    // `Opened shop UI` and the inventory behind it.
+                    std::thread::sleep(Duration::from_millis(1200));
+                    r.pump();
+                    return Stop::AtShop(at.clone());
+                }
                 r.log.push_str(&format!("{step}. at **{at}** in `{container}` — resting\n"));
                 let rested = r.rest_at_inn();
                 // **Written off only if it gave us nothing.** This used to abandon before trying,
@@ -3513,10 +3545,14 @@ pub fn drive(
             // that produced the `shrine1 -> l10 -> shrine1` bounce, and the same omission is what
             // left `shrine1` unconsecrated for four runs — a filter testing `corrupted` without
             // asking `completed`.
-            let rest_here = r.map.wants_rest()
-                && r.map.gold() >= crate::rest::INN_COST
-                && p.type_is("village")
-                && (!p.corrupted || p.completed);
+            // **Two reasons to walk into a village now.** A bed, and a heart -- see
+            // `WorldMap::wants_a_heart`. The gate is otherwise identical, corruption clause and all:
+            // corruption is a level rather than a locked door, and a cleared corrupted village has
+            // its shops back.
+            let rest_here = p.type_is("village")
+                && (!p.corrupted || p.completed)
+                && ((r.map.wants_rest() && r.map.gold() >= crate::rest::INN_COST)
+                    || (r.map.wants_a_heart() && !r.map.heart_is_spent(&p.key)));
             if p.subworld_container || rest_here {
                 let heading_for = r.map.next_hop().map(|h| h.plan.target);
                 let stuck_here =

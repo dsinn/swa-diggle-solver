@@ -2752,8 +2752,16 @@ impl WorldMap {
         //   which must NOT fall back to the exit, because leaving is the one move that abandons the
         //   errand, and the doorway we came in by is usually the nearest thing to walk to;
         // - **the road out**, which is every other case.
-        let inn = self.inn_inside(&parent).map(|p| p.key.clone());
-        let leaving_to = match inn.is_some() || self.seeking_a_rest(&parent) {
+        // **What we came in for**, which is now two things rather than one. The inn is the rest
+        // errand; the general store is the heart errand (`Goal::Heart`). They behave identically
+        // from here — walk to it, arrive on it, hand over to the driver — which is task #18's
+        // generalisation arriving one errand at a time rather than as an abstraction invented
+        // around a single case.
+        let inn = self
+            .inn_inside(&parent)
+            .or_else(|| self.store_inside(&parent))
+            .map(|p| p.key.clone());
+        let leaving_to = match inn.is_some() || self.seeking_a_rest(&parent) || self.seeking_a_heart(&parent) {
             // The errand outranks the crossing, and leaves the commitment untouched rather than
             // clearing it: the rest is a detour, and the door we were making for is still the door.
             true => None,
@@ -3126,7 +3134,11 @@ impl WorldMap {
     /// record of having had its go is the only thing that separates "the fog still hides it" from
     /// "we tried and it did not work", and conflating those is this project's oldest bounce.
     fn store_inside(&self, container: &str) -> Option<&Place> {
-        if !self.wants_a_heart() {
+        // The spent check belongs here as well as in `seeking_a_heart`: this is what the crossing
+        // asks when deciding whether we are still standing on an errand, and a store we have already
+        // emptied is not one. Without it, arriving stays `Arrive` for ever and the driver is handed
+        // a counter with nothing left on it.
+        if !self.wants_a_heart() || self.heart_bought.contains(container) {
             return None;
         }
         self.places.values().find(|p| {
@@ -3145,6 +3157,11 @@ impl WorldMap {
     ///
     /// `> HEART_COST` and not `>=`: arriving with exactly the price and nothing over is how a run
     /// ends up unable to pay for the inn it needs afterwards.
+    /// Has this village's heart already been bought? See [`WorldMap::heart_bought`].
+    pub fn heart_is_spent(&self, village: &str) -> bool {
+        self.heart_bought.contains(village)
+    }
+
     /// The driver's record that a village's heart is spent — see [`WorldMap::heart_bought`].
     pub fn bought_the_heart(&mut self, village: &str) {
         self.heart_bought.insert(village.to_string());
@@ -3179,6 +3196,25 @@ impl WorldMap {
     /// exit we cannot see yet, which in a lost woods is every exit.
     pub fn seeking_an_inn(&self, container: &str) -> bool {
         self.seeking_a_rest(container)
+    }
+
+    /// Are we inside a village on the heart errand, with its general store still to find?
+    ///
+    /// The same shape as [`WorldMap::seeking_a_rest`], including the abandoned clause: a store we
+    /// have already tried is not one the fog is hiding, and treating those alike is the shape of
+    /// every bounce this project has had.
+    fn seeking_a_heart(&self, container: &str) -> bool {
+        if !self.wants_a_heart() || self.heart_bought.contains(container) {
+            return false;
+        }
+        if !self.places.get(container).map(|p| p.type_is("village")).unwrap_or(false) {
+            return false;
+        }
+        !self.places.values().any(|p| {
+            p.parent.as_deref() == Some(container)
+                && p.is_general_store()
+                && self.abandoned.contains(&p.key)
+        })
     }
 
     fn seeking_a_rest(&self, container: &str) -> bool {
@@ -5346,6 +5382,42 @@ mod tests {
         let mut m = build();
         m.bought_the_heart("l11");
         assert_ne!(m.next_target().unwrap().reason, Goal::Heart, "the shelf is bare");
+    }
+
+    /// Inside the village, the errand is the general store.
+    ///
+    /// The rest errand walks to the inn; the heart errand walks to the store. They share every step
+    /// of getting there, which is why #18's generalisation arrives one errand at a time rather than
+    /// as an abstraction invented around a single case.
+    #[test]
+    fn the_heart_errand_walks_to_the_general_store() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("l11", "Rowlston Covert village")]));
+        m.fold(&inside_dump("l11", "l11sub1", "Rowlston Covert road",
+            vec![node("l11sub2", "Rowlston Covert general store"), node("l11sub3", "Rowlston Covert house")],
+            vec![]));
+        m.hell = Some(0.1);
+        m.gold = HEART_COST + 1;
+
+        match m.cross_toward(&[]) {
+            Some(Crossing::Step { to, toward }) | Some(Crossing::Probe { to, toward }) => {
+                assert_eq!(toward, "l11sub2", "the store is what we came in for");
+                assert_eq!(to, "l11sub2", "and it is one hop away");
+            }
+            other => panic!("expected a step toward the store, got {other:?}"),
+        }
+
+        // Standing on it, the crossing is over and the errand begins.
+        m.fold(&inside_dump("l11", "l11sub2", "Rowlston Covert general store",
+            vec![node("l11sub1", "Rowlston Covert road")], vec![]));
+        assert!(matches!(m.cross_toward(&[]), Some(Crossing::Arrive { .. })), "arrived at the counter");
+
+        // And once bought, the village stops being an errand at all.
+        m.bought_the_heart("l11");
+        assert!(
+            !matches!(m.cross_toward(&[]), Some(Crossing::Arrive { .. })),
+            "an emptied store is not somewhere to stand about in"
+        );
     }
 
     /// A road that bends the wrong way is still the road.
