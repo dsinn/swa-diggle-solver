@@ -150,6 +150,18 @@ pub struct Modifiers {
     /// asking is whether the enemy gets to act: `enemyCanHit` is gated on the same post-status
     /// health the game uses for `attackEstimatedToCauseEnemyDeath` (`rpgview.lua:1044-1052`).
     pub enemy_status_tick: i64,
+    /// **The enemy's answering attack cannot land this turn.** Only the halfling's `immuneTurnMod2`
+    /// does this, and only on the turns [`crate::parity`] names — read from the save's own
+    /// `turnNumber`, which is not the number the console prints.
+    ///
+    /// The dev, 2026-08-15: *"make sure the halfling also only fears enemies on even turns"*, in the
+    /// console's numbering — which is the same statement as this one, see [`crate::parity`].
+    ///
+    /// **Nothing reads this to change a word yet, and that is on purpose** — see
+    /// [`MIN_MEANINGFUL_DAMAGE`] for what the missing half is, and `Goal::for_enemy`'s scare floor
+    /// for why the obvious wiring makes play worse rather than better. It is reported in the turn
+    /// log, which is what makes the next step measurable instead of theoretical.
+    pub player_dodges: bool,
 }
 
 impl Modifiers {
@@ -207,6 +219,11 @@ impl Modifiers {
             problems.push(note);
         }
 
+        // **A turn the enemy cannot land on.** Absent the turn number this reads as false, which is
+        // the safe direction: it only ever restores the ordinary floor.
+        let player_dodges = crate::parity::save_turn(save)
+            .is_some_and(|t| crate::parity::dodges(crate::parity::has_flag(save), t));
+
         Ok((
             Modifiers {
                 excluded: lexica.excluded_words(&statuses),
@@ -227,6 +244,7 @@ impl Modifiers {
                 dicts,
                 weapon,
                 enemy_status_tick,
+                player_dodges,
             },
             resolved.geometry,
         ))
@@ -250,6 +268,7 @@ impl Modifiers {
             dicts: Vec::new(),
             weapon: crate::gear::Weapon::default(),
             enemy_status_tick: 0,
+            player_dodges: false,
         }
     }
 
@@ -617,11 +636,24 @@ fn affordable_buffer(slack: i64) -> i64 {
 ///
 /// **Post-MVP this stops being true**, and the two exceptions the dev named are specific:
 ///
-/// - **The halfling on an odd turn, against an enemy on 1 health.** `immuneTurnMod2` — "Enemies
-///   can't deal damage to you on even turns" (`items/classpassives.lua:35-45`) — is evaluated as
-///   `entityDodged`: the flag, and `player.turnNumber % 2 == 0` (`rpgview.lua:265`). So a turn
-///   spent dealing nothing is a turn spent moving the parity, and it is free precisely when the
-///   turn it buys is one the enemy cannot hit back on.
+/// - **The halfling on a turn the enemy cannot land on.** `immuneTurnMod2` — "Enemies can't deal
+///   damage to you on even turns" (`items/classpassives.lua:35-48`). **The parity input now
+///   exists**: [`crate::parity`] reads it, [`Modifiers::player_dodges`] carries it, and the turn log
+///   prints it. What is still missing is a way to *choose* a turn that does nothing.
+///
+///   Counting the way the console does — `Player turn n start;`, which is 0 for the first word —
+///   the halfling is safe on odd turns and can be hit on even ones. That is the dev's sentence
+///   exactly: *"make sure the halfling also only fears enemies on even turns"*. An earlier version
+///   of this comment said "the halfling on an odd turn" and meant the same thing; a later one said
+///   the opposite by quoting `turnNumber`, which is the *other* numbering. See [`crate::parity`],
+///   which now holds the conversion and two tests that pin it to files in this repo.
+///
+///   The remaining work is not the floor. Dropping it to zero on a dodge turn is worse than leaving
+///   it — `Goal::for_enemy` carries the argument. What is worth having is a **stall**: on a turn we
+///   cannot be hit, when every word that lands would commit an avoidable murder, spend the turn
+///   deliberately instead of taking the kill. Today `fight::nothing_left_to_lower` takes the kill,
+///   which is the dev's recorded call for the general case — but the general case is one where the
+///   turn is not free.
 ///
 /// - **The slime brooch, letting toxin land the kill.** Not a scare consideration at all, which is
 ///   what this comment said before the dev corrected it. `onStatusKillToxinRegen` is
@@ -706,6 +738,17 @@ impl Goal {
         // the input instead would double-count against the buffer and narrow a band that was
         // already correct: at 4 health against a threshold of 5, `0+1 .. 3` becomes `1+1 .. 3`, a
         // band one point wide for no reason.
+        //
+        // **This floor stays at 1 even when the enemy cannot swing** — see
+        // [`Modifiers::player_dodges`], which is read and reported but deliberately not wired here.
+        // Dropping it to 0 on a dodge turn admits zero-damage words to the band, and a band is
+        // ranked by [`crate::pick::Rank`], which carries **no damage term at all** because every
+        // candidate in a band is acceptable by construction. A zero-damage word would therefore win
+        // on board tidiness over a word that actually moves the enemy toward its flee threshold, and
+        // being unable to be hit this turn does not make that trade good — the work still has to be
+        // done, one turn later, on a turn we *can* be hit. Spending the free turn is only right when
+        // the alternative is worse than nothing, which is a decision the search cannot see. See
+        // [`MIN_MEANINGFUL_DAMAGE`].
         let need = (scare_need + b).max(MIN_MEANINGFUL_DAMAGE);
         // The floor can push the floor into the ceiling, and that is not a band.
         //

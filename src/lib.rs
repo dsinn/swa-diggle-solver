@@ -11,6 +11,7 @@ pub mod heroselect;
 pub mod innplay;
 pub mod layout;
 pub mod letters;
+pub mod parity;
 pub mod pick;
 pub mod lexica;
 pub mod navigate;

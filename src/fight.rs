@@ -485,6 +485,13 @@ impl Fight<'_> {
         // still kills if the status finishes the job, which is how a live run collected thirty
         // avoidable-murder refusals for words its own arithmetic called safe.
         let deciding_health = (health - mods.enemy_status_tick).max(0);
+        // Printed rather than acted on. The halfling's `immuneTurnMod2` is the only thing that sets
+        // it, it is a per-turn fact that leaves no other trace in a log, and the case it unlocks —
+        // spending a free turn rather than committing an avoidable murder — needs a goal that does
+        // not exist yet. See [`crate::parity`] and `search::MIN_MEANINGFUL_DAMAGE`.
+        if mods.player_dodges {
+            log.push_str("  the enemy cannot land a hit this turn (immuneTurnMod2)\n");
+        }
         if mods.enemy_status_tick != 0 {
             log.push_str(&format!(
                 "  {name} loses {} to status before acting; aiming against {deciding_health}hp
