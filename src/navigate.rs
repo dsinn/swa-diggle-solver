@@ -2993,7 +2993,25 @@ pub fn drive(
         // An uncorrupted shrine is strictly worth it: consecrating costs no fight and is what the
         // `shrineKarma` economy pays out on. The gate is the map's, not this function's, because it
         // is the map that knows whether a *corrupted* one is merely on the way.
-        if r.map.worth_consecrating_here(&here) && !r.shrines_tried.contains(&here) {
+        // **Played, or there is nothing here for `consecrate` to press.**
+        //
+        // `shrineplay::consecrate` opens the shrine screen and looks for a live `Consecrate`. It has
+        // no typist — solving is `play`'s job — and the button is only live once the word is won:
+        // `showConsecrateButton` is `ShowAGoodButton() and majorShrine`, and `ShowAGoodButton()` is
+        // `hasWon()` (`shrine.lua:36-40, 92-95`).
+        //
+        // The gate is here rather than inside `worth_consecrating_here` because that helper answers a
+        // different question — *is this shrine worth walking to* — and an unplayed shrine certainly
+        // is. It is only the choice of what to do on arrival that has to know.
+        //
+        // Live 2026-08-15: the run crossed two subworlds and took three fights to reach `shrine5`,
+        // which had no `subs` in the save and so had never been played by anyone. It took this
+        // branch, found the button greyed, logged `left unconsecrated`, and walked away. The dev saw
+        // the whole trip and no typing.
+        if r.map.worth_consecrating_here(&here)
+            && r.map.get(&here).map(|p| p.played).unwrap_or(false)
+            && !r.shrines_tried.contains(&here)
+        {
             r.log.push_str(&format!("{step}. at **{here}** — consecrating\n"));
             // Same discipline as the play branch: marked before the attempt, both here and on the
             // planner, so an attempt that panics or times out still counts as having had its go.

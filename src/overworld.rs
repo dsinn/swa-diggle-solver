@@ -92,6 +92,23 @@ pub struct Place {
     /// (`overworldview.lua:215-218`). For a campfire this is the difference between a free rest and
     /// a wasted walk.
     pub used: bool,
+    /// `<key>subs` in `areaFlags` — **the shrine's word has been played at least once.**
+    ///
+    /// No underscore: the game builds it as `data.dataKey..'subs'` (`shrineview.lua:267`), and it
+    /// writes the whole submissions list there on every accepted guess. `shrine.lua:495` hands it
+    /// back to the view on the next entry, which is why a shrine solved in an earlier run opens
+    /// already won.
+    ///
+    /// What it is *for* here is the negative case. `hasWon()` is
+    /// `word == submitions[#submitions-1]` (`shrineview.lua:57-59`), so no submissions means no win,
+    /// which means `ShowAGoodButton()` is false and `Consecrate` is drawn greyed. A shrine with no
+    /// `subs` cannot be consecrated by anything that does not first solve the word — and
+    /// `shrineplay::consecrate` has no typist at all.
+    ///
+    /// Present rather than parsed: a partial attempt writes `subs` too, so this says "played", not
+    /// "won". That is the right strength for the one question it answers, which is whether pressing
+    /// a button could possibly do anything.
+    pub played: bool,
     /// This node is a subworld **container** — a forest, a village — not a place we fight on.
     ///
     /// Learned by evidence, never by type name. `getLocationButtons` checks `typeData.subworld`
@@ -1588,6 +1605,18 @@ impl WorldMap {
                 .collect();
             for k in used {
                 self.entry(&k).used = true;
+            }
+            // `<key>subs`, the shrine submissions list — see [`Place::played`]. No underscore, and
+            // the suffix is stripped the same way everything else here is.
+            let played: Vec<String> = flags
+                .map
+                .keys()
+                .filter_map(|k| k.strip_suffix("subs"))
+                .filter(|k| !k.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            for k in played {
+                self.entry(&k).played = true;
             }
             // `<key>_first_corrupt_time`. The `_shop` variant has a different suffix and so does
             // not match, which is what we want — it says nothing about the area itself.
@@ -5063,6 +5092,38 @@ mod tests {
         assert!(m.gap("west", "start").unwrap() < m.gap("east", "start").unwrap());
         assert_eq!(hop.step, "west", "toward the anomaly, not the lower key");
         assert!(!hop.routed, "and the log has to say so");
+    }
+
+    /// `shrine5`, and the trip that could not have worked.
+    ///
+    /// The save records a shrine's submissions under `<key>subs` (`shrineview.lua:267`), with no
+    /// underscore. `shrine5` had none — nobody had ever played it — so `hasWon()` was false,
+    /// `ShowAGoodButton()` was false, and `Consecrate` was drawn greyed. The run walked there anyway
+    /// and pressed nothing, because the branch it took has no typist.
+    ///
+    /// The shrine is still a destination. That is the distinction the fix turns on: worth walking
+    /// to, and not yet worth pressing at.
+    #[test]
+    fn a_shrine_nobody_has_played_is_worth_the_walk_but_not_the_button() {
+        let mut m = WorldMap::new();
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = {
+                     completedAreas = { shrine5 = true, shrine2 = true },
+                     areaFlags = { hell = 0.1, shrine2subs = 3, shrine2_used = 1 },
+                 } }",
+            )
+            .unwrap(),
+        );
+
+        assert!(!m.get("shrine5").expect("known from the save").played, "no `subs`, never played");
+        assert!(m.get("shrine2").expect("known from the save").played, "`shrine2subs` says otherwise");
+        // Both are worth a trip while the anomaly is open and neither is consecrated — the planner's
+        // question, which this must not change.
+        assert!(m.worth_consecrating_here("shrine5"));
+        assert!(m.worth_consecrating_here("shrine2"));
+        // And no `subs` key invented a place of its own.
+        assert!(!m.places.contains_key("shrine2subs"), "the suffix strip must not mint a node");
     }
 
     /// A road that bends the wrong way is still the road.
