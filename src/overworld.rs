@@ -1685,6 +1685,47 @@ impl WorldMap {
         self.plan(false, true).or_else(|| self.plan(false, false))
     }
 
+    /// Is there a known route to `key` that takes no crypt fight on the way?
+    ///
+    /// The dev's rule for shrine targets while the anomaly is open. A shrine is worth walking to
+    /// because it is *cheap* — no fight, and it pays in wildcard tiles — and a route that spends a
+    /// level 6 crypt to get there has given that away.
+    ///
+    /// **Crypt-ness comes from the heading, and only an unfinished one counts.** `completed` is what
+    /// says whether a fight is still owed, exactly as it does everywhere else here: a crypt we have
+    /// already cleared is ordinary ground to walk over. The destination itself is exempt — refusing
+    /// to path to where we were told to go is failure, not avoidance — but a shrine is not a crypt,
+    /// so that exemption is a formality rather than a loophole.
+    ///
+    /// Breadth-first over the same edges as [`WorldMap::distances`] and deliberately *not* weighted:
+    /// the question is whether such a route exists at all, not which one is cheapest.
+    fn reachable_without_a_crypt(&self, from: &str, to: &str) -> bool {
+        let costly = |k: &str| {
+            k != to
+                && self
+                    .places
+                    .get(k)
+                    .map(|p| !p.completed && p.type_is("crypt"))
+                    .unwrap_or(false)
+        };
+        let mut seen: BTreeSet<&str> = [from].into_iter().collect();
+        let mut queue: std::collections::VecDeque<&str> = [from].into();
+        while let Some(k) = queue.pop_front() {
+            if k == to {
+                return true;
+            }
+            let Some(p) = self.places.get(k) else { continue };
+            for n in &p.neighbours {
+                if seen.contains(n.as_str()) || costly(n) {
+                    continue;
+                }
+                seen.insert(n);
+                queue.push_back(n);
+            }
+        }
+        false
+    }
+
     /// Could [`WorldMap::next_hop`] actually set off toward `key`, over the edges we have recorded?
     ///
     /// The question `plan` failed to ask, and the run of 2026-08-09 is what that cost. Every travel
@@ -1924,7 +1965,23 @@ impl WorldMap {
                 .filter(|p| p.key != here && !p.avoid && p.is_shrine())
                 .filter(|p| !self.abandoned.contains(&p.key))
                 .filter(|p| worth_a_trip(p))
-                .filter(|p| !(anomaly_open && p.corrupted && !p.completed))
+                // **With the portal open, a shrine has to be cheap or it is not a destination.**
+                //
+                // The dev's rule, 2026-08-15: target only unconsecrated, uncorrupted shrines that
+                // can be reached without fighting a crypt on the way. A corrupted shrine is not a
+                // target at all — consecrating one is something we do *if we happen to be there*,
+                // having gone through it for another reason, and never a reason to make the trip.
+                //
+                // What this replaces was a filter that admitted any corrupted shrine whose fight was
+                // already won, and ranked purely on distance. It sent the run of 2026-08-15 from
+                // `shrine5` through `l50`, `l41`, `l51` and `l35` into `l49` — Yokefleet, a level 6
+                // crypt — chasing another shrine, with the anomaly untouched. Every hop of it read
+                // `RouteTo(Shrine)`.
+                //
+                // The cost is bounded and the benefit is not: a shrine bought with a crypt fight is
+                // no longer cheap preparation, it is the level 8 fight's budget spent early.
+                .filter(|p| !anomaly_open || (!p.corrupted && !p.consecrated))
+                .filter(|p| !anomaly_open || self.reachable_without_a_crypt(here, &p.key))
                 .filter(|p| ok(p))
                 .min_by_key(|p| dist_or_far(&dist, &p.key))
         };
@@ -6202,8 +6259,9 @@ mod tests {
         fresh.fold(&dump("here", "camp", vec![]));
         fresh.hell = Some(0.1);
         {
+            // Cleared, and **uncorrupted**: since 2026-08-15 a corrupted shrine is not a target at
+            // all, and this test is about the cache restoring a route rather than about corruption.
             let p = fresh.entry("s1");
-            p.corrupted = true;
             p.completed = true;
         }
         assert!(
@@ -6268,14 +6326,20 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupted_shrine_we_already_cleared_is_a_destination_again() {
-        // Live 2026-08-14: `shrine1` finished its run `[done] [corrupted]` and unconsecrated, and
-        // was never once nominated. The picker dropped every corrupted shrine, so the fight won at
-        // the start of that very run bought nothing — while `worth_consecrating_here` would have
-        // taken the consecration for free had anything walked the run back there.
+    fn a_corrupted_shrine_is_not_a_destination_but_is_still_consecrated_on_arrival() {
+        // **The rule changed on 2026-08-15 and this test changed with it.** It used to assert that a
+        // corrupted shrine whose fight we had already won was a destination again, which was the
+        // dev's earlier correction — corruption is a level, not a locked door. The refinement:
+        // corruption still is not a locked door, but it is not a reason to make the trip either.
+        // Only unconsecrated, uncorrupted shrines are targets while the anomaly is open; a corrupted
+        // one is consecrated **if we happen to be standing on it**, having gone there for something
+        // else.
         //
-        // The two tests that matter are on the same map: with the bill outstanding we stay away,
-        // and the ONLY thing that changes between them is `completed`.
+        // What that protects: the run of 2026-08-15 walked `shrine5 -> l50 -> l41 -> l51 -> l35 ->
+        // l49` chasing shrines, into a level 6 crypt, with the anomaly untouched.
+        //
+        // Both halves are asserted on one map, because the two used to drift apart and the drift is
+        // what left `shrine1` unconsecrated for four runs.
         let mut m = WorldMap::new();
         let mut d = dump("here", "camp", vec![node("s1", "Faraway shrine"), node("l2", "Quiet Glade meadow")]);
         d.hidden = 1;
@@ -6287,11 +6351,44 @@ mod tests {
         assert!(!m.worth_consecrating_here("s1"), "and the arrival test agrees while it is owed");
 
         m.entry("s1").completed = true;
+        assert_ne!(
+            m.next_target().unwrap().reason,
+            Goal::Shrine,
+            "cleared or not, a corrupted shrine is not somewhere we set off for"
+        );
+        assert!(
+            m.worth_consecrating_here("s1"),
+            "but standing on it, the consecration is free and we take it"
+        );
+
+        // Uncorrupt the same shrine and it becomes a destination, which is what pins the filter to
+        // corruption rather than to something else about the fixture.
+        m.entry("s1").corrupted = false;
         let plan = m.next_target().unwrap();
-        assert_eq!(plan.reason, Goal::Shrine, "the bill is paid; corruption is no longer a reason");
+        assert_eq!(plan.reason, Goal::Shrine);
         assert_eq!(plan.target, "s1");
-        // The pair must not drift again: destination and arrival now say the same thing.
-        assert!(m.worth_consecrating_here("s1"));
+    }
+
+    /// A shrine on the far side of a crypt is not cheap, so it is not a destination.
+    ///
+    /// The dev's rule: reachable without fighting a crypt. `l49` — Yokefleet, level 6 — is what the
+    /// run of 2026-08-15 walked into on its way to the next shrine.
+    #[test]
+    fn a_shrine_behind_a_crypt_is_not_worth_the_trip() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("l49", "Yokefleet — level 6 crypt")]));
+        m.fold(&dump("l49", "Yokefleet — level 6 crypt", vec![node("s1", "Faraway shrine")]));
+        m.here = Some("here".into());
+        m.hell = Some(0.1);
+
+        assert!(!m.reachable_without_a_crypt("here", "s1"), "the only way through is the crypt");
+        assert_ne!(m.next_target().unwrap().reason, Goal::Shrine, "so it is not the plan");
+
+        // Clear the crypt and the same shrine is suddenly cheap: `completed` is what says whether a
+        // fight is still owed, here as everywhere else.
+        m.entry("l49").completed = true;
+        assert!(m.reachable_without_a_crypt("here", "s1"));
+        assert_eq!(m.next_target().unwrap().target, "s1");
     }
 
     #[test]

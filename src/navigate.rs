@@ -2913,9 +2913,26 @@ pub fn drive(
                 r.snap_area_slot(tag);
             }
         }
+        // **One shrine branch, and it always brings the typist.**
+        //
+        // The dev's rule: solve the word as soon as we enter an unsolved shrine. There used to be a
+        // second branch below for a shrine that was `used` but unconsecrated, and it called
+        // `shrineplay::consecrate` — which opens the screen, looks for a live `Consecrate` and has
+        // no typist at all. Whenever the word was not already won that branch could only fail, and
+        // on 2026-08-15 it did: two subworlds and three fights to reach `shrine5`, greyed button,
+        // `left unconsecrated`, nothing typed.
+        //
+        // `play` handles every state the slot can be in — active `Consecrate` spends the solve,
+        // `Pray` claims the blessing, an empty slot means the word and so the solver runs — so there
+        // is nothing for a second entry point to add. See its doc for the four-state table.
+        //
+        // The condition is the union of what the two branches covered: an unused shrine is worth
+        // entering for its blessing, and a used one is worth entering while the anomaly is open and
+        // it is still unconsecrated.
         if let Some(p) = place
             .as_ref()
-            .filter(|p| p.is_shrine() && p.completed && !p.used)
+            .filter(|p| p.is_shrine() && p.completed)
+            .filter(|p| !p.used || r.map.worth_consecrating_here(&p.key))
             .filter(|p| !r.shrines_tried.contains(&p.key))
         {
             let key = p.key.clone();
@@ -2993,46 +3010,6 @@ pub fn drive(
         // An uncorrupted shrine is strictly worth it: consecrating costs no fight and is what the
         // `shrineKarma` economy pays out on. The gate is the map's, not this function's, because it
         // is the map that knows whether a *corrupted* one is merely on the way.
-        // **Played, or there is nothing here for `consecrate` to press.**
-        //
-        // `shrineplay::consecrate` opens the shrine screen and looks for a live `Consecrate`. It has
-        // no typist — solving is `play`'s job — and the button is only live once the word is won:
-        // `showConsecrateButton` is `ShowAGoodButton() and majorShrine`, and `ShowAGoodButton()` is
-        // `hasWon()` (`shrine.lua:36-40, 92-95`).
-        //
-        // The gate is here rather than inside `worth_consecrating_here` because that helper answers a
-        // different question — *is this shrine worth walking to* — and an unplayed shrine certainly
-        // is. It is only the choice of what to do on arrival that has to know.
-        //
-        // Live 2026-08-15: the run crossed two subworlds and took three fights to reach `shrine5`,
-        // which had no `subs` in the save and so had never been played by anyone. It took this
-        // branch, found the button greyed, logged `left unconsecrated`, and walked away. The dev saw
-        // the whole trip and no typing.
-        if r.map.worth_consecrating_here(&here)
-            && r.map.get(&here).map(|p| p.played).unwrap_or(false)
-            && !r.shrines_tried.contains(&here)
-        {
-            r.log.push_str(&format!("{step}. at **{here}** — consecrating\n"));
-            // Same discipline as the play branch: marked before the attempt, both here and on the
-            // planner, so an attempt that panics or times out still counts as having had its go.
-            r.shrines_tried.insert(here.clone());
-            r.map.abandon(&here);
-            // The artwork capture lives inside `consecrate`, not here: `snap_area_slot` photographs
-            // the OVERWORLD slot, and `Consecrate` is on the shrine screen. Calling it from here
-            // produced a picture of `Visit` filed under `consecrate-live`.
-            match crate::shrineplay::consecrate(r.win, &r.keys) {
-                Ok(did) => {
-                    r.log.push_str(&did.log.clone());
-                    if !did.done {
-                        r.log.push_str("  shrine: left unconsecrated\n");
-                    }
-                }
-                Err(e) => r.log.push_str(&format!("  consecrate failed: {e}\n")),
-            }
-            r.apply_save();
-            continue;
-        }
-
         // **Standing on a shrine and doing nothing is the end of it as a destination.**
         //
         // The structural backstop, and the more important half of the fix above. `abandon` existed
