@@ -660,7 +660,21 @@ impl Fight<'_> {
         // Kept past the submission: if the game comes back with the avoidable-murder dialog, the
         // word survives the cancel and has to come off, and this is the only record of what the
         // board looked like before it went on.
-        let placed = match board.select_word(&steps) {
+        // **Which tiles count themselves down, from the save rather than from watching.** A digit
+        // tile is a bomb (`rpg/effects/material/default.lua:54-56`) and its number ticks, so it
+        // differs from any baseline taken before it moved — see `Board::select_word`, and the
+        // anomaly run of 2026-08-15 that this stopped eight turns in.
+        let counting: Vec<usize> = tiles
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.letter.chars().all(|c| c.is_ascii_digit()) && !t.letter.is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        if !counting.is_empty() {
+            log.push_str(&format!("  bomb tiles counting down at {counting:?}
+"));
+        }
+        let placed = match board.select_word(&steps, &counting) {
             Ok(placed) => placed,
             Err(e) => {
                 *select_failures += 1;

@@ -547,7 +547,12 @@ impl<'a> Board<'a> {
     /// is what [`crate::typist::Typed::steps`] yields. The baseline is taken once, before anything is
     /// clicked, so "selected" always means "differs from the untouched board" — comparing against
     /// the previous step instead would let a missed click look like a successful one.
-    pub fn select_word(&self, plan: &[(usize, Option<char>)]) -> Result<Placed, SelectFailure> {
+    /// `known_restless` are tiles the *save* says move on their own, which the sample below cannot
+    /// be relied on to catch. See the note under it for the live failure that made identity beat
+    /// observation here.
+    pub fn select_word(
+        &self, plan: &[(usize, Option<char>)], known_restless: &[usize],
+    ) -> Result<Placed, SelectFailure> {
         let dirty = |error| SelectFailure { error, board_is_clean: false };
         let baseline = self.read().map_err(|e| dirty(e.into()))?;
 
@@ -579,8 +584,32 @@ impl<'a> Board<'a> {
         // Widening still bought nothing and cost half a second per word, so it stays at 250ms. This
         // sample is for tiles that are *already* moving -- an exploding tile, a countdown -- which is
         // the case it was built for and the one it handles.
+        //
+        // ## And a bomb is known by name, not caught in the act
+        //
+        // The sample above is two reads 250ms apart, which finds a tile that happens to be moving
+        // *during that window*. A countdown's glow pulses over about a second, so a quarter of a
+        // second of it can look perfectly still — and then the tile moves in the middle of the word,
+        // which is the failure this was supposed to prevent.
+        //
+        // Live 2026-08-15, **eight turns into the anomaly**: board `D M 3 R D 2 E M U S QU D A U U
+        // E`, `SUMMERED` planned, and `clicking tile 1 also changed [2]` three times over. Tile 2 is
+        // the `3`. The dev called it before the log did.
+        //
+        // **A digit tile *is* a bomb** — `rpg/effects/material/default.lua:54-56`:
+        //
+        // ```lua
+        // getMaterialName = function(letter, ligature)
+        //     if tonumber(letter) then return 'bomb' end
+        // ```
+        //
+        // and `rpg/effects/material/bomb.lua` gives it the tooltip *"Acts like a ! tile, but explodes
+        // and destroys edge touching tiles if it's 0 at the start of your turn."* So the save says
+        // outright which tiles count down, and the caller passes them here rather than hoping to
+        // catch one mid-pulse. Identity beats observation whenever identity is available, and the
+        // 250ms window stays exactly as it is for everything else.
         std::thread::sleep(RESTLESS_SAMPLE);
-        let restless: Vec<usize> = {
+        let mut restless: Vec<usize> = {
             let second = self.read().map_err(|e| dirty(e.into()))?;
             baseline
                 .iter()
@@ -590,6 +619,12 @@ impl<'a> Board<'a> {
                 .map(|(i, _)| i)
                 .collect()
         };
+        for i in known_restless {
+            if !restless.contains(i) {
+                restless.push(*i);
+            }
+        }
+        restless.sort_unstable();
 
         let placed = Placed { baseline, restless };
         match self.place_all(plan, &placed.baseline, &placed.restless) {
@@ -681,6 +716,39 @@ impl<'a> Board<'a> {
             want.push(i);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod bomb_tests {
+    /// A digit tile is a bomb, by the game's own material resolution.
+    ///
+    /// `rpg/effects/material/default.lua:54-56` is `if tonumber(letter) then return 'bomb' end`, and
+    /// `rpg/effects/material/bomb.lua` gives the numbered one the tooltip *"Acts like a ! tile, but
+    /// explodes and destroys edge touching tiles if it's 0 at the start of your turn."*
+    ///
+    /// This pins the classifier `fight.rs` uses to build `known_restless`, against the board that
+    /// stopped a run eight turns into the anomaly on 2026-08-15. `QU` is one tile, which is why the
+    /// board reads seventeen characters and holds sixteen tiles — a digit test that split on
+    /// characters would mis-index every tile after it.
+    #[test]
+    fn a_digit_tile_is_a_bomb_and_the_rest_are_not() {
+        let board = [
+            "D", "M", "3", "R", "D", "2", "E", "M", "U", "S", "QU", "D", "A", "U", "U", "E",
+        ];
+        let counting: Vec<usize> = board
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.is_empty() && l.chars().all(|c| c.is_ascii_digit()))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(counting, vec![2, 5], "the `3` and the `2`, and nothing else");
+        // Tile 1 is the `M` the run clicked and tile 2 is the `3` that moved on its own. That pair
+        // is the whole failure: `clicking tile 1 also changed [2]`, three times over.
+        assert!(counting.contains(&2));
+        assert!(!counting.contains(&1));
+        // A multi-letter tile is not a digit, and must not be one by accident.
+        assert!(!counting.contains(&10));
     }
 }
 
