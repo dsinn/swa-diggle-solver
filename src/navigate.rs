@@ -2969,6 +2969,28 @@ pub fn drive(
         // The condition is the union of what the two branches covered: an unused shrine is worth
         // entering for its blessing, and a used one is worth entering while the anomaly is open and
         // it is still unconsecrated.
+        // **A shrine's `completed` is one save read behind us when we arrive.**
+        //
+        // The guard below wants `completed` because the area slot holds `Visit` only when the area
+        // is complete — press it early and the click starts a fight instead of opening the word. For
+        // a shrine with no fight on it that flag lands on *arrival*, so the map we planned the hop
+        // with predates it and the branch silently declines.
+        //
+        // Live 2026-08-15, twice, and it read as two different bugs. At `shrine5` on the first run
+        // the play branch declined and the consecrate branch took it instead — with no typist, so
+        // nothing was solved. On the second run the branches had been merged, so declining meant
+        // doing *nothing at all*: the run crossed three fights to reach `shrine5`, arrived, and left
+        // for `shrine7` in the same step. The dev watched both.
+        //
+        // One extra save read, only when standing on a shrine we think is unfinished. Everything
+        // else here already re-reads after acting; this is the one place that had to read *before*.
+        let place = match place.as_ref().filter(|p| p.is_shrine() && !p.completed) {
+            Some(_) => {
+                r.apply_save();
+                r.map.get(&here).cloned()
+            }
+            None => place,
+        };
         if let Some(p) = place
             .as_ref()
             .filter(|p| p.is_shrine() && p.completed)
