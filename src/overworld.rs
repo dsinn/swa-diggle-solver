@@ -2722,6 +2722,35 @@ impl WorldMap {
 
     /// Is a single step from `from` to `to` legal?
     ///
+    /// ## A single step is not the only move the game offers, and we only ever make single steps
+    ///
+    /// The dev, 2026-08-15: *so far we've only been hopping to adjacent nodes with our inputs. The
+    /// game allows us to go directly to visited nodes in general; only the corruption can block off
+    /// a previously created path.*
+    ///
+    /// Correct, and confirmed in source. `core.mousereleased` (`overworldview.lua:1479`) hands a
+    /// clicked location to `canTravelToIndirect`, which is a **breadth-first search from the player**
+    /// (`:1330-1373`) building a `pathHash`; `core.travelTo` (`:1394`) then walks the whole path in
+    /// one action. So clicking a distant node travels there, however many hops away it is.
+    ///
+    /// The chaining rule is looser than this function, which is worth knowing before anyone models
+    /// it: the **first** hop is `canTravelToDirect`, but every hop after it is `couldTravelBetween`
+    /// (`:1323-1328`), which adds `core.locationIsCompleteOnVisit(location1)` to the disjunction — a
+    /// node that completes merely by being visited chains even with no completion flag on either
+    /// side. And the dev's "only corruption blocks it" is exactly right about the mechanism:
+    /// `setHellValue` resets areas to incomplete, and `areaOrExitToComplete` is the whole of the
+    /// condition, so corruption is the one thing that can cut a path we have already walked.
+    ///
+    /// **What stops us using it is not the rule, it is the pixel.** Selecting a distant node means
+    /// clicking where it is drawn, and a dump prints positions only for nodes adjacent to us (plus
+    /// subworld exits) — so the coordinate for anywhere further is not on the feed. It is
+    /// *derivable*: [`WorldMap::registration`] anchors each dump against nodes that already carry a
+    /// position, which is what steering already uses to aim at a door the current dump does not
+    /// name. That is task #21, and this is the payoff it was always for: routing would stop being a
+    /// sequence of hops, each with its own pan, steer and settle, and become one click.
+    ///
+    /// Until then every move here is one hop, and this is the rule for one hop.
+    ///
     /// `canTravelToDirect` (`overworldview.lua:1316-1321`) requires **one of the two** endpoints to
     /// be complete:
     ///
