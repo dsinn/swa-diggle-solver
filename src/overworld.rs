@@ -1524,7 +1524,33 @@ impl WorldMap {
             let door_key = exit_node_key(container, to);
             if let (Some(d), Some(h)) = (self.frame.get(&door_key), self.frame.get(&a.here_key)) {
                 let gap = (h.0 - d.0).powi(2) + (h.1 - d.1).powi(2);
-                self.steered_gap = Some((door_key, gap));
+                // **A high-water mark, not a last reading.** The nearest we have *ever* been to this
+                // door on this crossing, which is the difference between a measure and a memory of
+                // the last step.
+                //
+                // Written as "wherever we last stood", the ceiling loosened whenever something other
+                // than a steer moved us — and the frontier walk moves us all the time, because a
+                // steer that finds no improvement yields to it by design. That is a laundering
+                // machine: steer forward onto the near node, fail to steer from there, walk *back*
+                // to the far node for a frontier, and the arrival raises the ceiling to the far
+                // node's distance, so the same forward steer is "an improvement" again. Every step
+                // is individually justified and the pair repeats for ever.
+                //
+                // Live 2026-08-15 in `l40`: `steering ... via l40sub24`, then
+                // `l40_path_to_l36 is not on any route we know — probing ... via l40sub25`,
+                // alternating fifteen times. The dev put it as the invariant this restores: a step
+                // must either close on a destination or reach the frontier, and after the first lap
+                // neither of those nodes was doing either.
+                //
+                // Taking the minimum makes the quantity monotone across the *whole* crossing rather
+                // than between consecutive steers, so a strict decrease per steer can no longer be
+                // undone by anything else that moves us. `fold` clears it on entering or leaving a
+                // subworld, which is where a crossing genuinely restarts.
+                let keep = match self.steered_gap.take() {
+                    Some((k, g)) if k == door_key => g.min(gap),
+                    _ => gap,
+                };
+                self.steered_gap = Some((door_key, keep));
             }
         }
         self.frame.clear();
@@ -5075,6 +5101,38 @@ mod tests {
         assert!(m.gap("west", "start").unwrap() < m.gap("east", "start").unwrap());
         assert_eq!(hop.step, "west", "toward the anomaly, not the lower key");
         assert!(!hop.routed, "and the log has to say so");
+    }
+
+    /// The steer's ceiling is the nearest we have ever been, not wherever we last stood.
+    ///
+    /// The `l40` cycle in one assertion. Walking *away* from the door — which the frontier walk does
+    /// routinely, since a steer that cannot improve yields to it — must not licence the same forward
+    /// steer a second time. Without the minimum, every retreat re-opened the ground in front of it.
+    #[test]
+    fn walking_away_from_the_door_does_not_reopen_the_ground_in_front_of_it() {
+        let mut m = WorldMap::new();
+        let door = "l40_path_to_l36";
+        let near = |k: &str, x: f64| Node { key: k.into(), heading: "Fosholme Growth road".into(), x, y: 0.0, connections: 2 };
+
+        // Walk in first: entering a subworld clears any commitment, so the crossing has to be
+        // declared after we are inside it rather than before.
+        m.fold(&inside_dump("l40", "l40sub17", "Fosholme Growth road", vec![near("l40sub24", 100.0)], vec![]));
+        m.crossing_to = Some(("l36".into(), Goal::Explore));
+        // Arriving on the near node, 100 from the door.
+        m.frame.insert(door.into(), (0.0, 0.0));
+        m.frame.insert("l40sub24".into(), (100.0, 0.0));
+        m.fold(&inside_dump("l40", "l40sub24", "Fosholme Growth grave", vec![near("l40sub25", 300.0)], vec![]));
+        assert_eq!(m.steered_gap.as_ref().map(|(_, g)| *g), Some(10_000.0), "100 squared");
+
+        // Then walking back out to the far node, 300 away. The measure must not follow us out.
+        m.frame.insert(door.into(), (0.0, 0.0));
+        m.frame.insert("l40sub25".into(), (300.0, 0.0));
+        m.fold(&inside_dump("l40", "l40sub25", "Fosholme Growth road", vec![near("l40sub24", 100.0)], vec![]));
+        assert_eq!(
+            m.steered_gap.as_ref().map(|(_, g)| *g),
+            Some(10_000.0),
+            "still the nearest we have ever been, which is what makes the steer monotone"
+        );
     }
 
     /// `l40sub25` to `l40sub24` and back, fifteen times, live on 2026-08-15.
