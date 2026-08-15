@@ -2776,14 +2776,45 @@ impl WorldMap {
             (dest.as_deref().and_then(|d| self.placed_now(d)), ceiling)
         {
             let gap = |p: (f64, f64)| (p.0 - door.0).powi(2) + (p.1 - door.1).powi(2);
+            let paved = |k: &String| self.places.get(k).map(|p| p.is_paved()).unwrap_or(false);
+            // **The road wins before distance is consulted, not after.**
+            //
+            // The dev's rule for the MVP: always prefer paved. The old ordering had `paved` as the
+            // first sort key and looked like it obeyed that, but the ceiling test ran *first* and
+            // struck candidates out before any of them were compared — so paved outranked near only
+            // among neighbours that had already survived on distance, and a road eliminated there
+            // never reached the ranking at all.
+            //
+            // Live 2026-08-15 at `l40sub25`, with the `l36` door printed at (233, 105):
+            //
+            // ```text
+            //   l40sub24  grave       (802,  65)   570   brush   <- taken
+            //   l40xrd…   forest      (931,  97)   698   brush
+            //   l40_path… road        (960, 539)   846   paved
+            //   l40sub17  road       (1102, 125)   869   paved
+            // ```
+            //
+            // The road bends north-east before it turns for a door that lies west, so both paved
+            // neighbours were further from the door than we already stood, both were struck out, and
+            // the grave was the only survivor. Nothing chose brush over road; the road was gone
+            // before the choice.
+            //
+            // So the filter narrows to paved whenever any paved neighbour is on offer. A steer that
+            // then finds no improvement yields to the frontier walk below, which is a paved-first
+            // breadth-first search — the road, followed properly, instead of a shortcut across the
+            // graves toward where the door happens to be printed.
+            let any_paved = place.neighbours.iter().filter(|n| usable(n)).any(paved);
             let mut best: Option<(bool, f64, &String)> = None;
             for n in place.neighbours.iter().filter(|n| usable(n)) {
+                let brush = !paved(n);
+                if any_paved && brush {
+                    continue;
+                }
                 let Some(at) = self.placed_now(n) else { continue };
                 let d = gap(at);
                 if d >= ceiling {
                     continue;
                 }
-                let brush = !self.places.get(n).map(|p| p.is_paved()).unwrap_or(false);
                 // `(brush, distance, key)` ascending, spelled out because an `f64` keeps the tuple
                 // from being `Ord`.
                 let better = match best {
@@ -5032,6 +5063,80 @@ mod tests {
         assert!(m.gap("west", "start").unwrap() < m.gap("east", "start").unwrap());
         assert_eq!(hop.step, "west", "toward the anomaly, not the lower key");
         assert!(!hop.routed, "and the log has to say so");
+    }
+
+    /// A road that bends the wrong way is still the road.
+    ///
+    /// `l40sub25` as the dump printed it on 2026-08-15, with the `l36` door at (233, 105):
+    ///
+    /// ```text
+    ///   l40sub24  grave   (802,  65)   570 from the door   brush   <- the steer took this
+    ///   l40sub17  road   (1102, 125)   869 from the door   paved
+    /// ```
+    ///
+    /// The road runs north-east before it turns for a door that lies west, so it was *further* from
+    /// the door than we already stood, the ceiling struck it out before anything was compared, and
+    /// the grave was the only survivor. "Paved outranks near" was in the sort key and never saw a
+    /// candidate.
+    ///
+    /// The dev's rule for the MVP: always prefer paved. With the road excluded on distance and the
+    /// grave excluded for being brush, the steer declines — and the frontier walk below, which is
+    /// itself paved-first, goes up the road toward the part of it we have not seen.
+    #[test]
+    fn the_steer_will_not_leave_the_road_for_a_shortcut() {
+        let node_at = |k: &str, h: &str, x: f64, y: f64| Node {
+            key: k.into(),
+            heading: h.into(),
+            x,
+            y,
+            connections: 3,
+        };
+        let door = crate::observe::adjacency::Exit {
+            x: 233.0,
+            y: 105.0,
+            to_key: "l36".into(),
+            to_heading: "Wawne crypt".into(),
+        };
+
+        let mut m = WorldMap::new();
+        // Walked in along the road, and the road carries on past `l40sub17` into ground we have not
+        // seen — which is what makes a paved frontier exist at all.
+        m.fold(&inside_dump("l40", "l40sub17", "Fosholme Growth road",
+            vec![
+                node_at("l40sub25", "Fosholme Growth road", 0.0, 0.0),
+                node_at("l40sub13", "Fosholme Growth road", 1400.0, 200.0),
+            ],
+            vec![door.clone()]));
+        m.crossing_to = Some(("l36".into(), Goal::Explore));
+
+        // Now standing on `l40sub25`, having been 600 from the door at the nearest.
+        m.fold(&inside_dump("l40", "l40sub25", "Fosholme Growth road",
+            vec![
+                node_at("l40sub24", "Fosholme Growth — level 5 grave", 802.0, 65.0),
+                node_at("l40sub17", "Fosholme Growth road", 1102.0, 125.0),
+            ],
+            vec![door.clone()]));
+        m.steered_gap = Some(("l40_path_to_l36".into(), 600.0 * 600.0));
+        // The fixture has to be the one that used to fail: the grave genuinely is nearer the door.
+        let to_door = |k: &str| {
+            let (x, y) = m.placed_now(k).expect("placed");
+            let (dx, dy) = m.placed_now("l40_path_to_l36").expect("the door is in the frame");
+            ((x - dx).powi(2) + (y - dy).powi(2)).sqrt()
+        };
+        assert!(to_door("l40sub24") < to_door("l40sub17"), "the shortcut is the shorter line");
+
+        let step = m.cross_toward(&[door]).and_then(|c| match c {
+            Crossing::Step { to, .. }
+            | Crossing::Steer { to, .. }
+            | Crossing::Probe { to, .. }
+            | Crossing::Seek { to } => Some(to),
+            _ => None,
+        });
+        assert_eq!(
+            step.as_deref(),
+            Some("l40sub17"),
+            "the road, even though it bends away from the door first"
+        );
     }
 
     /// The steer's ceiling is the nearest we have ever been, not wherever we last stood.
