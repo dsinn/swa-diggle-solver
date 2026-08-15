@@ -612,6 +612,31 @@ pub struct WorldMap {
     /// because leaving a village by the door you came in is a retreat, and nothing visible inside
     /// distinguishes that road from any other.
     entered_from: Option<String>,
+    /// The node we were standing on one move ago, whatever kind of node it was.
+    ///
+    /// Distinct from [`WorldMap::entered_from`], which is the overworld node a subworld was entered
+    /// through and changes once per crossing. This changes on every step, and exists for one rule:
+    /// **an immediate reversal is never the plan.**
+    ///
+    /// `docs/superpowers/notes/navigation-loops.md` states the property every navigation bug here
+    /// has lacked — memory or a monotone measure, never a ranking. The frontier walk has the measure
+    /// ([`WorldMap::steered_gap`]); the routed step had neither, on the reasoning that a
+    /// breadth-first step is monotone by construction. It is monotone *within one pass*, and
+    /// [`first_step_toward`] runs two of them — paved, then anything — so a node whose paved
+    /// neighbours reach the door and a node whose paved neighbours do not can each be the other's
+    /// answer. That is a ranking wearing a search's clothes, and it cycles.
+    ///
+    /// Live 2026-08-15 in `l40`: `l40sub25` (a road) and `l40sub24` (a grave), fifteen times, until
+    /// the dev stopped the run.
+    stepped_from: Option<String>,
+    /// One move further back, and the reason the rule is about the *second* reversal.
+    ///
+    /// **Going back the way we came is often simply right.** A forest strings dead ends off its
+    /// road, so stepping onto a grave and returning to the road is the shortest route to anywhere,
+    /// and a guard that refused it would strand runs to prevent a loop. What is never right is doing
+    /// it twice: `B -> A -> B -> A` is a cycle already observed once, and that is what these two
+    /// fields together can see and a single one cannot.
+    stepped_before: Option<String>,
     /// The door this crossing is making for, and the errand it was chosen to serve.
     ///
     /// The subworld twin of [`crate::navigate::Run::committed_to`], and it exists for the same
@@ -1369,6 +1394,13 @@ impl WorldMap {
             self.entered_from = None;
             self.crossing_to = None;
             self.steered_gap = None;
+        }
+        // The node we were standing on when this dump moved us. Kept only across a move that
+        // actually happened, so a repeated dump of the same node does not make us our own
+        // predecessor — see [`WorldMap::stepped_from`].
+        if self.here.as_deref() != Some(a.here_key.as_str()) {
+            self.stepped_before = self.stepped_from.take();
+            self.stepped_from = self.here.clone();
         }
         self.here = Some(a.here_key.clone());
 
@@ -2654,7 +2686,44 @@ impl WorldMap {
             return Some(Crossing::Fight { at: here });
         }
         if let Some(step) = dest.as_ref().and_then(|d| self.first_step_toward(&here, d, false)) {
-            return Some(Crossing::Step { to: step, toward: dest? });
+            // **Never straight back the way we just came.** See [`WorldMap::stepped_from`] for why
+            // a routed step needs this at all when a breadth-first search is supposed to be
+            // monotone: two passes make it a ranking, and a ranking bounces.
+            //
+            // Narrow on purpose. It refuses exactly one node, only when something else is offered,
+            // and never when that node is the destination — retreating to a door we have decided to
+            // leave by is the plan, not a loop. Anything wider would be the `backed_out_of` rule the
+            // dev has already called off.
+            // `B -> A -> B` already on the record, and the proposal is `A` again. One reversal is
+            // allowed and usually correct — see [`WorldMap::stepped_before`].
+            let reversal = self.stepped_from.as_deref() == Some(step.as_str())
+                && self.stepped_before.as_deref() == Some(here.as_str())
+                && dest.as_deref() != Some(step.as_str());
+            if !reversal {
+                return Some(Crossing::Step { to: step, toward: dest? });
+            }
+            let onward = self
+                .places
+                .get(&here)
+                .map(|p| {
+                    let mut ks: Vec<&String> = p
+                        .neighbours
+                        .iter()
+                        .filter(|k| Some(k.as_str()) != self.stepped_from.as_deref())
+                        .filter(|k| !self.abandoned.contains(*k))
+                        .collect();
+                    ks.sort_by_key(|k| self.gap(k, dest.as_deref().unwrap_or("")).map(|d| d as i64));
+                    ks.first().map(|k| (*k).clone())
+                })
+                .unwrap_or(None);
+            match onward {
+                Some(k) => {
+                    return Some(Crossing::Step { to: k, toward: dest? });
+                }
+                // Nothing else to try, so the reversal is the only move there is and refusing it
+                // would strand the run — worse than any one wasted step.
+                None => return Some(Crossing::Step { to: step, toward: dest? }),
+            }
         }
         // No known route. Fog means the interior is learned a hop at a time, so an unknown route is
         // the normal early state rather than an error — walk into the dark, preferring somewhere we
@@ -5006,6 +5075,57 @@ mod tests {
         assert!(m.gap("west", "start").unwrap() < m.gap("east", "start").unwrap());
         assert_eq!(hop.step, "west", "toward the anomaly, not the lower key");
         assert!(!hop.routed, "and the log has to say so");
+    }
+
+    /// `l40sub25` to `l40sub24` and back, fifteen times, live on 2026-08-15.
+    ///
+    /// A road and a grave hanging off it. The routed step is a breadth-first search and was assumed
+    /// monotone for that reason, but [`WorldMap::first_step_toward`] runs **two** passes — paved
+    /// first, anything second — and a node whose paved neighbours reach the door and a node whose
+    /// paved neighbours do not can each be the other's answer. Two searches taking turns is a
+    /// ranking, and rankings bounce.
+    ///
+    /// The first reversal is left alone, because stepping onto a dead end and coming back is how a
+    /// forest is crossed. It is the second that says a cycle.
+    #[test]
+    fn the_second_time_we_turn_round_we_do_something_else() {
+        let mut m = WorldMap::new();
+        let road = |k: &str| node(k, "Fosholme Growth road");
+        // The road runs sub25 - sub17 - the door; the grave hangs off sub25 and leads nowhere.
+        m.fold(&inside_dump("l40", "l40sub25", "Fosholme Growth road",
+            vec![road("l40sub17"), node("l40sub24", "Fosholme Growth grave")], vec![]));
+        m.fold(&inside_dump("l40", "l40sub17", "Fosholme Growth road",
+            vec![road("l40sub25"), road("l40_path_to_l36")], vec![]));
+        m.fold(&inside_dump("l40", "l40sub24", "Fosholme Growth grave",
+            vec![road("l40sub25")], vec![]));
+        // B -> A -> B: we came from the grave to the road and back to the grave already.
+        m.fold(&inside_dump("l40", "l40sub25", "Fosholme Growth road",
+            vec![road("l40sub17"), node("l40sub24", "Fosholme Growth grave")], vec![]));
+        m.fold(&inside_dump("l40", "l40sub24", "Fosholme Growth grave",
+            vec![road("l40sub25")], vec![]));
+        m.crossing_to = Some(("l36".into(), Goal::Explore));
+
+        // Standing on the grave with only one neighbour, the reversal is the only move there is,
+        // and refusing it would strand the run — so it is still taken.
+        match m.cross_toward(&[]) {
+            Some(
+                Crossing::Step { to, .. } | Crossing::Probe { to, .. } | Crossing::Seek { to },
+            ) => assert_eq!(to, "l40sub25", "a dead end has one way out; the guard must not deny it"),
+            other => panic!("expected the only step there is, got {other:?}"),
+        }
+
+        // Standing on the road, having just come back from the grave for the second time: the guard
+        // fires, and the run takes the road onward instead of going round again.
+        m.fold(&inside_dump("l40", "l40sub25", "Fosholme Growth road",
+            vec![road("l40sub17"), node("l40sub24", "Fosholme Growth grave")], vec![]));
+        assert_ne!(
+            m.cross_toward(&[]).and_then(|c| match c {
+                Crossing::Step { to, .. } | Crossing::Probe { to, .. } | Crossing::Seek { to } => Some(to),
+                _ => None,
+            }),
+            Some("l40sub24".into()),
+            "the grave has been visited twice; anything but a third trip"
+        );
     }
 
     /// Safety decides the door only when we are looking for a bed.
