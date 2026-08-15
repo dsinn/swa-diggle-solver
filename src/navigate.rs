@@ -2861,17 +2861,6 @@ pub fn drive(
                             "  shrine: left un{}\n",
                             if anomaly_open { "consecrated" } else { "prayed" }
                         ));
-                    } else if played.consecrated && !played.prayed {
-                        // The half-finished trip, and it needs its own line because the old one
-                        // could not see it: `consecrated || prayed` reported success, and a
-                        // consecration that never came back for its blessing looked identical to a
-                        // complete visit. Worth naming loudly for a second reason — `_used` is what
-                        // `worth_a_trip` reads, so a shrine left here stays a destination, and the
-                        // run will come back for it instead of going to the anomaly.
-                        r.log.push_str(
-                            "  shrine: consecrated but **left unprayed** — the blessing is still \
-                             owed, and this shrine still counts as unused\n",
-                        );
                     }
                 }
                 Err(e) => r.log.push_str(&format!("  shrine failed: {e}\n")),
@@ -2880,6 +2869,22 @@ pub fn drive(
             // is *exited*, which the driver has just done, so this is the first moment the flag is
             // readable — see the standing note that a stale read here is timing, not failure.
             r.apply_save();
+            // **Was a blessing actually left behind?** Only the save can answer, and the answer is
+            // not "did we press Pray this visit". A shrine solved before the anomaly opened was
+            // prayed at then — with the portal shut that is the only reward a shrine offers — so it
+            // owes the consecration alone and no `Pray` appears after the beam. Judging that by the
+            // press would report a correct, complete visit as a failure.
+            //
+            // Worth a loud line when it is real, because `_used` is what `worth_a_trip` reads: a
+            // shrine that stays unused stays a destination, and the run will walk back to it instead
+            // of going to the anomaly.
+            if let Some(p) = r.map.get(&key).filter(|p| !p.used) {
+                let _ = p;
+                r.log.push_str(
+                    "  shrine: still **unused** after the visit — a blessing is owed here, and \
+                     the planner will keep choosing this shrine until it is claimed\n",
+                );
+            }
             continue;
         }
 
