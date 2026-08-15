@@ -371,6 +371,30 @@ pub const ESCAPES: &[Escape] = &[
         threshold: crate::act::SHRINE_GOBACK_PRESENT,
         what: "the shrine screen",
     },
+    // **The same exit, for the screen that names the button.**
+    //
+    // Removing the old `Consecrate` entry was right and left a hole: `identify` reports
+    // `ShrineConsecrate` in preference to `Shrine` whenever the slot is occupied, so the more
+    // specific variant shadowed the escape above and the run had no answer for a screen it was
+    // standing on. `answer_for` said `Elsewhere("the shrine driver")`, but the shrine driver enters
+    // from the *map* by pressing `Visit` — it has no way to take over a screen we are already on.
+    //
+    // Live 2026-08-15, restored at `shrine1` mid-fight: the fight finished, the game left the shrine
+    // screen up, and the run spent every step alternating `ShrineConsecrate` -> locate-me clicks
+    // that landed on the shrine's own chrome -> `StatsHistory` -> back -> `ShrineConsecrate`, until
+    // it stopped with `no pan dump after locate-me, 4 times over`. Seven steps, no progress, and a
+    // stop message about panning.
+    //
+    // **This presses `Go back`, not `Consecrate`,** which is the whole difference from the entry
+    // that was removed. Leaving is always safe and always available; taking the consecration
+    // requires knowing the word is solved, which only the shrine driver knows. The invariant holds —
+    // nothing outside that driver presses `Consecrate` — and the screen stops being a trap.
+    Escape {
+        screen: Screen::ShrineConsecrate,
+        button: &crate::act::SHRINE_GOBACK,
+        threshold: crate::act::SHRINE_GOBACK_PRESENT,
+        what: "the shrine screen, leaving the slot alone",
+    },
 ];
 
 /// Where a recognised screen gets answered.
@@ -414,7 +438,7 @@ pub const fn answer_for(screen: Screen) -> Answer {
         // Not escaped any more: pressing `Consecrate` is the shrine driver's job, because only it
         // has solved the word that makes the button pressable. See the note where its `Escape` used
         // to be.
-        Screen::ShrineConsecrate => Answer::Elsewhere("the shrine driver, which solves the word first"),
+        Screen::ShrineConsecrate => Answer::Escape,
         // The one `drive` plays out itself, because nothing else is watching for it.
         Screen::CombatEntered => Answer::Fight,
         // Reached through the affirmative slot rather than through `identify`: `drive` waits on
@@ -3973,11 +3997,20 @@ mod tests {
         // shrine's word is solved (`ShowAGoodButton()`, `shrine.lua:36-40`), so an actor that has
         // not solved it cannot know whether pressing does anything — which is how a consecration
         // came to be reported twice, once as done and once as failed. The shrine driver owns it.
-        assert!(
-            !ESCAPES.iter().any(|e| e.screen == Screen::ShrineConsecrate),
-            "the escape path must not press Consecrate; the shrine driver solves the word first"
+        //
+        // The screen still needs a way out, which is the part the first version of this got wrong.
+        // Removing the entry altogether left `ShrineConsecrate` with no answer at all, and since
+        // `identify` prefers it to `Shrine` whenever the slot is occupied, it shadowed the ordinary
+        // shrine escape and trapped a run for its whole length. So: an escape, pressing **Go back**.
+        let entry = ESCAPES
+            .iter()
+            .find(|e| e.screen == Screen::ShrineConsecrate)
+            .expect("the screen must have a way out or it is a trap");
+        assert_eq!(
+            entry.button.name, SHRINE_GOBACK.name,
+            "leaving is always safe; pressing `Consecrate` needs a solved word and only the shrine              driver knows that"
         );
-        assert!(matches!(answer_for(Screen::ShrineConsecrate), Answer::Elsewhere(_)));
+        assert!(matches!(answer_for(Screen::ShrineConsecrate), Answer::Escape));
     }
 
     #[test]

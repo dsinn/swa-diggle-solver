@@ -1606,12 +1606,21 @@ impl WorldMap {
             for k in used {
                 self.entry(&k).used = true;
             }
-            // `<key>subs`, the shrine submissions list — see [`Place::played`]. No underscore, and
-            // the suffix is stripped the same way everything else here is.
+            // `<dataKey>subs`, the shrine submissions list — see [`Place::played`].
+            //
+            // **The dataKey is not the location key**, which the first attempt at this assumed. The
+            // save holds `shrine1_shrine_subs`, so stripping only `subs` leaves `shrine1_shrine_` —
+            // a name no shrine has. Live 2026-08-15 that set the flag on a phantom and, worse,
+            // `entry()` minted the phantom as a place: `shrine1_shrine_`, `shrine2_shrine_` and two
+            // more turned up in the run's own place list, exactly the invention this function's
+            // opening comment warns about.
+            //
+            // So both suffixes come off, and the remainder must be non-empty to count.
             let played: Vec<String> = flags
                 .map
                 .keys()
                 .filter_map(|k| k.strip_suffix("subs"))
+                .filter_map(|k| k.strip_suffix("_shrine_"))
                 .filter(|k| !k.is_empty())
                 .map(|s| s.to_string())
                 .collect();
@@ -5167,20 +5176,25 @@ mod tests {
             &crate::game::save::parse(
                 "return { overworld = {
                      completedAreas = { shrine5 = true, shrine2 = true },
-                     areaFlags = { hell = 0.1, shrine2subs = 3, shrine2_used = 1 },
+                     areaFlags = { hell = 0.1, shrine2_shrine_subs = 3, shrine2_used = 1 },
                  } }",
             )
             .unwrap(),
         );
 
         assert!(!m.get("shrine5").expect("known from the save").played, "no `subs`, never played");
-        assert!(m.get("shrine2").expect("known from the save").played, "`shrine2subs` says otherwise");
+        assert!(
+            m.get("shrine2").expect("known from the save").played,
+            "`shrine2_shrine_subs` says otherwise — and the dataKey is not the location key"
+        );
         // Both are worth a trip while the anomaly is open and neither is consecrated — the planner's
         // question, which this must not change.
         assert!(m.worth_consecrating_here("shrine5"));
         assert!(m.worth_consecrating_here("shrine2"));
         // And no `subs` key invented a place of its own.
-        assert!(!m.places.contains_key("shrine2subs"), "the suffix strip must not mint a node");
+        for junk in ["shrine2subs", "shrine2_shrine_", "shrine2_shrine_subs"] {
+            assert!(!m.places.contains_key(junk), "the suffix strip must not mint `{junk}`");
+        }
     }
 
     /// A road that bends the wrong way is still the road.
