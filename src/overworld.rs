@@ -472,6 +472,31 @@ impl Place {
         heading_has_combat(&self.heading) || self.corrupted
     }
 
+    /// Does this settlement's general store stock a `Heart`? **The heading says so outright.**
+    ///
+    /// `getTypeName` (`overworld/locations/village.lua:5-14`) picks the noun from the special stock
+    /// itself:
+    ///
+    /// ```lua
+    /// local gearB, healthB = self.specialStock.gearSlotsBuff, self.specialStock.healthBuff
+    /// if gearB then return 'town'
+    /// elseif not gearB and not healthB then return 'hamlet' end
+    /// return 'village'
+    /// ```
+    ///
+    /// So `village` *is* "has a healthBuff and no gearSlotsBuff", `town` is "has a gearSlotsBuff,
+    /// and may have a heart as well", and `hamlet` is "neither". The dev's standing assumption —
+    /// every village starts with one — turns out to be the game's own definition rather than a
+    /// guess, and it comes with the two cases the assumption missed: a town may have one too, and a
+    /// hamlet never does.
+    ///
+    /// It does not go stale when the heart is bought. `specialStock` seeds the shop
+    /// (`shop.lua:372-379`) and a purchase decrements `shopData`, not this — which is why *whether
+    /// it is still for sale* is a different question, asked of the save.
+    pub fn stocks_a_heart(&self) -> bool {
+        self.type_is("village") || self.type_is("town")
+    }
+
     pub fn is_general_store(&self) -> bool {
         self.type_is("general store")
     }
@@ -1653,6 +1678,40 @@ impl WorldMap {
             for k in keys {
                 self.entry(&k).avoid = true;
             }
+            // **Whether a general store still has its heart, read rather than assumed.**
+            //
+            // `shop.load` keeps a shop's state in `areaFlags[<key>_shops][<storeType>]`
+            // (`shop.lua:364`), and `core.save` writes it back when the shop *closes* (`:303-309`).
+            // So three cases, and absence is the informative one:
+            //
+            // - no `generalStoreStock` sub-table: that store has never been opened, and buying
+            //   requires opening it — so the heart is still there. Nothing is recorded here.
+            // - a `healthBuff` entry with stock: still for sale. Nothing is recorded here either.
+            // - the entry gone or at zero: sold, and the village stops being a destination.
+            //
+            // The sub-table matters rather than the flag: the live save carries `l19_shops` holding
+            // only `innStock`, because an inn was visited there and the general store was not.
+            //
+            // And "opened" is not enough — it must have been *closed*. Our own run of 2026-08-15
+            // opened `l11`'s store and stopped on the screen, and no `l11_shops` was written at all.
+            // That is why the buying code presses the back arrow before it reads the save.
+            let spent: Vec<String> = flags
+                .map
+                .keys()
+                .filter_map(|k| k.strip_suffix("_shops"))
+                .filter(|village| {
+                    let base = format!("overworld.areaFlags.{village}_shops.generalStoreStock");
+                    save.table_at(&base).is_some()
+                        && save
+                            .int_at(&format!("{base}.inventoryHash.{}.stock", crate::shopplay::HEART))
+                            .unwrap_or(0)
+                            <= 0
+                })
+                .map(|s| s.to_string())
+                .collect();
+            for k in spent {
+                self.heart_bought.insert(k);
+            }
             // `<key>_used`, which for a campfire decides whether resting there is free or futile.
             let used: Vec<String> = flags
                 .map
@@ -2104,7 +2163,7 @@ impl WorldMap {
                 let heart = self
                     .places
                     .values()
-                    .filter(|p| p.key != here && !p.avoid && p.type_is("village"))
+                    .filter(|p| p.key != here && !p.avoid && p.stocks_a_heart())
                     .filter(|p| !self.heart_bought.contains(&p.key) && !self.abandoned.contains(&p.key))
                     .filter(|p| self.reachable_without_a_fight(here, &p.key))
                     .min_by_key(|p| dist_or_far(&dist, &p.key));
@@ -5508,6 +5567,59 @@ e	l4	l11
         assert!(m.get("l4").unwrap().corrupted);
         assert!(m.get("l4").unwrap().may_be_a_fight(), "corruption is what turns it back into one");
         assert!(!m.reachable_without_a_fight("here", "l11"), "and the trip stops being free");
+    }
+
+    /// Whether a heart is still for sale, read out of the save rather than assumed.
+    ///
+    /// Three cases, and absence is the informative one: a store nobody has opened cannot have had
+    /// its heart bought, because buying requires opening it.
+    #[test]
+    fn the_save_says_which_hearts_are_still_on_the_shelf() {
+        let with = |flags: &str| {
+            let mut m = WorldMap::new();
+            m.fold(&dump(
+                "here",
+                "camp",
+                vec![
+                    node("v1", "Rowlston Covert village"),
+                    node("v2", "Enholmes town"),
+                    node("v3", "Little Nowhere hamlet"),
+                ],
+            ));
+            m.apply_save(
+                &crate::game::save::parse(&format!(
+                    "return {{ overworld = {{ areaFlags = {{ hell = 0.1, {flags} }} }} }}"
+                ))
+                .unwrap(),
+            );
+            m
+        };
+
+        // The heading is the stock list: a village has a heart, a town may, a hamlet never does.
+        let m = with("");
+        assert!(m.get("v1").unwrap().stocks_a_heart(), "village");
+        assert!(m.get("v2").unwrap().stocks_a_heart(), "town");
+        assert!(!m.get("v3").unwrap().stocks_a_heart(), "hamlet");
+
+        // Never opened: nothing is recorded, so the heart is still there.
+        assert!(!m.heart_is_spent("v1"));
+
+        // An inn was visited and the general store was not — which is the shape of the live save's
+        // `l19_shops`. Still nothing said about the heart.
+        let m = with("v1_shops = { innStock = { inventoryHash = { } } }");
+        assert!(!m.heart_is_spent("v1"), "an inn visit says nothing about the shelf");
+
+        // Opened, and the heart still on it.
+        let m = with(
+            "v1_shops = { generalStoreStock = { inventoryHash = { healthBuff = { stock = 1 } } } }",
+        );
+        assert!(!m.heart_is_spent("v1"));
+
+        // Opened, and bought.
+        let m = with(
+            "v1_shops = { generalStoreStock = { inventoryHash = { healthBuff = { stock = 0 } } } }",
+        );
+        assert!(m.heart_is_spent("v1"), "sold");
     }
 
     /// A road that bends the wrong way is still the road.
