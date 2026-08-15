@@ -451,6 +451,9 @@ pub const fn answer_for(screen: Screen) -> Answer {
         // has solved the word that makes the button pressable. See the note where its `Escape` used
         // to be.
         Screen::ShrineConsecrate => Answer::Escape,
+        // `drive` buys at it and leaves; see the store arrival branch. Not an escape, because
+        // leaving before buying is the one outcome the whole trip was against.
+        Screen::Shop => Answer::Bespoke,
         // The one `drive` plays out itself, because nothing else is watching for it.
         Screen::CombatEntered => Answer::Fight,
         // Reached through the affirmative slot rather than through `identify`: `drive` waits on
@@ -917,6 +920,23 @@ impl Run<'_> {
     /// because the same integer regenerates the same world. But **every new character draws a fresh
     /// seed and therefore starts blind**; the cache only pays off across restores of one save. A
     /// cold start on a new character is the design working, not a regression.
+    /// Does the save record a `healthBuff` bought at this village?
+    ///
+    /// `reduceStock` tallies purchases under `shopData.purchased` (`shop.lua:101-106`), and
+    /// `core.save` writes the whole `shopData` back to `areaFlags[<key>_shops]` when the shop closes
+    /// (`:303-309`). So this is readable only after leaving, which is why the check sits where it
+    /// does — and it is the game's own record rather than an inference from a click we sent.
+    fn heart_is_recorded(&self, village: &str) -> bool {
+        let Ok(save) = crate::game::save::load(&self.save_dir.join("mainSaveData")) else {
+            return false;
+        };
+        let path = format!(
+            "overworld.areaFlags.{village}_shops.generalStoreStock.purchased.{}",
+            crate::shopplay::HEART
+        );
+        save.int_at(&path).unwrap_or(0) > 0
+    }
+
     fn map_cache_path(&self) -> Option<PathBuf> {
         let save = crate::game::save::load(&self.save_dir.join("mainSaveData")).ok()?;
         let seed = save.int_at("overworld.seed")?;
@@ -3181,7 +3201,82 @@ pub fn drive(
                     // `Opened shop UI` and the inventory behind it.
                     std::thread::sleep(Duration::from_millis(1200));
                     r.pump();
-                    return Stop::AtShop(at.clone());
+
+                    // **The game told us the stock; the layout tells us where it is drawn.**
+                    // Neither is a guess and neither is a template — see `crate::shopplay`.
+                    let inv = crate::shopplay::inventory(r.feed.lines());
+                    r.log.push_str(&format!("  the store lists {} items
+", inv.len()));
+                    let bought = match crate::shopplay::index_of(&inv, crate::shopplay::HEART) {
+                        None => {
+                            r.log.push_str("  no `healthBuff` in stock — nothing to buy here
+");
+                            false
+                        }
+                        Some(i) => match crate::shopplay::slot_at(r.win, i, 0) {
+                            // Paging is not written: `relativeIndex` steps by eight
+                            // (`shop.lua:205-232`) and a heart has never yet been anywhere but the
+                            // first page. Refusing to click is the safe half of that — there is no
+                            // confirmation dialogue on this screen, so a slot we cannot place is a
+                            // purchase of whatever else is sitting in it.
+                            None => {
+                                r.log.push_str(&format!(
+                                    "  the heart is item {i}, which is off the first page — paging                                      is not implemented, so nothing is pressed
+"
+                                ));
+                                false
+                            }
+                            Some((x, y)) => {
+                                r.log.push_str(&format!("  the heart is item {i}, at ({x}, {y})
+"));
+                                match r.win.client_to_screen(x, y) {
+                                    Ok((sx, sy)) => {
+                                        let _ = click_at_in(r.win, sx, sy);
+                                        std::thread::sleep(Duration::from_millis(700));
+                                        r.pump();
+                                        true
+                                    }
+                                    Err(e) => {
+                                        r.log.push_str(&format!("  could not aim at it: {e}
+"));
+                                        false
+                                    }
+                                }
+                            }
+                        },
+                    };
+
+                    // Leave whatever happened. The back arrow is the mirror of `Sell` at the other
+                    // end of the same bar, measured off the frame this screen was first captured on.
+                    if let Ok((bx, by)) = r.win.client_to_screen(1755, 916) {
+                        let _ = click_at_in(r.win, bx, by);
+                        std::thread::sleep(Duration::from_millis(900));
+                        r.pump();
+                    }
+
+                    // **Confirmed from the save, not from the press.** `core.save` writes the whole
+                    // `shopData` back to `areaFlags[<key>_shops]` when the shop closes
+                    // (`shop.lua:303-309`), and `reduceStock` records what was bought under
+                    // `purchased` (`:101-106`). So leaving is what makes the purchase readable, and
+                    // this is the first moment it can be checked.
+                    r.apply_save();
+                    let spent = r.heart_is_recorded(&container);
+                    r.log.push_str(&format!(
+                        "  heart bought={bought}, and the save {}
+",
+                        match spent {
+                            true => "agrees",
+                            false => "does not show it yet",
+                        }
+                    ));
+                    // Written off either way: a store that did not sell us one this time will not
+                    // sell us one next time either, and standing here again is the bounce every
+                    // other errand in this file has already had to learn not to do.
+                    r.map.abandon(at);
+                    if spent || bought {
+                        r.map.bought_the_heart(&container);
+                    }
+                    continue;
                 }
                 r.log.push_str(&format!("{step}. at **{at}** in `{container}` — resting\n"));
                 let rested = r.rest_at_inn();

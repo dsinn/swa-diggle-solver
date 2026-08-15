@@ -2757,9 +2757,29 @@ impl WorldMap {
         // from here — walk to it, arrive on it, hand over to the driver — which is task #18's
         // generalisation arriving one errand at a time rather than as an abstraction invented
         // around a single case.
+        // **The bed outranks the shelf, and the order here is the whole of that rule.**
+        //
+        // The dev's, after watching a run stand in front of a general store at 2/20 health with an
+        // inn in the same village. `wants_rest` is not a preference, it is the state that gets runs
+        // killed: the two level 6 crypts that ended the evening were both entered hurt. So a village
+        // that can do both does the bed first, and the heart on the way out — `wants_rest` clears
+        // when the inn heals us, and `store_inside` is asked again on the next step.
         let inn = self
             .inn_inside(&parent)
-            .or_else(|| self.store_inside(&parent))
+            .or_else(|| match self.seeking_a_rest(&parent) {
+                // **Still looking for the bed, so the shelf waits.** This is the case that actually
+                // went wrong, and it is subtler than "prefer the inn": the inn was not *known* yet.
+                // The store had already been seen, `inn_inside` returned nothing because nothing in
+                // the map was an inn, and the fallback took the store — so a run at 2/20 walked past
+                // the search it was in the middle of and went shopping.
+                //
+                // `seeking_a_rest` is exactly "we are in a village, we want a bed, and no inn here
+                // has been written off", which is the same thing as "keep looking". Returning `None`
+                // leaves `dest` empty, and an empty `dest` is what makes `cross_toward` explore —
+                // which is how the inn gets found.
+                true => None,
+                false => self.store_inside(&parent),
+            })
             .map(|p| p.key.clone());
         let leaving_to = match inn.is_some() || self.seeking_a_rest(&parent) || self.seeking_a_heart(&parent) {
             // The errand outranks the crossing, and leaves the commitment untouched rather than

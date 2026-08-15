@@ -22,6 +22,7 @@ pub mod rested;
 pub mod flee;
 pub mod search;
 pub mod shrine;
+pub mod shopplay;
 pub mod shrineplay;
 pub mod subworld;
 pub mod buyer;

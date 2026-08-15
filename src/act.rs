@@ -1035,6 +1035,32 @@ pub const SHRINE_CONSECRATE: Button = Button {
 /// the two questions must be asked with their own templates, never inferred from one score.
 pub const SHRINE_CONSECRATE_PRESENT: f64 = 0.95;
 
+/// The general store's `Sell` plaque, which is how we know the shop screen is up.
+///
+/// Cut from `spike-frames-live/shop-open.png`, the frame the run of 2026-08-15 stopped on at
+/// Rowlston Covert with `Stop::AtShop`. The plaque is chrome — fixed position, no state — which is
+/// exactly what a screen fingerprint wants, and it is the only large text on the screen that is not
+/// an item name.
+///
+/// **Nothing presses it.** Selling is not something this program does; this identifies the screen
+/// and no more. The item grid is aimed at arithmetically (see [`crate::shopplay`]) and the back
+/// arrow at the other end of the bar is what leaves.
+pub const SHOP_SELL: Button = Button {
+    name: "shop Sell",
+    template: "shop-sell.png",
+    search: (128, 852, 418, 980),
+    origin: (148, 872),
+    click: (273, 916),
+};
+
+/// The shop screen is up. See [`SHOP_SELL`].
+///
+/// **0.90**, the same bar as the other chrome plaques and for the same reason: it is a fixed image
+/// over a fixed background, so a genuine match scores near 1.0 and the only thing the threshold has
+/// to survive is capture noise. Unmeasured against a confusable, because there is no other `Sell` in
+/// the game's chrome — if one turns up, this needs re-measuring against it rather than lowering.
+pub const SHOP_SELL_PRESENT: f64 = 0.90;
+
 pub const SHRINE_GOBACK: Button = Button {
     name: "shrine Go back",
     template: "shrine-goback.png",
@@ -1263,6 +1289,8 @@ pub enum Screen {
     ShrineConsecrate,
     /// A shrine's word screen, identified only by its back plaque. See [`SHRINE_GOBACK`].
     Shrine,
+    /// A general store, open for business. See [`SHOP_SELL`].
+    Shop,
     /// A class-unlock announcement, which can interrupt a run after a fight. See [`UNLOCK_CONTINUE`].
     Unlock,
     /// None of the above. Usually the map, but also any screen with no fingerprint yet.
@@ -1289,6 +1317,7 @@ impl Screen {
         Screen::StatsHistory,
         Screen::ShrineConsecrate,
         Screen::Shrine,
+        Screen::Shop,
         Screen::Unlock,
         Screen::Unknown,
     ];
@@ -1457,6 +1486,12 @@ pub fn identify(win: &GameWindow) -> Screen {
     if over(&SHRINE_CONSECRATE, SHRINE_CONSECRATE_PRESENT) {
         return Screen::ShrineConsecrate;
     }
+    // Asked before the generic back-plaque checks below, for the reason written above them: a shop
+    // has its own back arrow, and a test that answers "there is a way out of here" must never
+    // pre-empt one that answers "what is this screen for".
+    if over(&SHOP_SELL, SHOP_SELL_PRESENT) {
+        return Screen::Shop;
+    }
     if over(&SHRINE_GOBACK, SHRINE_GOBACK_PRESENT) {
         return Screen::Shrine;
     }
@@ -1487,6 +1522,7 @@ pub const ALL: &[&Button] =
     &SHRINE_PRAY,
     &SHRINE_CONSECRATE,
     &SHRINE_GOBACK,
+    &SHOP_SELL,
     &STATS_BACK,
     &HEROSELECT_HEADER,
     &UNLOCK_CONTINUE,
