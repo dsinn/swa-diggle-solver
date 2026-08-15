@@ -582,6 +582,15 @@ pub struct WorldMap {
     /// routing has to obey — memory or a monotone measure, never a ranking. Read it before adding
     /// another.
     abandoned: std::collections::HashSet<String>,
+    /// Completed `<container>_path_to_<neighbour>` roads, by their own key.
+    ///
+    /// The other half of `areaOrExitToComplete` (`overworldview.lua:1312-1313`), and the reason it
+    /// is a set rather than a `Place` flag: these keys were already being read out of
+    /// `completedAreas` and **thrown away** by `apply_save`, because folding them in as places
+    /// invented destinations that routing tried to walk to. That worry was sound and this keeps it —
+    /// nothing here creates a `Place`, so nothing here can become a target. It only records that a
+    /// road has been walked, which is the fact [`WorldMap::can_step`] needs and did not have.
+    roads_done: std::collections::HashSet<String>,
     /// Where the last dump said we were.
     here: Option<String>,
     /// `areaFlags.hell` — zero means the anomaly has not opened and the trigger is still live.
@@ -1506,7 +1515,11 @@ impl WorldMap {
                 if let Some(base) = key.strip_suffix("_corrupt") {
                     self.entry(base).completed_corrupt = true;
                 } else if key.contains("_path_to_") {
-                    continue;
+                    // Recorded, not skipped. Still no `Place` — see `roads_done` for why that part
+                    // of the original decision stands — but the completion itself is exactly what
+                    // authorises a direct hop between the two nodes the key names, and dropping it
+                    // made `can_step` stricter than the game.
+                    self.roads_done.insert(key.clone());
                 } else {
                     self.entry(key).completed = true;
                 }
@@ -2226,13 +2239,30 @@ impl WorldMap {
     /// Secret nodes have a further `_revealed` condition we cannot see; being wrong there costs a
     /// refused move, and the game is still the authority.
     ///
-    /// **Advisory, not a filter.** It is deliberately not used to prune routes: `areaOrExitToComplete`
-    /// carries an exit notion this does not model, and a node we have merely never heard of reads as
-    /// incomplete — so pruning on it removed every route in a map that had not been walked yet. It
-    /// answers one question only: *must* we fight where we stand, or can we simply leave?
+    /// **Advisory, not a filter.** It is deliberately not used to prune routes: a node we have merely
+    /// never heard of reads as incomplete, so pruning on it removed every route in a map that had not
+    /// been walked yet. It answers one question only: *must* we fight where we stand, or can we
+    /// simply leave?
+    ///
+    /// ## The exit clause, which this used to be missing
+    ///
+    /// `areaOrExitToComplete` is `areaIsComplete(a) or areaIsComplete(a..'_path_to_'..b)`, and
+    /// `canTravelToDirect` asks it **both ways round** — so a walked road authorises the hop between
+    /// the two nodes it joins, whether or not either node has been cleared. This modelled only the
+    /// first half of each side, which made it strictly stricter than the game: a legal move read as
+    /// illegal, `must_fight_here` came back true, and the run fought or crossed something it could
+    /// have walked away from. That is the same shape as the bug in the paragraph above, one level
+    /// down.
+    ///
+    /// Live 2026-08-15 at `l62`, a level 7 spider forest: `completedAreas` held
+    /// `l62_path_to_l57 = true`, so stepping out to `l57` was legal, and this said it was not.
+    /// (It was right about the move the run actually wanted — neither `l62`, `l62_path_to_l36` nor
+    /// `l36` was complete, so crossing the interior was genuinely the only way to `l36`. The dev
+    /// spotted the general fault from a case where the answer happened to come out correct.)
     pub fn can_step(&self, from: &str, to: &str) -> bool {
         let done = |k: &str| self.places.get(k).map(|p| p.completed).unwrap_or(false);
-        done(from) || done(to)
+        let road = |a: &str, b: &str| self.roads_done.contains(&format!("{a}_path_to_{b}"));
+        done(from) || done(to) || road(from, to) || road(to, from)
     }
 
     /// Are we currently inside a subworld, and if so which one?
@@ -4861,6 +4891,43 @@ mod tests {
         assert!(m.gap("west", "start").unwrap() < m.gap("east", "start").unwrap());
         assert_eq!(hop.step, "west", "toward the anomaly, not the lower key");
         assert!(!hop.routed, "and the log has to say so");
+    }
+
+    /// Rebuilt from the save as it stood at the stop of the run of 2026-08-15.
+    ///
+    /// Standing on `l62`, a level 7 spider forest, with `l62_path_to_l57` and `l62_path_to_shrine7`
+    /// complete and the forest itself uncleared. The game would have let us walk straight out to
+    /// either of those two neighbours (`canTravelToDirect`, `overworldview.lua:1316-1321`) and
+    /// refused the hop to `l36`, whose road is unwalked and whose crypt is unfought.
+    ///
+    /// Before the exit clause existed, all three read the same: illegal. The two that matter cost a
+    /// level 7 crossing each time we believed it.
+    #[test]
+    fn a_walked_road_lets_us_leave_a_forest_we_never_cleared() {
+        let mut m = WorldMap::default();
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { completedAreas = {
+                     l62_path_to_l57 = true, l62_path_to_shrine7 = true, shrine7 = true,
+                 } } }",
+            )
+            .unwrap(),
+        );
+
+        assert!(m.can_step("l62", "l57"), "the road out to `l57` is walked, so leaving is legal");
+        assert!(m.can_step("l57", "l62"), "and the game asks the pair both ways round");
+        assert!(
+            m.can_step("l62", "shrine7"),
+            "`shrine7` is complete as well, which was already enough on its own"
+        );
+        assert!(
+            !m.can_step("l62", "l36"),
+            "but an unwalked road to an unfought crypt is still a fight we have to take"
+        );
+        assert!(
+            !m.places.contains_key("l62_path_to_l57"),
+            "and no road became a place — routing must not acquire a new destination from this"
+        );
     }
 
     /// The last decision of the run of 2026-08-09, rebuilt from `spike-run-raw.log:1336-1344`.
