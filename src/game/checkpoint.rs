@@ -94,6 +94,49 @@ pub fn restore(store: &Path, name: &str, save_dir: &Path) -> Result<(), crate::E
     copy_tree(&src, save_dir)
 }
 
+/// Empties the sandbox save completely, so the next launch starts a fresh profile.
+///
+/// **Everything, and `persistentSaveData` is the point of it.** The dev asked for exactly that on
+/// 2026-08-15. [`restore`] clears only [`KNOWN`] because it is about to lay a checkpoint down on
+/// top; this is about leaving nothing behind, so it enumerates the directory instead of a list of
+/// names. A list would quietly spare whatever we had not thought of — `screenshots`, `heroCards`
+/// (`ui/elements/herodisplay.lua:276-284` writes them), anything a later version of the game adds.
+///
+/// ## What clearing each thing costs
+///
+/// - `mainSaveData` and `combatSaveData` — the run. Without them the start menu's shared slot reads
+///   **`Start`** rather than `Restart` (`ui/startmenu.lua:199`) and confirming a champion no longer
+///   raises the eulogy dialogue (`utils/classes.lua:81-87`), which is a screen the driver has no
+///   handler for. This much is what "start fresh" needs.
+/// - `persistentSaveData` — **unlocks**. Every class returns to whatever `isUnlocked` says on a
+///   clean profile, so the warrior is not on offer until he is earned again.
+/// - `saveStats` — the run history, and **it decides which champions hero select offers**.
+///   `rngSeed = #(love.filesystem.getDirectoryItems'saveStats')` (`ui/heroselect.lua:218`), and at
+///   zero the screen asks for **one** hero rather than three (`:56`). So a cleared profile shows a
+///   single card, which is a state [`crate::heroselect`] handles — the outer positions read as
+///   nothing and the middle one wins the tie — but it is not a state that exercises it.
+///
+/// The directory itself is left in place; LÖVE will refill it.
+pub fn clear(save_dir: &Path) -> Result<Vec<String>, crate::Error> {
+    guard(save_dir)?;
+    refuse_if_game_running()?;
+    if !save_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut removed = Vec::new();
+    for e in std::fs::read_dir(save_dir)?.filter_map(|e| e.ok()) {
+        let path = e.path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
+        }
+        removed.push(e.file_name().to_string_lossy().into_owned());
+    }
+    removed.sort();
+    Ok(removed)
+}
+
 /// Checkpoint names, newest first by modification time.
 pub fn list(store: &Path) -> Result<Vec<(String, std::time::SystemTime)>, crate::Error> {
     if !store.is_dir() {
@@ -198,6 +241,61 @@ mod tests {
     #[test]
     fn an_unrelated_directory_is_refused() {
         assert!(guard(Path::new(r"C:\temp\whatever")).is_err());
+    }
+
+    /// A sandbox-shaped directory under the test's own temporary space, with a profile in it.
+    fn a_sandbox_with_a_profile(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("diggle-clear-{tag}-{}", std::process::id()))
+            .join("LOVE")
+            .join("SternlyWordedAdventures");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        std::fs::create_dir_all(dir.join("saveStats")).expect("temp dir");
+        std::fs::create_dir_all(dir.join("screenshots")).expect("temp dir");
+        for f in ["mainSaveData", "persistentSaveData", "statsIndex"] {
+            std::fs::write(dir.join(f), b"return {}").expect("temp file");
+        }
+        std::fs::write(dir.join("saveStats").join("0000"), b"return {}").expect("temp file");
+        dir
+    }
+
+    /// **Everything means everything**, which is the dev's request and the difference between this
+    /// and what [`restore`] clears.
+    ///
+    /// Asserted by enumerating what is left rather than by checking for the files this test happened
+    /// to write: a `clear` that spared something we never thought to name would still pass a list of
+    /// known names, and sparing the unnamed is exactly the failure mode.
+    #[test]
+    fn clearing_leaves_nothing_at_all_behind() {
+        let dir = a_sandbox_with_a_profile("all");
+        // A directory and a nested file, because the two are removed by different calls.
+        assert!(dir.join("saveStats").join("0000").is_file());
+
+        let removed = clear(&dir).expect("the sandbox should be clearable");
+        assert!(removed.contains(&"persistentSaveData".to_string()), "unlocks must go too");
+        assert!(removed.contains(&"saveStats".to_string()), "and the history that seeds hero select");
+        assert!(removed.contains(&"screenshots".to_string()), "and whatever else was in there");
+
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the directory itself stays")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(left.is_empty(), "the save should be empty, found {left:?}");
+        assert!(dir.is_dir(), "the directory itself is left for LOVE to refill");
+
+        // Idempotent: nothing to remove is not an error.
+        assert_eq!(clear(&dir).expect("a second clear is harmless"), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// The guard is not weaker for being the destructive path — it is the same one, and this pins
+    /// that `clear` actually asks it before touching anything.
+    #[test]
+    fn clearing_refuses_the_real_steam_save() {
+        let real = Path::new(r"C:\Users\x\AppData\Roaming\SternlyWordedAdventures");
+        assert!(clear(real).is_err(), "the real Steam save must never be cleared");
+        assert!(clear(Path::new(r"C:\temp\whatever")).is_err());
     }
 
     #[test]
