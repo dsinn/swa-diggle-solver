@@ -1390,6 +1390,16 @@ impl WorldMap {
         self.abandoned.insert(key.to_string());
     }
 
+    /// Have we given up on `key`?
+    ///
+    /// [`WorldMap::abandon`] is a set insert and so is idempotent, but writing off is also
+    /// *progress* — it is a field of [`WorldMap::progress`] — and a caller that cannot tell a fresh
+    /// write-off from a repeat would report one every time it passed. See `navigate::LOOP_WRITE_OFF`,
+    /// which relies on the second attempt being silent so the give-up guard behind it still fires.
+    pub fn is_written_off(&self, key: &str) -> bool {
+        self.abandoned.contains(key)
+    }
+
     pub fn get(&self, key: &str) -> Option<&Place> {
         self.places.get(key)
     }
@@ -5255,6 +5265,47 @@ mod tests {
             m.cross_toward(&[exit("l19")]),
             Some(Crossing::Step { to: "l10sub7".into(), toward: "l10_path_to_l19".into() })
         );
+    }
+
+    /// The `l4` loop of 2026-08-16, and the write-off that breaks it.
+    ///
+    /// A frontier stays a frontier while the game withholds a neighbour (`is_frontier` is
+    /// `!visited || hidden > 0`), so standing on one need not retire it — which is how the crossing
+    /// kept electing `l4sub14` while the steer kept pushing back off it. Writing it off has to be
+    /// enough on its own to send the crossing somewhere else, because that is all
+    /// `navigate::LOOP_WRITE_OFF` does.
+    ///
+    /// **Two neighbours, not one, and that is the whole fixture.** Written with a single neighbour
+    /// this test fails, and correctly: `cross_toward` ends in an *unfiltered* pick
+    /// (`place.neighbours.iter().min()`) on the reasoning that standing still in a subworld is worse
+    /// than any one bad step. So a write-off redirects a crossing that has somewhere else to go and
+    /// does not strand one that has not — see the note on the residual case in
+    /// `navigate::LOOP_WRITE_OFF`.
+    #[test]
+    fn a_frontier_that_is_written_off_sends_the_crossing_elsewhere() {
+        let mut m = WorldMap::new();
+        // No route to any exit: the state that leaves crossing to the frontier walk. Both
+        // neighbours are named and neither is stood on, so both are frontiers.
+        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post",
+            vec![node("l10sub7", "Ulrome east guard post"), node("l10sub8", "Ulrome south guard post")],
+            vec![exit("l19")]));
+        let chosen = match m.cross_toward(&[exit("l19")]) {
+            Some(Crossing::Probe { to, .. }) | Some(Crossing::Seek { to }) => to,
+            other => panic!("the premise: a frontier is probed, got {other:?}"),
+        };
+
+        assert!(!m.is_written_off(&chosen));
+        m.abandon(&chosen);
+        assert!(m.is_written_off(&chosen), "and a repeat write-off can be told from a fresh one");
+
+        let after = m.cross_toward(&[exit("l19")]);
+        match after {
+            Some(Crossing::Probe { to, .. }) | Some(Crossing::Seek { to }) => assert_ne!(
+                to, chosen,
+                "written off and still chosen, so the guard would change nothing"
+            ),
+            other => panic!("still a crossing, just a different one: {other:?}"),
+        }
     }
 
     #[test]

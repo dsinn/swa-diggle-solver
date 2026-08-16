@@ -313,6 +313,49 @@ pub enum Stop {
 /// revisiting with the run no further along than before.
 const LOOP_GIVE_UP: usize = 4;
 
+/// Sterile revisits after which a **frontier** is written off rather than merely counted.
+///
+/// Two, because two is the first visit that *demonstrates* a repeat instead of suspecting one — the
+/// same reading of the counter [`LOOP_GIVE_UP`] already uses, taken one lap earlier.
+///
+/// ## The loop this exists for, and why the guards already in place could not stop it
+///
+/// Run of 2026-08-16 1043Z, inside `l4`, ten crossings and then the give-up:
+///
+/// ```text
+///   at l4sub14  ->  Crossing::Steer  ->  l4sub23      (the door is printed here)
+///   at l4sub23  ->  Crossing::Probe  ->  l4sub14      (no route to the door from here)
+/// ```
+///
+/// **Two different rules, each correct, pointing at each other.** The steer leg is already
+/// protected: `steered_gap` is a high-water mark that only ever falls, so a steer cannot be
+/// re-earned by walking backwards — that was the `l40` fix of 2026-08-15. It says nothing about the
+/// *other* leg, and the frontier walk is what keeps electing `l4sub14`.
+///
+/// It elects it forever because `Place::is_frontier` is `!visited || hidden > 0`, and **standing on
+/// a node does not lower `hidden`** when the game goes on withholding a neighbour. So a node can be
+/// permanently "somewhere the map might still open up" while having nothing left to give. The
+/// frontier walk's own guarantee — BFS distance to the chosen frontier strictly decreases — is about
+/// *reaching* it, and holds perfectly well while the run learns nothing.
+///
+/// The answer is the one `docs/superpowers/notes/navigation-loops.md` gives for every loop here:
+/// memory, not a ranking. `WorldMap::abandon` is that memory, it already exists, and every chooser
+/// that matters honours it — the crossing's `usable` filter, the frontier search, target selection,
+/// and `committed_exit`. What was missing was anything that ever *wrote* to it for this reason.
+///
+/// **Frontiers only, deliberately.** A node we keep returning to for some other reason may well be a
+/// road we have to pass through, and `step_avoiding` routes around abandoned nodes — writing one off
+/// could cut the only path. A frontier's whole appeal is that it might teach us something, so a
+/// frontier that has twice taught us nothing is exactly the thing that can be given up with nothing
+/// lost. Anything else still runs into [`LOOP_GIVE_UP`], which is unchanged and still the backstop.
+///
+/// **One case this does not break, and the test says so out loud.** `cross_toward` ends in an
+/// unfiltered pick — `place.neighbours.iter().min()` — because standing still in a subworld is worse
+/// than any one bad step. So when the written-off node is the *only* neighbour, the crossing takes
+/// it regardless and the cycle continues to [`LOOP_GIVE_UP`], exactly as it did before. That is the
+/// right trade and not an oversight: the alternative is a run that stops with somewhere to go.
+const LOOP_WRITE_OFF: usize = 2;
+
 /// Counts sterile revisits: how often we have stood somewhere with the run no further along.
 ///
 /// Its own type rather than two fields on [`Run`] so the rule can be tested without a game window,
@@ -3642,6 +3685,21 @@ pub fn drive(
                 r.log_button_scores();
                 return Stop::Looping(format!(
                     "{here} visited {laps} times with no progress; last errand {doing}"
+                ));
+            }
+            // A frontier that has twice taught us nothing stops being one. See [`LOOP_WRITE_OFF`]
+            // for the loop this breaks and why the two guards already in place could not.
+            //
+            // Falls through rather than restarting the step: writing off is a fact about the map, and
+            // every chooser below reads the map fresh, so this step is decided with it already true.
+            if laps >= LOOP_WRITE_OFF
+                && place.as_ref().map(|p| p.is_frontier()).unwrap_or(false)
+                && !r.map.is_written_off(&here)
+            {
+                r.map.abandon(&here);
+                r.log.push_str(&format!(
+                    "{step}. `{here}` is written off — stood on {laps} times with nothing learned, \
+                     and a frontier that teaches nothing is not a frontier\n"
                 ));
             }
         }
