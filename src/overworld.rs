@@ -2138,6 +2138,57 @@ impl WorldMap {
             for k in besieged {
                 self.entry(&k).under_attack = true;
             }
+            // **Every road the save names is an edge, and we were throwing all of them away.**
+            //
+            // The dev, 2026-08-16: *why is the planner only choosing one node over when we've
+            // explored so much of the map already? When we wanted to rest, the navigator could have
+            // selected any of the uncorrupted villages we already visited, because a path existed.*
+            //
+            // It could not, and the reason was not the ranking. A place learned from `completedAreas`
+            // arrives **as a key with no edges** — `entry(&k)` and nothing else — so most of the map
+            // was known by name and unroutable, `ok()` refused every rest site for want of a route,
+            // and the run fell through to stepping at an adjacent frontier node. That is what every
+            // `RouteTo(Rest)` line in `spike-run-20260816-0826Z.md` is.
+            //
+            // But the edges were in the save the whole time, spelled into the road nodes' own names.
+            // `overworldview.lua:1043` builds them as `parent.key..'_path_to_'..k`, so
+            // `l25_path_to_l32` *is* the statement "l25 and l32 are adjacent" — and the save carries
+            // 35 of them for this island, in `completedAreas` and in `areaFlags` (`_explored`).
+            //
+            // Node keys carry no underscores of their own (`l25`, `shrine1`, `e2`, `l10sub7`), so
+            // splitting on the marker is unambiguous; the right-hand side only needs its flag suffix
+            // taken off. Anything unrecognised is left alone rather than guessed at.
+            let mut roads: Vec<(String, String)> = Vec::new();
+            let flag_keys = flags.map.keys().map(|k| k.as_str());
+            let done_keys = save
+                .table_at("overworld.completedAreas")
+                .map(|t| t.map.keys().map(|k| k.as_str()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            for key in flag_keys.chain(done_keys) {
+                let Some((from, rest)) = key.split_once("_path_to_") else { continue };
+                let to = [
+                    "_explored",
+                    "_used",
+                    "_corrupt",
+                    "_attacked",
+                    "_attack",
+                    "_revealed",
+                    "_looted",
+                    "_first_corrupt_time",
+                ]
+                .iter()
+                .find_map(|suffix| rest.strip_suffix(suffix))
+                .unwrap_or(rest);
+                if !from.is_empty() && !to.is_empty() {
+                    roads.push((from.to_string(), to.to_string()));
+                }
+            }
+            for (from, to) in roads {
+                // The surface edge, which is the thing routing needs. The road node itself is an
+                // interior node of `from` and is recorded wherever a dump names it.
+                self.entry(&from).neighbours.insert(to.clone());
+                self.entry(&to).neighbours.insert(from);
+            }
             // `<key>_used`, which for a campfire decides whether resting there is free or futile.
             let used: Vec<String> = flags
                 .map
@@ -5665,6 +5716,53 @@ mod tests {
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Rest);
         assert_eq!(plan.target, "l10", "a freed inn is a rest stop again");
+    }
+
+    /// The save has been carrying the road network all along, and we were reading none of it.
+    ///
+    /// The dev, 2026-08-16: *why is the planner only choosing one node over when we've explored so
+    /// much of the map already? When we wanted to rest, the navigator could have selected any of the
+    /// uncorrupted villages we already visited, because a path existed.*
+    ///
+    /// A path did exist and we could not see it. `completedAreas` hands us places **as bare keys**,
+    /// so the map filled with nodes that had no edges, `ok()` refused every rest site for want of a
+    /// route, and the run stepped to an adjacent frontier instead — every `RouteTo(Rest)` line in
+    /// `spike-run-20260816-0826Z.md`.
+    ///
+    /// Measured against a real save rather than a fixture, because the claim is about what the game
+    /// writes down, not about what we can construct.
+    #[test]
+    fn the_roads_named_in_a_save_are_edges() {
+        let path = std::path::Path::new("checkpoints/ping-pong-l10-l18/mainSaveData");
+        let Ok(text) = std::fs::read_to_string(path) else {
+            eprintln!("SKIP: {} is not present", path.display());
+            return;
+        };
+        let save = crate::game::save::parse(&text).expect("the checkpoint parses");
+        let mut m = WorldMap::new();
+        m.apply_save(&save);
+
+        // `l25_path_to_l32` appears in the save's flags, and says these two are adjacent.
+        assert!(
+            m.get("l25").map(|p| p.neighbours.contains("l32")).unwrap_or(false),
+            "the road `l25_path_to_l32` names an edge and it must be one"
+        );
+        assert!(
+            m.get("l32").map(|p| p.neighbours.contains("l25")).unwrap_or(false),
+            "and edges are recorded from both ends, as `fold` does"
+        );
+
+        // The point of it: a route the planner can measure, from the save alone, before this run has
+        // walked anywhere at all.
+        m.here = Some("l25".into());
+        assert!(m.can_route_to("l32"), "Enthorpe is routable from Aike without a single dump");
+        assert!(m.can_route_to("shrine2"), "and so is what lies beyond it");
+
+        // A flag suffix must not be mistaken for part of the destination key.
+        assert!(
+            !m.places.keys().any(|k| k.ends_with("_explored")),
+            "`l25_path_to_l32_explored` must yield `l32`, not `l32_explored`"
+        );
     }
 
     /// A village under attack, or lost, is neither a bed nor a shop.

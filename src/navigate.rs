@@ -743,6 +743,9 @@ pub struct Run<'a> {
     ///
     /// So the run remembers what it set out for. Arriving at it means acting on it.
     pub committed_to: Option<String>,
+    /// How many inputs this run has sent. Numbers the lines [`Run::tap`] writes, so a click heard
+    /// at the game can be found in the report by counting.
+    pub inputs: usize,
     /// The loop guard's memory. See [`Run::sterile_here`] and [`LoopGuard`].
     pub guard: LoopGuard,
     /// The last few places we stood, and what we were doing there — the report's evidence.
@@ -1187,7 +1190,7 @@ impl Run<'_> {
                 continue;
             }
             let Ok((ex, ey)) = self.win.client_to_screen(cx, cy) else { continue };
-            let _ = click_at_in(self.win, ex, ey);
+            let _ = self.tap("clearing a text screen: empty ground", ex, ey);
             self.park();
             std::thread::sleep(Duration::from_millis(500));
             self.pump();
@@ -1205,7 +1208,7 @@ impl Run<'_> {
             // Counted BEFORE the click. Anything already in hand describes the map as it was, and the
             // whole point of pressing the arrow is to learn where the map is now.
             let before = self.dumps;
-            let _ = click_at_in(self.win, lx, ly);
+            let _ = self.tap("show the area buttons", lx, ly);
             self.park();
             let by = Instant::now() + Duration::from_secs(12);
             while Instant::now() < by {
@@ -1315,6 +1318,39 @@ impl Run<'_> {
         }
     }
 
+    /// Send a click, and record what it was for.
+    ///
+    /// ## Why every input is logged, and why it took a disagreement to build
+    ///
+    /// The dev watches runs by ear and eye — clicks have a sound and a cursor jump — and on
+    /// 2026-08-16 concluded from that that multi-hop travel was not working. The console said one
+    /// press had walked three edges (`e2 -> l41 -> l25 -> l4` inside a single step). Both readings
+    /// were honest and neither could be checked against the other, because **nothing recorded what
+    /// each input was for**.
+    ///
+    /// They are also both right, which is the point. A multi-hop walk fires an arrival event at
+    /// every node it passes (`overworldview.lua:1210-1216`), and the wait loop answers those — so
+    /// clicks keep coming at each hop while the travel press happened once. Watching the inputs
+    /// cannot separate the two, and neither could the report.
+    ///
+    /// So: a numbered line per input, with the coordinate and the reason, interleaved with the steps
+    /// in the same report. "Was that a travel press or an event answer?" becomes a lookup.
+    ///
+    /// Kept deliberately cheap — a counter and a `push_str` — so it can stay on in every run rather
+    /// than being a debug mode nobody remembers to enable.
+    fn tap(&mut self, why: &str, sx: i32, sy: i32) -> bool {
+        self.inputs += 1;
+        self.log.push_str(&format!("  input {}: click ({sx},{sy}) — {why}\n", self.inputs));
+        click_at_in(self.win, sx, sy).is_ok()
+    }
+
+    /// Send a key, and record what it was for. See [`Run::tap`].
+    fn tap_key(&mut self, why: &str, vk: u16, sc: u16) -> bool {
+        self.inputs += 1;
+        self.log.push_str(&format!("  input {}: key {vk:#06x} — {why}\n", self.inputs));
+        self.keys.press_key(vk, sc).is_ok()
+    }
+
     /// Have we been here before with the run no further along than it is now?
     ///
     /// Returns how many sterile visits this node has had, counting this one.
@@ -1422,6 +1458,12 @@ impl Run<'_> {
     fn click_button(&mut self, spec: &crate::win::window::ButtonSpec) -> bool {
         let Ok((cw, ch)) = self.win.client_size() else { return false };
         let (x, y) = crate::win::window::button_center(spec, cw, ch);
+        self.inputs += 1;
+        self.log.push_str(&format!(
+            "  input {}: click ({x},{y}) — a button at its declared coordinate
+",
+            self.inputs
+        ));
         self.keys.click(x, y).is_ok()
     }
 
@@ -1624,7 +1666,7 @@ impl Run<'_> {
                     break;
                 }
                 let mark = self.feed.mark();
-                if self.keys.press_key(VK_SPACE, SC_SPACE).is_err() {
+                if !self.tap_key("affirmative: space", VK_SPACE, SC_SPACE) {
                     self.log.push_str("  rest: the Space press failed\n");
                     stalled = true;
                     break;
@@ -1814,7 +1856,9 @@ impl Run<'_> {
             ));
         }
         let (bx, by) = self.win.client_to_screen(AREA_BUTTON.0, AREA_BUTTON.1)?;
-        click_at_in(self.win, bx, by)?;
+        if !self.tap(&format!("area button: {what}"), bx, by) {
+            return Err("click failed".into());
+        }
         self.park();
         std::thread::sleep(Duration::from_millis(1000));
         self.pump();
@@ -2009,7 +2053,7 @@ impl Run<'_> {
             // control is painted and live, and the re-read after the press says whether it took.
             self.keys.focus();
             std::thread::sleep(Duration::from_millis(150));
-            let _ = self.keys.press_key(VK_SPACE, SC_SPACE);
+            let _ = self.tap_key("clearing a text screen: space", VK_SPACE, SC_SPACE);
             std::thread::sleep(Duration::from_millis(700));
             self.pump();
             let now = self.affirmative();
@@ -2144,7 +2188,7 @@ impl Run<'_> {
         let Ok((cx, cy)) = self.win.button_center(&affirm::LORE_AFFIRMATIVE) else { return false };
         let Ok((sx, sy)) = self.win.client_to_screen(cx, cy) else { return false };
         for attempt in 1..=3 {
-            if click_at_in(self.win, sx, sy).is_err() {
+            if !self.tap("locate-me: click empty map", sx, sy) {
                 self.log.push_str("  could not click the continue arrow\n");
                 return false;
             }
@@ -2305,7 +2349,7 @@ impl Run<'_> {
         if let Ok((cx, cy)) = self.win.client_to_screen(click_x, click_y) {
             for attempt in 1..=4 {
                 let before = crate::win::capture::capture_window(self.win).ok();
-                let _ = click_at_in(self.win, cx, cy);
+                let _ = self.tap("dismiss: centre of the screen", cx, cy);
                 self.park();
                 std::thread::sleep(Duration::from_millis(900));
                 self.pump();
@@ -2364,7 +2408,7 @@ impl Run<'_> {
             for attempt in 1..=3 {
                 if let Ok((sx, sy)) = self.win.client_to_screen(bx, by) {
                     let before = crate::win::capture::capture_window(self.win).ok();
-                    let _ = click_at_in(self.win, sx, sy);
+                    let _ = self.tap("answering an event choice", sx, sy);
                     self.park();
                     std::thread::sleep(Duration::from_millis(700));
                     self.pump();
@@ -2424,7 +2468,9 @@ fn skip_cinematic(r: &mut Run) -> Result<(), String> {
         .map_err(|e| format!("capture before Escape: {e}"))?;
     r.keys.focus();
     std::thread::sleep(Duration::from_millis(300));
-    r.keys.press_key(VK_ESCAPE, SC_ESCAPE).map_err(|e| format!("Escape: {e}"))?;
+    if !r.tap_key("skipping the cinematic: escape", VK_ESCAPE, SC_ESCAPE) {
+        return Err("Escape failed".to_string());
+    }
     r.park();
     std::thread::sleep(Duration::from_millis(1200));
     r.pump();
@@ -2516,7 +2562,7 @@ fn page_the_shop_to(r: &mut Run, index: usize) -> usize {
             return at;
         };
         let Ok((sx, sy)) = r.win.client_to_screen(ax, ay) else { return at };
-        if click_at_in(r.win, sx, sy).is_err() {
+        if !r.tap("clearing the gate", sx, sy) {
             r.log.push_str("  the paging arrow could not be clicked\n");
             return at;
         }
@@ -2723,7 +2769,9 @@ pub fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
     // parking before the read-back is what stops us erasing it again.
     warp_cursor(sx, sy).map_err(|e| format!("cannot move the cursor to the card: {e}"))?;
     std::thread::sleep(Duration::from_millis(400));
-    click_at_in(r.win, sx, sy).map_err(|e| format!("click on the champion card failed: {e}"))?;
+    if !r.tap("hero select: the champion card", sx, sy) {
+        return Err("click on the champion card failed".into());
+    }
     std::thread::sleep(Duration::from_millis(700));
 
     // Read back: the confirm button only exists once `selectedIndex` is set
@@ -2825,7 +2873,7 @@ pub fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
         }
         r.keys.focus();
         std::thread::sleep(Duration::from_millis(250));
-        let _ = r.keys.press_key(VK_RETURN, SC_RETURN);
+        let _ = r.tap_key("hero select: confirm", VK_RETURN, SC_RETURN);
         std::thread::sleep(Duration::from_millis(900));
     }
     Err(format!("never reached the overworld after {MAX_RETURNS} Returns"))
@@ -3880,7 +3928,7 @@ pub fn drive(
                                 match r.win.client_to_screen(x, y) {
                                     Ok((sx, sy)) => {
                                         for _ in 0..want {
-                                            let _ = click_at_in(r.win, sx, sy);
+                                            let _ = r.tap("shop: buying a heart", sx, sy);
                                             std::thread::sleep(Duration::from_millis(700));
                                         }
                                         r.pump();
@@ -3899,7 +3947,7 @@ pub fn drive(
                     // Leave whatever happened. The back arrow is the mirror of `Sell` at the other
                     // end of the same bar, measured off the frame this screen was first captured on.
                     if let Ok((bx, by)) = r.win.client_to_screen(1755, 916) {
-                        let _ = click_at_in(r.win, bx, by);
+                        let _ = r.tap("shop: paging the shelf", bx, by);
                         std::thread::sleep(Duration::from_millis(900));
                         r.pump();
                     }
@@ -4211,7 +4259,7 @@ pub fn drive(
             let Ok((ax, ay)) = r.win.client_to_screen(at.0 as i32, at.1 as i32) else {
                 return Stop::Failed("coordinate conversion failed".into());
             };
-            let _ = click_at_in(r.win, ax, ay);
+            let _ = r.tap(&format!("crossing: select for {what}"), ax, ay);
             std::thread::sleep(Duration::from_millis(900));
             r.pump();
             // **`Travel` is not always what is on offer, and pressing it when it is not stalls the
@@ -4741,7 +4789,7 @@ pub fn drive(
             let Ok((sx, sy)) = r.win.client_to_screen(at.0, at.1) else {
                 return Stop::Failed("coordinate conversion failed".into());
             };
-            let _ = click_at_in(r.win, sx, sy);
+            let _ = r.tap(&format!("travel: select `{}`", hop.step), sx, sy);
             std::thread::sleep(Duration::from_millis(900));
             r.pump();
             let Ok(after) = crate::win::capture::capture_window(r.win) else {
@@ -4795,7 +4843,7 @@ pub fn drive(
         }
         r.keys.focus();
         std::thread::sleep(Duration::from_millis(200));
-        if r.keys.press_key(VK_SPACE, SC_SPACE).is_err() {
+        if !r.tap_key(&format!("travel: press Travel for `{}`", hop.step), VK_SPACE, SC_SPACE) {
             return Stop::Failed("could not send Travel".into());
         }
         r.park();

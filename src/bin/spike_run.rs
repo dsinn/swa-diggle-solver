@@ -119,6 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         slots_captured: std::collections::HashSet::new(),
         snaps: std::collections::HashMap::new(),
         committed_to: None,
+        inputs: 0,
         guard: Default::default(),
         recent: std::collections::VecDeque::new(),
         dump_misses: 0,
