@@ -4151,12 +4151,50 @@ pub fn drive(
                 }
                 continue;
             }
+            // **One press for as far as the town will carry us**, the crossing's counterpart to the
+            // surface far hop. Computed here rather than in the arm because a match guard cannot
+            // bind, and calling it twice to get the value out would be the same walk done twice.
+            //
+            // Only `Step` can use it: the other three arms exist precisely because no route is
+            // known, and there is no chain to walk without one.
+            //
+            // The far node has to be **named in this dump**. On the surface a node the dump omits is
+            // placed from the world frame; that is exactly what must not happen here, because
+            // `lostOrientation` re-rolls every interior coordinate on re-entry
+            // (`forest.lua:483-490`), so a remembered position inside a subworld is worth nothing.
+            // A node the dump does not name falls back to the ordinary single step.
+            let far_inside: Option<(String, (f64, f64))> = match &mv {
+                Crossing::Step { toward, .. } => r
+                    .map
+                    .far_hop_inside(&here, toward)
+                    .and_then(|f| fresh.nodes.iter().find(|n| n.key == f).map(|n| (f, (n.x, n.y)))),
+                _ => None,
+            };
             let (what, at) = match &mv {
                 Crossing::Leave { to } => {
                     match fresh.exits.iter().find(|e| &e.to_key == to) {
                         Some(e) => (format!("leaving `{container}` for `{to}`"), (e.x, e.y)),
                         None => return Stop::Failed(format!("exit to {to} not on screen")),
                     }
+                }
+                // **One press for as far as the town will carry us**, the crossing's counterpart to
+                // the surface far hop below. Only `Step` gets it: the other three arms exist
+                // precisely because no route is known, and there is no chain to walk without one.
+                //
+                // The far node has to be **named in this dump**. On the surface a node absent from
+                // the dump is placed from the world frame, and that is exactly what must not happen
+                // here — `lostOrientation` re-rolls every interior coordinate on re-entry
+                // (`forest.lua:483-490`), so a remembered position inside a subworld is worth
+                // nothing. A node the dump does not name falls back to the ordinary single step.
+                Crossing::Step { to, toward } if far_inside.is_some() => {
+                    let (far, n) = far_inside.as_ref().expect("guarded");
+                    (
+                        format!(
+                            "crossing `{container}` toward `{toward}` — `{far}` is travellable in \
+                             one press, so not via `{to}` hop by hop"
+                        ),
+                        *n,
+                    )
                 }
                 Crossing::Step { to, toward } => match fresh.nodes.iter().find(|n| &n.key == to) {
                     // The door's reason is printed because three runs in a row turned on which

@@ -4725,10 +4725,69 @@ impl WorldMap {
     /// [`WorldMap::first_step_toward`] the hops would have taken, one node at a time, so the two can
     /// never disagree about which way we are going.
     pub fn far_hop(&self, from: &str, to: &str) -> Option<String> {
-        if self.inside().is_some() || from == to {
+        if self.inside().is_some() {
             return None;
         }
         let shut = !self.anomaly_is_open().unwrap_or(false);
+        self.far_chain(from, to, &|p: &Place| {
+            (shut && p.triggers_anomaly()) || self.worth_consecrating_here(&p.key)
+        })
+    }
+
+    /// The same accelerator for crossing a **settlement**, which the surface rule was refusing.
+    ///
+    /// The dev, 2026-08-16, watching a run leave a town a node at a time: *the multi-hop in that
+    /// town still didn't work when we were trying to leave town after resting at the inn.*
+    ///
+    /// ## Why "surface only" was too broad, and what actually justified it
+    ///
+    /// [`crate::subworld`] assumes every subworld is fogged, on the grounds that `thickFog` collapses
+    /// visibility to "standing there or adjacent right now" (`overworldview.lua:696-699`) and that we
+    /// cannot detect it — `lost_woods.getTypeName` reads `forest` until the area flag is set, so a
+    /// heading tells us nothing. Both true, and neither reaches a village: **`thickFog = true`
+    /// appears in exactly one place in the game, `lost_woods.lua:15`**, with `:47` turning it back
+    /// off for the corrupt variant. The ambiguity that motivated the blanket rule is *forest against
+    /// lost woods*; a village and a town are a different generator and say so in the heading.
+    ///
+    /// The measurement that appeared to back the rule does not either. The run that clicked an exit
+    /// several nodes off and moved the screen 0.015 is explained where [`WorldMap::cross_toward`]
+    /// explains it: inside a **corrupted** subworld `setHellValue` has reset every area to
+    /// incomplete, so `canTravelToDirect` has no complete endpoint to work with and refuses. That is
+    /// a completion failure, and [`WorldMap::can_travel_direct`] already models it exactly — which is
+    /// what makes this safe to switch on rather than a gamble. An interior we have not cleared stops
+    /// the chain on its own, one node at a time, exactly as before.
+    ///
+    /// ## The extra stop rule, which the surface does not need
+    ///
+    /// Arrivals fire at every node on the path (`overworldview.lua:1210-1216`), so a chain through an
+    /// uncleared guard post walks into that fight. On the surface that is the dev's standing ruling —
+    /// stick to the path and fight through whatever is standing on it — but leaving a settlement
+    /// after a rest is the one errand that is deliberately *not* looking for a fight, so the chain
+    /// stops short of anything [`WorldMap::blocks_departure`] names. **This is the conservative half
+    /// of a decision the dev has not made**; barrelling through is one line away if that is wanted.
+    pub fn far_hop_inside(&self, from: &str, to: &str) -> Option<String> {
+        let inside_a_settlement = self
+            .inside()
+            .and_then(|c| self.places.get(c))
+            .map(|c| c.is_settlement())
+            .unwrap_or(false);
+        if !inside_a_settlement {
+            return None;
+        }
+        self.far_chain(from, to, &|p: &Place| self.blocks_departure(&p.key))
+    }
+
+    /// Walks our own route to `to`, as far as the game would carry us in one press.
+    ///
+    /// Shared by [`WorldMap::far_hop`] and [`WorldMap::far_hop_inside`], which differ only in
+    /// `stop_at` — the question "is this intermediate node one we must not stride past?". Keeping one
+    /// walker means the two can never disagree about the *route*, only about where to get off it.
+    fn far_chain(
+        &self, from: &str, to: &str, stop_at: &dyn Fn(&Place) -> bool,
+    ) -> Option<String> {
+        if from == to {
+            return None;
+        }
         let mut cur = from.to_string();
         let mut last: Option<String> = None;
         // Bounded so a cycle in our own edges cannot spin here. Ten hops is far past the point where
@@ -4739,11 +4798,7 @@ impl WorldMap {
                 break;
             }
             if next != to {
-                let stop = self
-                    .places
-                    .get(&next)
-                    .map(|p| (shut && p.triggers_anomaly()) || self.worth_consecrating_here(&p.key))
-                    .unwrap_or(true);
+                let stop = self.places.get(&next).map(stop_at).unwrap_or(true);
                 if stop {
                     // Still worth going *to* it — it is the node we would have stepped to anyway.
                     last = Some(next);
@@ -7097,6 +7152,94 @@ mod tests {
         );
         shut.hell = Some(0.0);
         assert_eq!(shut.far_hop("a", "d").as_deref(), Some("c"), "up to it, never through it");
+    }
+
+    /// Leaving a town in one press, and the two things that still stop it.
+    ///
+    /// The dev, 2026-08-16: *the multi-hop in that town still didn't work when we were trying to
+    /// leave town after resting at the inn.* It could not: `far_hop` refuses outright inside any
+    /// subworld. See [`WorldMap::far_hop_inside`] for why that was too broad — `thickFog` is set in
+    /// exactly one file in the game, and the 0.015 measurement that seemed to back the rule was a
+    /// **corrupted** interior with nothing complete to travel from.
+    #[test]
+    fn leaving_a_settlement_is_one_press_when_the_way_is_clear() {
+        // Inn -> two crossroads -> the road out, the walk that prompted this.
+        let town = |cleared: &str, headings: Vec<(&str, &str)>| {
+            let mut m = WorldMap::default();
+            for (a, b) in [
+                ("l25sub2", "l25xrd1"),
+                ("l25xrd1", "l25xrd2"),
+                ("l25xrd2", "l25_path_to_l4"),
+            ] {
+                m.entry(a).neighbours.insert(b.into());
+                m.entry(b).neighbours.insert(a.into());
+            }
+            m.entry("l25").heading = "Aike town".into();
+            for k in ["l25sub2", "l25xrd1", "l25xrd2", "l25_path_to_l4"] {
+                m.entry(k).parent = Some("l25".into());
+            }
+            for (k, h) in headings {
+                m.entry(k).heading = h.into();
+            }
+            m.here = Some("l25sub2".into());
+            m.apply_save(
+                &crate::game::save::parse(&format!(
+                    "return {{ overworld = {{ areaFlags = {{ hell = 0.1 }},
+                         completedAreas = {{ {cleared} }} }} }}"
+                ))
+                .unwrap(),
+            );
+            m
+        };
+        let all = "l25sub2 = true, l25xrd1 = true, l25xrd2 = true, l25_path_to_l4 = true";
+
+        assert_eq!(
+            town(all, vec![]).far_hop_inside("l25sub2", "l25_path_to_l4").as_deref(),
+            Some("l25_path_to_l4"),
+            "three hops of inn-to-door in one press"
+        );
+        // The surface entry point still refuses inside, which is what keeps a fogged forest from
+        // trying this. Same map, same route, different rule.
+        assert_eq!(town(all, vec![]).far_hop("l25sub2", "l25_path_to_l4"), None);
+
+        // **An uncleared guard post on the way stops the chain**, because arrivals fire at every
+        // node on the path and leaving after a rest is the one errand not looking for a fight.
+        let guarded = town(
+            "l25sub2 = true, l25xrd1 = true",
+            vec![("l25xrd2", "Aike guard post — level 6 crypt")],
+        );
+        assert_eq!(
+            guarded.far_hop_inside("l25sub2", "l25_path_to_l4").as_deref(),
+            Some("l25xrd2"),
+            "up to the fight, never through it"
+        );
+    }
+
+    /// A forest interior is still crossed one node at a time.
+    ///
+    /// The narrowing is to settlements specifically, because `village.lua` is a different generator
+    /// and its heading says so — the ambiguity `crate::subworld` documents is forest against lost
+    /// woods, which no heading resolves.
+    #[test]
+    fn a_forest_interior_does_not_get_the_settlement_shortcut() {
+        let mut m = WorldMap::default();
+        for (a, b) in [("l4sub1", "l4sub2"), ("l4sub2", "l4_path_to_l25")] {
+            m.entry(a).neighbours.insert(b.into());
+            m.entry(b).neighbours.insert(a.into());
+        }
+        m.entry("l4").heading = "Bainton Clump — level 1 forest".into();
+        for k in ["l4sub1", "l4sub2", "l4_path_to_l25"] {
+            m.entry(k).parent = Some("l4".into());
+        }
+        m.here = Some("l4sub1".into());
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = { hell = 0.1 }, completedAreas = {
+                     l4sub1 = true, l4sub2 = true, l4_path_to_l25 = true } } }",
+            )
+            .unwrap(),
+        );
+        assert_eq!(m.far_hop_inside("l4sub1", "l4_path_to_l25"), None);
     }
 
     /// A node the current dump never mentions can still be clicked, because the frame places it.

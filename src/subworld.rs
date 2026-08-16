@@ -24,6 +24,13 @@
 //! The consequence for us: **nothing beyond one hop can be selected**, so `canTravelToIndirect` and
 //! the `Travel` button cannot carry us to a remembered node. Multi-hop travel is unavailable.
 //!
+//! **Where `thickFog` is actually set, which narrows this a great deal.** One file:
+//! `lost_woods.lua:15`, with `:47` turning it back off for `corrupt_lost_woods`. Not villages, not
+//! ordinary forests. The blanket assumption below is still right for anything whose *kind* we cannot
+//! pin down — which is forests, for the reason two sections on — but it was also refusing multi-hop
+//! inside settlements, where the heading is unambiguous and there is no fog to fear. That exception
+//! is [`crate::overworld::WorldMap::far_hop_inside`], added 2026-08-17.
+//!
 //! ## `lostOrientation` — the layout shuffles, the graph does not
 //!
 //! `overworld/generators/forest.lua:483-490`:
@@ -90,6 +97,13 @@ pub struct Rules {
     ///
     /// False under `thickFog`, and assumed false in any subworld — see the module note on why
     /// detection is not attempted.
+    ///
+    /// **Not the whole story since 2026-08-17, and the exception is deliberate.**
+    /// [`crate::overworld::WorldMap::far_hop_inside`] allows it inside a **settlement**, where the
+    /// blanket assumption was costing a press per node on every walk out of a town. The reasoning
+    /// this field records is about telling a forest from a lost woods, which no heading resolves; a
+    /// village is a different generator and its heading names it. This field is left conservative
+    /// because it is read where the *kind* of subworld is not known.
     pub multi_hop_travel: bool,
     /// Do screen coordinates survive leaving and coming back?
     ///
