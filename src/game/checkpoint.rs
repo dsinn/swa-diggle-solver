@@ -19,7 +19,8 @@
 //!   real progress. Restoring is destructive and there is no undo.
 //! - **Never while the game runs.** LÖVE writes `mainSaveData` on screen exit and `overworld:save()`
 //!   at its own moments, so a snapshot taken mid-run captures a torn state, and a restore under a
-//!   live game is simply overwritten when it next saves.
+//!   live game is simply overwritten when it next saves. Scoped to directories the game could
+//!   actually be writing — see [`refuse_if_game_running`].
 
 use std::path::{Path, PathBuf};
 
@@ -55,7 +56,7 @@ pub fn guard(save_dir: &Path) -> Result<(), crate::Error> {
 /// Copies the sandbox save into `store/name`, replacing any checkpoint already there.
 pub fn save(save_dir: &Path, store: &Path, name: &str) -> Result<PathBuf, crate::Error> {
     guard(save_dir)?;
-    refuse_if_game_running()?;
+    refuse_if_game_running(save_dir)?;
     if !save_dir.is_dir() {
         return Err(crate::Error::SaveDirMissing(save_dir.to_path_buf()));
     }
@@ -75,7 +76,7 @@ pub fn save(save_dir: &Path, store: &Path, name: &str) -> Result<PathBuf, crate:
 /// produced. Every known file is cleared first so absence is restored as faithfully as presence.
 pub fn restore(store: &Path, name: &str, save_dir: &Path) -> Result<(), crate::Error> {
     guard(save_dir)?;
-    refuse_if_game_running()?;
+    refuse_if_game_running(save_dir)?;
     let src = store.join(sanitize(name));
     if !src.is_dir() {
         return Err(crate::Error::Config(format!("no checkpoint named {name:?} in {}", store.display())));
@@ -119,7 +120,7 @@ pub fn restore(store: &Path, name: &str, save_dir: &Path) -> Result<(), crate::E
 /// The directory itself is left in place; LÖVE will refill it.
 pub fn clear(save_dir: &Path) -> Result<Vec<String>, crate::Error> {
     guard(save_dir)?;
-    refuse_if_game_running()?;
+    refuse_if_game_running(save_dir)?;
     if !save_dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -203,8 +204,51 @@ fn sanitize(name: &str) -> String {
     name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect()
 }
 
-fn refuse_if_game_running() -> Result<(), crate::Error> {
-    crate::win::process::refuse_if_running("lovec.exe", &[])
+/// Refuses while the game runs — **but only for a directory the game could be writing.**
+///
+/// The guard used to be unconditional, and that made it wrong in a way that cost nothing until it
+/// did: on 2026-08-17 `cargo test` failed during a live run, because
+/// `clearing_leaves_nothing_at_all_behind` clears a **temp** sandbox and the guard refused on behalf
+/// of a save in `%APPDATA%` that the test never goes near. A guard that stops unrelated work is one
+/// people learn to route around, which is the opposite of what this one is for.
+///
+/// LÖVE decides where it writes from the game's identity, not from anything we pass it: `fused` and
+/// `unfused` are both under `%APPDATA%` (`savedir.rs`), and `--save-dir` only tells *us* where to
+/// look. So "under `%APPDATA%`" is exactly the set of directories a running game could be writing,
+/// and everything else is a copy we made.
+///
+/// Conservative if `%APPDATA%` cannot be read at all: the guard applies, because the alternative is
+/// to skip it on the one machine where we cannot tell.
+fn refuse_if_game_running(save_dir: &Path) -> Result<(), crate::Error> {
+    let appdata = std::env::var("APPDATA").ok();
+    let live = match appdata.as_deref() {
+        Some(a) => is_under(Path::new(a), save_dir),
+        None => true,
+    };
+    match live {
+        true => crate::win::process::refuse_if_running("lovec.exe", &[]),
+        false => Ok(()),
+    }
+}
+
+/// Whether `dir` lies inside `root`, case-insensitively.
+///
+/// `Path::starts_with` is component-wise and case-**sensitive**, and Windows paths are neither
+/// consistently cased nor consistently separated, so this compares lowercased strings with the
+/// separators normalised. Prefix-only would match `…\Roaming2` against `…\Roaming`; comparing
+/// component-wise after normalising is what stops that.
+fn is_under(root: &Path, dir: &Path) -> bool {
+    let parts = |p: &Path| -> Vec<String> {
+        p.to_string_lossy()
+            .to_lowercase()
+            .replace('/', "\\")
+            .split('\\')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let (root, dir) = (parts(root), parts(dir));
+    dir.len() >= root.len() && dir[..root.len()] == root[..]
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<(), crate::Error> {
@@ -296,6 +340,29 @@ mod tests {
         let real = Path::new(r"C:\Users\x\AppData\Roaming\SternlyWordedAdventures");
         assert!(clear(real).is_err(), "the real Steam save must never be cleared");
         assert!(clear(Path::new(r"C:\temp\whatever")).is_err());
+    }
+
+    /// The running-game guard covers the save the game writes, and nothing else.
+    ///
+    /// Unconditional, it failed `cargo test` during a live run — `clearing_leaves_nothing_at_all_
+    /// behind` clears a temp sandbox, and the guard refused on behalf of a directory that test never
+    /// touches. Both paths LÖVE can choose are under `%APPDATA%` (`savedir.rs`), so that is the line.
+    #[test]
+    fn the_running_game_guard_covers_the_save_the_game_writes() {
+        let appdata = Path::new(r"C:\Users\x\AppData\Roaming");
+        assert!(is_under(appdata, &crate::game::savedir::unfused(appdata)), "Diggle's sandbox");
+        assert!(is_under(appdata, &crate::game::savedir::fused(appdata)), "and the real Steam save");
+        assert!(is_under(appdata, appdata), "the root counts as inside itself");
+
+        // A copy of the sandbox made somewhere else is not a save any game is writing, whatever it
+        // is called — and it is called exactly the same thing, which is why the name cannot decide.
+        let temp = Path::new(r"C:\Users\x\AppData\Local\Temp\diggle\LOVE\SternlyWordedAdventures");
+        assert!(!is_under(appdata, temp));
+
+        // Case and separators are both unreliable on Windows; a bare prefix match is not.
+        let mixed = Path::new(r"c:/users/X/appdata/roaming/LOVE/SternlyWordedAdventures");
+        assert!(is_under(appdata, mixed), "case and slashes must not decide a safety guard");
+        assert!(!is_under(appdata, Path::new(r"C:\Users\x\AppData\Roaming2\LOVE")), "not a prefix");
     }
 
     #[test]

@@ -1396,6 +1396,8 @@ impl WorldMap {
         // any case — see [`WorldMap::registration`].
         let positions_are_trustworthy = text.starts_with(CACHE_VERSION);
         let mut edges = 0;
+        // Set when any position comes back off disk. See the assignment at the end of this function.
+        let mut inherited_a_frame = false;
         for line in text.lines() {
             let mut f = line.split('\t');
             match f.next() {
@@ -1414,6 +1416,7 @@ impl WorldMap {
                             (x.map(str::parse::<f64>), y.map(str::parse::<f64>))
                         {
                             place.pos = Some((x, y));
+                            inherited_a_frame = true;
                         }
                     }
                     if place.connections == 0 {
@@ -1442,6 +1445,17 @@ impl WorldMap {
                 }
                 _ => {}
             }
+        }
+        // **A restored frame is inherited, not defined**, and its units are whatever the zoom was in
+        // the run that wrote the file. [`ScreenScale`] defaults to `Some(1.0)` on the reasoning that
+        // a fresh map's first dump *is* the frame — true, and false the moment a cache supplies one.
+        // Left alone, a one-anchor dump would place at this run's zoom into last run's frame, which
+        // is exactly the fault `WorldMap::registration` was rewritten to stop, arriving by post.
+        //
+        // The cost is nothing in practice: the first surface dump names several nodes the cache has
+        // already placed, so the scale is measured before there is anything new to place.
+        if inherited_a_frame {
+            self.screen_scale = ScreenScale(None);
         }
         edges
     }
@@ -7754,6 +7768,33 @@ mod tests {
 
         // Two anchors measure it, and `d` is placed the moment a dump can say where it is.
         m.fold(&dump("n2", "Halfway", vec![
+            node_at("a", "A", 50.0, 50.0),
+            node_at("b", "B", 100.0, 50.0),
+            node_at("d", "D", 150.0, 50.0),
+        ]));
+        assert_eq!(m.get("d").unwrap().pos, Some((300.0, 100.0)));
+    }
+
+    /// A frame that came off disk has an unknown scale until a dump measures it.
+    ///
+    /// The same fault as the zoom, arriving by post. `ScreenScale` starts at `Some(1.0)` because a
+    /// fresh map's first dump *defines* the frame — which stops being true the moment a cache
+    /// supplies one, since the file was written at whatever zoom that run ended on.
+    #[test]
+    fn a_cached_frame_is_inherited_rather_than_defined() {
+        let mut m = WorldMap::new();
+        m.absorb_cache(&format!(
+            "{CACHE_VERSION}\np\ta\tA\t100\t100\t2\t0\t\np\tb\tB\t200\t100\t2\t0\t\n"
+        ));
+        assert_eq!(m.get("a").unwrap().pos, Some((100.0, 100.0)), "the premise: positions restored");
+
+        // One anchor and a cache-supplied frame: this dump cannot say what the units are worth, and
+        // half of it being right is not good enough for a position that never changes again.
+        m.fold(&dump("n1", "Somewhere", vec![node_at("a", "A", 50.0, 50.0), node_at("d", "D", 150.0, 50.0)]));
+        assert_eq!(m.get("d").unwrap().pos, None, "assuming 1.0 here is assuming last run's zoom");
+
+        // And the moment a dump carries two, the scale is measured and everything proceeds.
+        m.fold(&dump("n2", "Somewhere", vec![
             node_at("a", "A", 50.0, 50.0),
             node_at("b", "B", 100.0, 50.0),
             node_at("d", "D", 150.0, 50.0),
