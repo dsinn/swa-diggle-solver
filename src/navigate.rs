@@ -292,7 +292,61 @@ pub enum Stop {
     /// deliberate alternative to [`Stop::Died`], which is what happened the one time this was not
     /// checked — a run walked from `l41` onto a level-6 crypt at 1/20 and was killed by it.
     TooHurtToFight(String),
+    /// The run is going round in circles and has stopped saying so only to itself.
+    ///
+    /// Carries the cycle as walked, so the report diagnoses rather than merely announces. See
+    /// [`Run::sterile_here`] for why this is a stop and not a correction.
+    Looping(String),
     Exhausted,
+}
+
+/// How many times a node may be stood on, with nothing gained in between, before the run gives up.
+///
+/// Four, and the number is chosen from the three loops we have actually met rather than from taste.
+/// Every one of them was a two- or three-node cycle, so four visits to the same node is at least one
+/// full lap after the first repeat — enough that a legitimate there-and-back cannot trip it, few
+/// enough that a loop is caught in under a minute instead of over an evening.
+///
+/// Legitimate revisits do happen: a crossing probes, a steer overshoots, a village is re-entered for
+/// a second errand. All of them *achieve* something — a node learned, a shop emptied, a place
+/// written off — and any achievement clears the counts entirely. What this counts is specifically
+/// revisiting with the run no further along than before.
+const LOOP_GIVE_UP: usize = 4;
+
+/// Counts sterile revisits: how often we have stood somewhere with the run no further along.
+///
+/// Its own type rather than two fields on [`Run`] so the rule can be tested without a game window,
+/// which is the difference between a guard with a regression test and a guard nobody can exercise
+/// until it misfires live.
+#[derive(Debug, Default)]
+pub struct LoopGuard {
+    seen: std::collections::HashMap<String, usize>,
+    last: Option<crate::overworld::Progress>,
+}
+
+impl LoopGuard {
+    /// Record standing at `here` with the run having achieved `now`, and say how many times this
+    /// node has been stood on **since the run last achieved anything**.
+    ///
+    /// Zero only on the very first call and on any call where `now` has moved — there is nothing to
+    /// compare against at those points. Every later arrival counts, so a two-node cycle reaches
+    /// [`LOOP_GIVE_UP`] on its second full lap.
+    ///
+    /// **Any change to `now` clears every count.** That is the monotone half of the rule: real
+    /// progress cannot be undone by walking, so a count cleared by an achievement can never be
+    /// re-earned by going round the same circle again. It is also what keeps honest work off the
+    /// counter — a crossing that probes, a village re-entered for a second errand, a corridor walked
+    /// twice all *achieve* something, and anything achieved resets this to zero.
+    pub fn visit(&mut self, here: &str, now: crate::overworld::Progress) -> usize {
+        if self.last != Some(now) {
+            self.last = Some(now);
+            self.seen.clear();
+            return 0;
+        }
+        let n = self.seen.entry(here.to_string()).or_insert(0);
+        *n += 1;
+        *n
+    }
 }
 
 /// A screen that is a dead end, and the one button that leaves it.
@@ -689,6 +743,13 @@ pub struct Run<'a> {
     ///
     /// So the run remembers what it set out for. Arriving at it means acting on it.
     pub committed_to: Option<String>,
+    /// The loop guard's memory. See [`Run::sterile_here`] and [`LoopGuard`].
+    pub guard: LoopGuard,
+    /// The last few places we stood, and what we were doing there — the report's evidence.
+    ///
+    /// A loop is only diagnosable from the *sequence*, and every one of the three met so far was
+    /// read off consecutive steps that each looked reasonable alone.
+    pub recent: std::collections::VecDeque<String>,
     /// An answered event has started the anomaly cinematic and it has not been skipped yet.
     ///
     /// A flag rather than a return value, because *which* caller answers the rumble is an accident of
@@ -1252,6 +1313,39 @@ impl Run<'_> {
             true => self.log.push_str("  nothing could be scored — the capture itself failed\n"),
             false => self.log.push_str(&format!("  loudest fingerprints: {}\n", top.join(", "))),
         }
+    }
+
+    /// Have we been here before with the run no further along than it is now?
+    ///
+    /// Returns how many sterile visits this node has had, counting this one.
+    ///
+    /// ## Why this exists at all
+    ///
+    /// Three ping-pongs in two days — `l19`↔`l10`, `shrine2`↔`l10`, `l18`↔`l10` — each with a
+    /// different root cause, each fixed on its own, and **not one of them noticed by the program**.
+    /// Every one was spotted by the dev watching the screen, and cost an evening between the
+    /// watching and the diagnosis.
+    ///
+    /// `docs/superpowers/notes/navigation-loops.md` has said from the start that every navigation
+    /// bug here reduces to a missing monotone measure or a missing memory. Each fix supplied one
+    /// locally — `abandon` for shrines, `heart_bought` for shops, `crossing_to` for doors. None of
+    /// them generalises, because the next loop will be about something none of them tracks.
+    /// [`crate::overworld::WorldMap::progress`] is the general measure, and this is the memory.
+    ///
+    /// ## Why it stops rather than steers
+    ///
+    /// It would be easy to make this *correct* the run — write the current target off and re-plan —
+    /// and that is the wrong first move. A loop is a disagreement between two pieces of reasoning,
+    /// and papering over it hides the disagreement while leaving both halves wrong; the `l18` loop
+    /// would have been silently absorbed and the map-copy bug behind it would still be there, ready
+    /// to produce something subtler. The dev's own framing was that the fourth loop should
+    /// *announce itself* rather than be found by someone watching.
+    ///
+    /// So: stop, name the cycle, and print the sequence that produced it. Cheap to relax later if a
+    /// run is ever lost to a loop it could have walked out of.
+    fn sterile_here(&mut self, here: &str) -> usize {
+        let now = self.map.progress();
+        self.guard.visit(here, now)
     }
 
     /// Is the area-button slot offering `Combat` for whatever is selected right now?
@@ -3442,6 +3536,36 @@ pub fn drive(
         let here = r.map.here().unwrap_or("?").to_string();
         let place = r.map.get(&here).cloned();
 
+        // **Are we going round in circles?** See [`Run::sterile_here`] for why this is here at all
+        // and why it stops rather than steers.
+        //
+        // Before any of the branches below, because every one of them is a reason to be at a node
+        // and none of them is in a position to notice that we have been at it four times over.
+        {
+            let laps = r.sterile_here(&here);
+            let doing = r
+                .map
+                .next_target()
+                .map(|p| format!("{:?} -> {}", p.reason, p.target))
+                .unwrap_or_else(|| "no errand".into());
+            r.recent.push_back(format!("{step}. `{here}` — {doing}"));
+            while r.recent.len() > 10 {
+                r.recent.pop_front();
+            }
+            if laps >= LOOP_GIVE_UP {
+                let trail = r.recent.iter().cloned().collect::<Vec<_>>().join("\n  ");
+                r.log.push_str(&format!(
+                    "{step}. **going in circles** — `{here}` for the {laps}th time with nothing \
+                     gained in between\n  {trail}\n  progress stuck at {:?}\n",
+                    r.map.progress()
+                ));
+                r.log_button_scores();
+                return Stop::Looping(format!(
+                    "{here} visited {laps} times with no progress; last errand {doing}"
+                ));
+            }
+        }
+
         // A shrine we are standing on whose fight is already won and whose blessing is unclaimed.
         //
         // Taken **on arrival, whatever the errand was**. An uncorrupted shrine is strictly
@@ -4720,6 +4844,55 @@ pub fn drive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The guard that should have caught all three ping-pongs, against the shape all three had.
+    ///
+    /// `l19`↔`l10`, `shrine2`↔`l10`, `l18`↔`l10` — 2026-08-15 and 16, three different root causes,
+    /// none of them noticed by the program. Each was spotted by the dev watching the screen.
+    ///
+    /// The cycle here is the last one: `l18 -> l10 -> l18 -> …`, with nothing achieved on any lap.
+    #[test]
+    fn a_circle_with_nothing_gained_is_noticed_and_an_honest_walk_is_not() {
+        let nothing = crate::overworld::Progress {
+            known: 128,
+            completed: 57,
+            consecrated: 1,
+            used: 2,
+            gold: 294,
+            portal_open: true,
+            shops_emptied: 4,
+            written_off: 3,
+        };
+
+        let mut g = LoopGuard::default();
+        // The very first call only establishes the baseline — there is nothing yet to compare to.
+        assert_eq!(g.visit("l18", nothing), 0, "the first look sets the baseline");
+        // After that every arrival counts, because every one of them is an arrival with nothing
+        // gained since the last. A two-node cycle therefore trips on its second full lap.
+        let mut laps = 0;
+        for _ in 0..4 {
+            g.visit("l10", nothing);
+            laps = g.visit("l18", nothing);
+        }
+        assert!(laps >= LOOP_GIVE_UP, "four sterile visits must trip the guard, got {laps}");
+
+        // **And an honest walk is not a loop, however much it revisits.** A crossing probes, backs
+        // up and tries another way; what makes it honest is that it *learns* — each new node folded
+        // in moves `known`. Any change at all wipes the slate.
+        let mut g = LoopGuard::default();
+        let mut learning = nothing;
+        for i in 0..10 {
+            learning.known += 1;
+            assert_eq!(g.visit("l4_plaza", learning), 0, "still learning on pass {i}");
+        }
+
+        // The slate stays wiped only while progress keeps coming. Stopping is what counts.
+        let mut g = LoopGuard::default();
+        let mut once = nothing;
+        once.completed += 1;
+        assert_eq!(g.visit("l9", once), 0, "a fight won clears everything");
+        assert_eq!(g.visit("l9", once), 1, "and standing still afterwards starts counting again");
+    }
 
     /// The stopping rule for fetching a node into reach, in the state that ended a run.
     ///

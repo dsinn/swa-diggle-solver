@@ -704,6 +704,29 @@ impl Place {
     }
 }
 
+/// A snapshot of how much the run has achieved. See [`WorldMap::progress`].
+///
+/// Equality is the whole interface: two of these being equal means nothing was gained between them.
+/// The individual counts are public so a stop can say *which* of them a run was failing to move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    /// Places on the map. Rises whenever a dump names somewhere new — so exploring always counts.
+    pub known: usize,
+    /// Nodes cleared. The main one: a fight won moves this and nothing else does.
+    pub completed: usize,
+    pub consecrated: usize,
+    /// Shrines prayed at, campfires burnt, towers spent — `<key>_used` in the save.
+    pub used: usize,
+    /// Falls when we buy and rises when we loot, so either direction is something happening.
+    pub gold: i64,
+    pub portal_open: bool,
+    /// General stores whose heart we have taken.
+    pub shops_emptied: usize,
+    /// Places the driver has given up on. Rises when we *learn* something is not worth returning to,
+    /// which is progress of a kind and, more to the point, is the thing that breaks most loops.
+    pub written_off: usize,
+}
+
 /// Everything we have folded together, plus the run state that decides routing.
 ///
 /// `Clone` exists for one caller and one reason: [`WorldMap::choose_exit`] has to ask the planner a
@@ -1586,6 +1609,34 @@ impl WorldMap {
         match self.places.values().any(|p| p.pos.is_some()) {
             false => Some((0.0, 0.0)),
             true => None,
+        }
+    }
+
+    /// Everything that counts as having got somewhere, in one comparable value.
+    ///
+    /// The measure under the loop guard — see [`crate::navigate::Run::sterile_here`]. It exists
+    /// because three ping-pongs in two days were each diagnosed to a different root cause and **not
+    /// one of them was caught by anything general**. `docs/superpowers/notes/navigation-loops.md`
+    /// has said all along that every navigation bug here comes down to lacking a monotone measure or
+    /// a memory; this is the measure.
+    ///
+    /// What belongs in it is anything whose change means the run got something done — a fight won, a
+    /// node learned, gold spent, a shop emptied, a shrine consecrated, the portal opened. What must
+    /// **not** be in it is anything that changes merely by moving: `here` most of all, since walking
+    /// in a circle would then look like progress, which is the exact mistake this is built to catch.
+    ///
+    /// Coarse on purpose. It answers one question — *is this lap the same as the last one?* — and a
+    /// counter that moves for the wrong reason only ever costs a stop we could have deferred.
+    pub fn progress(&self) -> Progress {
+        Progress {
+            known: self.places.len(),
+            completed: self.places.values().filter(|p| p.completed).count(),
+            consecrated: self.places.values().filter(|p| p.consecrated).count(),
+            used: self.places.values().filter(|p| p.used).count(),
+            gold: self.gold,
+            portal_open: self.anomaly_is_open().unwrap_or(false),
+            shops_emptied: self.heart_bought.len(),
+            written_off: self.abandoned.len(),
         }
     }
 
