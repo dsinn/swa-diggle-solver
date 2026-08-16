@@ -14,7 +14,7 @@ use diggle_solver::fight::Fight;
 use diggle_solver::observe::feed::Feed;
 use diggle_solver::observe::log::{Console, LogMirror};
 use diggle_solver::search::Dictionary;
-use diggle_solver::win::input::{Input, PostMessageInput};
+use diggle_solver::win::input::PostMessageInput;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

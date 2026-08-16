@@ -49,7 +49,13 @@ const EMPTY_MAP: (i32, i32) = (1750, 160);
 const NEUTRAL: (i32, i32) = (300, 300);
 
 /// Why the loop stopped. Several of these are successes.
+///
+/// **The payloads are read, and by the only reader that matters:** `run` returns one of these and
+/// `main` writes it into the report as `{stop:?}`. Rust's dead-code lint does not count a derived
+/// `Debug` as a use, so it calls every field here unread — which would be true of any type whose
+/// whole purpose is to be printed once.
 #[derive(Debug)]
+#[allow(dead_code)]
 enum Stop {
     /// Standing at a combat node, which cannot be passed without fighting.
     CombatNode(String),

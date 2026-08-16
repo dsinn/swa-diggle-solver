@@ -67,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let win = game.wait_for_window(Duration::from_secs(20))?;
     std::thread::sleep(Duration::from_secs(3));
 
-    let mut finish = |log: &str, game: &mut diggle_solver::game::launch::GameProcess| {
+    let finish = |log: &str, game: &mut diggle_solver::game::launch::GameProcess| {
         game.close(Duration::from_secs(15));
         let _ = std::fs::File::create(REPORT).and_then(|mut f| f.write_all(log.as_bytes()));
         println!("{log}");

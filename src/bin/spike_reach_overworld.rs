@@ -158,7 +158,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         before_path,
         after_path,
     );
-    current = after;
+    // No `current = after` here: the next read of `current` comes after the re-sample below,
+    // which reassigns it from `wait_for_quiescence`. Carrying the frame across would be a value
+    // nothing can observe.
     if !r {
         notes.push("WARNING: Return on the lore card did not register as a reaction.".into());
     }

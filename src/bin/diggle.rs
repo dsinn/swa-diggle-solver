@@ -620,7 +620,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Pan content by (dx,dy) using whichever key has the right sign.
-            let mut pan = |dx: i32, dy: i32| -> Result<(), Box<dyn std::error::Error>> {
+            let pan = |dx: i32, dy: i32| -> Result<(), Box<dyn std::error::Error>> {
                 if dx != 0 {
                     let (dir, r) = if (dx as f64) * rate_x > 0.0 { ("left", rate_x) } else { ("right", -rate_x) };
                     let ms = (dx.abs() as f64 / r.abs()).round() as u64;
@@ -1051,7 +1051,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Reads the channel until a dump arrives, or gives up. Returns the LAST one: if
             // arrival fired an event the newest dump is the authoritative one.
-            let mut collect = |console: &mut diggle_solver::observe::log::Console,
+            let collect = |console: &mut diggle_solver::observe::log::Console,
                                mirror: &mut diggle_solver::observe::log::LogMirror,
                                secs: u64|
              -> Result<Option<diggle_solver::observe::adjacency::Adjacency>, Box<dyn std::error::Error>> {

@@ -38,11 +38,6 @@ use std::time::{Duration, Instant};
 
 const REPORT: &str = "spike-frames-live/crypt-board-report.md";
 const RAW_LOG: &str = "spike-frames-live/crypt-board-log.txt";
-/// Where the progress button lives, and where to click it. From `capture::PROGRESS_BUTTON_*`,
-/// measured off a live cutscene; the click point is the centre of the button's VISIBLE face,
-/// since the right screen edge clips it.
-const BTN_BOX: (i32, i32, i32, i32) = (1800, 905, 1910, 1015);
-const BTN_CLICK: (i32, i32) = (1855, 960);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg_path = std::env::args().nth(1).unwrap_or_else(|| "config.toml".into());
@@ -70,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::thread::sleep(Duration::from_millis(500));
 
     // Drains the console into the mirror and returns any completed adjacency dumps.
-    let mut pump = |console: &mut Console,
+    let pump = |console: &mut Console,
                     mirror: &mut LogMirror,
                     reader: &mut adjacency::Reader|
      -> Result<Vec<adjacency::Adjacency>, Box<dyn std::error::Error>> {

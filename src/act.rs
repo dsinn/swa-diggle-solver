@@ -1885,17 +1885,18 @@ pub fn click_when_ready(
 ) -> Result<f64, crate::Error> {
     let deadline = std::time::Instant::now() + timeout;
     let started = std::time::Instant::now();
-    let mut best = 0.0f64;
     let mut attempts = 0usize;
     let mut spent_looking = std::time::Duration::ZERO;
-    loop {
+    // **The loop yields the score rather than filling in a variable declared above it.** There is no
+    // way out of here that is not either a match or an error, so a `best` seeded with 0.0 was a
+    // value no caller could ever receive — and a reader had to prove that for themselves.
+    let best = loop {
         let probe = std::time::Instant::now();
         let result = locate(win, button);
         spent_looking += probe.elapsed();
         attempts += 1;
         match result {
             Ok(Some(inliers)) => {
-                best = inliers;
                 // Separates the two explanations for a slow start: a button that took a long time to
                 // APPEAR, versus a check that is slow to run. Guessing between them once already
                 // produced a fix for the wrong one.
@@ -1905,7 +1906,7 @@ pub fn click_when_ready(
                     started.elapsed(),
                     spent_looking
                 );
-                break;
+                break inliers;
             }
             Ok(None) => {}
             // A capture can legitimately fail while the window is still coming up.
@@ -1919,7 +1920,7 @@ pub fn click_when_ready(
             )));
         }
         std::thread::sleep(std::time::Duration::from_millis(400));
-    }
+    };
     let (sx, sy) = win.client_to_screen(button.click.0, button.click.1)?;
     // One batched, position-carrying, game-checked click. The old warp -> sleep(250) -> positionless
     // click was a race this module's own primitive was written to remove: anything that moved the

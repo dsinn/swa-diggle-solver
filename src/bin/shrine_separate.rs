@@ -8,7 +8,7 @@
 //! cargo run --release --bin shrine_separate -- baaed eaved faded gaged jaded
 //! ```
 
-use diggle_solver::shrine::{feedback, solved, Baked, Band, WordSource};
+use diggle_solver::shrine::{feedback, solved, Baked, WordSource};
 use std::collections::{HashMap, HashSet};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

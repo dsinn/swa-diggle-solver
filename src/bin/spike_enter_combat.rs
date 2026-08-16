@@ -63,6 +63,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut reader = adjacency::Reader::new();
     let mut map = WorldMap::new();
     let mut latest = None;
+    // **Read at three later points**, but this macro expands at several call sites and the last of
+    // them has nothing after it — so that one expansion assigns a value no line reads, and the lint
+    // reports the macro body rather than the site.
     macro_rules! pump {
         () => {
             if let Ok(new) = console.read_new() {
@@ -70,7 +73,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     mirror.write(&new);
                     for a in reader.push(&new) {
                         map.fold(&a);
-                        latest = Some(a);
+                        #[allow(unused_assignments)]
+                        {
+                            latest = Some(a);
+                        }
                     }
                     lines.extend(new);
                 }

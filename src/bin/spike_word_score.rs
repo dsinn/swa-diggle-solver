@@ -134,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::thread::sleep(Duration::from_millis(500));
 
     let mut all_lines: Vec<String> = Vec::new();
-    let mut pump = |console: &mut Console, mirror: &mut LogMirror, sink: &mut Vec<String>| {
+    let pump = |console: &mut Console, mirror: &mut LogMirror, sink: &mut Vec<String>| {
         if let Ok(lines) = console.read_new() {
             if !lines.is_empty() {
                 mirror.write(&lines);
