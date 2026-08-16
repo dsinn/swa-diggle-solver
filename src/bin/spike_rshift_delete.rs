@@ -112,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         centres.len()
     ));
 
-    if !board.wait_until_ready(Duration::from_secs(20))? {
+    if board.wait_until_ready(Duration::from_secs(20))? == diggle_solver::combat::Ready::Never {
         log.push_str("ABORT: board never filled and settled\n");
         finish(&log, &mut game);
         return Ok(());

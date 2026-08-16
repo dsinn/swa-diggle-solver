@@ -678,11 +678,18 @@ impl Fight<'_> {
         // `click_and_confirm`), a click that lands wrong is a **setback rather than an ending**
         // (task #30), and a word that comes out wrong can be cleared and retried. So the cost of
         // typing into a genuinely moving board is a wasted turn; the cost of refusing was the run.
-        if !board.wait_until_ready(Duration::from_secs(20))? {
-            log.push_str(
-                "  the board never read as full and still — typing anyway after the wait, because \
-                 a stuck reading and a moving board look the same and only one of them is common\n",
-            );
+        match board.wait_until_ready(Duration::from_secs(20))? {
+            crate::combat::Ready::Settled => {}
+            // A slot reads empty on a board that has not twitched for seconds. Either a charred tile
+            // brightness cannot call, or a gap the board will never fill — both fine to play on,
+            // because the letters come from the console dump and not from these pixels.
+            crate::combat::Ready::StillWithAGap => log.push_str(
+                "  a slot reads empty on a board that has been still for seconds — playing it\n",
+            ),
+            crate::combat::Ready::Never => log.push_str(
+                "  the board never stopped moving — typing anyway after the wait, because a stuck \
+                 reading and a moving board look the same and only one of them is common\n",
+            ),
         }
         // Kept past the submission: if the game comes back with the avoidable-murder dialog, the
         // word survives the cancel and has to come off, and this is the only record of what the

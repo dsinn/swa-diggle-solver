@@ -75,6 +75,42 @@ pub const CHANGED: f64 = 12.0;
 /// [`Board::occupancy`], which applies that and leaves this number where it was measured.
 pub const OCCUPIED: f64 = 40.0;
 
+/// How far a tile's luminance may drift between samples and still count as still.
+///
+/// Frame-to-frame noise from torch flicker and idle animation stays under 8 ([`CHANGED`]'s note);
+/// four is well inside that and still an order of magnitude below a real move.
+pub const QUIET: f64 = 4.0;
+
+/// Gap between stillness samples in [`Board::wait_until_ready`].
+pub const SAMPLE: Duration = Duration::from_millis(50);
+
+/// Consecutive still samples that settle a board which also reads full. 200 ms.
+pub const SETTLED_SAMPLES: usize = 4;
+
+/// Consecutive still samples that settle a board which does **not** read full. Three seconds.
+///
+/// The number is chosen against what it has to tell apart, not by taste. A board that reads short
+/// because it is still filling is *moving* — tiles fall from `letterQueue` continuously
+/// (`tileboard.lua:2520-2523`), so it cannot hold perfectly still for three seconds and then produce
+/// more tiles. A board that reads short because one slot is charred, or because a tile exploded and
+/// was not replaced, holds still forever.
+///
+/// Sixty times the ordinary bar, so it can never be reached by accident on the way to the normal
+/// case, and still fast enough that a turn spent here is a pause rather than a stall.
+pub const STILL_ENOUGH_SAMPLES: usize = 60;
+
+/// What [`Board::wait_until_ready`] concluded, and on which evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ready {
+    /// Full and still. The ordinary case.
+    Settled,
+    /// Still for [`STILL_ENOUGH_SAMPLES`] while one or more slots read empty — a charred tile, or a
+    /// gap the board is never going to fill. Fit to type on; worth saying out loud.
+    StillWithAGap,
+    /// Never stopped moving. Something is genuinely animating, or covering the board.
+    Never,
+}
+
 /// How often to re-capture while waiting for a click to show. The capture floor is 4.4 ms, but
 /// polling that hard is near-continuous GDI work for no measurable latency gain.
 pub const POLL: Duration = Duration::from_millis(15);
@@ -421,9 +457,10 @@ impl<'a> Board<'a> {
         Ok(seen)
     }
 
-    /// Blocks until every slot holds a tile **and** the board has stopped moving.
+    /// Blocks until the board is fit to type on, and says which way it got there.
     ///
-    /// Two separate conditions, and the first one is why the first version of this failed.
+    /// Two conditions, **fullness and stillness**, and the first one is why the first version of this
+    /// failed.
     ///
     /// **Stillness alone is not readiness: an empty board is perfectly static.** `preload` pushes
     /// every saved letter into `letterQueue` (`tileboard.lua:2520-2523`) and the board fills from
@@ -437,30 +474,53 @@ impl<'a> Board<'a> {
     /// (`rpgview.lua:1500-1502`) — but resuming a save restores the state directly, skipping the
     /// gate. Same shape as a resumed fight printing no board dump: a save restores *state* without
     /// replaying the transitions that establish it. Never trust an entry gate you did not see fire.
-    pub fn wait_until_ready(&self, timeout: Duration) -> Result<bool, crate::Error> {
-        const QUIET: f64 = 4.0;
-        const NEEDED: usize = 4;
+    ///
+    /// ## Stillness is the fallback, because the case fullness guards against is motion
+    ///
+    /// The dev, 2026-08-16: *there's always the chance that a burnt tile sits at the top of a
+    /// column. Perhaps stillness needs to be a fallback.*
+    ///
+    /// [`Board::occupancy`]'s gravity rule rescues a dark tile with a lit one above it, and a tile at
+    /// the top of its column has nothing above it — so a burnt tile there still reads as a gap, and
+    /// this would wait out its timeout again.
+    ///
+    /// The way out is in the paragraph above: the state fullness exists to catch is a board **still
+    /// filling**, and a filling board is moving. So a board that has held perfectly still for far
+    /// longer than a fill takes is fit to type on whatever the pixels say about one slot. Two
+    /// readings, and only their *timing* differs:
+    ///
+    /// - full **and** still for [`SETTLED_SAMPLES`] — the ordinary case, taken at once;
+    /// - still for [`STILL_ENOUGH_SAMPLES`] without reading full — trusted, and reported as
+    ///   [`Ready::StillWithAGap`] so a run's log says which of the two it was.
+    ///
+    /// A permanent gap is a real board state as well as a misread one: tiles explode and are not
+    /// always replaced. Either way the letters come from the console dump rather than these pixels,
+    /// so playing on is right in both.
+    pub fn wait_until_ready(&self, timeout: Duration) -> Result<Ready, crate::Error> {
         let deadline = Instant::now() + timeout;
         let mut previous = self.read()?;
         let mut quiet = 0usize;
         while Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(SAMPLE);
             let now = self.read()?;
             let worst = now
                 .iter()
                 .zip(&previous)
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0f64, f64::max);
-            let full = self.occupancy()?.into_iter().all(|o| o);
             previous = now;
             // Consecutive, not cumulative: a tile can pause mid-bounce, so one still frame is not
-            // stillness. And an empty slot resets the count however still it is.
-            quiet = if worst < QUIET && full { quiet + 1 } else { 0 };
-            if quiet >= NEEDED {
-                return Ok(true);
+            // stillness. Unlike the first version, an empty-reading slot no longer resets the count —
+            // it only decides *which* threshold has to be met.
+            quiet = if worst < QUIET { quiet + 1 } else { 0 };
+            if quiet >= SETTLED_SAMPLES && self.occupancy()?.into_iter().all(|o| o) {
+                return Ok(Ready::Settled);
+            }
+            if quiet >= STILL_ENOUGH_SAMPLES {
+                return Ok(Ready::StillWithAGap);
             }
         }
-        Ok(false)
+        Ok(Ready::Never)
     }
 
     fn click(&self, i: usize) -> Result<(), crate::Error> {
@@ -900,6 +960,41 @@ mod tests {
 
         // And the empty-slot population the threshold still has to stay clear of.
         assert!(OCCUPIED > 21.8, "an empty slot reads 17.0-21.8 and must not read as a tile");
+    }
+
+    /// Gravity cannot rescue a tile with nothing above it, which is why stillness is the fallback.
+    ///
+    /// The dev, 2026-08-16: *there's always the chance that a burnt tile sits at the top of a
+    /// column.* It reads as a gap, the column reads short, and the gravity rule has no brighter
+    /// neighbour to argue from — so `wait_until_ready` would wait out its timeout exactly as it did
+    /// before, on a board that is perfectly fine.
+    ///
+    /// This pins the arithmetic of the two thresholds rather than driving a live board: the
+    /// fallback has to be unreachable on the way to the ordinary case, and reachable well inside the
+    /// timeout, or it is either noise or decoration.
+    #[test]
+    fn a_dark_tile_at_the_top_of_a_column_is_only_saved_by_waiting() {
+        // The rule itself, applied to a column whose top slot reads empty. `ri = 0` is the bottom.
+        let mut col = [true, true, true, false];
+        if let Some(top) = (0..4).rev().find(|&ri| col[ri]) {
+            col[..top].fill(true);
+        }
+        assert!(!col[3], "nothing above it, so nothing can vouch for it");
+
+        // Which leaves the timing to separate a charred board from a filling one.
+        assert!(
+            STILL_ENOUGH_SAMPLES > SETTLED_SAMPLES * 10,
+            "the fallback must be far out of reach of the ordinary case, or it fires by accident"
+        );
+        let fallback = SAMPLE * STILL_ENOUGH_SAMPLES as u32;
+        assert!(
+            fallback >= Duration::from_secs(2),
+            "shorter than a fill and the fallback would trust a board still dropping tiles: {fallback:?}"
+        );
+        assert!(
+            fallback * 2 < Duration::from_secs(20),
+            "and it has to fire well inside the caller's timeout to be the fallback at all: {fallback:?}"
+        );
     }
 
     #[test]
