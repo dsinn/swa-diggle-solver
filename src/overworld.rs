@@ -704,6 +704,34 @@ impl Place {
     }
 }
 
+/// The map cache's format marker, and the reason it is versioned at all.
+///
+/// **v1 held raw per-dump screen coordinates**, registered by translation alone. A file written
+/// across a zoom change therefore contains positions at two scales with nothing recording which is
+/// which, and no way to tell them apart afterwards. That is what aimed a click at (463, 841) instead
+/// of roughly (672, 713) on 2026-08-16 and ended a run with `no arrival at l32`.
+///
+/// v2 positions are fitted with [`Frame`], scale included, so every one is in the same frame
+/// whatever the zoom was when it was seen. A v1 file is refused rather than migrated — the zoom it
+/// was taken at is not in it — and the cost of refusing is one run's map, which the next dump starts
+/// rebuilding at once.
+pub const CACHE_VERSION: &str = "# diggle map cache v2";
+
+/// How a dump's printed coordinates relate to the map's own frame: `world = drawn * scale + offset`.
+///
+/// A similarity rather than a translation, because `zoomMult` scales every printed position
+/// (`overworldview.lua:1033`) and the run of 2026-08-16 0802Z aimed a click through a frame recorded
+/// at twice the current zoom. See [`WorldMap::registration`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Frame {
+    pub scale: f64,
+    pub dx: f64,
+    pub dy: f64,
+    /// How many already-placed nodes this fit rests on. **One means the scale was assumed, not
+    /// measured** — enough to keep placing nodes, not enough to aim a click at one.
+    pub anchors: usize,
+}
+
 /// A snapshot of how much the run has achieved. See [`WorldMap::progress`].
 ///
 /// Equality is the whole interface: two of these being equal means nothing was gained between them.
@@ -1220,7 +1248,7 @@ impl WorldMap {
     /// something a `split('\t')` does. Unknown leading tokens are skipped rather than rejected, so a
     /// newer writer cannot break an older reader.
     pub fn cache_text(&self) -> String {
-        let mut out = String::from("# diggle map cache v1\n");
+        let mut out = format!("{CACHE_VERSION}\n");
         for p in self.places.values() {
             let (x, y) = match p.pos {
                 Some((x, y)) => (x.to_string(), y.to_string()),
@@ -1252,6 +1280,12 @@ impl WorldMap {
     /// `completed` is not restored either. The save carries it, and the save is the game's own
     /// answer rather than our recollection.
     pub fn absorb_cache(&mut self, text: &str) -> usize {
+        // **An older cache is refused outright, positions and all** — see [`CACHE_VERSION`].
+        // Mixed-scale coordinates cannot be repaired after the fact, so the only safe reading of a
+        // v1 file is none at all.
+        if !text.starts_with(CACHE_VERSION) {
+            return 0;
+        }
         let mut edges = 0;
         for line in text.lines() {
             let mut f = line.split('\t');
@@ -1594,22 +1628,75 @@ impl WorldMap {
     /// Returns `None` when this dump shares no placed node with the frame, which is not an error: it
     /// is what an unregistered island looks like, and those get placed the first time a dump links
     /// them to something we have already seen.
-    fn registration(&self, a: &Adjacency) -> Option<(f64, f64)> {
+    /// ## Zoom is not a detail, and one anchor cannot see it
+    ///
+    /// This returned a translation and nothing else, on the reasoning that a dump differs from the
+    /// frame by an offset. That is true only **at a fixed zoom**, which the doc above said and the
+    /// code did not check — and the run of 2026-08-16 0802Z paid for it. Standing at `l7`, aiming
+    /// one press at `l32`, the first anchor in the dump gave a shift of `(-249.9, -280.9)` and the
+    /// second gave `(-176.6, -189.1)`. Two anchors, two answers, from the same dump.
+    ///
+    /// The separations say why: `l10` to `l1` is 235.01 apart in the frame and 117.50 apart on
+    /// screen — a ratio of **2.0000**, exactly. The stored positions were recorded at one zoom and
+    /// the dump was printed at another, `zoomMult` being a shared factor (`overworldview.lua:1033`).
+    /// The click went to (463, 841) instead of roughly (672, 713), landed on empty ground, and the
+    /// run stopped with `no arrival at l32`.
+    ///
+    /// So the fit is a **similarity**, not a translation: `world = drawn * scale + offset`. Two
+    /// anchors determine it, and the pair furthest apart on screen is used because a short baseline
+    /// turns small pixel differences into large scale errors.
+    ///
+    /// With only one anchor the scale cannot be seen at all, so it is assumed unchanged — which is
+    /// right nearly always, since the zoom only moves when we move it, and wrong exactly when it has
+    /// just moved. [`Frame::anchors`] carries how many were used so a caller can decline to *aim* on
+    /// a fit it cannot verify, which placing a node is not required to do.
+    fn registration(&self, a: &Adjacency) -> Option<Frame> {
         if a.subworld.is_some() {
             return None;
         }
-        // A node already in the frame anchors this dump against it.
-        for n in &a.nodes {
-            if let Some((px, py)) = self.places.get(&n.key).and_then(|p| p.pos) {
-                return Some((px - n.x, py - n.y));
+        // Everything in this dump we have already placed, in the frame and on screen.
+        let anchors: Vec<((f64, f64), (f64, f64))> = a
+            .nodes
+            .iter()
+            .filter_map(|n| self.places.get(&n.key).and_then(|p| p.pos).map(|w| (w, (n.x, n.y))))
+            .collect();
+        if anchors.is_empty() {
+            // Nothing placed yet anywhere: this dump *defines* the frame, so its own numbers are the
+            // frame. Only ever taken once per run.
+            return match self.places.values().any(|p| p.pos.is_some()) {
+                false => Some(Frame { scale: 1.0, dx: 0.0, dy: 0.0, anchors: 0 }),
+                true => None,
+            };
+        }
+        // The widest baseline on screen, which is the best-conditioned pair for a scale.
+        let mut best: Option<(f64, usize, usize)> = None;
+        for i in 0..anchors.len() {
+            for j in (i + 1)..anchors.len() {
+                let (_, (ax, ay)) = anchors[i];
+                let (_, (bx, by)) = anchors[j];
+                let d = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
+                if best.map(|(bd, _, _)| d > bd).unwrap_or(true) {
+                    best = Some((d, i, j));
+                }
             }
         }
-        // Nothing placed yet anywhere: this dump *defines* the frame, so its own numbers are the
-        // frame and the shift is zero. Only ever taken once per run.
-        match self.places.values().any(|p| p.pos.is_some()) {
-            false => Some((0.0, 0.0)),
-            true => None,
-        }
+        // A baseline of a few pixels cannot measure a ratio; treat it as one anchor rather than
+        // trusting it. Nodes are drawn tens of pixels apart at any usable zoom.
+        let scale = match best.filter(|(d, _, _)| *d > 8.0) {
+            Some((drawn, i, j)) => {
+                let ((wax, way), _) = anchors[i];
+                let ((wbx, wby), _) = anchors[j];
+                ((wbx - wax).powi(2) + (wby - way).powi(2)).sqrt() / drawn
+            }
+            None => 1.0,
+        };
+        let ((wx, wy), (sx, sy)) = anchors[0];
+        Some(Frame {
+            scale,
+            dx: wx - sx * scale,
+            dy: wy - sy * scale,
+            anchors: anchors.len(),
+        })
     }
 
     /// Everything that counts as having got somewhere, in one comparable value.
@@ -1664,9 +1751,9 @@ impl WorldMap {
     ///
     /// `None` when the node has no world position, or when the dump shares nothing with the frame.
     pub fn screen_position(&self, a: &Adjacency, key: &str) -> Option<(f64, f64)> {
-        let (dx, dy) = self.registration(a)?;
+        let f = self.registration(a).filter(|f| f.anchors >= 2)?;
         let (wx, wy) = self.places.get(key)?.pos?;
-        Some((wx - dx, wy - dy))
+        Some(((wx - f.dx) / f.scale, (wy - f.dy) / f.scale))
     }
 
     pub fn fold(&mut self, a: &Adjacency) {
@@ -1770,8 +1857,8 @@ impl WorldMap {
             // never moves is easier to reason about and the registration below is exact, not
             // approximate — every reading of one node in one frame differs only by the shift.
             if place.pos.is_none() {
-                if let Some((dx, dy)) = shift {
-                    place.pos = Some((n.x + dx, n.y + dy));
+                if let Some(f) = shift {
+                    place.pos = Some((n.x * f.scale + f.dx, n.y * f.scale + f.dy));
                 }
             }
             place.neighbours.insert(a.here_key.clone());
@@ -6676,18 +6763,32 @@ mod tests {
             Node { key: "c".into(), heading: "C".into(), x: 350.0, y: 70.0, connections: 2 },
         ]));
 
-        // Standing at `b`, panned again: only `c` is adjacent, and `here` itself is not listed.
-        // `c` anchors the dump, so everything else in the frame can be drawn against it.
-        let now = dump("b", "B", vec![
+        // Standing at `b`, panned again. `a` is not in this dump; `b` and `c` are, and two anchors
+        // is the minimum a fit needs — one cannot see the zoom, which is what ended a live run.
+        let now = dump("here2", "elsewhere", vec![
+            Node { key: "b".into(), heading: "B".into(), x: -100.0, y: 0.0, connections: 2 },
             Node { key: "c".into(), heading: "C".into(), x: 0.0, y: 0.0, connections: 2 },
         ]);
         assert!(!now.nodes.iter().any(|n| n.key == "a"), "the fixture must not name `a`");
-        // `c` is world (300,100) and is drawn at (0,0), so the shift is (300,100); `a` is world
-        // (150,100) — one frame-length left of `b` — hence drawn 150 left of `c`.
+        // `c` is world (300,100) drawn at (0,0) and `b` is world (200,100) drawn at (-100,0): same
+        // scale, so the shift is (300,100) and `a` — world (100,100) — is drawn 200 left of `c`.
         assert_eq!(m.screen_position(&now, "c"), Some((0.0, 0.0)), "the anchor draws where it says");
-        let (ax, ay) = m.screen_position(&now, "a").expect("`a` is in the frame");
-        let (wx, wy) = m.get("a").unwrap().pos.expect("`a` was placed");
-        assert_eq!((ax, ay), (wx - 300.0, wy - 100.0), "and every other node moves with it");
+        assert_eq!(m.screen_position(&now, "a"), Some((-200.0, 0.0)), "and the rest move with it");
+
+        // **One anchor is not enough to aim with.** The scale would have to be assumed, and assuming
+        // it is what aimed a click at (463, 841) instead of (672, 713) on 2026-08-16.
+        let thin = dump("here3", "elsewhere", vec![
+            Node { key: "c".into(), heading: "C".into(), x: 0.0, y: 0.0, connections: 2 },
+        ]);
+        assert_eq!(m.screen_position(&thin, "a"), None, "a fit that cannot be checked is not offered");
+
+        // And a dump at half the zoom is followed rather than fought: `b` and `c` are 100 apart in
+        // the frame and 50 apart here, so the scale is 2 and `a` sits 100 left of `c` on screen.
+        let zoomed = dump("here4", "elsewhere", vec![
+            Node { key: "b".into(), heading: "B".into(), x: -50.0, y: 0.0, connections: 2 },
+            Node { key: "c".into(), heading: "C".into(), x: 0.0, y: 0.0, connections: 2 },
+        ]);
+        assert_eq!(m.screen_position(&zoomed, "a"), Some((-100.0, 0.0)), "scale, not just offset");
 
         // A node the frame has never placed cannot be invented.
         assert_eq!(m.screen_position(&now, "never-seen"), None);
@@ -7330,7 +7431,8 @@ mod tests {
     /// remembered name is not evidence of danger and is not treated as any.
     #[test]
     fn corruption_is_what_makes_a_remembered_heading_a_fight() {
-        let cached = "p	l4	Riccall crypt	951	275	4	0	
+        let cached = "# diggle map cache v2
+p	l4	Riccall crypt	951	275	4	0	
 p	l11	Rowlston Covert village	900	300	2	0	
 e	l4	l11
 ";
@@ -8756,13 +8858,13 @@ e	l4	l11
         let seen = fresh.entry("mid").pos;
         assert!(seen.is_some(), "the premise: this run placed it");
 
-        let stale = "p\tmid\tSomewhere Else crypt\t999\t999\t7\t3\t\n";
+        let stale = "# diggle map cache v2\np\tmid\tSomewhere Else crypt\t999\t999\t7\t3\t\n";
         fresh.absorb_cache(stale);
         assert_eq!(fresh.entry("mid").pos, seen, "a cache moved a node this run had placed");
         assert_eq!(fresh.entry("mid").heading, "Quiet Glade meadow", "a cache renamed a live node");
 
         // But a place the run has never heard of is taken whole.
-        fresh.absorb_cache("p\tfar\tBorsea shrine\t12\t34\t2\t1\t\n");
+        fresh.absorb_cache("# diggle map cache v2\np\tfar\tBorsea shrine\t12\t34\t2\t1\t\n");
         assert_eq!(fresh.entry("far").heading, "Borsea shrine");
         assert_eq!(fresh.entry("far").pos, Some((12.0, 34.0)));
     }
