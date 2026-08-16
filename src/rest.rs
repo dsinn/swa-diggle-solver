@@ -106,6 +106,28 @@ pub fn health_is_low(now: Health) -> bool {
 /// What the inn charges (`ui/rest.lua:49`, `getPlayerGold() >= 10`).
 pub const INN_COST: i64 = 10;
 
+/// **Is resting at a campfire actually implemented?** No, and until it is, one is not a rest site.
+///
+/// The dev's call, 2026-08-16: *the campfire stalled the run; we can sidestep this by not trying to
+/// rest there, and mark it post-MVP.*
+///
+/// The planner has always known a campfire is the *better* rest — no subworld to cross, no subnode
+/// to walk to, no gold ([`Site::rank`]) — and the driver has never had a handler for arriving at
+/// one. So `Goal::Rest` at a campfire is a trip that cannot pay: the run walks there, nothing
+/// happens, `wants_rest` is still true, and the planner picks the next site along.
+/// `spike-run-20260816-0802Z.md` steps 15-16 are exactly that, `l1 -> l7 (for l7, Rest)` followed
+/// immediately by `l7 -> l32 (for l32, Rest)`.
+///
+/// It was a wasted trip before and it is a **run-ender now**, because nothing is achieved on such a
+/// lap — `WorldMap::progress` does not move — so `LoopGuard` will end the run at the fourth one.
+/// That is the guard doing its job, and the right response is to stop nominating a destination we
+/// cannot use rather than to relax the guard.
+///
+/// One constant rather than a deletion so the reversal is one word. What re-enabling needs is an
+/// arrival handler: `Rest` on a campfire is an ordinary area button, and the cost side is already
+/// read — [`fuel`] totals the firewood and `areaUnused` says whether the first rest is free.
+pub const CAMPFIRE_REST_IS_BUILT: bool = false;
+
 /// A place that can restore health.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Site {
@@ -193,7 +215,7 @@ pub fn fuel_from_save(save: &crate::game::save::Table) -> i64 {
 /// `restInsomnia` gear blocks resting outright (`:45`) and is the one part we genuinely cannot see.
 pub fn can_rest_at(site: Site, gold: i64, fuel: i64, area_unused: bool) -> bool {
     match site {
-        Site::Campfire => fuel > 0 || area_unused,
+        Site::Campfire => CAMPFIRE_REST_IS_BUILT && (fuel > 0 || area_unused),
         Site::Inn => gold >= INN_COST,
     }
 }
@@ -246,14 +268,23 @@ mod tests {
         assert!(can_rest_at(Site::Inn, 107, 0, false));
     }
 
+    /// A campfire is not a rest site while the press for one is unwritten.
+    ///
+    /// See [`CAMPFIRE_REST_IS_BUILT`]. The cost side is still modelled and still correct — it is the
+    /// *arriving* that does nothing — so this asserts both halves: the gate is shut, and what it is
+    /// shutting is a judgement that would otherwise be right.
     #[test]
-    fn a_used_campfire_is_worthless_without_fuel() {
-        // The case that would otherwise send us walking on spec. `start_used = true` in the real
-        // save, so this is the nearest campfire on the current island.
-        assert!(!can_rest_at(Site::Campfire, 999, 0, false));
-        // Either knowing it is untouched, or carrying fuel, makes it a certainty.
-        assert!(can_rest_at(Site::Campfire, 0, 0, true), "known unlit-and-unused is enough");
-        assert!(can_rest_at(Site::Campfire, 0, 3, false), "so is firewood");
+    fn a_campfire_is_not_a_rest_site_until_arriving_at_one_does_something() {
+        assert!(!can_rest_at(Site::Campfire, 0, 0, true), "unused and free, and still not offered");
+        assert!(!can_rest_at(Site::Campfire, 0, 3, false), "firewood does not change it either");
+        assert!(!can_rest_at(Site::Campfire, 999, 0, false), "and a used one never could");
+
+        // The judgement underneath, unchanged and ready for the day the press exists: a used
+        // campfire with no firewood restores nothing, either of the other two states does.
+        let cost_side = |fuel, unused| fuel > 0 || unused;
+        assert!(!cost_side(0, false), "used, no wood — the walk would pay nothing");
+        assert!(cost_side(0, true), "known unlit-and-unused is enough");
+        assert!(cost_side(3, false), "so is firewood");
     }
 
     #[test]

@@ -5504,6 +5504,10 @@ mod tests {
             ],
         ));
         m.note_health(crate::rest::Health { current: 12, max: 12 }, crate::rest::Health { current: 7, max: 12 });
+        // Enough for a bed and well under `HEART_FLOOR`, so the errand under test is the only one
+        // live. The campfire in this fixture is deliberately kept: it is the real island's shape, and
+        // since `CAMPFIRE_REST_IS_BUILT` went false it is also the thing that must *not* be chosen.
+        m.gold = 50;
         m
     }
 
@@ -5513,7 +5517,9 @@ mod tests {
         assert!(m.wants_rest());
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Rest);
-        assert_eq!(plan.target, "start", "the campfire, not the village");
+        // The village. The campfire is nearer and free and would be the better answer, but arriving
+        // at one does nothing yet — see `rest::CAMPFIRE_REST_IS_BUILT`.
+        assert_eq!(plan.target, "l10", "the inn, while the campfire press is unwritten");
     }
 
     /// **The dev's question, reproduced.** *"After we completed the level 7 crypt, why did the
@@ -5580,20 +5586,31 @@ mod tests {
         assert_eq!(plan.target, "l10", "a freed inn is a rest stop again");
     }
 
+    /// A campfire is never the rest destination, in any of the states that used to choose it.
+    ///
+    /// This test used to be about *cost* — a used campfire with no firewood restores nothing, so pay
+    /// for the inn instead; carry firewood and the free one wins again. Both readings were right and
+    /// both are now beside the point, because arriving at a campfire does nothing at all:
+    /// `rest::CAMPFIRE_REST_IS_BUILT` is false and the driver has no handler to press.
+    ///
+    /// The dev, 2026-08-16, after a run walked to `l7` for a rest and straight back out again: *the
+    /// campfire stalled the run; we can sidestep this by not trying to rest there.* Kept as a test
+    /// rather than deleted so that turning the constant back on has something to fail against.
     #[test]
-    fn a_used_campfire_is_skipped_for_the_inn_when_we_carry_no_fuel() {
-        // The real island: `start_used = true`. Walking there with no firewood restores nothing, so
-        // the ten gold at Ulrome is the honest choice.
+    fn a_campfire_is_never_the_rest_destination_while_the_press_is_unwritten() {
         let mut m = hurt_at_l1();
         m.entry("start").used = true;
-        m.gold = 50;
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Rest);
-        assert_eq!(plan.target, "l10", "a used campfire without fuel is a wasted walk");
+        assert_eq!(plan.target, "l10", "the inn is the only rest we can actually take");
 
-        // Firewood puts it back on the table, and it outranks paying.
+        // Firewood used to put it back on the table and outrank paying. It no longer does.
         m.fuel = 2;
-        assert_eq!(m.next_target().unwrap().target, "start");
+        assert_eq!(m.next_target().unwrap().target, "l10", "fuel does not build the press");
+
+        // Nor does an untouched one, which is the free-and-nearest case and the most tempting.
+        m.entry("start").used = false;
+        assert_eq!(m.next_target().unwrap().target, "l10", "and neither does a fresh campfire");
     }
 
     #[test]
@@ -6264,6 +6281,10 @@ mod tests {
         m.fold(&inside_dump("l9", "l9sub0", "Saltagh Park crossroads",
             vec![node("l9sub1", "Saltagh Park road"), node("l9sub2", "Saltagh Park road")],
             both.clone()));
+        // Enough for a bed. The two doors are a campfire and a village, and since
+        // `rest::CAMPFIRE_REST_IS_BUILT` went false only the village can answer a rest — so without
+        // this the fixture has no rest errand at all and the tests below test nothing.
+        m.gold = 50;
         (m, dane, cowlam)
     }
 
@@ -8076,7 +8097,9 @@ e	l4	l11
         assert!(!m.can_route_to("l19"), "no edge joins the interior to the surface");
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Rest, "the exits are the route, and `cross_toward` walks them");
-        assert_eq!(plan.target, "l19");
+        // `l1`, the village. `l19` is a campfire, nearer and free, and not a rest site until
+        // arriving at one does something — see `rest::CAMPFIRE_REST_IS_BUILT`.
+        assert_eq!(plan.target, "l1");
     }
 
     #[test]
@@ -8135,8 +8158,8 @@ e	l4	l11
         m.note_health_level(crate::rest::Health { current: 1, max: 20 });
         assert_eq!(m.next_target().map(|p| p.reason), Some(Goal::Rest), "the errand changed");
         match m.cross_toward(&[dane, cowlam]) {
-            Some(Crossing::Step { toward, .. }) => assert_eq!(toward, "l9_path_to_l19", "the fire"),
-            other => panic!("expected the door to the campfire, got {other:?}"),
+            Some(Crossing::Step { toward, .. }) => assert_eq!(toward, "l9_path_to_l1", "the bed"),
+            other => panic!("expected the door to the village, got {other:?}"),
         }
     }
 
