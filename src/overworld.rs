@@ -2341,61 +2341,72 @@ impl WorldMap {
             if let Some(p) = pick_shrine() {
                 return Some(Plan { target: p.key.clone(), reason: Goal::Shrine, steered_by: None });
             }
-            // **A heart before the anomaly, if one can be had for nothing but walking.**
+        }
+
+        // **A heart, if one can be had for nothing but walking.**
+        //
+        // The dev's rule, 2026-08-15, given the evening a run finally died going the right way:
+        // two level 6 corrupted crypts back to back, and the second ran the board dry against a
+        // five-deep queue. Four maximum health for a hundred gold is the cheapest preparation
+        // available, and the anomaly is a level 8 fight.
+        //
+        // **Outside the `anomaly_open` block, unlike the shrine detour above it** — the dev,
+        // 2026-08-16: *we should want the healthBuff regardless of anomaly state.* The shrine really
+        // is windowed, because consecrating needs `hell ~= 0` (`shrine.lua:93-96`) and cannot be
+        // bought early at any price. A heart has no such window, and the fights that *open* the
+        // anomaly are the level 6 ones that killed the run this rule came from. See
+        // [`WorldMap::wants_a_heart`] for how the misreading survived: the shut state had never been
+        // played until an adventure started from a cleared profile.
+        //
+        // Above the anomaly and above `OpenAnomaly`, so the preparation happens before the fight it
+        // is preparation for, in both states.
+        //
+        // Every remaining clause is the dev's: the gold must be *over* the price, the village must
+        // be reachable **without combat** (the same test the shrine detour uses, for the same reason
+        // — a detour paid for with a fight is not a detour, it is the fight), and a village whose
+        // store we have already emptied is not a destination. `has_heart` is the standing assumption
+        // the dev set: every village's general store starts with one.
+        if self.wants_a_heart() {
+            let shops: Vec<&Place> = self
+                .places
+                .values()
+                .filter(|p| p.key != here && !p.avoid && p.stocks_a_heart())
+                .filter(|p| !self.heart_bought.contains(&p.key) && !self.abandoned.contains(&p.key))
+                .collect();
+            let heart = shops
+                .iter()
+                .filter(|p| self.reachable_without_a_fight(here, &p.key))
+                .min_by_key(|p| dist_or_far(&dist, &p.key));
+            if let Some(p) = heart {
+                return Some(Plan {
+                    target: p.key.clone(),
+                    reason: Goal::Heart,
+                    steered_by: None,
+                });
+            }
+            // **"I have not looked" is not "there is nothing there", and the difference is a
+            // probe.** The dev's correction, 2026-08-15: the navigator's job is to go and find
+            // out which nodes are reachable without combat, not to conclude from an incomplete
+            // cache that none are.
             //
-            // The dev's rule, 2026-08-15, given the evening a run finally died going the right way:
-            // two level 6 corrupted crypts back to back, and the second ran the board dry against a
-            // five-deep queue. Four maximum health for a hundred gold is the cheapest preparation
-            // available, and the window is now — the anomaly is a level 8 fight.
+            // So a shop we cannot route to for free, whose [`Access`] is `Unknown` rather than
+            // `Blocked`, sends us to the nearest place with roads we have never looked down —
+            // still inside the fight-free region, so the probe costs walking and nothing else.
+            // Whatever it reveals lands in the map, and the next pass either routes to the shop
+            // or downgrades it to `Blocked` on evidence.
             //
-            // Every clause is the dev's: the goal must already be the anomaly, the gold must be
-            // *over* the price, the village must be reachable **without combat** (the same test the
-            // shrine detour uses, for the same reason — a detour paid for with a fight is not a
-            // detour, it is the fight), and a village whose store we have already emptied is not a
-            // destination. `has_heart` is the standing assumption the dev set: every village's
-            // general store starts with one.
-            if self.wants_a_heart() {
-                let shops: Vec<&Place> = self
-                    .places
-                    .values()
-                    .filter(|p| p.key != here && !p.avoid && p.stocks_a_heart())
-                    .filter(|p| !self.heart_bought.contains(&p.key) && !self.abandoned.contains(&p.key))
-                    .collect();
-                let heart = shops
-                    .iter()
-                    .filter(|p| self.reachable_without_a_fight(here, &p.key))
-                    .min_by_key(|p| dist_or_far(&dist, &p.key));
-                if let Some(p) = heart {
+            // Still `Goal::Heart`, because that is what the walk is *for*, and a log that said
+            // `Explore` here would hide the errand that chose it.
+            if shops
+                .iter()
+                .any(|p| self.access_without_a_fight(here, &p.key) == Access::Unknown)
+            {
+                if let Some(p) = self.probe_toward_the_unknown(here, &dist) {
                     return Some(Plan {
                         target: p.key.clone(),
                         reason: Goal::Heart,
                         steered_by: None,
                     });
-                }
-                // **"I have not looked" is not "there is nothing there", and the difference is a
-                // probe.** The dev's correction, 2026-08-15: the navigator's job is to go and find
-                // out which nodes are reachable without combat, not to conclude from an incomplete
-                // cache that none are.
-                //
-                // So a shop we cannot route to for free, whose [`Access`] is `Unknown` rather than
-                // `Blocked`, sends us to the nearest place with roads we have never looked down —
-                // still inside the fight-free region, so the probe costs walking and nothing else.
-                // Whatever it reveals lands in the map, and the next pass either routes to the shop
-                // or downgrades it to `Blocked` on evidence.
-                //
-                // Still `Goal::Heart`, because that is what the walk is *for*, and a log that said
-                // `Explore` here would hide the errand that chose it.
-                if shops
-                    .iter()
-                    .any(|p| self.access_without_a_fight(here, &p.key) == Access::Unknown)
-                {
-                    if let Some(p) = self.probe_toward_the_unknown(here, &dist) {
-                        return Some(Plan {
-                            target: p.key.clone(),
-                            reason: Goal::Heart,
-                            steered_by: None,
-                        });
-                    }
                 }
             }
         }
@@ -3554,6 +3565,21 @@ impl WorldMap {
     /// costs a level 8 fight and the two before it cost this run its life at level 6 — four maximum
     /// health for a hundred gold is the cheapest preparation on the board.
     ///
+    /// **"While the goal is the anomaly" was read as "the anomaly is open", and that was wrong.**
+    /// The dev, 2026-08-16: *we should want the healthBuff regardless of anomaly state.*
+    ///
+    /// The misreading survived because it could not be seen. Every run the original rule was written
+    /// against had already opened the portal — every checkpoint in the store reads `anomaly OPEN` —
+    /// so the shut state was never played until the first adventure started from a cleared profile,
+    /// and then it showed at once: a village with a bed and a shelf, over 110 gold in hand, and the
+    /// shelf never asked about.
+    ///
+    /// Nothing in the reasoning depended on the portal. Opening it means winning a fight at a combat
+    /// node above level 3 (`overworld/events/arrived/world_evil.lua:15-21`) — the level 6 fights that
+    /// killed the earlier runs are on *this* side of the trigger — so the preparation is worth as
+    /// much before as after. Unlike the shrine detour beside it, which really is windowed:
+    /// consecrating needs `hell ~= 0` (`shrine.lua:93-96`) and cannot be done early at any price.
+    ///
     /// **The floor is the price plus a bed**, which the dev raised to that on 2026-08-15 after
     /// watching the errand drain a purse: *I want us to be at at least 110 gold before buying so
     /// that we can rest if needed afterwards.* Spending down to nothing buys four maximum health and
@@ -3571,7 +3597,7 @@ impl WorldMap {
     }
 
     pub fn wants_a_heart(&self) -> bool {
-        self.anomaly_is_open().unwrap_or(false) && self.gold >= HEART_FLOOR
+        self.gold >= HEART_FLOOR
     }
 
     /// How many hearts this purse can take off a shelf, holding a bed back.
@@ -5944,6 +5970,16 @@ mod tests {
         assert_eq!(plan.reason, Goal::Heart, "the anomaly is open, the gold is there, the road is free");
         assert_eq!(plan.target, "l11");
 
+        // **And with the portal shut**, which is the dev's correction of 2026-08-16. The clause
+        // used to be "the goal must already be the anomaly", read as "the anomaly is open" — and
+        // the fights that open it are the level 6 ones this rule was written after.
+        let mut shut = build();
+        shut.hell = Some(0.0);
+        assert!(!shut.anomaly_is_open().unwrap_or(true));
+        let plan = shut.next_target().expect("a plan");
+        assert_eq!(plan.reason, Goal::Heart, "the heart does not wait for the portal");
+        assert_eq!(plan.target, "l11");
+
         // A pound short and it is not a plan. **The bar is the price plus a bed**, not the price:
         // the dev raised it to 110 on 2026-08-15 after watching the errand spend a run down to
         // nothing, which trades four maximum health for the six-a-press that keeps it alive.
@@ -6765,10 +6801,15 @@ e	l4	l11
         // driver's record of having had its go; without consulting it here, "the fog hides the inn"
         // and "the inn would not serve us" look identical from inside the village, and the run
         // searches a village it has already finished with until its budget runs out.
+        // **Under the heart's floor on purpose.** This is a test about the inn, and at 763 gold the
+        // village would also be carrying a live heart errand — which since 2026-08-16 searches a
+        // village whatever the anomaly is doing, so the run would keep looking for a general store
+        // and the abandoned inn would prove nothing. `HEART_FLOOR - 1` is over `INN_COST`, so the
+        // rest errand is real and the shopping one is not.
         let mut m = inside_a_village(
             ("l10sub1", "Ulrome well"),
             vec![node("l10sub4", "The Wobbly Cat inn"), node("l10_path_to_l7", "Road to Greenoak")],
-            763,
+            HEART_FLOOR - 1,
         );
         m.abandon("l10sub4");
         match m.cross_toward(&[exit("l19"), exit("l7")]) {
@@ -6783,10 +6824,14 @@ e	l4	l11
     fn a_healthy_run_crosses_a_village_without_stopping_at_the_bar() {
         // The inn is only a destination while a rest is wanted. Otherwise a village is a subworld
         // like any other and the exit is the whole objective.
+        //
+        // Purse under `HEART_FLOOR`, so the bar is the only thing that could stop us — see the note
+        // in `an_inn_we_have_already_tried_stops_the_search`, and the test below for what a full
+        // purse does instead.
         let mut m = inside_a_village(
             ("l10sub1", "Ulrome well"),
             vec![node("l10sub4", "The Wobbly Cat inn"), node("l10_path_to_l7", "Road to Greenoak")],
-            763,
+            HEART_FLOOR - 1,
         );
         m.note_health_level(crate::rest::Health { current: 20, max: 20 });
         assert!(!m.wants_rest());
@@ -6796,6 +6841,48 @@ e	l4	l11
             }
             other => panic!("expected an exit crossing, got {other:?}"),
         }
+    }
+
+    /// **A full purse turns a village into an errand, with the anomaly still shut.**
+    ///
+    /// The dev, 2026-08-16, after the first adventure ever started from a cleared profile rested in
+    /// a village with over 110 gold and walked past the shelf: *we should want the healthBuff
+    /// regardless of anomaly state.*
+    ///
+    /// The control is the pair: the same village, the same health, the same exits, and the only
+    /// difference a pound either side of [`HEART_FLOOR`]. Without it this would pass on a map that
+    /// never crossed anything.
+    #[test]
+    fn a_village_is_searched_for_its_store_whatever_the_anomaly_is_doing() {
+        let village = |gold| {
+            let mut m = inside_a_village(
+                ("l10sub1", "Ulrome well"),
+                vec![
+                    node("l10sub4", "The Wobbly Cat inn"),
+                    node("l10_path_to_l7", "Road to Greenoak"),
+                ],
+                gold,
+            );
+            m.note_health_level(crate::rest::Health { current: 20, max: 20 });
+            m
+        };
+
+        let mut poor = village(HEART_FLOOR - 1);
+        assert!(!poor.anomaly_is_open().unwrap_or(false), "the portal is shut in both");
+        assert!(!poor.wants_a_heart());
+        match poor.cross_toward(&[exit("l19"), exit("l7")]) {
+            Some(Crossing::Step { toward, .. }) | Some(Crossing::Probe { toward, .. }) => {
+                assert!(toward.starts_with("l10_path_to_"), "a pound short: straight through")
+            }
+            other => panic!("expected an exit crossing, got {other:?}"),
+        }
+
+        let mut rich = village(HEART_FLOOR);
+        assert!(rich.wants_a_heart(), "the anomaly no longer has a say in this");
+        assert!(
+            matches!(rich.cross_toward(&[exit("l19"), exit("l7")]), Some(Crossing::Seek { .. })),
+            "with the price in hand the store is worth looking for, not walking past"
+        );
     }
 
     #[test]
