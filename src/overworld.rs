@@ -4728,10 +4728,7 @@ impl WorldMap {
         if self.inside().is_some() {
             return None;
         }
-        let shut = !self.anomaly_is_open().unwrap_or(false);
-        self.far_chain(from, to, &|p: &Place| {
-            (shut && p.triggers_anomaly()) || self.worth_consecrating_here(&p.key)
-        })
+        self.far_chain(from, to, &|p: &Place| self.worth_consecrating_here(&p.key))
     }
 
     /// The same accelerator for crossing a **settlement**, which the surface rule was refusing.
@@ -4757,6 +4754,24 @@ impl WorldMap {
     /// what makes this safe to switch on rather than a gamble. An interior we have not cleared stops
     /// the chain on its own, one node at a time, exactly as before.
     ///
+    /// ## Uncorrupted, because corruption brings the fog back
+    ///
+    /// The dev, 2026-08-17: *once a settlement is corrupted, the thick fog re-appears, but if that
+    /// hasn't happened, then there is no thick fog to guard against.* Which is why this asks
+    /// `is_settlement() && !corrupted` and not merely the first half.
+    ///
+    /// The mechanism is not `thickFog` itself — that really is set in one file — but the general
+    /// cloud rule beside it, and the effect is the same. `isCloudCovered` (`overworldview.lua:701-706`)
+    /// leaves a node visible only if it is **complete** or carries an `_explored` flag, and
+    /// `subworldOnEnterBasics` sets that flag for `visibleOnEnter` nodes only
+    /// (`utils/world.lua:884-891`). Corruption runs `setAreaIncomplete`, which clears
+    /// `completedAreas[key]` and every `_path_to_` road with it (`overworldview.lua:183-206`) — so
+    /// every interior node that was visible *because it was cleared* goes back under cloud.
+    ///
+    /// Belt and braces, and deliberately: `can_travel_direct` would refuse most of the chain in a
+    /// corrupted interior anyway, for exactly the same reason. Two independent guards on a rule the
+    /// dev has watched fail once is the right number.
+    ///
     /// ## The extra stop rule, which the surface does not need
     ///
     /// Arrivals fire at every node on the path (`overworldview.lua:1210-1216`), so a chain through an
@@ -4766,12 +4781,12 @@ impl WorldMap {
     /// stops short of anything [`WorldMap::blocks_departure`] names. **This is the conservative half
     /// of a decision the dev has not made**; barrelling through is one line away if that is wanted.
     pub fn far_hop_inside(&self, from: &str, to: &str) -> Option<String> {
-        let inside_a_settlement = self
+        let open_for_business = self
             .inside()
             .and_then(|c| self.places.get(c))
-            .map(|c| c.is_settlement())
+            .map(|c| c.is_settlement() && !c.corrupted)
             .unwrap_or(false);
-        if !inside_a_settlement {
+        if !open_for_business {
             return None;
         }
         self.far_chain(from, to, &|p: &Place| self.blocks_departure(&p.key))
@@ -4798,9 +4813,36 @@ impl WorldMap {
                 break;
             }
             if next != to {
-                let stop = self.places.get(&next).map(stop_at).unwrap_or(true);
-                if stop {
-                    // Still worth going *to* it — it is the node we would have stepped to anyway.
+                // **A level 4+ node in the middle of the chain is not crossed and not landed on.**
+                //
+                // The dev, 2026-08-17: *when doing fast hops, make sure the in-game traveller
+                // doesn't cross over a level 4+ node if it's in between.* Arrivals fire at every node
+                // on the path (`overworldview.lua:1210-1216`), so a chain that passes one takes its
+                // fight, and pre-anomaly it also opens the portal
+                // (`overworld/events/arrived/world_evil.lua:15-21`).
+                //
+                // **Breaks without taking it**, which is the difference from every other stop here.
+                // This used to be `shut && p.triggers_anomaly()` and it *did* take the node — "up to
+                // it, never through it" — which was only ever defensible when the node was the next
+                // ordinary step anyway. Several hops into a chain it is not: it commits us to a fight
+                // nothing chose. Stopping short hands the decision back to the single-step machinery,
+                // which has the level 4 rule (`gentler_ground_remains`) and a health gate; the fast
+                // hop has neither and should not be the reason we set foot anywhere dangerous.
+                //
+                // Unconditional on the portal, per the dev. The old `shut` qualifier only ever
+                // covered the anomaly trigger, and a level 6 crypt is a fight we did not choose
+                // whether or not the portal is already open.
+                //
+                // An unknown node counts as dangerous: we cannot read a level off a heading we do
+                // not have.
+                let dangerous =
+                    self.places.get(&next).map(|p| p.level().unwrap_or(0) > 3).unwrap_or(true);
+                if dangerous {
+                    break;
+                }
+                if self.places.get(&next).map(stop_at).unwrap_or(true) {
+                    // Worth going *to* — a shrine we would otherwise stride past, which is a place
+                    // we want to be rather than one we want to avoid.
                     last = Some(next);
                     break;
                 }
@@ -7143,15 +7185,43 @@ mod tests {
         // multi-hop — so the caller is told nothing and steps as it always did.
         assert_eq!(chain("a = true", vec![]).far_hop("a", "d"), None);
 
-        // **A trigger on the way stops the chain while the portal is shut**, because the walk is not
-        // a teleport: `core.arriveAt` runs at every node on the path (`overworldview.lua:1210-1216`),
-        // so striding through a level 5 crypt opens the anomaly exactly as walking to it would.
+        // **A level 4+ node in the way stops the chain short of itself**, because the walk is not a
+        // teleport: `core.arriveAt` runs at every node on the path (`overworldview.lua:1210-1216`),
+        // so striding through a level 5 crypt takes its fight, and pre-anomaly opens the portal too.
+        //
+        // The dev's rule, 2026-08-17: *make sure the in-game traveller doesn't cross over a level 4+
+        // node if it's in between.* So the chain reaches `b`, which is adjacent to `a`, and one hop
+        // is not a multi-hop — the caller is told nothing and steps as it always did, which is where
+        // `gentler_ground_remains` and the health gate get their say.
+        //
+        // This used to answer `Some("c")` on the reasoning "up to it, never through it". That is
+        // only defensible when the node is the next ordinary step anyway; several hops along it
+        // commits the run to a fight nothing chose.
         let mut shut = chain(
             "a = true, b = true, c = true, d = true",
             vec![("c", "Crockey — level 5 crypt")],
         );
         shut.hell = Some(0.0);
-        assert_eq!(shut.far_hop("a", "d").as_deref(), Some("c"), "up to it, never through it");
+        assert_eq!(shut.far_hop("a", "d"), None, "stops short of it, and never lands on it");
+
+        // **And with the portal already open.** The old guard was `shut && triggers_anomaly()`, so
+        // this case chained straight through a level 5 crypt. A fight we did not choose is a fight
+        // we did not choose whether or not the anomaly is open.
+        let mut open = chain(
+            "a = true, b = true, c = true, d = true",
+            vec![("c", "Crockey — level 5 crypt")],
+        );
+        open.hell = Some(0.1);
+        assert_eq!(open.far_hop("a", "d"), None, "the portal's state is not what makes it dangerous");
+
+        // A level *3* node is ordinary ground and the chain runs the whole way, which is what keeps
+        // this a rule about danger rather than a rule against headings.
+        assert_eq!(
+            chain("a = true, b = true, c = true, d = true", vec![("c", "Rookdale — level 3 crypt")])
+                .far_hop("a", "d")
+                .as_deref(),
+            Some("d")
+        );
     }
 
     /// Leaving a town in one press, and the two things that still stop it.
@@ -7202,17 +7272,22 @@ mod tests {
         // trying this. Same map, same route, different rule.
         assert_eq!(town(all, vec![]).far_hop("l25sub2", "l25_path_to_l4"), None);
 
-        // **An uncleared guard post on the way stops the chain**, because arrivals fire at every
-        // node on the path and leaving after a rest is the one errand not looking for a fight.
+        // **A level 6 guard post on the way stops the chain short of itself**, by the same rule the
+        // surface hop uses: arrivals fire at every node on the path, and leaving a town after a rest
+        // is the one errand deliberately not looking for a fight. The chain gets as far as
+        // `l25xrd1`, which is adjacent, so the crossing steps as it always did.
         let guarded = town(
             "l25sub2 = true, l25xrd1 = true",
             vec![("l25xrd2", "Aike guard post — level 6 crypt")],
         );
-        assert_eq!(
-            guarded.far_hop_inside("l25sub2", "l25_path_to_l4").as_deref(),
-            Some("l25xrd2"),
-            "up to the fight, never through it"
-        );
+        assert_eq!(guarded.far_hop_inside("l25sub2", "l25_path_to_l4"), None);
+
+        // **A corrupted town is not eligible at all.** The dev, 2026-08-17: *once a settlement is
+        // corrupted, the thick fog re-appears.* Same map and same cleared route as the first case,
+        // so the only thing being tested is the corruption gate.
+        let mut corrupt = town(all, vec![]);
+        corrupt.entry("l25").corrupted = true;
+        assert_eq!(corrupt.far_hop_inside("l25sub2", "l25_path_to_l4"), None);
     }
 
     /// A forest interior is still crossed one node at a time.
