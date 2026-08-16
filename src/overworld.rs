@@ -743,9 +743,13 @@ impl Place {
 /// of roughly (672, 713) on 2026-08-16 and ended a run with `no arrival at l32`.
 ///
 /// v2 positions are fitted with [`Frame`], scale included, so every one is in the same frame
-/// whatever the zoom was when it was seen. A v1 file is refused rather than migrated — the zoom it
-/// was taken at is not in it — and the cost of refusing is one run's map, which the next dump starts
-/// rebuilding at once.
+/// whatever the zoom was when it was seen.
+///
+/// **A v1 file is still read, minus its positions.** Only the coordinates were ever scaled; edges,
+/// headings and connection counts describe the world's shape and are true at any zoom. Refusing the
+/// whole file threw away 1188 edges of a well-walked world to avoid trusting its coordinates, which
+/// is a bad trade — routing is what this project keeps failing for want of, and aiming rebuilds
+/// itself from this run's dumps anyway. See [`WorldMap::absorb_cache`].
 pub const CACHE_VERSION: &str = "# diggle map cache v2";
 
 /// How a dump's printed coordinates relate to the map's own frame: `world = drawn * scale + offset`.
@@ -1311,12 +1315,22 @@ impl WorldMap {
     /// `completed` is not restored either. The save carries it, and the save is the game's own
     /// answer rather than our recollection.
     pub fn absorb_cache(&mut self, text: &str) -> usize {
-        // **An older cache is refused outright, positions and all** — see [`CACHE_VERSION`].
-        // Mixed-scale coordinates cannot be repaired after the fact, so the only safe reading of a
-        // v1 file is none at all.
-        if !text.starts_with(CACHE_VERSION) {
-            return 0;
-        }
+        // **An older cache keeps everything except where things are.**
+        //
+        // The first cut of this refused a v1 file whole, on the grounds that its coordinates mix two
+        // zoom scales and cannot be repaired. The coordinates cannot — but they are the only part
+        // that was ever scaled. **Edges, headings and connection counts are statements about the
+        // world's shape**, and the shape does not change with the camera: `l25_path_to_l32` is true
+        // at any zoom.
+        //
+        // Refusing all of it threw away the most valuable thing in the file. `world-5.txt` holds 407
+        // places and 1188 edges from an adventure that walked much further than tonight's, and
+        // routing is exactly what this project keeps failing for want of.
+        //
+        // So a v1 file is read for structure and its positions are dropped on the floor. Aiming then
+        // rebuilds from this run's dumps, which is where a trustworthy position has to come from in
+        // any case — see [`WorldMap::registration`].
+        let positions_are_trustworthy = text.starts_with(CACHE_VERSION);
         let mut edges = 0;
         for line in text.lines() {
             let mut f = line.split('\t');
@@ -1331,7 +1345,7 @@ impl WorldMap {
                             place.heading = h.to_string();
                         }
                     }
-                    if place.pos.is_none() {
+                    if place.pos.is_none() && positions_are_trustworthy {
                         if let (Some(Ok(x)), Some(Ok(y))) =
                             (x.map(str::parse::<f64>), y.map(str::parse::<f64>))
                         {
@@ -5725,6 +5739,28 @@ mod tests {
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Rest);
         assert_eq!(plan.target, "l10", "a freed inn is a rest stop again");
+    }
+
+    /// An old cache keeps its shape and loses its coordinates.
+    ///
+    /// The dev asked whether we had lost the world-0 cache. We had not — but `world-5.txt` was being
+    /// refused whole for being v1, and it holds 407 places and 1188 edges from an adventure that
+    /// walked much further than any since. Only the coordinates were ever scaled by the zoom; the
+    /// edges are statements about the world's shape and survive it.
+    #[test]
+    fn an_old_cache_keeps_its_edges_and_drops_its_positions() {
+        let v1 = "# diggle map cache v1\np\tl9\tSaltagh Park forest\t100\t200\t3\t0\t\ne\tl9\tl19\n";
+        let mut m = WorldMap::new();
+        assert!(m.absorb_cache(v1) > 0, "the edges are the point of reading it at all");
+        assert!(m.get("l9").unwrap().neighbours.contains("l19"), "shape survives a zoom");
+        assert_eq!(m.get("l9").unwrap().heading, "Saltagh Park forest", "so does a name");
+        assert_eq!(m.get("l9").unwrap().pos, None, "the coordinates do not, and must not be kept");
+
+        // The current format keeps everything, which is the whole difference between them.
+        let v2 = v1.replacen("v1", "v2", 1);
+        let mut m = WorldMap::new();
+        m.absorb_cache(&v2);
+        assert_eq!(m.get("l9").unwrap().pos, Some((100.0, 200.0)));
     }
 
     /// The save has been carrying the road network all along, and we were reading none of it.
