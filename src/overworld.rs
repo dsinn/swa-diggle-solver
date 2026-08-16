@@ -2454,6 +2454,19 @@ impl WorldMap {
         // *when the goal is not rest and a chest is visible, detour to it, open it, then rejoin the
         // path.*
         //
+        // ## This branch has never fired and cannot, in v52.4. The rule lives in `chest_inside`
+        //
+        // `next_target` plans over **surface** nodes, and there are no chests on the surface:
+        // `typeName = 'chest'` occurs in exactly two files, `overworld/generators/forest.lua:178`
+        // and `bandit_camp_forest.lua:201`, and both build subnodes off `parentNode.subnodeCount`.
+        // Every chest in the game is inside a forest.
+        //
+        // It is kept rather than deleted because it is correct, cheap, and would be wanted the day a
+        // generator places one outdoors — and deleted-and-rewritten is how this rule got written
+        // twice already. But **do not read its existence as the chest detour working**: that is
+        // [`WorldMap::chest_inside`], reached through [`WorldMap::errand_inside`] while crossing.
+        // The tests under this branch use surface fixtures and prove only that the branch is wired.
+        //
         // `wants_rest` is the whole of "the goal is not rest", and it is the right gate rather than a
         // cautious one: `Open` starts a combat scenario (`overworld/generators/forest.lua:30-39`),
         // so a chest is a fight, and a fight is the last thing a hurt run should detour for. The
@@ -3384,11 +3397,10 @@ impl WorldMap {
         //   which must NOT fall back to the exit, because leaving is the one move that abandons the
         //   errand, and the doorway we came in by is usually the nearest thing to walk to;
         // - **the road out**, which is every other case.
-        // **What we came in for**, which is now two things rather than one. The inn is the rest
-        // errand; the general store is the heart errand (`Goal::Heart`). They behave identically
-        // from here — walk to it, arrive on it, hand over to the driver — which is task #18's
-        // generalisation arriving one errand at a time rather than as an abstraction invented
-        // around a single case.
+        // **What we came in for**, which is task #18 done rather than approached: see
+        // [`WorldMap::errand_inside`]. Three stops now share this path — the general store, the inn
+        // and an unopened chest — and they share it because *reaching* them is identical. What
+        // happens on arrival is the driver's business and differs for each.
         // **A shelf we can see outranks the bed; a shelf we cannot does not.**
         //
         // The dev, 2026-08-16: *once we are in a settlement with that goal, buy as many healthBuffs
@@ -3413,11 +3425,11 @@ impl WorldMap {
         // When neither is found the answer is `None`, which is what makes `cross_toward` explore —
         // and exploring is how either of them gets found at all. The old shape said that through a
         // `seeking_a_rest` match whose arms both came to `None` once the store was asked first.
-        let inn = self
-            .store_inside(&parent)
-            .or_else(|| self.inn_inside(&parent))
-            .map(|p| p.key.clone());
-        let leaving_to = match inn.is_some() || self.seeking_a_rest(&parent) || self.seeking_a_heart(&parent) {
+        let errand_at = self.errand_inside(&parent).map(|p| p.key.clone());
+        let leaving_to = match errand_at.is_some()
+            || self.seeking_a_rest(&parent)
+            || self.seeking_a_heart(&parent)
+        {
             // The errand outranks the crossing, and leaves the commitment untouched rather than
             // clearing it: the rest is a detour, and the door we were making for is still the door.
             true => None,
@@ -3466,16 +3478,24 @@ impl WorldMap {
                 to
             }
         };
-        let dest = match (&inn, &leaving_to) {
+        let dest = match (&errand_at, &leaving_to) {
             (Some(k), _) => Some(k.clone()),
             (None, Some(to)) => Some(exit_node_key(&parent, to)),
             (None, None) => None,
         };
 
-        // Standing on the inn: the crossing is over and the errand starts. Guarded by
+        // Standing on the errand: the crossing is over and the errand starts. Guarded by
         // `blocks_departure` because a village under attack puts a fight on its subnodes
         // (`village.lua:371-395`), and a fight underfoot is dealt with before anything else.
-        if inn.as_deref() == Some(here.as_str()) && !self.blocks_departure(&here) {
+        //
+        // **That guard is also the whole of "the chest needed a fight first".** An unopened chest is
+        // incomplete and its heading carries the combat form, so `blocks_departure` says yes and
+        // this falls through to [`Crossing::Fight`] — which the driver answers by pressing the area
+        // slot and letting the top of its loop name whatever screen arrives. That is right for both
+        // of a chest's two states: guarded, where `getAreaButtons` offers `Combat`
+        // (`overworld/generators/forest.lua:187`), and clear, where it offers `Open` and the press
+        // goes straight into the chest's own fight with no pregame at all.
+        if errand_at.as_deref() == Some(here.as_str()) && !self.blocks_departure(&here) {
             return Some(Crossing::Arrive { at: here });
         }
         // Already standing on the road out.
@@ -3951,6 +3971,62 @@ impl WorldMap {
         }
         self.wants_rest = true;
         true
+    }
+
+    /// Everything inside this subworld that is worth stopping at, in the order they outrank one
+    /// another. Task #18.
+    ///
+    /// The crossing used to know two errands by name, bolted on one at a time — the inn because a
+    /// rest is what first made a village worth entering, then the general store when hearts became
+    /// worth buying. Each addition touched the same four places, and the third one was a chest we
+    /// walked straight past.
+    ///
+    /// The order is not alphabetical and not accidental:
+    ///
+    /// 1. **the general store**, because a heart raises maximum health and the bed then fills the
+    ///    larger bar — resting first wastes part of the purchase (`items/ephemeral.lua:4-9`, and
+    ///    the full argument is at the call site);
+    /// 2. **the inn**, which is where a hurt run is trying to get to;
+    /// 3. **an unopened chest**, which is loot rather than preparation and is therefore last.
+    ///
+    /// Each of the three gates itself on whether we actually want it — see [`WorldMap::store_inside`],
+    /// [`WorldMap::inn_inside`] and [`WorldMap::chest_inside`] — so this is an ordering, not a
+    /// policy. `None` means nothing in here is worth a stop, which is what makes a crossing a
+    /// crossing.
+    fn errand_inside(&self, container: &str) -> Option<&Place> {
+        self.store_inside(container)
+            .or_else(|| self.inn_inside(container))
+            .or_else(|| self.chest_inside(container))
+    }
+
+    /// An unopened chest in this subworld, nearest first.
+    ///
+    /// The interior half of task #16, and the half that had to exist for the task to do anything at
+    /// all: `typeName = 'chest'` appears in exactly two files, `overworld/generators/forest.lua:178`
+    /// and `bandit_camp_forest.lua:201`, and both build **subnodes** off `parentNode.subnodeCount`.
+    /// There are no chests on the surface. So the detour that landed on 2026-08-16 —
+    /// [`Goal::Chest`], which plans over surface nodes — could never once have fired in a real
+    /// world, and the run that evening walked past `l4sub11` twice.
+    ///
+    /// `wants_rest` is the gate, and it is the dev's rule verbatim: *when the goal is not rest and a
+    /// chest is visible, detour to it.* Opening one is a fight, and a fight is the last thing a hurt
+    /// run should walk toward.
+    ///
+    /// **Nearest first, and by distance rather than by whatever the map iterates first.** A forest
+    /// carries `math.ceil(nestCount/4)` chests (`forest.lua:586`), so more than one is ordinary, and
+    /// `places` is a hash map — `find` would pick a different chest on different runs from the same
+    /// state. The key breaks ties so the choice cannot flap.
+    fn chest_inside(&self, container: &str) -> Option<&Place> {
+        if self.wants_rest {
+            return None;
+        }
+        let dist = self.here.as_deref().map(|h| self.distances(h)).unwrap_or_default();
+        self.places
+            .values()
+            .filter(|p| p.parent.as_deref() == Some(container))
+            .filter(|p| p.is_chest() && !p.completed && !p.avoid)
+            .filter(|p| !self.abandoned.contains(&p.key))
+            .min_by_key(|p| (dist_or_far(&dist, &p.key), p.key.clone()))
     }
 
     fn inn_inside(&self, container: &str) -> Option<&Place> {
@@ -6071,12 +6147,66 @@ mod tests {
     #[test]
     fn a_fogged_arrival_explores_instead_of_giving_up() {
         let mut m = a_lost_woods();
+        // **The chest is put out of the way on purpose.** `e1sub1` is an unopened chest, and since
+        // task #18 that is an errand — `cross_toward` would head straight for it and this test would
+        // pass without the fog fallback existing at all. Completing it takes the errand off the
+        // board and leaves the question the test is named for: three neighbours, no exits, no route.
+        m.entry("e1sub1").completed = true;
         match m.cross_toward(&[]) {
             Some(Crossing::Seek { to }) | Some(Crossing::Probe { to, .. }) => {
                 assert_eq!(to, "e1sub3", "the crossroads: paved outranks the rest");
             }
             other => panic!("fog is not a dead end, got {other:?}"),
         }
+    }
+
+    /// The chest the run of 2026-08-16 walked past, twice.
+    ///
+    /// `l4sub11 Bainton Clump — level 1 chest`, printed in the adjacency dump one hop from where we
+    /// stood (`spike-run-20260816-0402Z.log:2207`), and the crossing walked to the exit instead.
+    /// [`Goal::Chest`] had landed that morning and could not have helped: it plans over surface
+    /// nodes, and there are no chests on the surface — see [`WorldMap::chest_inside`].
+    ///
+    /// Inside a subworld the destination comes from `cross_toward`, which knew the inn and the
+    /// general store by name and treated everything else as "head for the door".
+    #[test]
+    fn a_chest_inside_a_forest_is_a_destination_and_not_scenery() {
+        let mut m = a_lost_woods();
+        assert!(m.get("e1sub1").unwrap().is_chest(), "the fixture's chest must be a chest");
+
+        // Where the crossing puts its next foot, whichever kind of move it decided on. `Seek` is one
+        // of the answers here — it is what a crossing with no destination does — so this cannot
+        // insist on `Step`, and the positive case checks the variant separately.
+        let step_to = |c: Option<Crossing>| match c {
+            Some(Crossing::Step { to, .. })
+            | Some(Crossing::Probe { to, .. })
+            | Some(Crossing::Seek { to }) => to,
+            other => panic!("expected a move, got {other:?}"),
+        };
+
+        // Standing on the plaza, an unopened chest one hop away, nothing else asking for us.
+        let plan = m.cross_toward(&[]);
+        assert!(
+            matches!(&plan, Some(Crossing::Step { toward, .. }) if toward == "e1sub1"),
+            "a chest one hop away is a destination we have a route to, got {plan:?}"
+        );
+        assert_eq!(step_to(plan), "e1sub1", "and the step is onto it");
+
+        // **Not while hurt.** Opening one is a fight (`forest.lua:30-39`), and the dev's rule names
+        // rest as the exception: *when the goal is not rest and a chest is visible, detour to it.*
+        let mut hurt = a_lost_woods();
+        hurt.wants_rest = true;
+        assert_ne!(
+            step_to(hurt.cross_toward(&[])),
+            "e1sub1",
+            "a fight is not a rest, so a hurt run does not walk to a chest"
+        );
+
+        // And an opened one is scenery again — `getAreaButtons` offers nothing at all on a complete
+        // chest (`forest.lua:186-188`).
+        let mut done = a_lost_woods();
+        done.entry("e1sub1").completed = true;
+        assert_ne!(step_to(done.cross_toward(&[])), "e1sub1", "an emptied chest is not an errand");
     }
 
     /// Paved still means something in here, and it means something better.
