@@ -4903,8 +4903,28 @@ pub fn drive(
         // out of it. Measured over 80 settled dumps: every shared node agrees on the shift to
         // 0.0000 px.
         //
-        // So a far hop is aimed from the frame, and the pan machinery below fetches it onto the
-        // screen exactly as it does for a neighbour that sits under the HUD.
+        // So a far hop is aimed from the frame — **and then it has to be somewhere we can click.**
+        //
+        // ## The claim that used to be here was false, and it ended the run of 2026-08-16 2103Z
+        //
+        // It said "the pan machinery below fetches it onto the screen exactly as it does for a
+        // neighbour that sits under the HUD". There is no pan machinery below. That loop lives in
+        // the **crossing** branch, several hundred lines up; this branch selects and retries and
+        // has never done anything else.
+        //
+        // A frame position is not a promise of visibility. It is where the node *is*, and the map is
+        // bigger than the window: `shrine7` came out at **(1265, 1567)** on a 1080-tall client — 487
+        // px below the bottom edge — and the run clicked it. The per-click confirmation did its job
+        // (`moved the strip 0.0000`), three attempts were spent, a re-centre followed, `shrine7` was
+        // not in the new dump either, and that was the run.
+        //
+        // So the placement is checked against [`crate::observe::hud::is_map_point`] before it is
+        // used, which is the same check every dumped neighbour has passed since a road at (213, 18)
+        // opened the character screen. Failing it costs one press's worth of ambition: `hop.step` is
+        // still the ordinary adjacent step, which is on screen by construction, and the run walks
+        // there instead. Panning the far target into view is the better answer and is #28's machinery
+        // applied to this branch — worth doing, and not worth guessing at while a run is stopping
+        // over it.
         let mut far_target: Option<crate::observe::adjacency::Node> = None;
         if let Some(far) = r.map.far_hop(&here, &hop.plan.target) {
             match fresh.nodes.iter().find(|n| n.key == far) {
@@ -4918,8 +4938,27 @@ pub fn drive(
                 // Not in this dump, so place it from the frame. `None` here means the frame cannot
                 // speak for it — an unregistered island, or a dump sharing nothing with the frame —
                 // and the ordinary single step is the answer, as it was before any of this.
-                None => match r.map.screen_position(&fresh, &far) {
-                    Some((x, y)) => {
+                // Two ways to have no usable coordinate, and they are worth telling apart in the
+                // log: the frame could not speak for the node at all, or it did and the answer is
+                // somewhere no click may go. The first is an unregistered island; the second is an
+                // ordinary consequence of the map being bigger than the window.
+                None => match r.map.screen_position(&fresh, &far).map(|(x, y)| {
+                    // Unknown client size counts as unusable: aiming needs the window's
+                    // measurements, and guessing at them is what this branch is being fixed for.
+                    let clickable = r
+                        .win
+                        .client_size()
+                        .map(|(cw, ch)| crate::observe::hud::is_map_point(x as i32, y as i32, cw, ch))
+                        .unwrap_or(false);
+                    ((x, y), clickable)
+                }) {
+                    Some(((x, y), false)) => r.log.push_str(&format!(
+                        "  `{far}` is travellable in one press but the frame puts it at \
+                         ({x:.0}, {y:.0}), which is off the map we can click — stepping to `{}` \
+                         instead\n",
+                        hop.step
+                    )),
+                    Some(((x, y), true)) => {
                         r.log.push_str(&format!(
                             "  `{far}` is travellable in one press and is not in this dump — placed \
                              from the world frame at ({x:.0}, {y:.0})\n"

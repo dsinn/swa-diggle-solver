@@ -97,6 +97,21 @@ mod tests {
         assert!(!is_map_point(1958, 1654, 1920, 1080));
     }
 
+    /// A node placed from the **world frame** gets the same check as one read from a dump.
+    ///
+    /// Live 2026-08-16 2103Z: the far hop placed `shrine7` at (1265, 1567) on a 1080-tall client and
+    /// clicked it, because that branch never asked. A frame position says where a node *is*, and the
+    /// map is bigger than the window — being placeable and being clickable are different claims.
+    /// Three attempts and a re-centre later the run stopped with
+    /// `selecting shrine7 did not register after 3 attempts`.
+    #[test]
+    fn a_node_placed_below_the_window_is_refused() {
+        assert!(!is_map_point(1265, 1567, 1920, 1080));
+        assert_eq!(chrome_at(1265, 1567, 1920, 1080), Some("off-screen"));
+        // The bottom edge is the only thing wrong with it: the same x, on screen, is fine.
+        assert!(is_map_point(1265, 567, 1920, 1080));
+    }
+
     #[test]
     fn ordinary_map_positions_are_allowed() {
         // The four adjacent nodes from that same dump, all comfortably on the map.
