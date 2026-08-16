@@ -1706,12 +1706,48 @@ impl WorldMap {
     /// would let routing propose it as unexplored.
     pub fn apply_save(&mut self, save: &crate::game::save::Table) {
         if let Some(t) = save.table_at("overworld.completedAreas") {
+            // **Replaced, not accumulated, because completion is a thing the game takes away.**
+            //
+            // The dev, 2026-08-16: *the navigator is confused because the corruption of the node cut
+            // off its neighbours.* Exactly that, and `core.setAreaIncomplete`
+            // (`overworldview.lua:179-206`) is the whole mechanism:
+            //
+            // ```lua
+            // overworldData.completedAreas[key] = nil
+            // core.setAreaFlag(key..'_first_corrupt_time', … )
+            // …
+            // if overworldData.completedAreas[key..'_path_to_'..k] then
+            //     overworldData.completedAreas[key..'_path_to_'..k] = false
+            // end
+            // ```
+            //
+            // A corrupted location is **removed** from this table and each of its roads is set to
+            // **false**. This loop only ever wrote `true`, so both survived as stale completions:
+            // `can_step` is `done(from) || done(to) || road(…)`, it went on saying yes, and the
+            // game's `canTravelToDirect` — which needs a genuinely complete endpoint — went on
+            // saying no. `spike-run-20260816-0310Z.md` ends there: `l10 -> l7` clicked into an
+            // inactive Travel button **203 times**, and the map printed `l10 … [done] [corrupted]`,
+            // which is the contradiction written out in full.
+            //
+            // So the table is read as the truth about this instant. Anything not in it is not
+            // complete, whatever we believed a moment ago.
+            for p in self.places.values_mut() {
+                p.completed = false;
+                p.completed_corrupt = false;
+            }
+            self.roads_done.clear();
             // Not every key here is a location. `setAreaComplete` also writes `<key>_corrupt` for a
             // corrupt area (`overworldview.lua:172`), and `setAreaIncomplete` manages
             // `<key>_path_to_<k>` entries for subworld exits (`:201`). Folding those in as places
             // invented destinations that routing would then try to walk to — `start_corrupt` showed
             // up as an unvisited frontier and became the plan.
-            for key in t.map.keys() {
+            for (key, value) in &t.map {
+                // **The value is read, and it is not always `true`.** A road cut by corruption stays
+                // in the table carrying `false`; only the locations are removed outright. Iterating
+                // the keys alone could not tell those apart.
+                if value.as_bool() == Some(false) || matches!(value, crate::game::save::Value::Nil) {
+                    continue;
+                }
                 if let Some(base) = key.strip_suffix("_corrupt") {
                     self.entry(base).completed_corrupt = true;
                 } else if key.contains("_path_to_") {
@@ -5977,6 +6013,43 @@ mod tests {
         }
     }
 
+    /// **Corruption takes completion away, and the save is how we hear about it.**
+    ///
+    /// The dev, watching `spike-run-20260816-0310Z.md` stall: *the navigator is confused because the
+    /// corruption of the node cut off its neighbours.* It ended `Failed("no arrival at l7")` after
+    /// clicking an inactive `Travel` **203 times**, with `l10 … [done] [corrupted]` in its own map —
+    /// the contradiction written out in full.
+    ///
+    /// `core.setAreaIncomplete` (`overworldview.lua:179-206`) does it two ways, and this covers both:
+    /// the location is **removed** from `completedAreas`, and each of its roads is set to **false**
+    /// rather than removed. A fold that only ever wrote `true`, over keys alone, could not see
+    /// either.
+    #[test]
+    fn a_corrupted_node_stops_being_complete_and_its_roads_stop_being_walkable() {
+        let complete = |body: &str| {
+            crate::game::save::parse(&format!("return {{ overworld = {{ completedAreas = {{ {body} }} }} }}"))
+                .unwrap()
+        };
+        let mut m = WorldMap::new();
+        m.fold(&dump("l10", "Ulrome — level 6 village", vec![node("l7", "Greenoak Backwoods campfire")]));
+
+        m.apply_save(&complete("l10 = true, l10_path_to_l7 = true"));
+        assert!(m.places.get("l10").unwrap().completed);
+        assert!(m.can_step("l10", "l7"), "the control: with l10 complete the hop is legal");
+
+        // The hell radius reaches Ulrome. The game drops the location and falsifies the road.
+        m.apply_save(&complete("l10_path_to_l7 = false"));
+        assert!(!m.places.get("l10").unwrap().completed, "removed from the table is not complete");
+        assert!(
+            !m.can_step("l10", "l7"),
+            "and the road it wrote `false` over is not a road — this is the 203 clicks"
+        );
+
+        // Clearing the village again puts both back, so this is revocable rather than one-way.
+        m.apply_save(&complete("l10 = true, l10_path_to_l7 = true"));
+        assert!(m.can_step("l10", "l7"), "fighting it out restores the hop");
+    }
+
     /// **The decision that killed the run of 2026-08-16**, and the exploring case it must not break.
     ///
     /// Standing inside Stillingfleet with the portal open. The anomaly is `start`, the adventure
@@ -6607,7 +6680,10 @@ e	l4	l11
             m.entry(b).neighbours.insert(a.into());
         }
         m.entry("shrine9").heading = "Somewhere shrine".into();
-        m.entry("shrine9").completed = true;
+        // Completion comes from the save and nowhere else — since 2026-08-16 `apply_save`
+        // clears what the save no longer lists, because corruption takes completion away.
+        // Setting it by hand here used to survive the fold; now it is stated where the game
+        // states it.
         // Inside the forest, on an interior node that borders nothing on the surface — which is the
         // whole of the problem this test is about.
         m.entry("l62sub18").parent = Some("l62".into());
@@ -6615,7 +6691,7 @@ e	l4	l11
         m.apply_save(
             &crate::game::save::parse(
                 "return { overworld = { areaFlags = { hell = 0.1 },
-                     completedAreas = { l62_path_to_l57 = true } } }",
+                     completedAreas = { l62_path_to_l57 = true, shrine9 = true } } }",
             )
             .unwrap(),
         );
