@@ -66,10 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) if !save_dir.is_dir() => println!("nothing to rescue ({e})"),
                 Err(e) => return Err(e.into()),
             }
-            let removed = checkpoint::clear(
-                &save_dir,
-                std::path::Path::new(diggle_solver::navigate::MAP_CACHE),
-            )?;
+            let removed = checkpoint::clear(&save_dir)?;
             if removed.is_empty() {
                 println!("the sandbox save was already empty");
             } else {

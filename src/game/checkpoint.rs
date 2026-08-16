@@ -117,23 +117,7 @@ pub fn restore(store: &Path, name: &str, save_dir: &Path) -> Result<(), crate::E
 ///   nothing and the middle one wins the tie — but it is not a state that exercises it.
 ///
 /// The directory itself is left in place; LÖVE will refill it.
-///
-/// ## The map cache goes too, and it is not tidiness
-///
-/// The dev asked whether clearing takes the cache with it. It did not, and that was a correctness
-/// bug rather than an omission: the cache is keyed `world-{seed}.txt` from `overworld.seed`, and
-/// that seed is **not a unique world id**. Across the checkpoints in this repo it reads `0` for
-/// three different adventures and `5` for two more.
-///
-/// So a cleared profile that generated seed 0 would absorb a previous, unrelated world's map —
-/// foreign **edges**, which `absorb_cache` merges unconditionally and which become routes that do
-/// not exist, and foreign **positions**, which aim clicks at a different layout. Strictly worse than
-/// starting with nothing, and silent.
-///
-/// Deleting the cache alongside the save closes the common case. It does not close all of it: a
-/// checkpoint restored from another adventure hits the same collision without anyone clearing
-/// anything. That wants a world fingerprint in the cache header, which is its own task.
-pub fn clear(save_dir: &Path, cache_dir: &Path) -> Result<Vec<String>, crate::Error> {
+pub fn clear(save_dir: &Path) -> Result<Vec<String>, crate::Error> {
     guard(save_dir)?;
     refuse_if_game_running()?;
     if !save_dir.is_dir() {
@@ -148,18 +132,6 @@ pub fn clear(save_dir: &Path, cache_dir: &Path) -> Result<Vec<String>, crate::Er
             std::fs::remove_file(&path)?;
         }
         removed.push(e.file_name().to_string_lossy().into_owned());
-    }
-    // The remembered maps, which belong to the world we have just deleted.
-    //
-    // Taken as an argument rather than read from [`crate::navigate::MAP_CACHE`], which is a path
-    // relative to the working directory — a test calling this would have deleted the real one.
-    if cache_dir.is_dir() {
-        for e in std::fs::read_dir(cache_dir)?.filter_map(|e| e.ok()) {
-            if e.path().is_file() {
-                std::fs::remove_file(e.path())?;
-                removed.push(format!("{}/{}", cache_dir.display(), e.file_name().to_string_lossy()));
-            }
-        }
     }
     removed.sort();
     Ok(removed)
@@ -299,18 +271,7 @@ mod tests {
         // A directory and a nested file, because the two are removed by different calls.
         assert!(dir.join("saveStats").join("0000").is_file());
 
-        // A remembered map for a world we are deleting, in a sandbox of its own — see `clear`.
-        let cache = dir.parent().unwrap().join("map-cache");
-        std::fs::create_dir_all(&cache).unwrap();
-        std::fs::write(cache.join("world-0.txt"), "# diggle map cache v2
-").unwrap();
-
-        let removed = clear(&dir, &cache).expect("the sandbox should be clearable");
-        assert!(
-            removed.iter().any(|r| r.ends_with("world-0.txt")),
-            "the remembered map belongs to the world we just deleted, and `seed` does not identify              a world — leaving it means the next fresh profile may absorb a foreign map"
-        );
-        assert!(!cache.join("world-0.txt").exists());
+        let removed = clear(&dir).expect("the sandbox should be clearable");
         assert!(removed.contains(&"persistentSaveData".to_string()), "unlocks must go too");
         assert!(removed.contains(&"saveStats".to_string()), "and the history that seeds hero select");
         assert!(removed.contains(&"screenshots".to_string()), "and whatever else was in there");
@@ -324,7 +285,7 @@ mod tests {
         assert!(dir.is_dir(), "the directory itself is left for LOVE to refill");
 
         // Idempotent: nothing to remove is not an error.
-        assert_eq!(clear(&dir, &cache).expect("a second clear is harmless"), Vec::<String>::new());
+        assert_eq!(clear(&dir).expect("a second clear is harmless"), Vec::<String>::new());
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 
@@ -333,8 +294,8 @@ mod tests {
     #[test]
     fn clearing_refuses_the_real_steam_save() {
         let real = Path::new(r"C:\Users\x\AppData\Roaming\SternlyWordedAdventures");
-        assert!(clear(real, Path::new("nowhere")).is_err(), "the real Steam save must never be cleared");
-        assert!(clear(Path::new(r"C:\temp\whatever"), Path::new("nowhere")).is_err());
+        assert!(clear(real).is_err(), "the real Steam save must never be cleared");
+        assert!(clear(Path::new(r"C:\temp\whatever")).is_err());
     }
 
     #[test]
