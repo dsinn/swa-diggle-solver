@@ -575,35 +575,28 @@ impl Place {
         crate::subworld::triggers_anomaly(self.parent.as_deref(), self.level())
     }
 
-    /// Would arriving here open the anomaly **now**, in the state we currently believe it to be in?
+    /// ## There was an `opens_the_anomaly` here, and the state it existed for cannot happen
     ///
-    /// [`Place::triggers_anomaly`] answers the question from the heading alone, which is what a
-    /// planner wants when it is deciding whether a node is the kind of place that opens portals.
-    /// This one adds the clause the event's own check carries and the heading cannot:
-    ///
-    /// ```lua
-    /// return not location.parentNode
-    /// and overworldview.locationHasCombat(location)
-    /// and (location.level or 0) > 3
-    /// ```
-    ///
-    /// — `overworld/events/arrived/world_evil.lua:15-18`, and `locationHasCombat` opens with
+    /// It was `triggers_anomaly() && !completed`, on the strength of the event's full check —
+    /// `locationHasCombat(location) and (location.level or 0) > 3`
+    /// (`overworld/events/arrived/world_evil.lua:15-18`), where `locationHasCombat` opens with
     /// `if core.areaIsComplete(location.key) then return false end` (`overworldview.lua:305-310`).
+    /// True as a reading of the Lua, and worthless as a rule, because **clearing a level 5 crypt
+    /// requires arriving at it, and arriving is what opens the portal**. The event's other gate is
+    /// `areaFlag'hell' == 0`, so by the time that crypt is complete the anomaly is open and the only
+    /// caller — the pre-anomaly door filter in [`WorldMap::choose_exit`] — has switched itself off.
     ///
-    /// So **a level 5 crypt we have already cleared is as harmless to walk through as a road**, and
-    /// the difference is not academic: the run of 2026-08-16 left Colden Brake through `l41`, a
-    /// level 5 crypt, when `l20` — a level 2 crypt already cleared — stood at the same distance
-    /// from the target. Refusing every high-level node, cleared or not, would have made the way back
-    /// through our own footprints look as dangerous as the way forward, and a rule that cannot tell
-    /// those apart cannot route a corrupted world at all.
+    /// The dev, 2026-08-16: *we can't clear a level 5 crypt without first stepping on it, thereby
+    /// triggering the anomaly. I don't think it's a scenario that can exist.*
     ///
-    /// Deliberately **not** substituted into [`WorldMap::gentler_ground_remains`], which asks a
-    /// different question — "is there anywhere gentle left to go" — and answers it about frontier
-    /// nodes, where completion is nearly always false anyway. Two callers, two questions; collapsing
-    /// them is how the shrine filters drifted apart.
-    pub fn opens_the_anomaly(&self) -> bool {
-        self.triggers_anomaly() && !self.completed
-    }
+    /// The case it was justified with does not need it either. Leaving Colden Brake the choice was
+    /// `l20` against `l41`, and `l20` is **level 2** — it never triggers, cleared or not.
+    ///
+    /// Kept as a note because the mistake is worth more than the code was: the test written for it
+    /// built a world with `hell = 0` and a completed level 5 crypt, and passed. A green test in an
+    /// impossible world is the same error as the surface-chest fixtures two commits earlier, and
+    /// both times the code was checked against the Lua and never against the game's reachable
+    /// states.
 
     /// The rules in force where this place sits.
     pub fn rules(&self) -> crate::subworld::Rules {
@@ -3115,17 +3108,18 @@ impl WorldMap {
         //   rule that forbade the door to the node we have decided to open the anomaly at would
         //   deadlock the errand it is meant to sequence.
         //
-        // `opens_the_anomaly` rather than `triggers_anomaly`, so a level 5 crypt we have already
-        // cleared stays a perfectly good way home — see there for the game's own condition.
+        // The heading is the whole test. A `!completed` clause was tried here and removed — the note
+        // where [`Place::opens_the_anomaly`] used to be says why, and the short version is that the
+        // state it protected cannot occur while `hell == 0`.
         let gentle_doors_only = !self.anomaly_is_open().unwrap_or(false)
             && !target
                 .as_deref()
                 .and_then(|t| self.places.get(t))
-                .map(|p| p.opens_the_anomaly())
+                .map(|p| p.triggers_anomaly())
                 .unwrap_or(false);
         let opens_the_portal = |to: &str| {
             gentle_doors_only
-                && self.places.get(to).map(|p| p.opens_the_anomaly()).unwrap_or(false)
+                && self.places.get(to).map(|p| p.triggers_anomaly()).unwrap_or(false)
         };
         if gentle_doors_only {
             note.push_str("; gentle doors only");
@@ -7232,16 +7226,21 @@ e	l4	l11
     /// rule means walking further. That is the trade they asked for: *only visit a level 4 node when
     /// the entire frontier is at least level 4.*
     ///
-    /// The control is `l41` itself, **cleared**. Same level, same distance, same errand — and the
-    /// measured answer wins again, because a level 5 crypt whose fight is already won cannot open
-    /// anything (`overworldview.lua:305-310`, via [`Place::opens_the_anomaly`]). That isolates the
-    /// clause under test: this is a rule about opening the portal, not about big numbers.
+    /// The control is the **errand**: when the target is the trigger node itself, the rule has to
+    /// let us through the door to it or it deadlocks the very sequencing it exists for. That is
+    /// [`Goal::OpenAnomaly`], and it is a state a run reaches every time — once nothing gentler is
+    /// left, opening the portal is the plan.
     ///
-    /// A portal-open control was tried here first and proves nothing, because opening it changes
-    /// the *errand* too — with `hell ~= 0` the shrine needs `reachable_without_a_fight`, `l41` is
-    /// the fight in the way, and the target moves out from under the comparison.
+    /// Two other controls were tried here and both were wrong, which is worth leaving written down:
+    ///
+    /// - **portal open.** Proves nothing, because opening it changes the errand too — with
+    ///   `hell ~= 0` a shrine needs `reachable_without_a_fight`, `l41` is the fight in the way, and
+    ///   the target moves out from under the comparison.
+    /// - **`l41` cleared.** Green, and impossible: clearing a level 5 crypt means arriving at it,
+    ///   and arriving is what opens the portal, so `hell == 0` and a completed level 5 node cannot
+    ///   both hold. The dev caught it. See the note where `Place::opens_the_anomaly` used to be.
     #[test]
-    fn a_nearer_door_loses_to_a_gentler_one_unless_its_fight_is_already_won() {
+    fn a_nearer_door_loses_to_a_gentler_one_unless_the_trigger_is_the_errand() {
         use crate::observe::adjacency::Exit;
         let door = |to: &str| Exit { x: 0.0, y: 0.0, to_key: to.into(), to_heading: "".into() };
 
@@ -7280,10 +7279,37 @@ e	l4	l11
             Some("l20"),
             "three hops through gentle ground beats one hop through a level 5 crypt"
         );
-        assert_eq!(
-            world("l41 = true,").choose_exit(&doors).map(|(k, _, _)| k).as_deref(),
-            Some("l41"),
-            "the same crypt, already cleared, opens nothing — so the measured answer stands"
+
+        // The control. Nothing gentle left: `l20` is cleared, visited, and its one connection is
+        // accounted for, so it reveals nothing; `l41` is the only frontier there is. The planner's
+        // answer is to open the portal, and the door to the node it named must not be refused.
+        let mut only_way_on = WorldMap::default();
+        for (a, b) in [("e2", "l20"), ("e2", "l41")] {
+            only_way_on.entry(a).neighbours.insert(b.into());
+            only_way_on.entry(b).neighbours.insert(a.into());
+        }
+        only_way_on.entry("l20").heading = "Keyingham — level 2 crypt".into();
+        only_way_on.entry("l20").visited = true;
+        only_way_on.entry("l20").connections = 1;
+        only_way_on.entry("l41").heading = "Crockey — level 5 crypt".into();
+        only_way_on.entry("e2sub6").parent = Some("e2".into());
+        only_way_on.here = Some("e2sub6".into());
+        only_way_on.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = { hell = 0 },
+                     completedAreas = { e2 = true, l20 = true } } }",
+            )
+            .unwrap(),
+        );
+        let (chosen, _, note) = only_way_on.choose_exit(&doors).expect("two doors is not no doors");
+        assert_eq!(chosen, "l41", "the errand is to open the portal, so the door to it must open");
+        assert!(
+            note.starts_with("OpenAnomaly -> l41"),
+            "the control only means anything if the errand really is the trigger: {note}"
+        );
+        assert!(
+            !note.contains("gentle doors only"),
+            "and the rule must report itself as lifted, not merely overruled: {note}"
         );
     }
 
