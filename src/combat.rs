@@ -469,11 +469,23 @@ impl<'a> Board<'a> {
     /// clicked an empty slot — nothing happened — while later arrivals registered as tiles
     /// "changing", and a correct click was reported as hitting six wrong tiles.
     ///
-    /// **And `turnState == PlayerTurn` does not imply either condition.** On a normal transition it
-    /// implies both, since `PlayerPreTurn` only ends at `tileboard.boardIsStatic()`
-    /// (`rpgview.lua:1500-1502`) — but resuming a save restores the state directly, skipping the
-    /// gate. Same shape as a resumed fight printing no board dump: a save restores *state* without
-    /// replaying the transitions that establish it. Never trust an entry gate you did not see fire.
+    /// **And `turnState == PlayerTurn` does not imply either condition — not even on a normal
+    /// transition.** This used to say it did, on the strength of `PlayerPreTurn.shouldEnd` being
+    /// `tileboard.boardIsStatic()` (`rpgview.lua:1500-1502`), with resumed saves as the sole
+    /// exception. That gate is checked *before* `PlayerTurn` begins, and `tileboard.onPlayerTurn`
+    /// then calls `fill()` (`tileboard.lua:1233`), `spawnQueuedTiles'random'` (`:1240`) and
+    /// `removeTiles(explodingTiles)` (`:1242`). So the board is deliberately disturbed **after** the
+    /// static check that was supposed to vouch for it.
+    ///
+    /// Which is also why the console cannot answer this. `Player turn N start;` is the last line of
+    /// that same function (`:1285`), printed with the board's **logical** state from
+    /// `getDataForSave` — complete and authoritative for the letters, and emitted while the tiles it
+    /// names are still falling. The right use of it is to know when to *begin* waiting, not to skip
+    /// the wait. The dev asked whether it could replace this; it marks the turn's board being
+    /// decided, not the animation being over.
+    ///
+    /// Resuming a save is a second, different reason: it restores *state* without replaying the
+    /// transitions that establish it. Never trust an entry gate you did not see fire.
     ///
     /// ## Stillness is the fallback, because the case fullness guards against is motion
     ///
