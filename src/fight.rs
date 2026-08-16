@@ -641,8 +641,17 @@ impl Fight<'_> {
             return Ok(Some(Outcome::NotRealizable { turns, word: found.word }));
         };
         let steps: Vec<(usize, Option<char>)> = typed.steps().collect();
+        // **Our own health, beside the enemy's.** The run of 2026-08-16 1037Z printed Raziel falling
+        // 189 → 69 and never once said how the player was doing, so the death at turn 7 had to be
+        // *inferred* from the board going ragged — `fill()` is skipped at zero health
+        // (`tileboard.lua:1231-1234`), which is the only reason the columns emptied. A log that
+        // records the enemy's race and not ours cannot say which one we lost.
+        let us = player
+            .as_ref()
+            .map(|p| format!("{}/{}", p.vitals.current, p.vitals.max))
+            .unwrap_or_else(|| "?".into());
         log.push_str(&format!(
-            "turn {turns}: {name} {health}+{armour}hp, board {letters}\n  \
+            "turn {turns}: {name} {health}+{armour}hp, us {us}hp, board {letters}\n  \
              play **{}** (scores {}, tiles {:?}, {} corners{})\n",
             found.word,
             found.score,
