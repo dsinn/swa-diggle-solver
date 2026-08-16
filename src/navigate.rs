@@ -870,6 +870,8 @@ pub struct Run<'a> {
     /// why once is the only useful number: the game clamps `targetZoomMul` at `0.5`
     /// (`overworldview.lua:996`) and the default is `1`.
     pub zoomed_out: bool,
+    /// Whether the world frame has been reported as inconsistent. See [`Run::pump`].
+    pub frame_alarm: bool,
 }
 
 impl Run<'_> {
@@ -877,6 +879,22 @@ impl Run<'_> {
         let new: Vec<String> = self.feed.pump().to_vec();
         for a in self.reader.push(&new) {
             self.map.fold(&a);
+            // **The frame's own alarm.** Two nodes we have placed cannot both be where we think they
+            // are and where this dump draws them; when they disagree, the frame is not one frame and
+            // every position in it is suspect. Once, on the rising edge — a broken frame stays broken
+            // and would otherwise print on every dump for the rest of the run.
+            match self.map.frame_disagreement(&a) {
+                Some(px) if !self.frame_alarm => {
+                    self.frame_alarm = true;
+                    self.log.push_str(&format!(
+                        "  **the world frame disagrees with itself by {px:.0} px** at `{}` — placing \
+                         is suspended and far hops will decline; see WorldMap::registration\n",
+                        a.here_key
+                    ));
+                }
+                None => self.frame_alarm = false,
+                _ => {}
+            }
             self.latest = Some(a);
             self.dumps += 1;
         }
@@ -2018,6 +2036,11 @@ impl Run<'_> {
             self.log.push_str("  could not press pagedown to zoom out\n");
             return false;
         }
+        // **Before anything is pumped**, because from here until a dump measures the new scale the
+        // map must place nothing: a node placed at the wrong scale stays wrong for the whole run and
+        // goes into the cache. That is what ended the run of 2026-08-16 1752Z — see
+        // [`crate::overworld::WorldMap::registration`].
+        self.map.zoom_changed();
         // The zoom is lerped rather than snapped (`zoomMult` toward `targetZoomMul` at `dt*10`,
         // `:1091`), so this waits for the animation rather than the keystroke.
         std::thread::sleep(Duration::from_millis(900));

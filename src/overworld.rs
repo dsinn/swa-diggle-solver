@@ -743,14 +743,23 @@ impl Place {
 /// of roughly (672, 713) on 2026-08-16 and ended a run with `no arrival at l32`.
 ///
 /// v2 positions are fitted with [`Frame`], scale included, so every one is in the same frame
-/// whatever the zoom was when it was seen.
+/// whatever the zoom was when it was seen — **as far as aiming goes**. Placing still guessed.
 ///
-/// **A v1 file is still read, minus its positions.** Only the coordinates were ever scaled; edges,
-/// headings and connection counts describe the world's shape and are true at any zoom. Refusing the
-/// whole file threw away 1188 edges of a well-walked world to avoid trusting its coordinates, which
-/// is a bad trade — routing is what this project keeps failing for want of, and aiming rebuilds
-/// itself from this run's dumps anyway. See [`WorldMap::absorb_cache`].
-pub const CACHE_VERSION: &str = "# diggle map cache v2";
+/// **v3 exists because v2 files carry the same disease one level down.** `registration` measured the
+/// scale when the dump gave it two anchors and *assumed 1.0* when it gave one, and a dump with one
+/// anchor is the ordinary way a new node is learned: you arrive somewhere, and the only node in the
+/// dump you have already placed is the one you came from. Before any zoom the assumption is exactly
+/// right. Straight after one it is wrong by a factor of two, and the nodes placed from it go into the
+/// file in the *other* scale. `world-0.txt` as written by the run of 2026-08-16 1752Z is provably
+/// such a file: its 45 positions are two mutually consistent populations, one at each zoom, and 60 of
+/// the run's 95 surface dumps have anchors that disagree with each other by up to 229 px.
+///
+/// **A v1 or v2 file is still read, minus its positions.** Only the coordinates were ever scaled;
+/// edges, headings and connection counts describe the world's shape and are true at any zoom.
+/// Refusing the whole file threw away 1188 edges of a well-walked world to avoid trusting its
+/// coordinates, which is a bad trade — routing is what this project keeps failing for want of, and
+/// aiming rebuilds itself from this run's dumps anyway. See [`WorldMap::absorb_cache`].
+pub const CACHE_VERSION: &str = "# diggle map cache v3";
 
 /// How a dump's printed coordinates relate to the map's own frame: `world = drawn * scale + offset`.
 ///
@@ -762,9 +771,61 @@ pub struct Frame {
     pub scale: f64,
     pub dx: f64,
     pub dy: f64,
-    /// How many already-placed nodes this fit rests on. **One means the scale was assumed, not
-    /// measured** — enough to keep placing nodes, not enough to aim a click at one.
+    /// How many already-placed nodes this fit rests on. **One means the scale was not measured from
+    /// this dump** — enough to keep placing nodes, not enough to aim a click at one.
     pub anchors: usize,
+    /// Whether this dump measured its own scale, or inherited [`WorldMap::screen_scale`].
+    pub scale_measured: bool,
+    /// The furthest any anchor lands from where the frame already says it is, in screen pixels.
+    ///
+    /// **The positive control on the whole frame.** Every anchor is a node whose position we claim to
+    /// know, so a fit that puts one of them somewhere else is telling us the frame is not one frame.
+    ///
+    /// **It needs three anchors to see anything**, and that is not a shortcoming to fix. The scale
+    /// comes from a distance and the offset from one anchor, so any *two* anchors are satisfied
+    /// exactly by construction whenever they differ by a scale — which is precisely what two mixed
+    /// populations of positions do. The third is the one that has to choose between them. In the
+    /// 1752Z run 60 dumps had three or more and every one of them screamed; the four that had two
+    /// went quietly by. So this is the alarm, not the lock: the lock is measuring the scale rather
+    /// than assuming it, above.
+    pub disagreement: f64,
+}
+
+/// How far two anchors in one dump may disagree and still count as the same frame, in pixels.
+///
+/// Measured rather than chosen: replaying all 95 surface dumps of the 1752Z run under the current
+/// rule, every dump agrees to **0.00 px** exactly — the transform really is exact, not approximate —
+/// while the same replay under the old rule reaches 229 px. So anything above a few pixels is a
+/// different frame rather than noise, and four leaves room for an icon that shifts when a node is
+/// completed without coming near the corruption it is there to catch.
+///
+/// It also has to stay well under the game's own click tolerance, which is what a frame error
+/// actually spends: `mouseIsOverLocation` accepts a click within `selectionRadius * scale * zoomMult`
+/// of a node (`overworldview.lua:1283-1289`), 16 px by default and **8 px zoomed out**.
+const FRAME_TOLERANCE: f64 = 4.0;
+
+impl Frame {
+    /// Whether nodes may be placed from this fit at all. See [`Frame::disagreement`].
+    pub fn is_sound(&self) -> bool {
+        self.disagreement <= FRAME_TOLERANCE
+    }
+}
+
+/// What one unit of the world frame is worth in screen pixels right now.
+///
+/// `None` means we have moved the zoom and no dump has measured the new scale yet — see
+/// [`WorldMap::zoom_changed`]. Nothing may be placed in that state, because placing is what writes a
+/// wrong scale into the frame permanently.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenScale(Option<f64>);
+
+impl Default for ScreenScale {
+    /// A fresh map's frame is **defined** by its first dump, so it starts at screen scale exactly.
+    /// That is why an early one-anchor dump can place nodes at all, and it is true right up until the
+    /// first zoom.
+    fn default() -> Self {
+        ScreenScale(Some(1.0))
+    }
 }
 
 /// A snapshot of how much the run has achieved. See [`WorldMap::progress`].
@@ -838,6 +899,9 @@ pub struct WorldMap {
     /// nothing here creates a `Place`, so nothing here can become a target. It only records that a
     /// road has been walked, which is the fact [`WorldMap::can_step`] needs and did not have.
     roads_done: std::collections::HashSet<String>,
+    /// What the frame's units are worth in screen pixels, as last measured. See [`ScreenScale`] and
+    /// [`WorldMap::registration`], which is the only thing that writes it.
+    screen_scale: ScreenScale,
     /// Where the last dump said we were.
     here: Option<String>,
     /// `areaFlags.hell` — zero means the anomaly has not opened and the trigger is still live.
@@ -1710,10 +1774,35 @@ impl WorldMap {
     /// anchors determine it, and the pair furthest apart on screen is used because a short baseline
     /// turns small pixel differences into large scale errors.
     ///
-    /// With only one anchor the scale cannot be seen at all, so it is assumed unchanged — which is
-    /// right nearly always, since the zoom only moves when we move it, and wrong exactly when it has
-    /// just moved. [`Frame::anchors`] carries how many were used so a caller can decline to *aim* on
-    /// a fit it cannot verify, which placing a node is not required to do.
+    /// ## One anchor cannot see the scale, and assuming `1.0` broke the frame permanently
+    ///
+    /// The paragraph that used to sit here said the scale is "assumed unchanged" with one anchor —
+    /// "right nearly always, since the zoom only moves when we move it, and wrong exactly when it has
+    /// just moved" — and concluded that a caller may decline to *aim* on such a fit, "which placing a
+    /// node is not required to do". **That conclusion was backwards, and it cost the run of
+    /// 2026-08-16 1752Z.** A bad aim costs one click. A bad *placement* is written into the frame and
+    /// into the cache, and every later fit inherits it.
+    ///
+    /// What "assumed unchanged" actually assumed was `scale = 1.0`, i.e. that the frame is still at
+    /// screen scale — true only before the first zoom. The run zoomed out at step 43. Four dumps
+    /// later a one-anchor dump placed three nodes at half size; from then on the frame was **two
+    /// frames**, each internally exact, differing by a factor of two, and every fit that drew an
+    /// anchor from each returned a meaningless average. Replayed from the log: dumps 0–22 agree to
+    /// 0.00 px, and 60 of the 95 surface dumps after it have anchors disagreeing by up to 229 px.
+    /// 130 steps later a far hop aimed at `l11` from that frame, clicked (727, 123), and the node was
+    /// drawn at (763, 237) — 119 px away, against a selection box that is ±8 px when zoomed out
+    /// (`overworldview.lua:1283-1289`). Nothing was selected, `Travel` did nothing, and the run
+    /// stopped with `no arrival at l11`. The frame at the end of that run is `map-cache/world-0.txt`,
+    /// and it is why [`CACHE_VERSION`] is now v3.
+    ///
+    /// So the scale is **remembered rather than assumed**: [`WorldMap::screen_scale`] holds the last
+    /// one a dump measured, a one-anchor dump inherits it, and after a zoom it is `None` until some
+    /// dump measures the new one ([`WorldMap::zoom_changed`]). Replaying the same 95 dumps under that
+    /// rule places all 40 nodes the old rule placed — nothing is lost — with a worst disagreement of
+    /// **0.00 px** across the whole run.
+    ///
+    /// [`Frame::disagreement`] is the positive control that would have caught it in one line either
+    /// way, and no fit that fails it may place anything. See [`Frame::is_sound`].
     fn registration(&self, a: &Adjacency) -> Option<Frame> {
         if a.subworld.is_some() {
             return None;
@@ -1728,7 +1817,14 @@ impl WorldMap {
             // Nothing placed yet anywhere: this dump *defines* the frame, so its own numbers are the
             // frame. Only ever taken once per run.
             return match self.places.values().any(|p| p.pos.is_some()) {
-                false => Some(Frame { scale: 1.0, dx: 0.0, dy: 0.0, anchors: 0 }),
+                false => Some(Frame {
+                    scale: 1.0,
+                    dx: 0.0,
+                    dy: 0.0,
+                    anchors: 0,
+                    scale_measured: true,
+                    disagreement: 0.0,
+                }),
                 true => None,
             };
         }
@@ -1746,21 +1842,51 @@ impl WorldMap {
         }
         // A baseline of a few pixels cannot measure a ratio; treat it as one anchor rather than
         // trusting it. Nodes are drawn tens of pixels apart at any usable zoom.
-        let scale = match best.filter(|(d, _, _)| *d > 8.0) {
+        let (scale, scale_measured) = match best.filter(|(d, _, _)| *d > 8.0) {
             Some((drawn, i, j)) => {
                 let ((wax, way), _) = anchors[i];
                 let ((wbx, wby), _) = anchors[j];
-                ((wbx - wax).powi(2) + (wby - way).powi(2)).sqrt() / drawn
+                (((wbx - wax).powi(2) + (wby - way).powi(2)).sqrt() / drawn, true)
             }
-            None => 1.0,
+            // Not measurable here, so fall back on the last dump that could measure it. `None` means
+            // we have zoomed since and nothing has re-measured — the one state in which a placement
+            // would write a wrong scale into the frame for ever, so this dump does nothing at all.
+            None => (self.screen_scale.0?, false),
         };
         let ((wx, wy), (sx, sy)) = anchors[0];
-        Some(Frame {
-            scale,
-            dx: wx - sx * scale,
-            dy: wy - sy * scale,
-            anchors: anchors.len(),
-        })
+        let (dx, dy) = (wx - sx * scale, wy - sy * scale);
+        // Where the fit puts each anchor, against where the frame already has it. Zero for one
+        // anchor, which is the one the offset came from. See [`Frame::disagreement`].
+        let disagreement = anchors
+            .iter()
+            .map(|((wx, wy), (sx, sy))| {
+                ((sx * scale + dx - wx).powi(2) + (sy * scale + dy - wy).powi(2)).sqrt()
+            })
+            .fold(0.0f64, f64::max);
+        Some(Frame { scale, dx, dy, anchors: anchors.len(), scale_measured, disagreement })
+    }
+
+    /// Records that we have moved the zoom, so nothing is placed until a dump measures the new scale.
+    ///
+    /// The zoom is ours alone to move: `setZoom` is reached from `core:wheelmoved`
+    /// (`overworldview.lua:1529-1531`) and from the options screen, and `zoomMult` is otherwise a
+    /// module local that entering or leaving a subworld does not touch. So this cannot be missed by
+    /// forgetting to call it somewhere the game zooms on its own — there is no such place.
+    ///
+    /// It is belt and braces beside the remembered scale rather than the fix itself: replaying the
+    /// 1752Z run, the re-centring dump straight after the zoom carried four anchors and measured the
+    /// new scale immediately. This covers the case where it carries one.
+    pub fn zoom_changed(&mut self) {
+        self.screen_scale = ScreenScale(None);
+    }
+
+    /// How far this dump disagrees with the frame, when it disagrees enough to stop us placing.
+    ///
+    /// For the log line that names the fault on the spot. The 1752Z run had this signal in every
+    /// dump for 130 steps and printed none of it, so the corruption was only found afterwards, from a
+    /// screenshot that happened to catch the tooltip of the node we had missed.
+    pub fn frame_disagreement(&self, a: &Adjacency) -> Option<f64> {
+        self.registration(a).filter(|f| !f.is_sound()).map(|f| f.disagreement)
     }
 
     /// Everything that counts as having got somewhere, in one comparable value.
@@ -1815,7 +1941,7 @@ impl WorldMap {
     ///
     /// `None` when the node has no world position, or when the dump shares nothing with the frame.
     pub fn screen_position(&self, a: &Adjacency, key: &str) -> Option<(f64, f64)> {
-        let f = self.registration(a).filter(|f| f.anchors >= 2)?;
+        let f = self.registration(a).filter(|f| f.anchors >= 2 && f.is_sound())?;
         let (wx, wy) = self.places.get(key)?.pos?;
         Some(((wx - f.dx) / f.scale, (wy - f.dy) / f.scale))
     }
@@ -1901,7 +2027,14 @@ impl WorldMap {
 
         // Where this dump's coordinates sit relative to the frame we are building. `None` means we
         // cannot place anything from it — see [`WorldMap::registration`].
-        let shift = self.registration(a);
+        //
+        // A fit whose anchors disagree with each other is refused outright: the frame is already two
+        // frames, and placing more nodes from it spreads the damage rather than diluting it.
+        let shift = self.registration(a).filter(Frame::is_sound);
+        // **Only a dump that measured the scale may update it.** Everything else inherits.
+        if let Some(f) = shift.filter(|f| f.scale_measured) {
+            self.screen_scale = ScreenScale(Some(f.scale));
+        }
 
         for n in &a.nodes {
             // Connections of a node inside a subworld are inside the same subworld: the dump lists
@@ -5964,19 +6097,25 @@ mod tests {
     /// refused whole for being v1, and it holds 407 places and 1188 edges from an adventure that
     /// walked much further than any since. Only the coordinates were ever scaled by the zoom; the
     /// edges are statements about the world's shape and survive it.
+    ///
+    /// **v2 joined v1 on 2026-08-17**, for the same fault one level down: a v2 writer measured the
+    /// scale when it could and assumed `1.0` when it could not, so a file written across a zoom holds
+    /// two scales exactly as a v1 file does. See [`CACHE_VERSION`].
     #[test]
     fn an_old_cache_keeps_its_edges_and_drops_its_positions() {
         let v1 = "# diggle map cache v1\np\tl9\tSaltagh Park forest\t100\t200\t3\t0\t\ne\tl9\tl19\n";
-        let mut m = WorldMap::new();
-        assert!(m.absorb_cache(v1) > 0, "the edges are the point of reading it at all");
-        assert!(m.get("l9").unwrap().neighbours.contains("l19"), "shape survives a zoom");
-        assert_eq!(m.get("l9").unwrap().heading, "Saltagh Park forest", "so does a name");
-        assert_eq!(m.get("l9").unwrap().pos, None, "the coordinates do not, and must not be kept");
+        for old in ["v1", "v2"] {
+            let text = v1.replacen("v1", old, 1);
+            let mut m = WorldMap::new();
+            assert!(m.absorb_cache(&text) > 0, "the edges are the point of reading {old} at all");
+            assert!(m.get("l9").unwrap().neighbours.contains("l19"), "shape survives a zoom");
+            assert_eq!(m.get("l9").unwrap().heading, "Saltagh Park forest", "so does a name");
+            assert_eq!(m.get("l9").unwrap().pos, None, "{old} coordinates must not be kept");
+        }
 
         // The current format keeps everything, which is the whole difference between them.
-        let v2 = v1.replacen("v1", "v2", 1);
         let mut m = WorldMap::new();
-        m.absorb_cache(&v2);
+        m.absorb_cache(&v1.replacen("# diggle map cache v1", CACHE_VERSION, 1));
         assert_eq!(m.get("l9").unwrap().pos, Some((100.0, 200.0)));
     }
 
@@ -7514,6 +7653,111 @@ mod tests {
         assert_eq!(m.screen_position(&now, "never-seen"), None);
     }
 
+    /// The scale is remembered, not assumed — which is what ended the run of 2026-08-16 1752Z.
+    ///
+    /// The sequence is the run's, at a tenth of the size. A frame is built at one zoom; the map is
+    /// zoomed out; a dump with two anchors measures the new scale correctly; and then a dump with
+    /// **one** anchor arrives, which is the ordinary way a new node is learned — you walk somewhere
+    /// new and the only node in the dump you have already placed is the one you came from.
+    ///
+    /// The old rule assumed `scale = 1.0` there, i.e. that the frame was still at screen scale, and
+    /// wrote the new node into the frame at half size. From then on the frame was two frames.
+    #[test]
+    fn a_one_anchor_dump_inherits_the_measured_scale_instead_of_assuming_one() {
+        let mut m = WorldMap::new();
+        // The frame, defined by its first dump: `a` at (100,100) and `b` at (200,100).
+        m.fold(&dump("here", "Somewhere", vec![
+            node_at("a", "A", 100.0, 100.0),
+            node_at("b", "B", 200.0, 100.0),
+        ]));
+
+        // Zoomed out a step, so everything draws at half size. Two anchors, so the scale is there to
+        // be measured: `a` and `b` are 100 apart in the frame and 50 apart here.
+        m.zoom_changed();
+        m.fold(&dump("n1", "Halfway", vec![
+            node_at("a", "A", 50.0, 50.0),
+            node_at("b", "B", 100.0, 50.0),
+            node_at("d", "D", 150.0, 50.0),
+        ]));
+        assert_eq!(m.get("d").unwrap().pos, Some((300.0, 100.0)), "measured, so `d` is in frame units");
+
+        // **The step that used to poison everything.** One anchor, still at the zoomed-out scale.
+        // Assuming 1.0 here would put `e` at (350, 100) — half a node's spacing out, and permanent.
+        m.fold(&dump("n2", "Further", vec![
+            node_at("d", "D", 150.0, 50.0),
+            node_at("e", "E", 200.0, 50.0),
+        ]));
+        assert_eq!(m.get("e").unwrap().pos, Some((400.0, 100.0)), "the remembered scale still applies");
+
+        // And the frame is still one frame: a later dump mixing an old node with a new one agrees
+        // with both. Under the old rule this is where the two populations met and averaged.
+        let mixed = dump("n3", "Elsewhere", vec![
+            node_at("b", "B", 100.0, 50.0),
+            node_at("e", "E", 200.0, 50.0),
+            node_at("d", "D", 150.0, 50.0),
+        ]);
+        assert_eq!(m.frame_disagreement(&mixed), None, "no two anchors contradict each other");
+        assert_eq!(m.screen_position(&mixed, "a"), Some((50.0, 50.0)), "so aiming still lands");
+    }
+
+    /// After a zoom, nothing is placed until some dump has measured the new scale.
+    ///
+    /// The remembered scale is right until the moment we change the zoom, and then it is exactly as
+    /// wrong as the assumption it replaced. We are the only thing that changes the zoom — `setZoom`
+    /// is reached from `core:wheelmoved` and the options screen, and `zoomMult` is otherwise a module
+    /// local that entering a subworld does not touch — so saying so costs one call.
+    #[test]
+    fn a_zoom_suspends_placing_until_a_dump_can_measure_it() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "Somewhere", vec![
+            node_at("a", "A", 100.0, 100.0),
+            node_at("b", "B", 200.0, 100.0),
+        ]));
+        m.zoom_changed();
+
+        // One anchor and an unknown scale: this dump can say nothing about where `d` is.
+        m.fold(&dump("n1", "Halfway", vec![node_at("a", "A", 50.0, 50.0), node_at("d", "D", 150.0, 50.0)]));
+        assert_eq!(m.get("d").unwrap().pos, None, "a guess here is a guess for the rest of the run");
+        assert!(m.get("d").is_some(), "the node is still known — only its position is withheld");
+
+        // Two anchors measure it, and `d` is placed the moment a dump can say where it is.
+        m.fold(&dump("n2", "Halfway", vec![
+            node_at("a", "A", 50.0, 50.0),
+            node_at("b", "B", 100.0, 50.0),
+            node_at("d", "D", 150.0, 50.0),
+        ]));
+        assert_eq!(m.get("d").unwrap().pos, Some((300.0, 100.0)));
+    }
+
+    /// A fit whose anchors contradict each other places nothing and aims nothing.
+    ///
+    /// The frame's own positive control. Three anchors are the fewest that can show it — see
+    /// [`Frame::disagreement`] — and the wrong one here is off by exactly the amount the old
+    /// placement rule would have introduced.
+    #[test]
+    fn anchors_that_disagree_stop_the_frame_being_used_at_all() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "Somewhere", vec![
+            node_at("a", "A", 100.0, 100.0),
+            node_at("b", "B", 200.0, 100.0),
+        ]));
+        // `c` planted at a position no dump could have produced, standing in for a node placed at
+        // the wrong scale before this rule existed — or read out of a cache written by such a run.
+        m.entry("c").pos = Some((350.0, 100.0));
+
+        let bad = dump("n1", "Halfway", vec![
+            node_at("a", "A", 50.0, 50.0),
+            node_at("b", "B", 100.0, 50.0),
+            node_at("c", "C", 150.0, 50.0),
+            node_at("new", "New", 200.0, 50.0),
+        ]);
+        let px = m.frame_disagreement(&bad).expect("the anchors cannot all be right");
+        assert!(px > FRAME_TOLERANCE, "{px} px of disagreement is a broken frame, not noise");
+        m.fold(&bad);
+        assert_eq!(m.get("new").unwrap().pos, None, "placing from a broken frame spreads it");
+        assert_eq!(m.screen_position(&bad, "a"), None, "and aiming from one clicks empty ground");
+    }
+
     /// Positions come from the surface only, so a subworld's own frame cannot contaminate it.
     #[test]
     fn a_subworld_dump_places_nothing() {
@@ -8151,14 +8395,16 @@ mod tests {
     /// remembered name is not evidence of danger and is not treated as any.
     #[test]
     fn corruption_is_what_makes_a_remembered_heading_a_fight() {
-        let cached = "# diggle map cache v2
-p	l4	Riccall crypt	951	275	4	0	
-p	l11	Rowlston Covert village	900	300	2	0	
+        let cached = format!(
+            "{CACHE_VERSION}
+p	l4	Riccall crypt	951	275	4	0
+p	l11	Rowlston Covert village	900	300	2	0
 e	l4	l11
-";
+"
+        );
         let mut m = WorldMap::new();
         m.fold(&dump("here", "camp", vec![node("l4", "")]));
-        assert!(m.absorb_cache(cached) > 0);
+        assert!(m.absorb_cache(&cached) > 0);
         m.here = Some("here".into());
         m.gold = HEART_COST + 1;
 
@@ -9580,13 +9826,13 @@ e	l4	l11
         let seen = fresh.entry("mid").pos;
         assert!(seen.is_some(), "the premise: this run placed it");
 
-        let stale = "# diggle map cache v2\np\tmid\tSomewhere Else crypt\t999\t999\t7\t3\t\n";
-        fresh.absorb_cache(stale);
+        let stale = format!("{CACHE_VERSION}\np\tmid\tSomewhere Else crypt\t999\t999\t7\t3\t\n");
+        fresh.absorb_cache(&stale);
         assert_eq!(fresh.entry("mid").pos, seen, "a cache moved a node this run had placed");
         assert_eq!(fresh.entry("mid").heading, "Quiet Glade meadow", "a cache renamed a live node");
 
         // But a place the run has never heard of is taken whole.
-        fresh.absorb_cache("# diggle map cache v2\np\tfar\tBorsea shrine\t12\t34\t2\t1\t\n");
+        fresh.absorb_cache(&format!("{CACHE_VERSION}\np\tfar\tBorsea shrine\t12\t34\t2\t1\t\n"));
         assert_eq!(fresh.entry("far").heading, "Borsea shrine");
         assert_eq!(fresh.entry("far").pos, Some((12.0, 34.0)));
     }

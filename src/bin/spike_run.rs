@@ -129,6 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         needs_recentre: false,
         pan_retries: 0,
         zoomed_out: false,
+        frame_alarm: false,
     };
 
     // Timed because the startup felt slow and nobody could say which part was slow. `wait_for_window`
