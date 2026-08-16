@@ -456,6 +456,7 @@ impl Fight<'_> {
         let armour = cs.int_at("rpg.enemy.armour").unwrap_or(0);
         let name = cs.str_at("rpg.enemy.name").unwrap_or("?").to_string();
         let (mods, geom) = Modifiers::from_save(&self.game_dir, cs, tiles.len())?;
+        log.push_str(&board_census(tiles.len(), &geom));
         for p in &mods.problems {
             log.push_str(&format!("  WARNING {p}\n"));
         }
@@ -1309,6 +1310,46 @@ fn tiles_of(save: &Table) -> Vec<crate::observe::board::Tile> {
         .unwrap_or_default()
 }
 
+/// One line per turn: how many tiles the dump carried, and the shape we read it against.
+///
+/// **Printed unconditionally, and it is not decoration.** Every tile index in this program —
+/// which slot a click aims at, which entries are corners, which letters a word may draw on — is
+/// positional against `Geometry::rows_per_col`. `getDataForSave` (`tileboard.lua:2446-2456`)
+/// builds the dump with `table.insert` over nested `ipairs`: a **dense** column-major list with no
+/// slot indices and no gap marker, so if a live column can be short and we do not know it, entry
+/// *i* stops naming slot *i* from that column onward and every click after it lands one tile out.
+///
+/// The heights themselves are the answer. `tileboard.lua:2457-2467` writes `letters.columns` —
+/// each entry `#tilegrid[i]` — **only** when `#letters ~= totalTileCount`, and
+/// [`crate::geometry::Geometry::from_save`] honours it, so a short column shows here as a height
+/// below its neighbours. The two counts agreeing means the mapping is sound for this turn; them
+/// disagreeing means the shape is a guess, which the `WARNING` beside this line spells out.
+///
+/// ## What the saves already on disk say, and why the line is still worth a turn
+///
+/// Columns go short, and not by one: three of nine kept `combatSaveData` files carry `columns`,
+/// down to `0/0/1/0/0` on a sixteen-slot board. But those are **wait-phase** saves.
+/// `rpg:save()` runs at `rpgview.lua:1452` and `:1512` while the board is still spent, and again at
+/// `:1567` — which is the same function, four lines after `tileboard.onPlayerTurn` has refilled it.
+/// `fill` queues exactly `colTileCounts[i] - #grid[i]` per column (`tileboard.lua:749`,
+/// `getFreeSlotCount` at `:285-297`), so the dump a *player turn* is planned against should read
+/// full every time.
+///
+/// Should. Two known ways it does not, both of which this line catches on the turn they happen:
+///
+/// - **at zero health there is no refill at all.** `tileboard.lua:1231-1234` guards `fill()` on
+///   `getPlayerHealth() > 0`, so a bleedout turn is played on whatever the board has left — the
+///   one turn where a mis-aimed click costs the run.
+/// - `boardRefreshOnSubmitConsume` gear skips the fill on every turn but the first (`:1232`).
+///
+/// Which is what makes it worth printing rather than reasoning about once: it says on each turn
+/// whether the indices we are about to click were positional, and a fight that ends with sixteen on
+/// every line has ruled short columns out as the cause of `#30`'s stray selections.
+fn board_census(dump: usize, geom: &crate::geometry::Geometry) -> String {
+    let heights: Vec<String> = geom.rows_per_col.iter().map(|n| n.to_string()).collect();
+    format!("  board {dump} tiles, shape {} ({})\n", geom.total_tiles(), heights.join("/"))
+}
+
 /// The rewards on offer, from the `Item selection:` block.
 ///
 /// `ui/itemselection.lua:419-430` prints each item with its name and **screen coordinates**, so the
@@ -1421,6 +1462,75 @@ mod tileboard_tests {
 
     fn board(src: &str) -> Vec<crate::observe::board::Tile> {
         tiles_of(&parse(src).expect("parses"))
+    }
+
+    /// Geometry resolved the way a turn resolves it, from a save rather than from a struct literal:
+    /// the census is only worth printing if it reports what the live path would report.
+    fn shape(save: &str, dump: usize) -> crate::geometry::Geometry {
+        crate::geometry::Geometry::from_save(&parse(save).expect("parses"), dump).geometry
+    }
+
+    const NO_SHAPE_GEAR: &str = "return { passives = {}, rpg = { player = { gearFlags = {} } } }";
+
+    #[test]
+    fn a_full_board_reports_both_counts_and_its_column_heights() {
+        let census = board_census(16, &shape(NO_SHAPE_GEAR, 16));
+        assert_eq!(census, "  board 16 tiles, shape 16 (4/4/4/4)\n");
+    }
+
+    /// The question the line exists to answer: can a live column be short, and does it show?
+    ///
+    /// Same fixture as `geometry::a_corner_that_fell_off_is_a_ceiling_and_not_a_fault` — the save
+    /// writes `columns` exactly when the board no longer adds up (`tileboard.lua:2457-2467`), so a
+    /// tile that fell off the fourth column leaves `4/4/4/3` and the counts still agree.
+    #[test]
+    fn a_short_column_is_visible_as_a_height_below_its_neighbours() {
+        let save = "return { passives = {}, rpg = { player = { gearFlags = {} } },
+                     tileboard = { columns = { 4, 4, 4, 3 } } }";
+        let census = board_census(15, &shape(save, 15));
+        assert_eq!(census, "  board 15 tiles, shape 15 (4/4/4/3)\n");
+    }
+
+    /// The control, and the failure this is watching for: fifteen tiles read against a shape that
+    /// still believes in sixteen. Index 12 onward would name the wrong slot, and the line says so
+    /// by printing two numbers that do not match — without which the census could print anything
+    /// and the tests above would still pass.
+    #[test]
+    fn a_shape_that_does_not_account_for_the_dump_shows_the_disagreement() {
+        let census = board_census(15, &shape(NO_SHAPE_GEAR, 15));
+        assert_eq!(census, "  board 15 tiles, shape 16 (4/4/4/4)\n");
+    }
+
+    /// **Real bytes, and they settle the question outright: columns go short, and badly.**
+    ///
+    /// `tests/fixtures/combatSaveData-l1-depleted.lua` is the `l1-midfight-depleted` checkpoint
+    /// verbatim — the fight that produced the `BEFORE`/`AFTER` boards above. Its `hench` passive
+    /// makes the board a hexagonal five-wide `3/3/4/3/3`, sixteen slots; by this turn it held
+    /// **ten**, laid out `1/2/3/2/2`. Nothing about the dump says so. Read positionally against the
+    /// nominal shape, entry 3 would be called `(2,1)` when it is really `(2,2)`, and every index
+    /// after it worse.
+    ///
+    /// So the mapping is only sound because `columns` is present and honoured, and the census is
+    /// the per-turn proof that it was.
+    #[test]
+    fn the_depleted_l1_board_was_ragged_and_the_census_says_so() {
+        let save =
+            crate::game::save::load(std::path::Path::new(
+                "tests/fixtures/combatSaveData-l1-depleted.lua",
+            ))
+            .expect("fixture loads");
+        let tiles = tiles_of(&save);
+        let resolved = crate::geometry::Geometry::from_save(&save, tiles.len());
+        assert_eq!(tiles.len(), 10, "ten tiles left on a sixteen-slot board");
+        assert!(resolved.problems.is_empty(), "not a guess: {:?}", resolved.problems);
+        assert_eq!(
+            board_census(tiles.len(), &resolved.geometry),
+            "  board 10 tiles, shape 10 (1/2/3/2/2)\n"
+        );
+        // The claim above, made assertable: the nominal shape is a different board entirely, so a
+        // run that ignored `columns` would have been indexing against sixteen slots.
+        let nominal = crate::tables::shape("hench").expect("hench is baked");
+        assert_eq!(nominal.col_tile_counts, &[3, 3, 4, 3, 3]);
     }
 
     #[test]
