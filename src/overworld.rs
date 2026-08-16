@@ -128,8 +128,22 @@ pub struct Place {
     /// `<key>_attacked` is in `areaFlags`: this settlement, or this building, was lost.
     ///
     /// Permanent. All that is left is `Loot` (`village.lua:393-395`), which is task #26 and not a
-    /// rest. See [`Place::trades`].
+    /// rest. See [`Place::trades`] and [`Place::loot_left`].
     pub sacked: bool,
+    /// `<parent>_attack.playerAttack` — **we** are the ones who sacked this settlement.
+    ///
+    /// Recorded on the parent, and the third of the three ways a building's buttons become the
+    /// destroyed set (`village.lua:91-96`). Distinct from [`Place::under_attack`], which is the same
+    /// `_attack` flag merely existing: an attack in progress leaves the buildings shut but intact,
+    /// and this says the village is already past saving.
+    pub player_sacked: bool,
+    /// `<key>_looted` — how many times this building has been picked over.
+    ///
+    /// The counter `createLootButton` tests: the button stays pressable while
+    /// `(areaFlag(<key>_looted) or 0) < (loot or 2)` (`utils/world.lua:1317-1332`), so it is a budget
+    /// rather than a flag. Written by `incrementLootCounters` on every outcome, including the one
+    /// that finds nothing.
+    pub looted: u32,
     /// A lost woods we have already been swallowed by, and will not enter again.
     ///
     /// Set from the `lost_woods_known_*` save flags — see [`crate::subworld::LOST_WOODS_KNOWN`].
@@ -543,6 +557,52 @@ impl Place {
     /// attack indicator — so this is the same information a player has.
     pub fn trades(&self) -> bool {
         !self.under_attack && !self.sacked
+    }
+
+    /// How many times this building may still be looted, if it is a building that can be. — #26
+    ///
+    /// **Says nothing about whether the village is destroyed**, which is the other half of the
+    /// question and belongs to the parent — see [`WorldMap::loot_here`]. This is the per-node budget
+    /// only: which types carry a `Loot` button at all, and how many presses each allows.
+    ///
+    /// The table is `createLootButton(shopType, icon, iconScale, loot)` with `loot` defaulting to 2
+    /// (`utils/world.lua:1317-1332`), read off every call site in the game:
+    ///
+    /// | type | where | presses |
+    /// |---|---|---|
+    /// | market stall | `village.lua:284` | 2 |
+    /// | general store | `:333` | 2 |
+    /// | inn | `:394` | 2 |
+    /// | apothecary | `:454` | 2 |
+    /// | house | `:491` | **1** |
+    /// | chapel | `:549` | 2 |
+    ///
+    /// **Three more sites exist and are deliberately not here**, because each is reached by a
+    /// *different* rule and one of them is not about destruction at all:
+    ///
+    /// - a **church** on church grounds (`church_ground.lua:176`) keeps its Loot in
+    ///   `lootAreaButtons`, chosen by that file's own `getAreaButtons`;
+    /// - a **lodge** in an apple orchard (`apple_orchard.lua:248`, 1 press) is destroyed-gated like a
+    ///   village but by the orchard's generator;
+    /// - a **chapel ruin** in a forest (`forest.lua:266`, 1 press) carries Loot in its ordinary
+    ///   `areaButtons`, gated only by `subnodeHasEnemies` (`:86-88`) — so it is lootable on any
+    ///   peaceful visit, **destroyed or not**. That is a better grab than this whole entry and it is
+    ///   a separate rule; it is written up in #26 rather than guessed at here.
+    ///
+    /// The well is the trap in this table: it has a `destroyedAreaButtons` (`village.lua:238`) and
+    /// that button is `wellWater`, not `Loot`. Enumerating types with destroyed buttons would have
+    /// pressed it.
+    pub fn loot_left(&self) -> u32 {
+        let allowed: u32 = match () {
+            _ if self.type_is("house") => 1,
+            _ if self.type_is("market stall")
+                || self.type_is("general store")
+                || self.type_is("inn")
+                || self.type_is("apothecary")
+                || self.type_is("chapel") => 2,
+            _ => return 0,
+        };
+        allowed.saturating_sub(self.looted)
     }
 
     /// A village or a town — somewhere with an inn and shops inside.
@@ -1460,6 +1520,46 @@ impl WorldMap {
         edges
     }
 
+    /// How many times `key` may still be looted, counting the state of the settlement around it.
+    ///
+    /// The dev, 2026-08-09: *passing through a corrupted village lost to demons, a `Loot` button
+    /// appears in the bottom-left slot at every lootable node. High priority, easy grab.* This is the
+    /// question behind that, and the whole of what a caller has to ask before pressing.
+    ///
+    /// Two conditions, from `getAreaButtons` (`overworld/generators/village.lua:84-98`):
+    ///
+    /// ```lua
+    /// if overworldview.areaFlag(location.key..'_attacked')
+    /// or overworldview.areaFlag(location.parentNode.key..'_attacked')
+    /// or overworldview.areaFlag(location.parentNode.key..'_attack').playerAttack then
+    ///     return location.typeData.destroyedAreaButtons or {}
+    /// end
+    /// ```
+    ///
+    /// — the building or its village was lost, **or we sacked it ourselves** — and then the per-type
+    /// budget in [`Place::loot_left`].
+    ///
+    /// **The parent clause is not a detail.** A village is lost as a whole: the flag lands on the
+    /// container and the buildings inherit it, so asking only `<key>_attacked` would find nothing at
+    /// almost every node that actually has a `Loot` button.
+    ///
+    /// Zero when there is nothing to take, so a caller can treat it as a count and a condition at
+    /// once. **Nothing presses this yet** — see #26 for why the press is held back and what a live
+    /// run has to show first.
+    pub fn loot_here(&self, key: &str) -> u32 {
+        let Some(p) = self.places.get(key) else { return 0 };
+        let destroyed = p.sacked
+            || p.parent
+                .as_ref()
+                .and_then(|c| self.places.get(c))
+                .map(|c| c.sacked || c.player_sacked)
+                .unwrap_or(false);
+        match destroyed {
+            true => p.loot_left(),
+            false => 0,
+        }
+    }
+
     /// Records that we have had our one attempt at `key` and it should stop being a destination.
     ///
     /// Deliberately not folded into `apply_save`: the save is the game's view and would overwrite
@@ -2317,6 +2417,34 @@ impl WorldMap {
                 .collect();
             for k in besieged {
                 self.entry(&k).under_attack = true;
+            }
+            // **`_attack.playerAttack`, which is not the same statement as `_attack` existing.** The
+            // flag is a table, and the game's destroyed test reads that one field of it
+            // (`village.lua:93`): an attack in progress shuts the buildings, but an attack *we*
+            // pressed has already finished them. Taken as a pair with the key so the borrow ends
+            // before `entry` is called.
+            let player_sacked: Vec<String> = flags
+                .map
+                .iter()
+                .filter(|(_, v)| {
+                    v.as_table().and_then(|t| t.get("playerAttack")).and_then(|v| v.as_bool())
+                        == Some(true)
+                })
+                .filter_map(|(k, _)| k.strip_suffix("_attack"))
+                .map(|s| s.to_string())
+                .collect();
+            for k in player_sacked {
+                self.entry(&k).player_sacked = true;
+            }
+            // `<key>_looted`, a **count** rather than a flag — see [`Place::looted`].
+            let looted: Vec<(String, u32)> = flags
+                .map
+                .iter()
+                .filter_map(|(k, v)| Some((k.strip_suffix("_looted")?, v)))
+                .map(|(k, v)| (k.to_string(), v.as_int().unwrap_or(0).max(0) as u32))
+                .collect();
+            for (k, n) in looted {
+                self.entry(&k).looted = n;
             }
             // **Every road the save names is an edge, and we were throwing all of them away.**
             //
@@ -7773,6 +7901,66 @@ mod tests {
             node_at("d", "D", 150.0, 50.0),
         ]));
         assert_eq!(m.get("d").unwrap().pos, Some((300.0, 100.0)));
+    }
+
+    /// #26: what is left to loot in a village the demons have taken.
+    ///
+    /// The dev's rule, and the two halves it needs — the settlement is destroyed, and the building is
+    /// a kind that carries a `Loot` button with presses left on it. Nothing here presses anything;
+    /// see the entry for why the press is held back.
+    #[test]
+    fn a_destroyed_village_says_what_is_left_to_loot() {
+        let village = |flags: &str| {
+            let mut m = WorldMap::new();
+            m.fold(&inside_dump(
+                "l10",
+                "l10sub1",
+                "Ulrome general store",
+                vec![
+                    node("l10sub2", "Ulrome inn"),
+                    node("l10sub3", "Ulrome house"),
+                    node("l10sub4", "Ulrome well"),
+                    node("l10sub5", "Ulrome crossroads"),
+                ],
+                vec![exit("l19")],
+            ));
+            m.entry("l10").heading = "Ulrome village".into();
+            m.apply_save(
+                &crate::game::save::parse(&format!(
+                    "return {{ overworld = {{ areaFlags = {{ hell = 0, {flags} }} }} }}"
+                ))
+                .unwrap(),
+            );
+            m
+        };
+
+        // An intact village has nothing to loot, however lootable the buildings are.
+        let intact = village("");
+        for k in ["l10sub1", "l10sub2", "l10sub3"] {
+            assert_eq!(intact.loot_here(k), 0, "{k} is a shop, not a ruin");
+        }
+
+        // Lost — and the flag lands on the **village**, which is the clause that matters. Asking only
+        // `<key>_attacked` would find nothing at any of these.
+        let lost = village("l10_attacked = 4");
+        assert_eq!(lost.loot_here("l10sub1"), 2, "a general store is worth two presses");
+        assert_eq!(lost.loot_here("l10sub2"), 2, "and so is an inn");
+        assert_eq!(lost.loot_here("l10sub3"), 1, "a house allows one (`village.lua:491`)");
+        assert_eq!(lost.loot_here("l10sub4"), 0, "a well's destroyed button is water, not loot");
+        assert_eq!(lost.loot_here("l10sub5"), 0, "and a crossroads has no button at all");
+
+        // Sacking it ourselves counts, and it is a different flag: `_attack.playerAttack`, not the
+        // mere presence of `_attack`, which is a fight still in progress.
+        let ours = village("l10_attack = { playerAttack = true }");
+        assert!(ours.get("l10").unwrap().player_sacked);
+        assert_eq!(ours.loot_here("l10sub1"), 2, "we did this, and it is still lootable");
+        let besieged = village("l10_attack = { attackingEnemies = 3 }");
+        assert_eq!(besieged.loot_here("l10sub1"), 0, "a fight in progress is not a ruin yet");
+
+        // The counter is a budget: it counts down and stops the press when it is spent.
+        let picked = village("l10_attacked = 4, l10sub1_looted = 1, l10sub3_looted = 1");
+        assert_eq!(picked.loot_here("l10sub1"), 1, "one press taken of two");
+        assert_eq!(picked.loot_here("l10sub3"), 0, "the house is done");
     }
 
     /// A frame that came off disk has an unknown scale until a dump measures it.

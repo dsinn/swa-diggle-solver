@@ -3682,6 +3682,26 @@ pub fn drive(
         let here = r.map.here().unwrap_or("?").to_string();
         let place = r.map.get(&here).cloned();
 
+        // **#26, the reading half.** What a destroyed village leaves behind, said out loud and not
+        // acted on.
+        //
+        // The press is the part nobody has watched: `lootShop` (`utils/world.lua:1260-1315`) has two
+        // outcomes and only one of them changes the screen — `#rewards > 0` opens an item selection,
+        // and an empty shelf adds gold, plays a particle and changes no mode at all, so a driver that
+        // presses and waits for a screen hangs on the ordinary case. The dev's call on that was to
+        // *press it and look* rather than predict it, which needs a live run to be looking.
+        //
+        // So this run says what it can see, and a run with the dev watching turns it into a press
+        // with the detection already proved. Free either way: `loot_here` is two map lookups on a
+        // step that has already done far more.
+        match r.map.loot_here(&here) {
+            0 => {}
+            left => r.log.push_str(&format!(
+                "  `{here}` ({}) can still be looted {left}× — **not pressed**, see #26\n",
+                place.as_ref().map(|p| p.heading.as_str()).unwrap_or("?")
+            )),
+        }
+
         // **Are we going round in circles?** See [`Run::sterile_here`] for why this is here at all
         // and why it stops rather than steers.
         //
