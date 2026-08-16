@@ -1162,7 +1162,14 @@ impl Run<'_> {
     /// screen, and the one destroyed was of the inn, which is the one nobody could then explain.
     /// Photographs are cheap and a run writes few of them; collisions are not worth the disk they
     /// save.
-    fn snap_screen(&mut self, tag: &str) {
+    ///
+    /// **Public because the moments worth photographing include the ones before `drive` starts.**
+    /// A score in a report says how badly a template matched; it cannot say what the screen was, and
+    /// re-running to find out only works when the state repeats. The failure this was opened up for
+    /// does not repeat: a fresh profile shows the auto-save card once, and the game sets
+    /// `persistent.tutorials.autoSave` and writes it the moment it does
+    /// (`ui/publishersplash.lua:50-52`), so the second look is at a different screen.
+    pub fn snap_screen(&mut self, tag: &str) {
         let n = self.snaps.entry(tag.to_string()).or_insert(0);
         *n += 1;
         let tag = &if *n == 1 { tag.to_string() } else { format!("{tag}-{n}") };

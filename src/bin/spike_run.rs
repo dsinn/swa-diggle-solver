@@ -56,7 +56,7 @@ use diggle_solver::observe::affirm;
 use diggle_solver::observe::feed::Feed;
 use diggle_solver::observe::log::{Console, LogMirror};
 use diggle_solver::overworld::WorldMap;
-use diggle_solver::win::input::PostMessageInput;
+use diggle_solver::win::input::{Input, PostMessageInput, SC_RETURN, VK_RETURN};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -143,6 +143,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let menu_at = Instant::now();
     let mut found: Result<f64, String> = Err("menu never rendered".into());
     let mut offers_start = false;
+    /// How many Returns to spend on a lore card standing in front of the menu.
+    ///
+    /// Two, because the auto-save card is the only one the startup path can meet and one Return
+    /// clears it — the second is for a keystroke lost to focus, which this project has seen. More
+    /// would be pressing a key at a screen we have no evidence about.
+    const LORE_RETURNS: u32 = 2;
+    let mut pressed_return = 0u32;
     let by = Instant::now() + Duration::from_secs(30);
     while Instant::now() < by {
         let cont = diggle_solver::act::score_exact(&win, &diggle_solver::act::CONTINUE);
@@ -159,6 +166,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if matches!(start, Ok(q) if q >= diggle_solver::act::MENU_START_PRESENT) {
             offers_start = true;
             break;
+        }
+        // **A fresh profile does not open on the menu, and 2026-08-16 is the proof.**
+        //
+        // `ui/publishersplash.lua:46-53`: once the splash is done, the game shows the start menu
+        // *unless* `persistent.tutorials.autoSave` is unset — in which case it pushes a lore card
+        // first (`ui/graphics/text/auto-save.png`, the auto-save notice), sets the flag and writes
+        // `persistentSaveData` on the spot. Clearing that file clears the flag, so the very first
+        // launch after `checkpoint clear` puts a card where this loop expects a menu. `Start` scored
+        // **0.0570** and the run aborted saying the menu might not have rendered; it had, one screen
+        // further on.
+        //
+        // Return is what dismisses it, and that is not a guess: `spike_click_matrix` and
+        // `spike_button_probe` both *force* this card by clearing the save and use "Return dismisses
+        // it" as their positive control before trusting anything else they measure.
+        //
+        // Safe to send blind, which is the only reason it can live in the polling loop: the start
+        // menu's own buttons declare no `userFunctionName`, so Return does nothing there — the same
+        // fact that made `start_new_run` click rather than press. And nothing is assumed of it
+        // either way; the loop simply looks again, and the abort below still fires if neither button
+        // ever appears.
+        if pressed_return < LORE_RETURNS && menu_at.elapsed() > Duration::from_secs(4) {
+            pressed_return += 1;
+            r.keys.focus();
+            let _ = r.keys.press_key(VK_RETURN, SC_RETURN);
+            r.log.push_str(&format!(
+                "  neither button yet — Return {pressed_return} of {LORE_RETURNS}, in case a lore \
+                 card is in front of the menu\n"
+            ));
+            std::thread::sleep(Duration::from_millis(600));
+            continue;
         }
         std::thread::sleep(Duration::from_millis(150));
     }
@@ -188,15 +225,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return finish(&mut game, &r.log, &archive);
                 }
             }
+            // **Ask the observer before giving up.** The dev's standing rule, and this was the one
+            // path that still broke it: on 2026-08-16 the run stopped here saying "the menu may not
+            // have rendered" on the strength of a single number, when what was actually on screen
+            // was the auto-save lore card — a screen the spikes have known about for weeks.
+            //
+            // One number cannot tell "nothing is drawn" from "something else is drawn", and those
+            // want opposite responses. `identify` names it if we have a fingerprint,
+            // `log_button_scores` says what came closest if we do not, and the frame means the next
+            // person can look at the screen itself instead of re-running to see it.
             Ok(q) => {
                 r.log.push_str(&format!(
-                    "ABORT: no Continue, and no `Start` either (best {q:.4}) — the menu may not \
-                     have rendered\n"
+                    "ABORT: no Continue, and no `Start` either (best {q:.4}) — asking what IS on \
+                     screen\n"
                 ));
+                r.log.push_str(&format!("  screen: {:?}\n", diggle_solver::act::identify(&win)));
+                r.log_button_scores();
+                r.snap_screen("startup-no-menu");
                 return finish(&mut game, &r.log, &archive);
             }
             Err(e) => {
                 r.log.push_str(&format!("ABORT: no Continue; could not read `Start`: {e}\n"));
+                r.log.push_str(&format!("  screen: {:?}\n", diggle_solver::act::identify(&win)));
+                r.log_button_scores();
+                r.snap_screen("startup-unreadable");
                 return finish(&mut game, &r.log, &archive);
             }
         }
