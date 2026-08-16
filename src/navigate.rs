@@ -3664,13 +3664,16 @@ pub fn drive(
         //
         // Before any of the branches below, because every one of them is a reason to be at a node
         // and none of them is in a position to notice that we have been at it four times over.
+        // Computed once per step and used twice: by the loop guard below, and by the crossing
+        // branch's door line — which needs exactly this to say whether the door still matches the
+        // errand. Two calls would be two plan computations that could disagree.
+        let doing = r
+            .map
+            .next_target()
+            .map(|p| format!("{:?} -> {}", p.reason, p.target))
+            .unwrap_or_else(|| "no errand".into());
         {
             let laps = r.sterile_here(&here);
-            let doing = r
-                .map
-                .next_target()
-                .map(|p| format!("{:?} -> {}", p.reason, p.target))
-                .unwrap_or_else(|| "no errand".into());
             r.recent.push_back(format!("{step}. `{here}` — {doing}"));
             while r.recent.len() > 10 {
                 r.recent.pop_front();
@@ -4163,6 +4166,29 @@ pub fn drive(
             // `lostOrientation` re-rolls every interior coordinate on re-entry
             // (`forest.lua:483-490`), so a remembered position inside a subworld is worth nothing.
             // A node the dump does not name falls back to the ordinary single step.
+            // **Where the door came from, on every arm and not only `Step`.**
+            //
+            // Task #51. The `l4` loop of 2026-08-16 ran ten crossings toward `l4_path_to_l1` while
+            // the errand was `Heart -> l4_path_to_l10` — a different door, and one the log itself
+            // called "not on any route we know", which is *why* the crossing fell through to the
+            // frontier walk. Two explanations fit: a `crossing_to` commitment held from an older
+            // target (`committed_exit` compares the **goal** and not the target, and this run
+            // emptied a shelf mid-crossing, which moves the target without touching the goal), or
+            // `choose_exit` genuinely preferring `l1`.
+            //
+            // **The log could not tell them apart**, because `door_note` was printed only in the
+            // `Step` arm — and `Steer`, `Probe` and `Seek` are the three arms a loop actually runs
+            // in. One line, before the branch, so the next run answers it instead of the run after
+            // that.
+            //
+            // `door_note` already marks a held commitment with `HELD`; printing the current plan
+            // beside it is what makes a stale one visible, since the two disagreeing is the whole
+            // symptom.
+            r.log.push_str(&format!(
+                "  door: {} | reason {} | plan now {doing}\n",
+                r.map.door_note().unwrap_or_else(|| "none recorded".into()),
+                r.map.door_reason().map(|d| d.why()).unwrap_or("held from earlier"),
+            ));
             let far_inside: Option<(String, (f64, f64))> = match &mv {
                 Crossing::Step { toward, .. } => r
                     .map
@@ -4196,21 +4222,13 @@ pub fn drive(
                         *n,
                     )
                 }
+                // The door's reason and what it was ranked against used to be spliced in here, and
+                // that is now the unconditional line above — three runs in a row turned on which
+                // branch chose the door, and it was the arms *without* the line that needed it.
                 Crossing::Step { to, toward } => match fresh.nodes.iter().find(|n| &n.key == to) {
-                    // The door's reason is printed because three runs in a row turned on which
-                    // branch chose it, and the line looked identical in all of them.
-                    // **And what it was ranked against**, which the reason alone could not say.
-                    // On 2026-08-16 a run left Ulrome by the road to `l7` while the road to `l1` —
-                    // one hop from the anomaly against `l7`'s two — was among the five doors the
-                    // game printed, and this line could not say whether `l1` was even measured.
-                    Some(n) => (
-                        format!(
-                            "crossing `{container}` toward `{toward}` ({}) via `{to}`{}",
-                            r.map.door_reason().map(|d| d.why()).unwrap_or("held from earlier"),
-                            r.map.door_note().map(|s| format!("\n  door choice: {s}")).unwrap_or_default()
-                        ),
-                        (n.x, n.y),
-                    ),
+                    Some(n) => {
+                        (format!("crossing `{container}` toward `{toward}` via `{to}`"), (n.x, n.y))
+                    }
                     None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
                 },
                 // **Separated from `Step`, which it used to share a line with.** The two mean
