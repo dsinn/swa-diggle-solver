@@ -4502,34 +4502,57 @@ pub fn drive(
         // names is on the same route `hop.step` starts — see there. The dump must still place it, so
         // a node the screen does not show falls back to the single step rather than failing.
         //
-        // ## And today it almost never fires, because we cannot aim at a node we cannot see
+        // ## Aiming at a node the dump does not name
         //
-        // A surface dump prints positions for **adjacent connections only** (`overworldview.lua:
-        // 1030-1035`); a node two hops away has no current screen coordinate, and the camera moves
-        // under us with every pan and zoom, so a position remembered from an earlier dump means
-        // nothing now. The game is willing to walk us there — the block is that we have nowhere to
-        // click.
+        // A dump prints positions for **adjacent connections only** (`overworldview.lua:1030-1035`),
+        // so a node two hops out has no coordinate in it. I read that as "it cannot be aimed at" and
+        // the dev corrected it: the dump also carries several nodes we have *already placed*, and
+        // any one of them fixes the camera exactly. That is [`WorldMap::registration`], which has
+        // been building a world frame all along, and [`WorldMap::screen_position`] is the way back
+        // out of it. Measured over 80 settled dumps: every shared node agrees on the shift to
+        // 0.0000 px.
         //
-        // That is task #21, whose purpose this changes: it was filed as a *heuristic* for direction
-        // and is in fact the thing that makes one-press travel possible at all. Until it lands, this
-        // logs what it would have saved, so the case for #21 is measured rather than argued.
+        // So a far hop is aimed from the frame, and the pan machinery below fetches it onto the
+        // screen exactly as it does for a neighbour that sits under the HUD.
+        let mut far_target: Option<crate::observe::adjacency::Node> = None;
         if let Some(far) = r.map.far_hop(&here, &hop.plan.target) {
-            match fresh.nodes.iter().any(|n| n.key == far) {
-                true => {
+            match fresh.nodes.iter().find(|n| n.key == far) {
+                Some(n) => {
                     r.log.push_str(&format!(
                         "  the road to `{far}` is clear the whole way — one press instead of hop by hop\n"
                     ));
+                    far_target = Some(n.clone());
                     hop.step = far;
                 }
-                false => r.log.push_str(&format!(
-                    "  `{far}` is travellable from here in one press and is not on screen to click \
-                     (#21) — stepping to `{}` instead\n",
-                    hop.step
-                )),
+                // Not in this dump, so place it from the frame. `None` here means the frame cannot
+                // speak for it — an unregistered island, or a dump sharing nothing with the frame —
+                // and the ordinary single step is the answer, as it was before any of this.
+                None => match r.map.screen_position(&fresh, &far) {
+                    Some((x, y)) => {
+                        r.log.push_str(&format!(
+                            "  `{far}` is travellable in one press and is not in this dump — placed \
+                             from the world frame at ({x:.0}, {y:.0})\n"
+                        ));
+                        far_target = Some(crate::observe::adjacency::Node {
+                            key: far.clone(),
+                            heading: r.map.get(&far).map(|p| p.heading.clone()).unwrap_or_default(),
+                            x,
+                            y,
+                            connections: r.map.get(&far).map(|p| p.connections).unwrap_or(0),
+                        });
+                        hop.step = far;
+                    }
+                    None => r.log.push_str(&format!(
+                        "  `{far}` is travellable in one press and the frame cannot place it — \
+                         stepping to `{}` instead\n",
+                        hop.step
+                    )),
+                },
             }
         }
         let hop = hop;
-        let Some(target) = fresh.nodes.iter().find(|n| n.key == hop.step).cloned() else {
+        let found = far_target.or_else(|| fresh.nodes.iter().find(|n| n.key == hop.step).cloned());
+        let Some(target) = found else {
             return Stop::Failed(format!("{} is not on screen from {here}", hop.step));
         };
         // The suffix says whether this step is *on the way* or merely *the way it lies*. Without it
@@ -4659,10 +4682,29 @@ pub fn drive(
             // waiting for a map that cannot be drawn until the text is gone.
             r.clear_text_screen();
             r.handle_event();
-            arrived = r.map.here().map(|h| h != here).unwrap_or(false);
+            // **The named node, not merely a different one.**
+            //
+            // This used to be `h != here`, which is right for a single hop and wrong the moment one
+            // press covers several: `core.arriveAt` runs at *every* node on the path
+            // (`overworldview.lua:1210-1216`), so the first intermediate arrival would end the wait
+            // while the avatar was still walking, and the next step would plan from a node we were
+            // about to leave.
+            arrived = r.map.here().map(|h| h == hop.step).unwrap_or(false);
         }
+        // **Short of the named node is progress, not failure.** An event on the way pauses the walk
+        // (arrivals raise lore and choices), and a fight stops it outright. `here` is correct either
+        // way and the top of the loop re-plans from it, so anything that moved us is a step taken.
+        // Only standing still is a failure.
         if !arrived {
-            return Stop::Failed(format!("no arrival at {}", hop.step));
+            let moved = r.map.here().map(|h| h != here).unwrap_or(false);
+            if !moved {
+                return Stop::Failed(format!("no arrival at {}", hop.step));
+            }
+            r.log.push_str(&format!(
+                "  stopped at `{}` on the way to `{}` — re-planning from where we stand\n",
+                r.map.here().unwrap_or("somewhere"),
+                hop.step
+            ));
         }
         let now = r.apply_save();
         if let (Some(b), Some(a)) = (*health, now) {

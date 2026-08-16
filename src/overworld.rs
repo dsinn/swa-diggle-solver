@@ -1583,6 +1583,35 @@ impl WorldMap {
         }
     }
 
+    /// Where a node we have already placed would be **drawn right now**, given this dump.
+    ///
+    /// The inverse of [`WorldMap::registration`], and the piece that was missing rather than the
+    /// frame itself. `registration` returns the shift that takes this dump's numbers into the world
+    /// frame — `world = drawn + shift` — so the way back is simply `drawn = world - shift`.
+    ///
+    /// **This is what makes a distant node clickable.** A dump prints positions for adjacent
+    /// connections only (`overworldview.lua:1030-1035`), so a node two hops away has no coordinate
+    /// of its own in it; that was read as "we cannot aim at it" and it is not, because the dump
+    /// carries several nodes we *have* placed and any one of them fixes the camera exactly. Measured
+    /// over 80 settled dumps from the run of 2026-08-16, every node shared between consecutive dumps
+    /// agreed on the same shift **to 0.0000 px** — the transform is a pure translation at fixed
+    /// zoom, so this is exact rather than an estimate.
+    ///
+    /// Two things it is not:
+    ///
+    /// - **not valid across a zoom.** `zoomMult` scales the frame (`:1033`) and nothing here checks
+    ///   it, which is the same limitation `registration` already carries. A zoom invalidates the
+    ///   answer until a fresh dump re-registers.
+    /// - **not valid after a pan.** The shift is this dump's. Pan, and the drawn position moves with
+    ///   everything else — which is exactly what the caller's pan machinery already measures.
+    ///
+    /// `None` when the node has no world position, or when the dump shares nothing with the frame.
+    pub fn screen_position(&self, a: &Adjacency, key: &str) -> Option<(f64, f64)> {
+        let (dx, dy) = self.registration(a)?;
+        let (wx, wy) = self.places.get(key)?.pos?;
+        Some((wx - dx, wy - dy))
+    }
+
     pub fn fold(&mut self, a: &Adjacency) {
         let parent = a.subworld.as_ref().map(|(k, _)| k.clone());
         // Crossing into a subworld: remember the surface node we came from, because leaving by the
@@ -6432,6 +6461,94 @@ mod tests {
         // `c` is 100 beyond `b` in the second frame, so 300 in the first — the pan cancels.
         assert_eq!(m.get("c").unwrap().pos, Some((300.0, 100.0)), "registered through `b`");
         assert_eq!(m.gap("a", "c").map(|d| d as i64), Some(200), "and distances survive the pan");
+    }
+
+    /// How far one press may carry us, and every reason the chain stops.
+    ///
+    /// The dev, 2026-08-16: *make it possible for the navigator to directly hop to distant, visited
+    /// nodes as long as the corruption hasn't cut off the path.* Corruption is precisely what cuts
+    /// it: `setAreaIncomplete` (`overworldview.lua:179-206`) takes completion from a node **and
+    /// every road out of it**, and completion on one end of an edge is what `canTravelToDirect`
+    /// needs (`:1316-1321`).
+    #[test]
+    fn one_press_reaches_as_far_as_the_cleared_road_goes() {
+        let chain = |cleared: &str, headings: Vec<(&str, &str)>| {
+            let mut m = WorldMap::default();
+            for (a, b) in [("a", "b"), ("b", "c"), ("c", "d")] {
+                m.entry(a).neighbours.insert(b.into());
+                m.entry(b).neighbours.insert(a.into());
+            }
+            for (k, h) in headings {
+                m.entry(k).heading = h.into();
+            }
+            m.here = Some("a".into());
+            m.apply_save(
+                &crate::game::save::parse(&format!(
+                    "return {{ overworld = {{ areaFlags = {{ hell = 0.1 }},
+                         completedAreas = {{ {cleared} }} }} }}"
+                ))
+                .unwrap(),
+            );
+            m
+        };
+
+        // Every node cleared: the whole chain is one press.
+        assert_eq!(
+            chain("a = true, b = true, c = true, d = true", vec![]).far_hop("a", "d").as_deref(),
+            Some("d")
+        );
+        // `c` uncleared breaks the edge `c -> d`: `b -> c` is still legal because `b` is complete, so
+        // the press stops at `c` — which is where an ordinary step would have taken us next anyway,
+        // two hops on.
+        assert_eq!(chain("a = true, b = true", vec![]).far_hop("a", "d").as_deref(), Some("c"));
+        // Nothing cleared past `a`: the first edge is legal, the second is not, and one hop is not a
+        // multi-hop — so the caller is told nothing and steps as it always did.
+        assert_eq!(chain("a = true", vec![]).far_hop("a", "d"), None);
+
+        // **A trigger on the way stops the chain while the portal is shut**, because the walk is not
+        // a teleport: `core.arriveAt` runs at every node on the path (`overworldview.lua:1210-1216`),
+        // so striding through a level 5 crypt opens the anomaly exactly as walking to it would.
+        let mut shut = chain(
+            "a = true, b = true, c = true, d = true",
+            vec![("c", "Crockey — level 5 crypt")],
+        );
+        shut.hell = Some(0.0);
+        assert_eq!(shut.far_hop("a", "d").as_deref(), Some("c"), "up to it, never through it");
+    }
+
+    /// A node the current dump never mentions can still be clicked, because the frame places it.
+    ///
+    /// The dev's correction, 2026-08-16, and the whole of what #21 was missing. A dump prints
+    /// adjacent connections only, which I read as "a distant node cannot be aimed at". It carries
+    /// nodes we have already placed, and one of those fixes the camera exactly — measured over 80
+    /// settled dumps from that evening's run, every shared node agreed on the shift to 0.0000 px.
+    #[test]
+    fn a_node_missing_from_the_dump_is_placed_from_the_frame() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "Somewhere", vec![
+            Node { key: "a".into(), heading: "A".into(), x: 100.0, y: 100.0, connections: 2 },
+            Node { key: "b".into(), heading: "B".into(), x: 200.0, y: 100.0, connections: 2 },
+        ]));
+        m.fold(&dump("a", "A", vec![
+            Node { key: "b".into(), heading: "B".into(), x: 250.0, y: 70.0, connections: 2 },
+            Node { key: "c".into(), heading: "C".into(), x: 350.0, y: 70.0, connections: 2 },
+        ]));
+
+        // Standing at `b`, panned again: only `c` is adjacent, and `here` itself is not listed.
+        // `c` anchors the dump, so everything else in the frame can be drawn against it.
+        let now = dump("b", "B", vec![
+            Node { key: "c".into(), heading: "C".into(), x: 0.0, y: 0.0, connections: 2 },
+        ]);
+        assert!(!now.nodes.iter().any(|n| n.key == "a"), "the fixture must not name `a`");
+        // `c` is world (300,100) and is drawn at (0,0), so the shift is (300,100); `a` is world
+        // (150,100) — one frame-length left of `b` — hence drawn 150 left of `c`.
+        assert_eq!(m.screen_position(&now, "c"), Some((0.0, 0.0)), "the anchor draws where it says");
+        let (ax, ay) = m.screen_position(&now, "a").expect("`a` is in the frame");
+        let (wx, wy) = m.get("a").unwrap().pos.expect("`a` was placed");
+        assert_eq!((ax, ay), (wx - 300.0, wy - 100.0), "and every other node moves with it");
+
+        // A node the frame has never placed cannot be invented.
+        assert_eq!(m.screen_position(&now, "never-seen"), None);
     }
 
     /// Positions come from the surface only, so a subworld's own frame cannot contaminate it.
