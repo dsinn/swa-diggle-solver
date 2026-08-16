@@ -56,7 +56,7 @@ use diggle_solver::observe::affirm;
 use diggle_solver::observe::feed::Feed;
 use diggle_solver::observe::log::{Console, LogMirror};
 use diggle_solver::overworld::WorldMap;
-use diggle_solver::win::input::{Input, PostMessageInput, SC_RETURN, VK_RETURN};
+use diggle_solver::win::input::PostMessageInput;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -143,13 +143,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let menu_at = Instant::now();
     let mut found: Result<f64, String> = Err("menu never rendered".into());
     let mut offers_start = false;
-    /// How many Returns to spend on a lore card standing in front of the menu.
+    /// How many text screens to clear before the menu.
     ///
-    /// Two, because the auto-save card is the only one the startup path can meet and one Return
-    /// clears it — the second is for a keystroke lost to focus, which this project has seen. More
-    /// would be pressing a key at a screen we have no evidence about.
-    const LORE_RETURNS: u32 = 2;
-    let mut pressed_return = 0u32;
+    /// Three, because they arrive in runs — entering Ulrome printed two at once — and a fresh
+    /// profile's tutorial is exactly that shape. Each one is read before anything is pressed, so
+    /// the cost of an unused allowance is nothing.
+    const LORE_SCREENS: u32 = 3;
+    let mut cleared = 0u32;
     let by = Instant::now() + Duration::from_secs(30);
     while Instant::now() < by {
         let cont = diggle_solver::act::score_exact(&win, &diggle_solver::act::CONTINUE);
@@ -177,25 +177,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // **0.0570** and the run aborted saying the menu might not have rendered; it had, one screen
         // further on.
         //
-        // Return is what dismisses it, and that is not a guess: `spike_click_matrix` and
-        // `spike_button_probe` both *force* this card by clearing the save and use "Return dismisses
-        // it" as their positive control before trusting anything else they measure.
+        // **The card is cleared by the arrow in the bottom-right corner** — the dev, watching it
+        // happen. `ui/lorescreen.lua:46-50` is one button, `type = 'right'` at `ss(1, 0.9)` with
+        // `xOffset = -0.75`, carrying `mousereleased = buttonFunction` *and*
+        // `userFunctionName = 'affirmative'`, and `affirm::LORE_AFFIRMATIVE` has described that exact
+        // slot all along. So this is the machinery `clear_text_screen` already runs at every village
+        // gate: read the arrow, press `space`, read again — and click the same arrow if the key does
+        // not carry.
         //
-        // Safe to send blind, which is the only reason it can live in the polling loop: the start
-        // menu's own buttons declare no `userFunctionName`, so Return does nothing there — the same
-        // fact that made `start_new_run` click rather than press. And nothing is assumed of it
-        // either way; the loop simply looks again, and the abort below still fires if neither button
-        // ever appears.
-        if pressed_return < LORE_RETURNS && menu_at.elapsed() > Duration::from_secs(4) {
-            pressed_return += 1;
-            r.keys.focus();
-            let _ = r.keys.press_key(VK_RETURN, SC_RETURN);
-            r.log.push_str(&format!(
-                "  neither button yet — Return {pressed_return} of {LORE_RETURNS}, in case a lore \
-                 card is in front of the menu\n"
-            ));
-            std::thread::sleep(Duration::from_millis(600));
-            continue;
+        // **A first cut sent Return here and that was the wrong key.** `space = 'affirmative'` is the
+        // binding the button names; `['return'] = 'hotspotSelect'`
+        // (`utils/defaultbinds/keyboard.lua:6,13`), which presses whatever the hotspot cursor
+        // happens to be sitting on. It works on this card because the hotspot lands on the arrow,
+        // which is how two spikes came to use it as a positive control — but it is not what the
+        // screen declares, and a key chosen for the screen it was tried on is the habit this project
+        // keeps paying for.
+        //
+        // Reading first is also what makes this safe to run in the poll loop: on the start menu the
+        // arrow is simply absent and `clear_text_screen` returns false without pressing anything.
+        if cleared < LORE_SCREENS && menu_at.elapsed() > Duration::from_secs(3) {
+            cleared += 1;
+            if r.clear_text_screen() || r.click_affirmative() {
+                std::thread::sleep(Duration::from_millis(600));
+                continue;
+            }
         }
         std::thread::sleep(Duration::from_millis(150));
     }

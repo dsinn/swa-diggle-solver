@@ -1810,7 +1810,7 @@ impl Run<'_> {
     /// (`ui/lorescreen.lua:49`) and `space = 'affirmative'` (`utils/defaultbinds/keyboard.lua:13`).
     /// Reading the binding beats assuming a coordinate, and this button's position moves with
     /// whether it carries a label.
-    fn clear_text_screen(&mut self) -> bool {
+    pub fn clear_text_screen(&mut self) -> bool {
         let first = self.affirmative();
         // Logged even when there is nothing to do. A gate that has never been calibrated against a
         // live screen must show its score for the negative case too, or `Absent` is
@@ -1857,6 +1857,50 @@ impl Run<'_> {
         // The honest answer to "did you clear a text screen" is no, and the caller can then fall
         // through to the map path, which is where a run standing on the map belongs.
         self.log.push_str("  affirmative still live after 6 presses — giving up on it\n");
+        false
+    }
+
+    /// Clicks the lore screen's continue arrow, for when the key does not carry.
+    ///
+    /// **The arrow is the same control as the key**, not a second one:
+    /// `ui/lorescreen.lua:46-50` declares one button, `type = 'right'` at `ss(1, 0.9)` with
+    /// `xOffset = -0.75` — the bottom-right corner — carrying both `mousereleased = buttonFunction`
+    /// and `userFunctionName = 'affirmative'`. [`Run::clear_text_screen`] presses the second;
+    /// this presses the first, at the position [`affirm::LORE_AFFIRMATIVE`] already describes.
+    ///
+    /// Kept as a fallback rather than the first move, because a key needs no coordinate to be right
+    /// and a click does. It is only reached once the reading says the arrow is there and six presses
+    /// of `space` have failed to move it, which is the state where the coordinate is the *better*
+    /// evidence — the fingerprint has just told us what is under it.
+    ///
+    /// Verified like everything else: the arrow going away is the proof, not the click returning
+    /// `Ok`.
+    pub fn click_affirmative(&mut self) -> bool {
+        if !self.affirmative().state.is_ready() {
+            return false;
+        }
+        let Ok((cx, cy)) = self.win.button_center(&affirm::LORE_AFFIRMATIVE) else { return false };
+        let Ok((sx, sy)) = self.win.client_to_screen(cx, cy) else { return false };
+        for attempt in 1..=3 {
+            if click_at_in(self.win, sx, sy).is_err() {
+                self.log.push_str("  could not click the continue arrow\n");
+                return false;
+            }
+            self.park();
+            std::thread::sleep(Duration::from_millis(700));
+            self.pump();
+            let now = self.affirmative();
+            if !now.state.is_ready() {
+                self.log.push_str(&format!(
+                    "  the continue arrow at ({cx},{cy}) cleared it after {attempt} click(s)\n"
+                ));
+                return true;
+            }
+            self.log.push_str(&format!(
+                "  click {attempt} on the continue arrow did not take (still {:?}, {:.2})\n",
+                now.state, now.score
+            ));
+        }
         false
     }
 
