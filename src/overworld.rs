@@ -3842,13 +3842,14 @@ impl WorldMap {
     /// is the "believed impossible" half, and each clause is deliberately narrow, because a
     /// commitment that lapses easily is not one.
     ///
-    /// Two things drop it:
+    /// Three things drop it:
     ///
     /// 1. **The errand changed.** `errand` is the caller's current [`Goal`], and a commitment made
     ///    while exploring says nothing about where to go once we are hurt. This is the clause that
     ///    keeps boldness from becoming blindness — see [`WorldMap::crossing_to`].
     /// 2. **We wrote the road off.** `abandoned` is the driver's own memory of having tried
     ///    something, so an abandoned road out is one we have genuinely given up on.
+    /// 3. **The plan names a different door of this same container** — #51, below.
     ///
     /// Note what does **not** drop it. Not "the exit is missing from the current dump": exits print
     /// only while visible (`overworldview.lua:1044`), so an absent exit is the ordinary state of a
@@ -3856,12 +3857,38 @@ impl WorldMap {
     /// commitment exactly when it is doing the most work. And not "we know no route to it": fog
     /// means no route is the *first* thing we know about anywhere, which is why `cross_toward` has a
     /// frontier fallback for walking toward a destination it cannot yet reach.
-    fn committed_exit(&self, parent: &str, errand: Option<&Goal>) -> Option<String> {
+    ///
+    /// ## #51: the door held while the target moved, and why the fix is this narrow
+    ///
+    /// `crossing_to` stores `(door, goal)` and no target, so two destinations under one `Goal` share
+    /// a commitment. The 1043Z run of 2026-08-16 spent ten steps inside `l4` with every crossing line
+    /// reading `l4_path_to_l1` while the errand read `Heart -> l4_path_to_l10` — a door the log itself
+    /// called "not on any route we know", which is why the crossing fell through to the frontier walk
+    /// and looped.
+    ///
+    /// The obvious repair — drop the commitment whenever the target changes — is wrong, and the
+    /// diagnostic (`5de3917`) proved it on the first run that carried it. Inside `l21` the target
+    /// churned `l21sub7`, `l21sub9`, `l21sub8`, `l21sub10` step by step while the door stayed `e1`,
+    /// and **that churn is exactly what a commitment exists to ignore**: the plan is recomputed from
+    /// `here`, `here` changes every step of a crossing, so a target that moves with us would re-derive
+    /// the door every step and lose the single-mindedness the `HELD` marker was added for.
+    ///
+    /// What separates the two is not how far the target is or whether it is inside — `l4_path_to_l10`
+    /// is *also* a child of the container, so "outside the subworld" would have missed it. It is that
+    /// one target **is a door of this container and is not the one we committed to**, which is a
+    /// direct contradiction rather than a wandering, and the only shape of target that can be one.
+    fn committed_exit(&self, parent: &str, errand: Option<&Goal>, target: Option<&str>) -> Option<String> {
         let (to, goal) = self.crossing_to.as_ref()?;
         if errand != Some(goal) || self.abandoned.contains(&exit_node_key(parent, to)) {
             return None;
         }
-        Some(to.clone())
+        let committed = exit_node_key(parent, to);
+        let contradicted = target
+            .is_some_and(|t| t.starts_with(&format!("{parent}_path_to_")) && t != committed);
+        match contradicted {
+            true => None,
+            false => Some(to.clone()),
+        }
     }
 
     /// One move toward getting out of the subworld we are standing in.
@@ -3961,8 +3988,13 @@ impl WorldMap {
                 // Falling through to `None` puts us in the same state as a village whose inn we have
                 // not found: no destination, so explore — which for a fogged crossing is precisely
                 // right, because seeing an exit is the thing exploring achieves.
-                let errand = self.next_target().map(|p| p.reason);
-                let to = match self.committed_exit(&parent, errand.as_ref()) {
+                let plan = self.next_target();
+                let errand = plan.as_ref().map(|p| p.reason.clone());
+                let to = match self.committed_exit(
+                    &parent,
+                    errand.as_ref(),
+                    plan.as_ref().map(|p| p.target.as_str()),
+                ) {
                     // **A held commitment leaves the note alone, and the log used to print it as
                     // though it were this step's reasoning.**
                     //
@@ -9106,6 +9138,39 @@ e	l4	l11
             Some(Crossing::Step { toward, .. }) => assert_eq!(toward, "l9_path_to_l1", "the bed"),
             other => panic!("expected the door to the village, got {other:?}"),
         }
+    }
+
+    /// #51: a plan naming **another door of this same container** releases the commitment, and a
+    /// target merely wandering inside does not.
+    ///
+    /// Both halves come from live logs. The `l4` loop of the 1043Z run held `l4_path_to_l1` for ten
+    /// steps while the errand read `Heart -> l4_path_to_l10` — the door it was actually asking for,
+    /// and one the log itself called "not on any route we know". The 1752Z run, with the door
+    /// diagnostic in, showed the opposite case: inside `l21` the target churned `l21sub7`,
+    /// `l21sub9`, `l21sub8`, `l21sub10` step by step while the door stayed `e1`, because the plan is
+    /// recomputed from `here` and `here` changes every step of a crossing. Dropping the commitment
+    /// on *that* would re-derive the door every step and lose the whole point of having one.
+    ///
+    /// [`WorldMap::committed_exit`] is called directly rather than through `cross_toward`, because
+    /// the case needs the planner to nominate a specific door and the fixture would have to be built
+    /// backwards from the planner's ranking to arrange it. What is asserted here is the rule; that
+    /// `cross_toward` hands it `next_target().target` is one line at the call site.
+    #[test]
+    fn a_plan_naming_another_door_of_the_same_subworld_releases_the_commitment() {
+        let (mut m, dane, cowlam) = a_forest_with_two_doors();
+        m.cross_toward(&[dane, cowlam]);
+        let (door, goal) = m.crossing_to.clone().expect("the crossing committed to a door");
+        assert_eq!(door, "l1", "the fixture's stable choice — see the test above");
+
+        let held = |target: &str| m.committed_exit("l9", Some(&goal), Some(target));
+        assert_eq!(held("l9sub1").as_deref(), Some("l1"), "wandering inside is not a contradiction");
+        assert_eq!(held("l9_path_to_l1").as_deref(), Some("l1"), "asking for the door we hold");
+        assert_eq!(held("l9_path_to_l19"), None, "the other door — this is the `l4` loop");
+        assert_eq!(
+            held("l4_path_to_l10").as_deref(),
+            Some("l1"),
+            "a door of some other subworld says nothing about this crossing"
+        );
     }
 
     #[test]

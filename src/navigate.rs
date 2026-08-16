@@ -4606,15 +4606,25 @@ pub fn drive(
                     ));
                     return Stop::AtSubworld(here);
                 }
-                match rest_here {
-                    true => r.log.push_str(&format!(
+                // **Only the rest case announces anything here, and that is #54.**
+                //
+                // The crossing case used to print "`l4` is a subworld on the way to `l20` — entering
+                // to cross it" at this point, which is *before the decision to enter has been made*.
+                // Nothing in this block presses anything for a crossing; the press happens further
+                // down in the fight branch, and only if that branch fires. At step 47 of the 1752Z
+                // run it did not — the far hop found `l20` one press away and travelled there
+                // instead — so the log announced an entry that never happened and then, four lines
+                // later, a travel to somewhere else under the same step number. It cost the dev a
+                // question about why the run had entered a forest and immediately left, and the
+                // answer was that it never went in.
+                //
+                // So the entry is announced where it is made. See the fight branch below, which
+                // knows it is a crossing rather than a fight and now says so.
+                if rest_here {
+                    r.log.push_str(&format!(
                         "{step}. `{here}` ({}) is the rest we came for — entering it\n",
                         p.heading
-                    )),
-                    false => r.log.push_str(&format!(
-                        "{step}. `{here}` is a subworld on the way to `{}` — entering to cross it\n",
-                        heading_for.as_deref().unwrap_or("?")
-                    )),
+                    ));
                 }
                 // **Press it here, rather than falling through and hoping.**
                 //
@@ -4755,9 +4765,25 @@ pub fn drive(
                 ));
                 return Stop::TooHurtToFight(format!("{here} ({}) at {hp}", p.heading));
             }
+            // **The press is the same; the word is not.** `getLocationButtons` tests
+            // `typeData.subworld` before `basicCombatZone` (`overworldview.lua:462-467`), so on a
+            // container this click is `Explore` or `Visit` and enters — it does not start a fight.
+            // Calling that "fighting `l4`" was the other half of #54: one line claimed an entry that
+            // did not happen, and this one described the entry that did as something else.
+            let what = match () {
+                _ if p.subworld_container => "entering",
+                _ if p.is_chest() => "opening",
+                _ => "fighting",
+            };
+            let toward = match p.subworld_container {
+                true => hop
+                    .as_ref()
+                    .map(|h| format!(" to cross toward `{}`", h.plan.target))
+                    .unwrap_or_default(),
+                false => String::new(),
+            };
             r.log.push_str(&format!(
-                "{step}. {} {}`{here}` ({})\n",
-                if p.is_chest() { "opening" } else { "fighting" },
+                "{step}. {what} {}`{here}` ({}){toward}\n",
                 if is_anomaly { "**THE ANOMALY** " } else { "" },
                 p.heading
             ));
