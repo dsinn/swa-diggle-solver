@@ -705,7 +705,13 @@ impl Place {
 }
 
 /// Everything we have folded together, plus the run state that decides routing.
-#[derive(Debug, Default)]
+///
+/// `Clone` exists for one caller and one reason: [`WorldMap::choose_exit`] has to ask the planner a
+/// question *from outside the subworld we are standing in*, and the only honest way to move the
+/// vantage point is to copy the whole map and change where it is standing. It used to copy a
+/// hand-picked list of six fields, which is how a village came to forget it had already bought its
+/// hearts. See there.
+#[derive(Debug, Default, Clone)]
 pub struct WorldMap {
     places: BTreeMap<String, Place>,
     /// Places the driver has had its one go at and will not enter again this run.
@@ -3121,14 +3127,34 @@ impl WorldMap {
         // The container is a surface node with surface edges, and it is where we will be standing
         // the moment we step out. So plan from there. Every exit's `to_key` is a surface node too,
         // which is why the ranking below works at all once it is given a target it can measure.
+        // ## The whole map, with one thing changed. It used to be six fields, and that was the
+        // ## `l10` <-> `l18` ping-pong
+        //
+        // The list was `places`, `abandoned`, `roads_done`, `hell`, `wants_rest`, `gold`. Everything
+        // else took `Default`, and the one that mattered was **`heart_bought`** — the record of
+        // which general stores we have already emptied.
+        //
+        // So the planner, asked from inside Ulrome, was asked by a map that had forgotten every
+        // heart the run ever bought. With 294 gold in hand `wants_a_heart` was true, the nearest
+        // settlement with a shelf was `l32`, and the answer came back `Heart -> l32` — whose nearest
+        // door is `l18`. Outside, the real map remembered, answered `CloseAnomaly -> start`, and
+        // sent us back into the village. Three ping-pongs in two days, and the run of
+        // 2026-08-16 0602Z shows the two answers alternating on consecutive lines:
+        //
+        // ```text
+        // 7. l18 -> **l10** (for start, CloseAnomaly)
+        // 9. crossing `l10` toward `l10_path_to_l18` … door choice: Heart -> l32
+        // ```
+        //
+        // A hand-written field list is a promise to remember every future field, and this file has
+        // over twenty. Copying the map entire keeps that promise by construction; the vantage point
+        // is the only thing that should differ, so it is the only thing set.
+        //
+        // `here` being a surface node is what makes it "outside" — `inside()` reads the parent of
+        // `here`, and a container has none.
         let outside = self.inside().map(|container| {
-            let mut m = WorldMap { here: Some(container.to_string()), ..WorldMap::default() };
-            m.places.clone_from(&self.places);
-            m.abandoned.clone_from(&self.abandoned);
-            m.roads_done.clone_from(&self.roads_done);
-            m.hell = self.hell;
-            m.wants_rest = self.wants_rest;
-            m.gold = self.gold;
+            let mut m = self.clone();
+            m.here = Some(container.to_string());
             m
         });
         // **The errand is kept, not just the destination.** It decides whether the anti-backtracking
@@ -6461,6 +6487,71 @@ mod tests {
         // `c` is 100 beyond `b` in the second frame, so 300 in the first — the pan cancels.
         assert_eq!(m.get("c").unwrap().pos, Some((300.0, 100.0)), "registered through `b`");
         assert_eq!(m.gap("a", "c").map(|d| d as i64), Some(200), "and distances survive the pan");
+    }
+
+    /// The `l10` ↔ `l18` ping-pong: inside and outside must not disagree about what we have done.
+    ///
+    /// Ulrome, 2026-08-16, the third such loop in two days. Consecutive lines of the report:
+    ///
+    /// ```text
+    /// 7. l18 -> **l10** (for start, CloseAnomaly)
+    /// 9. crossing `l10` toward `l10_path_to_l18` … door choice: Heart -> l32
+    /// ```
+    ///
+    /// Outside, the errand was the anomaly and the way there ran through the village. Inside, it was
+    /// a heart at `l32`, whose nearest door was the one we had just come in by. Each answer undid
+    /// the other, and each lap paid to enter a village under attack.
+    ///
+    /// The cause was not the ranking and not the errand ordering: `choose_exit`'s outside vantage
+    /// was a **hand-assembled** map that dropped `heart_bought`, so from inside the village the
+    /// planner had forgotten every shop it had ever emptied. The save says otherwise —
+    /// `l32_shops.generalStoreStock.inventoryHash.healthBuff.stock = 0` in
+    /// `checkpoints/ping-pong-l10-l18`.
+    ///
+    /// The test is written against the *symptom* — that the two vantage points agree — rather than
+    /// against `heart_bought` specifically, because the next field to be forgotten will not be that
+    /// one.
+    #[test]
+    fn the_view_from_inside_a_village_remembers_what_the_view_from_outside_does() {
+        use crate::observe::adjacency::Exit;
+        let door = |to: &str| Exit { x: 0.0, y: 0.0, to_key: to.into(), to_heading: "".into() };
+
+        let mut m = WorldMap::default();
+        for (a, b) in [("l10", "l18"), ("l10", "l7"), ("l18", "l32")] {
+            m.entry(a).neighbours.insert(b.into());
+            m.entry(b).neighbours.insert(a.into());
+        }
+        m.entry("l10").heading = "Ulrome — level 6 village".into();
+        m.entry("l18").heading = "Stanningholme crypt".into();
+        m.entry("l32").heading = "Enthorpe village".into();
+        m.entry("l7").heading = "Greenoak Backwoods campfire".into();
+        m.entry("l10sub7").parent = Some("l10".into());
+        m.here = Some("l10sub7".into());
+        // Enthorpe's shelf is empty and the purse is full — the exact state of the checkpoint.
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { player = { gold = 294 }, overworld = { areaFlags = { hell = 0.1,
+                     l32_shops = { generalStoreStock = { inventoryHash = {
+                         healthBuff = { stock = 0, type = \"healthBuff\" } } } } },
+                     completedAreas = { l18 = true, l32 = true } } }",
+            )
+            .unwrap(),
+        );
+        assert!(m.wants_a_heart(), "294 gold is over the floor, so the errand is live in principle");
+        assert!(m.heart_is_spent("l32"), "and the save says that shelf is bare");
+
+        // The question the crossing asks, and the question the surface asks, must not disagree about
+        // an errand that is already done.
+        let (chosen, _, note) =
+            m.choose_exit(&[door("l18"), door("l7")]).expect("two doors is not no doors");
+        assert!(
+            !note.starts_with("Heart"),
+            "the view from inside forgot a shop it had emptied: {note}"
+        );
+        assert_ne!(
+            chosen, "l18",
+            "and so it left by the door it came in through, which is the ping-pong"
+        );
     }
 
     /// How far one press may carry us, and every reason the chain stops.
