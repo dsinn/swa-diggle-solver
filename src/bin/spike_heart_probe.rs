@@ -29,5 +29,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("anomaly {:?} open {:?}", m.anomaly().map(|p| p.key.clone()), m.anomaly_is_open());
     println!("plan     {:?}", m.next_target());
     println!("next hop {:?}", m.next_hop());
+
+    // How much of the map the save alone can route through, and how much of it we could aim at.
+    let placed = m.places_with_positions();
+    println!("places {}  with a position {placed}", m.len());
     Ok(())
 }

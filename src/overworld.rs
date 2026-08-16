@@ -1380,6 +1380,15 @@ impl WorldMap {
         self.places.get(key)
     }
 
+    /// How many places we could actually aim a click at: those with a world position.
+    ///
+    /// The complement of [`WorldMap::len`] is the answer to "why did a route exist and a one-press
+    /// travel not happen" — routing needs edges, which the save carries, and aiming needs a
+    /// position, which only a dump can give.
+    pub fn places_with_positions(&self) -> usize {
+        self.places.values().filter(|p| p.pos.is_some()).count()
+    }
+
     pub fn len(&self) -> usize {
         self.places.len()
     }
