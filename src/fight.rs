@@ -660,9 +660,29 @@ impl Fight<'_> {
 
         let board = Board::new(self.win, &geom)?.with_click_frames(self.click_frames.clone());
         self.park();
+        // **Waiting for stillness is a courtesy, not a precondition. After the timeout, type anyway.**
+        //
+        // The dev's call, 2026-08-16: *there should be a timeout for the typist to just go, similar
+        // to when we resumed a save from a boss fight.*
+        //
+        // This used to end the run, on the reasoning that clicking into a moving board misreads
+        // tiles. The reasoning is sound and the response was not, because **a stuck reading looks
+        // exactly like a moving board and is far more likely**. Turn 17 of the anomaly, 2026-08-16:
+        // a burnt-out tile read 35.1 against an `OCCUPIED` of 40, so `full` was false about a board
+        // that was full, and the wait could not have ended however long it ran. The run died at the
+        // level 8 fight it had spent the whole evening reaching, in front of a board a person could
+        // read at a glance.
+        //
+        // Going anyway is safe in a way that was already built and was not being used. Every tile
+        // click is confirmed against what actually changed ([`crate::combat::Board`]'s
+        // `click_and_confirm`), a click that lands wrong is a **setback rather than an ending**
+        // (task #30), and a word that comes out wrong can be cleared and retried. So the cost of
+        // typing into a genuinely moving board is a wasted turn; the cost of refusing was the run.
         if !board.wait_until_ready(Duration::from_secs(20))? {
-            log.push_str("  board never filled/settled -- not clicking into a moving board\n");
-            return Ok(Some(Outcome::BoardNeverSettled { turns }));
+            log.push_str(
+                "  the board never read as full and still — typing anyway after the wait, because \
+                 a stuck reading and a moving board look the same and only one of them is common\n",
+            );
         }
         // Kept past the submission: if the game comes back with the avoidable-murder dialog, the
         // word survives the cancel and has to come off, and this is the only record of what the
@@ -811,11 +831,19 @@ impl Fight<'_> {
                     return Ok(None);
                 }
                 if !self.back_out_of_murder(keys, log, &board, &placed)? {
-                    // Left as it is rather than dressed up as an outcome. The word is still on the
-                    // board and the modal may still be over it, so the next turn's
-                    // `wait_until_ready` will report `BoardNeverSettled` — which is exactly what
-                    // this situation is, and what it reported before the handler existed.
-                    return Ok(None);
+                    // **Ended here, rather than left for the next turn's wait to notice.**
+                    //
+                    // It used to return `Ok(None)`: the word was still on the board and the modal
+                    // still over it, so the next `wait_until_ready` reported `BoardNeverSettled` and
+                    // the run stopped. That side effect is gone — since 2026-08-16 a wait that times
+                    // out types anyway, which under a modal means clicking into it.
+                    //
+                    // So the case says its own name now. A modal we could not dismiss is the one
+                    // situation where the board genuinely is not there to be typed on, and it is
+                    // distinguishable from a misread threshold precisely because we watched it fail.
+                    log.push_str("  the murder warning would not clear — the board is behind it
+");
+                    return Ok(Some(Outcome::BoardNeverSettled { turns }));
                 }
                 *murder_backoff += 1;
                 log.push_str(&format!("  aiming {murder_backoff} lower next pass\n"));
@@ -933,8 +961,9 @@ impl Fight<'_> {
             }
             log.push_str(&format!("  press {attempt} did not confirm the warning\n"));
         }
-        // The board still has the word on it and the modal is still up, so the next turn's
-        // `wait_until_ready` reports `BoardNeverSettled` rather than this inventing an outcome.
+        // The board still has the word on it and the modal is still up. The caller turns this into
+        // `BoardNeverSettled` — see the `back_out_of_murder` call site, which stopped relying on the
+        // next turn's wait to notice once that wait began typing anyway.
         log.push_str("  WARNING could not confirm the murder warning either\n");
         self.shot("murder-stuck");
         Ok(())

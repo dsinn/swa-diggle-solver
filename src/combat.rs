@@ -51,8 +51,30 @@ pub const CHANGED: f64 = 12.0;
 ///
 /// Measured on a real half-filled board: empty slots read **17.0–21.8**, occupied ones **58.2–161.1**,
 /// where the 58.2 was an already-*selected* tile (selection darkens it, so that is the hardest case
-/// to call occupied). Forty sits in a 2.7× gap between the two populations.
-pub const OCCUPIED: f64 = 40.0;
+/// to call occupied).
+///
+/// ## A burnt-out tile is dark, and forty called it an empty slot
+///
+/// That calibration had no burnt tile in it, and a burnt one is not merely dim — it is charred
+/// black. Turn 17 of the anomaly fight, 2026-08-16 (`tests/frames/board-burnt-out-tile.png`):
+///
+/// ```text
+/// I=101.9  N= 97.0  R= 50.6  C=166.3
+/// E= 73.5  N= 95.4  P= 71.8  T= 72.5
+/// A= 57.8  N= 95.7  I=100.3  I=100.1
+/// P= 99.3  J= 81.0  C=171.2  Æ= 35.1
+/// ```
+///
+/// Fifteen tiles between 50 and 171, and one at **35.1**. [`Board::wait_until_ready`] requires every
+/// slot to read occupied, so it waited for a board that was already full and still, and could never
+/// have stopped waiting. The dev watched it happen and said so: *the board never filled/settled
+/// statement is incorrect; even the formerly burning tiles burnt out and stopped animating.*
+///
+/// Twenty-eight sits between the empty population's 21.8 and that 35.1. **The margin is thinner than
+/// the one it replaces** — 1.6× rather than 2.7× — and it rests on a single burnt sample, so
+/// `wait_until_ready` no longer treats a failure to settle as fatal: see there. A threshold this
+/// close wants the backstop.
+pub const OCCUPIED: f64 = 28.0;
 
 /// How often to re-capture while waiting for a click to show. The capture floor is 4.4 ms, but
 /// polling that hard is near-continuous GDI work for no measurable latency gain.
@@ -778,6 +800,54 @@ mod bomb_tests {
 mod tests {
     use super::*;
     use crate::win::capture::Frame;
+
+    /// A burnt-out tile is a tile, and the board that proved it is kept.
+    ///
+    /// Turn 17 of the anomaly fight, 2026-08-16. The board was full and still — the dev was watching
+    /// — and `wait_until_ready` waited out its timeout because the charred `Æ` in the bottom-right
+    /// read **35.1** against an `OCCUPIED` of 40. Not a slow board: an impossible condition.
+    ///
+    /// Measured off `tests/frames/board-burnt-out-tile.png` at the tile centres, so the number under
+    /// the threshold is the game's own pixels rather than a remembered figure.
+    #[test]
+    fn a_charred_tile_still_reads_as_occupied() {
+        let path = std::path::Path::new("tests/frames/board-burnt-out-tile.png");
+        let Ok(file) = std::fs::File::open(path) else {
+            eprintln!("SKIP: {} is not present", path.display());
+            return;
+        };
+        let mut rdr = png::Decoder::new(file).read_info().expect("a readable png");
+        let mut buf = vec![0; rdr.output_buffer_size()];
+        let info = rdr.next_frame(&mut buf).expect("one frame");
+        let n = info.color_type.samples();
+        let mut bgra = Vec::with_capacity((info.width * info.height * 4) as usize);
+        for px in buf.chunks_exact(n) {
+            bgra.extend_from_slice(&[px[2], px[1], px[0], 255]);
+        }
+        let frame = Frame { width: info.width as i32, height: info.height as i32, bgra };
+
+        // The 4x4 grid's centres in this capture, read off the frame.
+        let (cols, rows) = ([787, 902, 1017, 1132], [588, 703, 818, 933]);
+        let mut read: Vec<f64> = Vec::new();
+        for &y in &rows {
+            for &x in &cols {
+                read.push(luma(&frame, x, y, 14));
+            }
+        }
+        assert_eq!(read.len(), 16);
+
+        let dimmest = read.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(
+            dimmest < 40.0,
+            "the fixture must still contain the burnt tile that caused this: dimmest {dimmest:.1}"
+        );
+        assert!(
+            read.iter().all(|l| *l > OCCUPIED),
+            "every slot on this board holds a tile, dimmest {dimmest:.1} against {OCCUPIED}"
+        );
+        // And the empty-slot population it has to stay clear of, from the original calibration.
+        assert!(OCCUPIED > 21.8, "an empty slot reads 17.0-21.8 and must not read as a tile");
+    }
 
     #[test]
     fn click_frames_sort_into_the_order_they_were_taken() {
