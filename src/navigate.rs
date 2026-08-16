@@ -4489,7 +4489,46 @@ pub fn drive(
             continue;
         }
 
-        let Some(hop) = hop else { return Stop::NoPlan };
+        let Some(mut hop) = hop else { return Stop::NoPlan };
+        // **One press for as far as the game will carry us.** The dev's ask, 2026-08-16.
+        //
+        // Deliberately *after* the fight decision above, which asks `can_step(&here, &h.step)` and
+        // means "is a move off this node legal". Substituting a distant node before that would make
+        // it answer no — because a distant node is not adjacent — and the run would fight whatever
+        // it happened to be standing on. So the far hop is chosen once walking is settled, and never
+        // changes what we do here, only how far one press takes us.
+        //
+        // `far_hop` returns `None` for anything an ordinary step would have handled, and the node it
+        // names is on the same route `hop.step` starts — see there. The dump must still place it, so
+        // a node the screen does not show falls back to the single step rather than failing.
+        //
+        // ## And today it almost never fires, because we cannot aim at a node we cannot see
+        //
+        // A surface dump prints positions for **adjacent connections only** (`overworldview.lua:
+        // 1030-1035`); a node two hops away has no current screen coordinate, and the camera moves
+        // under us with every pan and zoom, so a position remembered from an earlier dump means
+        // nothing now. The game is willing to walk us there — the block is that we have nowhere to
+        // click.
+        //
+        // That is task #21, whose purpose this changes: it was filed as a *heuristic* for direction
+        // and is in fact the thing that makes one-press travel possible at all. Until it lands, this
+        // logs what it would have saved, so the case for #21 is measured rather than argued.
+        if let Some(far) = r.map.far_hop(&here, &hop.plan.target) {
+            match fresh.nodes.iter().any(|n| n.key == far) {
+                true => {
+                    r.log.push_str(&format!(
+                        "  the road to `{far}` is clear the whole way — one press instead of hop by hop\n"
+                    ));
+                    hop.step = far;
+                }
+                false => r.log.push_str(&format!(
+                    "  `{far}` is travellable from here in one press and is not on screen to click \
+                     (#21) — stepping to `{}` instead\n",
+                    hop.step
+                )),
+            }
+        }
+        let hop = hop;
         let Some(target) = fresh.nodes.iter().find(|n| n.key == hop.step).cloned() else {
             return Stop::Failed(format!("{} is not on screen from {here}", hop.step));
         };

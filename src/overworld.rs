@@ -499,8 +499,19 @@ impl Place {
     /// It does not go stale when the heart is bought. `specialStock` seeds the shop
     /// (`shop.lua:372-379`) and a purchase decrements `shopData`, not this — which is why *whether
     /// it is still for sale* is a different question, asked of the save.
+    /// **A corrupted settlement stocks nothing until its enemies are cleared.**
+    ///
+    /// The dev, 2026-08-16: *corruption prevents us from buying anything in that village until all
+    /// of the enemies are cleared.* The driver's rest gate has carried the same clause
+    /// (`!p.corrupted || p.completed`) since villages under attack were first met; the planner's
+    /// heart filter never did, so a corrupted village stayed a shopping destination — walk there,
+    /// find no shop to open, walk away, and the planner nominates it again. That is the shape of
+    /// every bounce this project has had.
+    ///
+    /// `completed` is the release, not the corruption flag, for the same reason it is everywhere
+    /// else here: corruption is a bill, and clearing the node pays it.
     pub fn stocks_a_heart(&self) -> bool {
-        self.is_settlement()
+        self.is_settlement() && (!self.corrupted || self.completed)
     }
 
     /// A village or a town — somewhere with an inn and shops inside.
@@ -806,6 +817,9 @@ pub struct WorldMap {
     /// A ranking nothing records is a ranking nobody can check, and this one decides where a run
     /// walks. Set beside [`WorldMap::door_reason`] and printed with the crossing.
     door_note: Option<String>,
+    /// Set on any step that honours a commitment instead of choosing afresh, so
+    /// [`WorldMap::door_note`] can say the note is not this step's. Cleared when a choice is made.
+    door_held: Option<String>,
     /// **The most recent dump's own frame**, rewritten wholesale by every [`WorldMap::fold`]: every
     /// node and every exit it named, at the coordinates it printed for them.
     ///
@@ -1436,8 +1450,18 @@ impl WorldMap {
     }
 
     /// The errand and the doors it was ranked against — see [`WorldMap::door_note`]'s field.
-    pub fn door_note(&self) -> Option<&str> {
-        self.door_note.as_deref()
+    ///
+    /// **A held commitment says so, in the returned string.** The note itself is only written when
+    /// [`WorldMap::choose_exit`] runs, so on every step that honours a commitment the last fresh
+    /// note stays put — and printed bare, it reads as this step's reasoning. That cost a false
+    /// diagnosis on 2026-08-16: `Heart -> l32` on every lap of a ping-pong, while the save said that
+    /// shop was empty and the plan was `CloseAnomaly`.
+    pub fn door_note(&self) -> Option<String> {
+        match (&self.door_held, &self.door_note) {
+            (Some(held), Some(note)) => Some(format!("HELD {held}; last decided — {note}")),
+            (Some(held), None) => Some(format!("HELD {held}; nothing was ever decided")),
+            (None, note) => note.clone(),
+        }
     }
 
     /// Straight-line distance between two places, when both have been placed in the frame.
@@ -3454,10 +3478,34 @@ impl WorldMap {
                 // right, because seeing an exit is the thing exploring achieves.
                 let errand = self.next_target().map(|p| p.reason);
                 let to = match self.committed_exit(&parent, errand.as_ref()) {
-                    Some(to) => Some(to),
+                    // **A held commitment leaves the note alone, and the log used to print it as
+                    // though it were this step's reasoning.**
+                    //
+                    // `door_note` was added on 2026-08-16 so a door decision could be read
+                    // afterwards, and within a day it produced a false diagnosis of the `l10`/`l18`
+                    // ping-pong: `door choice: Heart -> l32` printed on every lap, while the save
+                    // said Enthorpe's shelf was empty and the plan from that save was
+                    // `CloseAnomaly -> start`. The line was true, of a step long past. It was
+                    // stale on that run's step 16 too, printing `l4`'s doors while we stood inside
+                    // `l25`.
+                    //
+                    // So it now says so, and says what the errand is *now* — which is the one fact
+                    // that decides whether the commitment still means anything, since
+                    // `committed_exit` drops it the moment the errand changes.
+                    Some(to) => {
+                        self.door_held = Some(format!(
+                            "`{to}`, errand now {}",
+                            match &errand {
+                                Some(g) => format!("{g:?}"),
+                                None => "none".to_string(),
+                            }
+                        ));
+                        Some(to)
+                    }
                     None => self.choose_exit(exits).map(|(to, why, note)| {
                         self.door_reason = Some(why);
                         self.door_note = Some(note);
+                        self.door_held = None;
                         to
                     }),
                 };
@@ -3848,6 +3896,10 @@ impl WorldMap {
         if !self.wants_a_heart() || self.heart_bought.contains(container) {
             return None;
         }
+        // And a corrupted village sells nothing — see [`Place::stocks_a_heart`].
+        if !self.places.get(container).map(|p| p.stocks_a_heart()).unwrap_or(false) {
+            return None;
+        }
         self.places.values().find(|p| {
             p.parent.as_deref() == Some(container)
                 && p.is_general_store()
@@ -4059,7 +4111,10 @@ impl WorldMap {
         if !self.wants_a_heart() || self.heart_bought.contains(container) {
             return false;
         }
-        if !self.places.get(container).map(|p| p.is_settlement()).unwrap_or(false) {
+        // `stocks_a_heart` rather than `is_settlement`, so the corruption clause is asked here too —
+        // searching a corrupted village for a shop that will not open is the same wasted trip the
+        // planner's filter now refuses to nominate.
+        if !self.places.get(container).map(|p| p.stocks_a_heart()).unwrap_or(false) {
             return false;
         }
         !self.places.values().any(|p| {
@@ -4249,6 +4304,109 @@ impl WorldMap {
     /// Paved nodes are still subject to `blocked`, so an abandoned or shunned road is skipped by
     /// both passes — those are hard exclusions, this is a preference. `to` is exempt from both, for
     /// the same reason: refusing to path to where we were told to go is not routing.
+    /// Will the game let us walk straight from `a` to `b`, given what we know is cleared?
+    ///
+    /// Our model of `core.canTravelToDirect` (`overworldview.lua:1316-1321`), minus the two secret
+    /// clauses we cannot see:
+    ///
+    /// ```lua
+    /// return isAdjacent(location2)
+    /// and (core.areaOrExitToComplete(location1.key, location2.key)
+    ///      or core.areaOrExitToComplete(location2.key, location1.key))
+    /// ```
+    ///
+    /// and `areaOrExitToComplete(x, y)` is `areaIsComplete(x) or areaIsComplete(x..'_path_to_'..y)`
+    /// (`:1312-1314`) — which is why the *road* nodes count, and why they are keyed exactly as
+    /// [`exit_node_key`] builds them.
+    ///
+    /// **Conservative by construction.** Beyond the first ring the game actually uses
+    /// `couldTravelBetween` (`:1323-1328`), which additionally admits a `locationIsCompleteOnVisit`
+    /// node — a peaceful one. We cannot evaluate that from a heading, so this under-approximates:
+    /// worst case we stop a multi-hop short and take an ordinary step, which is what we did before
+    /// any of this existed.
+    pub fn can_travel_direct(&self, a: &str, b: &str) -> bool {
+        let done = |k: &str| self.places.get(k).map(|p| p.completed).unwrap_or(false);
+        let adjacent = self
+            .places
+            .get(a)
+            .map(|p| p.neighbours.contains(b))
+            .unwrap_or(false);
+        adjacent
+            && (done(a) || done(b) || done(&exit_node_key(a, b)) || done(&exit_node_key(b, a)))
+    }
+
+    /// The furthest node along our own route to `to` that we may select and travel to in one press.
+    ///
+    /// The dev, 2026-08-16: *make it possible for the navigator to directly hop to distant, visited
+    /// nodes as long as the corruption hasn't cut off the path.* The game will do the walking —
+    /// `travelTo` takes any node `canTravelToIndirect` can reach and paths to it
+    /// (`overworldview.lua:1394-1400`) — and we were taking one node per press, each costing a
+    /// click, sometimes a pan, and up to a minute of arrival wait.
+    ///
+    /// **It is not a teleport, and that is what shapes the rules below.** `:1210-1216` calls
+    /// `core.arriveAt` at *every* node on the path, so every intermediate arrival fires its events
+    /// and prints its dump. Nothing is skipped and the map still accumulates — but nothing is
+    /// avoided either.
+    ///
+    /// So the chain stops at the first node that fails any of:
+    ///
+    /// - **the game would refuse the step** ([`WorldMap::can_travel_direct`]) — which is exactly the
+    ///   dev's "as long as the corruption hasn't cut off the path", since `setAreaIncomplete`
+    ///   (`overworldview.lua:179-206`) is what takes completion away from a node and every one of
+    ///   its roads;
+    /// - **it would open the anomaly** while the portal is shut — arrivals fire on the way, so a
+    ///   walk-through is as fatal to the level 4 rule as a destination would be;
+    /// - **it is worth stopping at** — an unconsecrated shrine we would otherwise stride past,
+    ///   since the driver only acts on the node it ends its step on.
+    ///
+    /// Surface only: [`crate::subworld::Rules::multi_hop_travel`] is false inside a subworld, where
+    /// selecting a distant node moved a live run 0.015 of a screen and nothing else.
+    ///
+    /// Returns `None` when the answer is the ordinary single step, so the caller can keep doing what
+    /// it did before. This is an accelerator and never a different route: it walks the same
+    /// [`WorldMap::first_step_toward`] the hops would have taken, one node at a time, so the two can
+    /// never disagree about which way we are going.
+    pub fn far_hop(&self, from: &str, to: &str) -> Option<String> {
+        if self.inside().is_some() || from == to {
+            return None;
+        }
+        let shut = !self.anomaly_is_open().unwrap_or(false);
+        let mut cur = from.to_string();
+        let mut last: Option<String> = None;
+        // Bounded so a cycle in our own edges cannot spin here. Ten hops is far past the point where
+        // the saving matters.
+        for _ in 0..10 {
+            let Some(next) = self.first_step_toward(&cur, to, true) else { break };
+            if !self.can_travel_direct(&cur, &next) {
+                break;
+            }
+            if next != to {
+                let stop = self
+                    .places
+                    .get(&next)
+                    .map(|p| (shut && p.triggers_anomaly()) || self.worth_consecrating_here(&p.key))
+                    .unwrap_or(true);
+                if stop {
+                    // Still worth going *to* it — it is the node we would have stepped to anyway.
+                    last = Some(next);
+                    break;
+                }
+            }
+            cur = next.clone();
+            last = Some(next);
+            if cur == to {
+                break;
+            }
+        }
+        // One hop is not a multi-hop. Anything the caller could have worked out itself is `None`.
+        last.filter(|k| !self.can_step_is_adjacent(from, k))
+    }
+
+    /// Is `b` a neighbour of `a` in our own graph? Used to tell a multi-hop from an ordinary step.
+    fn can_step_is_adjacent(&self, a: &str, b: &str) -> bool {
+        self.places.get(a).map(|p| p.neighbours.contains(b)).unwrap_or(false)
+    }
+
     fn first_step_toward(&self, from: &str, to: &str, shun: bool) -> Option<String> {
         // **Pass 2 must not be removed.** A subworld can have no road at all between here and the
         // destination, and a run that refuses every route has stalled — which is worse than any
