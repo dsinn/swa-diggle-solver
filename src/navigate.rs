@@ -202,6 +202,52 @@ const SELECT_MOVED: f64 = 0.01;
 const RECENTRE_RETRIES: usize = 3;
 
 /// `PartialEq` is for the tests: comparing what [`precheck`] returns against what it should is the
+/// What is in front of a run at the moment it starts looking. See [`Run::doorway`].
+///
+/// A value rather than a ladder of `if`s, for the reason task #38 gives about arrivals: a ladder
+/// restates its preconditions at every rung and its order is an accident of where each check was
+/// added. Startup is small enough to be written the right way now — three questions, one answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Doorway {
+    /// A text screen's continue arrow. Whatever is behind it cannot be read until it is gone.
+    Text,
+    /// `Continue` — there is a save, and a run to resume.
+    Resume,
+    /// `Start` — no save, so this is a fresh adventure. **Not** `Restart`, which eulogises.
+    Fresh,
+    /// None of the three. The splash is still up, or something we have no fingerprint for is.
+    Nothing,
+}
+
+impl Doorway {
+    /// The ordering, separated from the reading so it can be asserted without a game.
+    ///
+    /// The same split `act::identify_from_scores` uses, for the same reason: which screen wins when
+    /// two fingerprints are live is a *decision*, and a decision that can only be exercised by
+    /// launching the game is a decision nothing checks.
+    ///
+    /// **Text first.** A lore card covers the menu, so asking about `Continue` while one is up is
+    /// asking about a button behind a picture. Everything downstream already works this way — *text
+    /// gates options* at an arrival — and a run that pressed the menu through a card would be
+    /// pressing a coordinate rather than a button.
+    ///
+    /// **Resume before fresh**, because they are mutually exclusive in the game
+    /// (`ui/startmenu.lua:186,199` — `Continue` is `activeIf mainSaveData`, and the slot beside it
+    /// says `Restart` in exactly that case) and taking the resume first means a save is never
+    /// stepped over.
+    pub fn from_readings(text: bool, resume: bool, fresh: impl FnOnce() -> bool) -> Doorway {
+        if text {
+            Doorway::Text
+        } else if resume {
+            Doorway::Resume
+        } else if fresh() {
+            Doorway::Fresh
+        } else {
+            Doorway::Nothing
+        }
+    }
+}
+
 /// only way to check `drive`'s wiring without a running game in front of it.
 #[derive(Debug, PartialEq)]
 pub enum Stop {
@@ -1858,6 +1904,91 @@ impl Run<'_> {
         // through to the map path, which is where a run standing on the map belongs.
         self.log.push_str("  affirmative still live after 6 presses — giving up on it\n");
         false
+    }
+
+    /// Which of the three things a run can meet at the door is on screen.
+    ///
+    /// **Three templates, not the registry.** [`crate::act::identify`] scores every button we know
+    /// and answers "which screen is this"; at startup the question is narrower — *what do I press* —
+    /// and only three answers exist. Asking narrowly is cheaper (three crops against thirty-odd) and
+    /// it cannot be surprised by a fingerprint from some screen that has no business being reachable
+    /// here.
+    ///
+    /// **The text screen is asked first, and that ordering is the point.** A lore card covers the
+    /// menu, so a run that checks `Continue` first is asking about a button behind a picture. The
+    /// same rule already governs arrivals — *text gates options* — and this is the same rule at the
+    /// front door.
+    ///
+    /// `Nothing` is a real and ordinary answer: the publisher splash takes several seconds and
+    /// nothing is pressable during it. It means look again, not give up.
+    pub fn doorway(&mut self) -> Doorway {
+        // Each read is skipped once an earlier one has answered — `||` is short-circuiting — so the
+        // ordinary case costs one crop, not three.
+        Doorway::from_readings(
+            self.affirmative().state.is_ready(),
+            matches!(
+                crate::act::score_exact(self.win, &crate::act::CONTINUE),
+                Ok(q) if q >= crate::act::CONTINUE_PRESENT
+            ),
+            // Recognised on its own artwork rather than by position, because the same slot reads
+            // `Restart` when a save exists and pressing that eulogises the run. See
+            // [`crate::act::MENU_START`], which measures both sides.
+            || matches!(
+                crate::act::score_exact(self.win, &crate::act::MENU_START),
+                Ok(q) if q >= crate::act::MENU_START_PRESENT
+            ),
+        )
+    }
+
+    /// The generic observer, as a way out rather than as an epitaph.
+    ///
+    /// **The dev's standing rule, said more than once:** *whenever we're confused, fall back to the
+    /// generic observer with all template matches so that we can try to recover — and log a warning
+    /// when this happens.*
+    ///
+    /// [`Run::doorway`] is deliberately narrow — three templates, because at the door only three
+    /// things are worth pressing — and narrowness is exactly what leaves it with nothing to say when
+    /// something else turns up. That is the moment to stop being clever and ask the whole registry.
+    /// It ran only at the abort before this, which is the observer as a *post mortem*: it explained
+    /// the corpse rather than saving the run.
+    ///
+    /// The warning is the point of the log line. Reaching here means the narrow path did not cover
+    /// the screen, which is a gap in the dispatch worth seeing even on the runs that recover from it.
+    ///
+    /// Returns whether anything was actually pressed, so the caller can tell a recovery from a
+    /// diagnosis.
+    pub fn recover_by_observing(&mut self, where_: &str) -> bool {
+        self.log.push_str(&format!(
+            "  WARNING: confused at {where_} — falling back to the full observer\n"
+        ));
+        let screen = crate::act::identify(self.win);
+        self.log.push_str(&format!("  observer says: {screen:?}\n"));
+        self.log_button_scores();
+        match answer_for(screen) {
+            // The escapes are the only answers that mean anything before a run has started: they
+            // are screens with a back plaque and nothing behind them we want. Everything else
+            // either belongs to a phase we are not in yet or is the map, and pressing at those from
+            // here would be inventing a handler rather than reusing one.
+            Answer::Escape => {
+                let out = self.back_one_screen();
+                self.log.push_str(&format!("  escaped it: {out}\n"));
+                out
+            }
+            other => {
+                self.log.push_str(&format!(
+                    "  no recovery for {screen:?} here ({other:?}) — looking again\n"
+                ));
+                false
+            }
+        }
+    }
+
+    /// Clears whatever text screen is up, by the key first and the arrow second.
+    ///
+    /// Both are the same control — see [`Run::click_affirmative`] — so this is one attempt at one
+    /// button, not two chances at two.
+    pub fn clear_the_gate(&mut self) -> bool {
+        self.clear_text_screen() || self.click_affirmative()
     }
 
     /// Clicks the lore screen's continue arrow, for when the key does not carry.
@@ -4424,6 +4555,46 @@ mod tests {
             !pan_again(far, w, h, Some(pan::Shift { dx: 0.0, dy: 20.0 }), PAN_ATTEMPTS),
             "the budget is spent"
         );
+    }
+
+    /// **A text screen outranks the menu behind it**, which is the whole reason the startup path
+    /// is a dispatch rather than two scores in a row.
+    ///
+    /// The run of 2026-08-16 is the case: a fresh profile put the auto-save card in front of the
+    /// menu, the menu checks were asked first, and the run aborted reporting `Start` at 0.0570 — a
+    /// true reading of a button that was behind a picture.
+    #[test]
+    fn a_text_screen_is_answered_before_anything_it_is_covering() {
+        // The failing run's state: a card up, and whatever the menu templates say beneath it.
+        assert_eq!(Doorway::from_readings(true, true, || true), Doorway::Text);
+        assert_eq!(Doorway::from_readings(true, false, || false), Doorway::Text);
+    }
+
+    /// A save is never stepped over. `Continue` and `Start` cannot both be live —
+    /// `ui/startmenu.lua:186,199` — but if a reading ever said so, resuming is the safe half:
+    /// the slot beside `Continue` reads `Restart` in that state, and pressing it eulogises the run.
+    #[test]
+    fn resuming_outranks_starting_over() {
+        assert_eq!(Doorway::from_readings(false, true, || true), Doorway::Resume);
+        assert_eq!(Doorway::from_readings(false, false, || true), Doorway::Fresh);
+    }
+
+    /// Nothing recognised is an ordinary answer, not a failure: the publisher splash is several
+    /// seconds long and nothing is pressable during it.
+    #[test]
+    fn recognising_nothing_is_a_state_and_not_an_error() {
+        assert_eq!(Doorway::from_readings(false, false, || false), Doorway::Nothing);
+    }
+
+    /// The later reads are not paid for once an earlier one has answered.
+    #[test]
+    fn the_menu_is_not_scored_when_a_text_screen_is_up() {
+        let mut asked = false;
+        let _ = Doorway::from_readings(true, false, || {
+            asked = true;
+            true
+        });
+        assert!(!asked, "scoring `Start` behind a lore card is work spent on a wrong answer");
     }
 
     /// `Screen::ALL` has to actually list every variant, or every test below silently checks less

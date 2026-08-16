@@ -50,7 +50,7 @@
 
 use diggle_solver::config::Config;
 use diggle_solver::fight::Fight;
-use diggle_solver::navigate::{drive, start_new_run, Run, Stop, FRAMES};
+use diggle_solver::navigate::{drive, start_new_run, Doorway, Run, Stop, FRAMES};
 use diggle_solver::observe::adjacency;
 use diggle_solver::observe::affirm;
 use diggle_solver::observe::feed::Feed;
@@ -132,130 +132,134 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // returns as soon as the HWND exists, the fixed 3 s after it is a guess, and `click_when_ready`
     // polls `locate` every 400 ms — three candidates, and guessing between them is how this project
     // wastes afternoons.
-    // One tight loop over BOTH menu buttons, breaking on whichever appears.
+    // **A dispatch over three fingerprints, not a ladder of polls.** The dev's shape, and the
+    // startup path is small enough to have it: at the door there are exactly three things worth
+    // pressing, so ask which one is there and act on the answer. See [`Doorway`].
     //
-    // This was `click_when_ready(CONTINUE, 30s)`, which polls `locate` — a *search* — four times a
-    // second, and on a fresh save `Continue` can never appear, so it burned the whole 30 s before
-    // `Start` was even considered. Every fresh-save launch paid it.
+    // What it replaces was two exact scores in sequence plus a lore-card attempt on a three-second
+    // timer with its own counter — an order that was an accident of when each piece was added, and
+    // a wait that was a guess. The card is now handled the moment it is recognised, however many
+    // arrive, and the menu checks no longer run against a screen that is covering the menu.
     //
-    // Both buttons now have exact origins, so each look is two comparisons rather than thousands of
-    // offsets, and the loop exits the moment either is recognised.
+    // This was `click_when_ready(CONTINUE, 30s)` once, which polls `locate` — a *search* — four
+    // times a second; on a fresh save `Continue` can never appear, so it burned the whole 30 s
+    // before `Start` was even considered. Every fresh-save launch paid it. Exact origins made each
+    // look three comparisons instead of thousands of offsets.
+    /// How long the publisher splash is allowed to be the reason nothing is recognised.
+    ///
+    /// `ui/publishersplash.lua:33` advances on a frame counter and hands over at `frame>7`, so this
+    /// is generous rather than tuned; anything unreadable after it is not the splash.
+    const SPLASH_GRACE: Duration = Duration::from_secs(8);
+    /// How often to spend a full-registry look while confused. Frequent enough to recover, rare
+    /// enough that the warning it writes stays readable.
+    const CONFUSED_EVERY: Duration = Duration::from_secs(5);
+
     let menu_at = Instant::now();
+    let mut confused = Instant::now();
     let mut found: Result<f64, String> = Err("menu never rendered".into());
     let mut offers_start = false;
-    /// How many text screens to clear before the menu.
-    ///
-    /// Three, because they arrive in runs — entering Ulrome printed two at once — and a fresh
-    /// profile's tutorial is exactly that shape. Each one is read before anything is pressed, so
-    /// the cost of an unused allowance is nothing.
-    const LORE_SCREENS: u32 = 3;
-    let mut cleared = 0u32;
     let by = Instant::now() + Duration::from_secs(30);
     while Instant::now() < by {
-        let cont = diggle_solver::act::score_exact(&win, &diggle_solver::act::CONTINUE);
-        if matches!(cont, Ok(q) if q >= diggle_solver::act::CONTINUE_PRESENT) {
-            found = diggle_solver::act::click_exact(
-                &win,
-                &diggle_solver::act::CONTINUE,
-                diggle_solver::act::CONTINUE_PRESENT,
-            )
-            .map_err(|e| e.to_string());
-            break;
-        }
-        let start = diggle_solver::act::score_exact(&win, &diggle_solver::act::MENU_START);
-        if matches!(start, Ok(q) if q >= diggle_solver::act::MENU_START_PRESENT) {
-            offers_start = true;
-            break;
-        }
-        // **A fresh profile does not open on the menu, and 2026-08-16 is the proof.**
-        //
-        // `ui/publishersplash.lua:46-53`: once the splash is done, the game shows the start menu
-        // *unless* `persistent.tutorials.autoSave` is unset — in which case it pushes a lore card
-        // first (`ui/graphics/text/auto-save.png`, the auto-save notice), sets the flag and writes
-        // `persistentSaveData` on the spot. Clearing that file clears the flag, so the very first
-        // launch after `checkpoint clear` puts a card where this loop expects a menu. `Start` scored
-        // **0.0570** and the run aborted saying the menu might not have rendered; it had, one screen
-        // further on.
-        //
-        // **The card is cleared by the arrow in the bottom-right corner** — the dev, watching it
-        // happen. `ui/lorescreen.lua:46-50` is one button, `type = 'right'` at `ss(1, 0.9)` with
-        // `xOffset = -0.75`, carrying `mousereleased = buttonFunction` *and*
-        // `userFunctionName = 'affirmative'`, and `affirm::LORE_AFFIRMATIVE` has described that exact
-        // slot all along. So this is the machinery `clear_text_screen` already runs at every village
-        // gate: read the arrow, press `space`, read again — and click the same arrow if the key does
-        // not carry.
-        //
-        // **A first cut sent Return here and that was the wrong key.** `space = 'affirmative'` is the
-        // binding the button names; `['return'] = 'hotspotSelect'`
-        // (`utils/defaultbinds/keyboard.lua:6,13`), which presses whatever the hotspot cursor
-        // happens to be sitting on. It works on this card because the hotspot lands on the arrow,
-        // which is how two spikes came to use it as a positive control — but it is not what the
-        // screen declares, and a key chosen for the screen it was tried on is the habit this project
-        // keeps paying for.
-        //
-        // Reading first is also what makes this safe to run in the poll loop: on the start menu the
-        // arrow is simply absent and `clear_text_screen` returns false without pressing anything.
-        if cleared < LORE_SCREENS && menu_at.elapsed() > Duration::from_secs(3) {
-            cleared += 1;
-            if r.clear_text_screen() || r.click_affirmative() {
-                std::thread::sleep(Duration::from_millis(600));
-                continue;
+        match r.doorway() {
+            // **A fresh profile does not open on the menu, and 2026-08-16 is the proof.**
+            //
+            // `ui/publishersplash.lua:46-53`: once the splash is done the game shows the start menu
+            // *unless* `persistent.tutorials.autoSave` is unset — in which case it pushes a lore
+            // card first (`ui/graphics/text/auto-save.png`, the auto-save notice), sets the flag and
+            // writes `persistentSaveData` on the spot. Clearing that file clears the flag, so the
+            // first launch after `checkpoint clear` puts a card where the menu is expected. `Start`
+            // scored **0.0570** and the run aborted saying the menu might not have rendered. It had,
+            // one screen further on.
+            //
+            // Cleared by the arrow in the bottom-right corner — the dev, watching it happen. Both
+            // the key and the click go at the same button; see [`Run::clear_the_gate`].
+            Doorway::Text => {
+                r.log.push_str("  a text screen is gating the menu
+");
+                if !r.clear_the_gate() {
+                    r.log.push_str("  could not clear it — looking again
+");
+                }
+            }
+            Doorway::Resume => {
+                found = diggle_solver::act::click_exact(
+                    &win,
+                    &diggle_solver::act::CONTINUE,
+                    diggle_solver::act::CONTINUE_PRESENT,
+                )
+                .map_err(|e| e.to_string());
+                break;
+            }
+            Doorway::Fresh => {
+                offers_start = true;
+                break;
+            }
+            // The splash is several seconds long and nothing is pressable during it, so this is the
+            // ordinary answer for the first stretch of every launch — and looking again is the
+            // whole response for as long as it stays ordinary.
+            //
+            // **After that it is confusion, and confusion has a standing answer**: the full
+            // observer, with a warning. `SPLASH_GRACE` is what separates the two, and it is set from
+            // the thing it is waiting out rather than from a fear of pressing too early — the splash
+            // runs on a frame counter (`ui/publishersplash.lua:33`, `frame>7`), so it is over in a
+            // few seconds and anything still unreadable at eight is not a splash.
+            //
+            // Bounded, because a fallback that fires every 150 ms would bury the log it exists to
+            // write. Between attempts the loop goes back to the cheap three-template question, so a
+            // screen that resolves on its own is still caught by the fast path.
+            Doorway::Nothing => {
+                if menu_at.elapsed() > SPLASH_GRACE && confused.elapsed() > CONFUSED_EVERY {
+                    confused = Instant::now();
+                    r.recover_by_observing("the start menu");
+                }
+                std::thread::sleep(Duration::from_millis(150));
             }
         }
-        std::thread::sleep(Duration::from_millis(150));
     }
     let found = if offers_start { Err("no Continue".to_string()) } else { found };
     r.log.push_str(&format!(
-        "launch->window+3s {:?}, then Continue took {:?}\n",
+        "launch->window+3s {:?}, then the door took {:?}\n",
         window_at.duration_since(launched),
         menu_at.elapsed()
     ));
     if found.is_err() {
-        // No `Continue` means no save — so the menu is offering `Start` instead. Say which, because
-        // "no Continue" alone cannot distinguish "fresh save, ready to start a new run" from "the
-        // menu never rendered", and those want opposite responses.
+        // **The dispatch already decided this; nothing is re-read here.** It used to score
+        // `MENU_START` a second time to find out which kind of failure it had, which is a second
+        // reading that can disagree with the first — the loop breaks on `Doorway::Fresh` and this
+        // could then miss on an animation and abort a launch that was fine.
         //
-        // Recognised, deliberately not pressed. That slot reads `Restart` when a save DOES exist and
-        // pressing it eulogises the run, so the fingerprint is the whole safety argument — and past
-        // it lies hero select, which nothing in this tree can drive yet. Better to stop here naming
-        // the reason than to click into a screen we cannot leave.
-        match diggle_solver::act::score_exact(&win, &diggle_solver::act::MENU_START) {
-            Ok(q) if q >= diggle_solver::act::MENU_START_PRESENT => {
-                r.log.push_str(&format!(
-                    "no Continue — the menu offers `Start` ({q:.4}), so there is no save to \
-                     resume. Beginning a new run.\n"
-                ));
-                if let Err(e) = start_new_run(&mut r, &cfg.game_dir) {
-                    r.log.push_str(&format!("ABORT: {e}\n"));
-                    return finish(&mut game, &r.log, &archive);
-                }
+        // `Start` is recognised and deliberately not pressed by [`Run::doorway`]: that slot reads
+        // `Restart` when a save DOES exist, and pressing that eulogises the run. The fingerprint is
+        // the whole safety argument, which is why the pressing lives in `start_new_run` behind
+        // `click_exact` rather than out here.
+        if offers_start {
+            r.log.push_str(
+                "no Continue — the menu offers `Start`, so there is no save to resume. \
+                 Beginning a new run.\n",
+            );
+            if let Err(e) = start_new_run(&mut r, &cfg.game_dir) {
+                r.log.push_str(&format!("ABORT: {e}\n"));
+                return finish(&mut game, &r.log, &archive);
             }
+        } else {
             // **Ask the observer before giving up.** The dev's standing rule, and this was the one
             // path that still broke it: on 2026-08-16 the run stopped here saying "the menu may not
-            // have rendered" on the strength of a single number, when what was actually on screen
-            // was the auto-save lore card — a screen the spikes have known about for weeks.
+            // have rendered" on the strength of a single number, when what was on screen was the
+            // auto-save lore card — a screen the spikes have known about for weeks.
             //
-            // One number cannot tell "nothing is drawn" from "something else is drawn", and those
-            // want opposite responses. `identify` names it if we have a fingerprint,
-            // `log_button_scores` says what came closest if we do not, and the frame means the next
-            // person can look at the screen itself instead of re-running to see it.
-            Ok(q) => {
-                r.log.push_str(&format!(
-                    "ABORT: no Continue, and no `Start` either (best {q:.4}) — asking what IS on \
-                     screen\n"
-                ));
-                r.log.push_str(&format!("  screen: {:?}\n", diggle_solver::act::identify(&win)));
-                r.log_button_scores();
-                r.snap_screen("startup-no-menu");
-                return finish(&mut game, &r.log, &archive);
-            }
-            Err(e) => {
-                r.log.push_str(&format!("ABORT: no Continue; could not read `Start`: {e}\n"));
-                r.log.push_str(&format!("  screen: {:?}\n", diggle_solver::act::identify(&win)));
-                r.log_button_scores();
-                r.snap_screen("startup-unreadable");
-                return finish(&mut game, &r.log, &archive);
-            }
+            // Reaching here now means thirty seconds in which none of the three was ever
+            // recognised, so a score would say nothing anyway: `identify` names the screen if we
+            // have a fingerprint for it, `log_button_scores` says what came closest if we do not,
+            // and the frame lets the next person look at the screen instead of re-running to see
+            // it — which for a first launch is not even possible, since the game writes
+            // `persistent.tutorials.autoSave` the moment it shows that card.
+            r.log.push_str(
+                "ABORT: no menu and no text screen within 30s — asking what IS on screen\n",
+            );
+            r.log.push_str(&format!("  screen: {:?}\n", diggle_solver::act::identify(&win)));
+            r.log_button_scores();
+            r.snap_screen("startup-no-menu");
+            return finish(&mut game, &r.log, &archive);
         }
     }
     let by = Instant::now() + Duration::from_secs(40);
