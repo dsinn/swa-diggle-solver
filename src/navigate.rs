@@ -3862,10 +3862,15 @@ pub fn drive(
                 Crossing::Step { to, toward } => match fresh.nodes.iter().find(|n| &n.key == to) {
                     // The door's reason is printed because three runs in a row turned on which
                     // branch chose it, and the line looked identical in all of them.
+                    // **And what it was ranked against**, which the reason alone could not say.
+                    // On 2026-08-16 a run left Ulrome by the road to `l7` while the road to `l1` —
+                    // one hop from the anomaly against `l7`'s two — was among the five doors the
+                    // game printed, and this line could not say whether `l1` was even measured.
                     Some(n) => (
                         format!(
-                            "crossing `{container}` toward `{toward}` ({}) via `{to}`",
-                            r.map.door_reason().map(|d| d.why()).unwrap_or("held from earlier")
+                            "crossing `{container}` toward `{toward}` ({}) via `{to}`{}",
+                            r.map.door_reason().map(|d| d.why()).unwrap_or("held from earlier"),
+                            r.map.door_note().map(|s| format!("\n  door choice: {s}")).unwrap_or_default()
                         ),
                         (n.x, n.y),
                     ),
@@ -4335,7 +4340,8 @@ pub fn drive(
                 return Stop::TooHurtToFight(format!("{here} ({}) at {hp}", p.heading));
             }
             r.log.push_str(&format!(
-                "{step}. fighting {}`{here}` ({})\n",
+                "{step}. {} {}`{here}` ({})\n",
+                if p.is_chest() { "opening" } else { "fighting" },
                 if is_anomaly { "**THE ANOMALY** " } else { "" },
                 p.heading
             ));

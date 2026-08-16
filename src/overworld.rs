@@ -427,6 +427,12 @@ impl Place {
     ///
     /// It is deterministic per seed rather than a die roll — `seedNormal` decides it — so a chest
     /// either is or is not a mimic before we touch it. We just cannot see which.
+    /// **Opening one is a fight**, which is why nothing special is needed to play it. Its area
+    /// button is `Open` at the same `ss(0, 0.85)`, `xOffset 0.75` slot every other area button uses
+    /// (`overworld/generators/forest.lua:30-39`), and pressing it calls
+    /// `overworld.startNewRun(utils.combat.scenarios.chest(…))`. The node completes when the chest
+    /// or the mimic inside it dies (`:190-194`), and `getAreaButtons` (`:186-188`) offers `Open`
+    /// only while it is incomplete — so an opened chest has no button at all.
     pub fn is_chest(&self) -> bool {
         self.type_is("chest")
     }
@@ -645,10 +651,19 @@ impl Place {
     /// **A subworld container is never retired.** Its edges are surface roads; what it has to offer
     /// is an interior, and no count of neighbours describes that.
     ///
-    /// **Reveals nothing is not offers nothing.** A chest or a worthwhile fight can sit on a retired
-    /// node. That is the same exception the chest task already owns — see `handoff/TASKS.md` — and
-    /// until it lands, a node with nothing to reveal is skipped whatever is standing on it.
+    /// **Reveals nothing is not offers nothing, and a chest is the case that proves it.** A leaf's
+    /// only neighbour is the one you arrive from, so entering costs two steps for nothing — right
+    /// for exploring, wrong for loot. Task #16, landed 2026-08-16: an unopened chest is never
+    /// retired, however little map it has left to give.
+    ///
+    /// Only while it is **unopened**. `getAreaButtons` offers `Open` on an incomplete chest and
+    /// nothing at all on a complete one (`overworld/generators/forest.lua:186-188`), so a chest we
+    /// have already emptied really is a leaf with nothing behind it, and walking back to it is the
+    /// bounce this whole field exists to prevent.
     pub fn nothing_left_to_reveal(&self) -> bool {
+        if self.is_chest() && !self.completed {
+            return false;
+        }
         !self.subworld_container
             && self.connections > 0
             && self.neighbours.len() as u32 >= self.connections
@@ -756,6 +771,18 @@ pub struct WorldMap {
     crossing_to: Option<(String, Goal)>,
     /// Why the door in `crossing_to` was chosen, for the log. Set wherever the choice is made.
     door_reason: Option<Door>,
+    /// **What the choice actually saw**: the errand, and every door with its distance to that
+    /// errand's target.
+    ///
+    /// The reason alone has twice been too little. On 2026-08-16 the run left Ulrome by the road to
+    /// `l7` when the road to `l1` — one hop from the anomaly against `l7`'s two — was among the five
+    /// doors the game printed, and the report could not say whether the errand was the anomaly,
+    /// whether `l1` was ranked at all, or what it scored. Answering that meant reading the *game's*
+    /// console log for the exit list and reasoning backwards.
+    ///
+    /// A ranking nothing records is a ranking nobody can check, and this one decides where a run
+    /// walks. Set beside [`WorldMap::door_reason`] and printed with the crossing.
+    door_note: Option<String>,
     /// **The most recent dump's own frame**, rewritten wholesale by every [`WorldMap::fold`]: every
     /// node and every exit it named, at the coordinates it printed for them.
     ///
@@ -1374,6 +1401,11 @@ impl WorldMap {
     /// Why the door we are crossing toward was chosen. `None` before any choice this crossing.
     pub fn door_reason(&self) -> Option<Door> {
         self.door_reason
+    }
+
+    /// The errand and the doors it was ranked against — see [`WorldMap::door_note`]'s field.
+    pub fn door_note(&self) -> Option<&str> {
+        self.door_note.as_deref()
     }
 
     /// Straight-line distance between two places, when both have been placed in the frame.
@@ -2467,6 +2499,30 @@ impl WorldMap {
         // save has been read, and an unknown flag is read as not open, since a wasted trip is
         // cheaper than stranding the run.
         if !self.anomaly_is_open().unwrap_or(false) {
+            // **Everything under the trigger's level first, and the trigger only when nothing else
+            // is left.**
+            //
+            // The dev, 2026-08-16, after a run walked out of a village straight into a level 7 crypt
+            // and died there: *we don't have the warrior's gear to carry us through difficult
+            // crypts, so instead of beelining for the nearest level 4 node, I now want the
+            // pre-anomaly navigator to visit every node that is lower than level 4, so that we only
+            // visit a level 4 node when the entire frontier is at least level 4.*
+            //
+            // Opening the portal needs a win at a node **above level 3**
+            // (`crate::subworld::triggers_anomaly`, and `world_evil.lua:15-21`), so the trigger is
+            // by definition the hardest thing on the board at that moment. Taking the nearest one
+            // the moment it appears spends a fresh character on the worst fight available while
+            // easier ground — gold, gear, hearts, and the map itself — sits unwalked beside it.
+            //
+            // A frontier node with no level at all counts as under the bar: no level means no combat
+            // (`Place::has_combat`), so it is free to visit and cannot be the thing we are avoiding.
+            //
+            // This does not *refuse* the trigger, it queues it. When every frontier is level 4 or
+            // above, the branch below runs exactly as it did.
+            // Suppression rather than pre-emption. An earlier cut returned the gentle frontier here
+            // and labelled it `Explore`, which stole the target from whichever branch below would
+            // have claimed it — a free shrine came back as exploring, and eight tests said so. The
+            // ladder is left to answer; this only declines to answer *with the trigger*.
             let mut candidates: Vec<&Place> = self
                 .places
                 .values()
@@ -2480,7 +2536,7 @@ impl WorldMap {
                     .then(a.level().cmp(&b.level()))
                     .then(a.key.cmp(&b.key))
             });
-            if let Some(p) = candidates.first() {
+            if let Some(p) = candidates.first().filter(|_| !self.gentler_ground_remains(here, &ok)) {
                 return Some(Plan { target: p.key.clone(), reason: Goal::OpenAnomaly, steered_by: None });
             }
         }
@@ -2566,6 +2622,7 @@ impl WorldMap {
         // (`tower::press_reveal` is a stub), so there is no such case to lose today — and when there
         // is, the honest fix is to clear `visited` on the nodes the reveal touched rather than to
         // walk back to every one of them on spec.
+        let gentle_only = self.gentler_ground_remains(here, &ok);
         let mut frontier: Vec<&Place> = self
             .places
             .values()
@@ -2575,6 +2632,11 @@ impl WorldMap {
             // over the edges, and this only decides what is worth walking *to*.
             .filter(|p| !p.nothing_left_to_reveal())
             .filter(|p| ok(p))
+            // **The same bar exploring is asked to respect.** Suppressing the trigger branch alone
+            // would only move the problem: the frontier below it holds the very same level 4+ nodes,
+            // and `Explore` would walk onto one anyway. So while gentler ground remains, it is the
+            // only ground exploring considers. See [`WorldMap::gentler_ground_remains`].
+            .filter(|p| !gentle_only || !p.triggers_anomaly())
             .collect();
         // Order matters, and a live run showed why. From l10 with l1 and l18 both adjacent and both
         // unvisited, sorting by key chose `l1` — already **completed**, so it revealed nothing — and
@@ -2900,7 +2962,7 @@ impl WorldMap {
     /// every distance in this file means, including `next_target`'s. Until then, read the ranking as
     /// what happens on the surface, and the fallback as what happens while crossing.
     pub fn exit_toward(&self, exits: &[crate::observe::adjacency::Exit]) -> Option<String> {
-        self.choose_exit(exits).map(|(k, _)| k)
+        self.choose_exit(exits).map(|(k, _, _)| k)
     }
 
     /// [`WorldMap::exit_toward`], and **which of its three answers produced the door**.
@@ -2912,7 +2974,9 @@ impl WorldMap {
     ///
     /// A decision worth making is worth being able to read afterwards. `Door` is carried to
     /// [`WorldMap::door_reason`] and printed with the crossing.
-    fn choose_exit(&self, exits: &[crate::observe::adjacency::Exit]) -> Option<(String, Door)> {
+    fn choose_exit(
+        &self, exits: &[crate::observe::adjacency::Exit],
+    ) -> Option<(String, Door, String)> {
         if exits.is_empty() {
             return None;
         }
@@ -2950,8 +3014,26 @@ impl WorldMap {
         let plan = outside.as_ref().unwrap_or(self).next_target();
         let errand = plan.as_ref().map(|p| p.reason.clone());
         let target = plan.map(|p| p.target);
+        // **The whole ranking, written down before anything is chosen from it.** See the
+        // `door_note` field: the reason alone could not answer "was the better door even ranked",
+        // which is the question the run of 2026-08-16 left open.
+        let mut note = match (&errand, &target) {
+            (Some(g), Some(t)) => format!("{g:?} -> {t}"),
+            _ => "no errand".to_string(),
+        };
         if let Some(target) = target.as_ref() {
             let dist = self.distances(target);
+            {
+                let mut seen: Vec<String> = exits
+                    .iter()
+                    .map(|e| match dist.get(&e.to_key) {
+                        Some(d) => format!("{}={d}", e.to_key),
+                        None => format!("{}=unmeasured", e.to_key),
+                    })
+                    .collect();
+                seen.sort();
+                note.push_str(&format!("; doors {}", seen.join(" ")));
+            }
             // A door whose road we have written off is not a door. `abandoned` is the driver's
             // record of having had its go, and it is recorded against the *interior road node*
             // (`l9_path_to_l1`), not against the surface node beyond it — so ranking by surface
@@ -3007,10 +3089,10 @@ impl WorldMap {
                         Some(&e.to_key) != entrance.as_ref()
                             && !self.places.get(&e.to_key).map(|p| p.visited).unwrap_or(false)
                     }) {
-                        return Some((onward.to_key.clone(), Door::NotBackOutAgain));
+                        return Some((onward.to_key.clone(), Door::NotBackOutAgain, note));
                     }
                 }
-                return Some((best.to_key.clone(), Door::NearestToTarget));
+                return Some((best.to_key.clone(), Door::NearestToTarget, note));
             }
         }
         // No target, or none of the exits lead anywhere we can measure.
@@ -3099,7 +3181,8 @@ impl WorldMap {
             i64::MAX => Door::SafestOfWhatIsLeft,
             _ => Door::TowardTheCorruption,
         };
-        Some((best.to_key.clone(), why))
+        note.push_str("; unranked, fell back on risk and bearing");
+        Some((best.to_key.clone(), why, note))
     }
 
     /// The door this crossing already chose, if it is still worth believing in.
@@ -3232,8 +3315,9 @@ impl WorldMap {
                 let errand = self.next_target().map(|p| p.reason);
                 let to = match self.committed_exit(&parent, errand.as_ref()) {
                     Some(to) => Some(to),
-                    None => self.choose_exit(exits).map(|(to, why)| {
+                    None => self.choose_exit(exits).map(|(to, why, note)| {
                         self.door_reason = Some(why);
+                        self.door_note = Some(note);
                         to
                     }),
                 };
@@ -3620,6 +3704,40 @@ impl WorldMap {
             p.parent.as_deref() == Some(container)
                 && p.is_general_store()
                 && !self.abandoned.contains(&p.key)
+        })
+    }
+
+    /// Is there anywhere left to go that the anomaly's trigger level does not cover?
+    ///
+    /// The dev, 2026-08-16, after a fresh character died in a level 7 crypt on the way to the
+    /// portal: *we don't have the warrior's gear to carry us through difficult crypts, so instead of
+    /// beelining for the nearest level 4 node, I now want the pre-anomaly navigator to visit every
+    /// node that is lower than level 4, so that we only visit a level 4 node when the entire
+    /// frontier is at least level 4.*
+    ///
+    /// Opening the portal needs a win **above level 3** (`crate::subworld::triggers_anomaly`, from
+    /// `world_evil.lua:15-21`), so the trigger is by definition the hardest thing on the board at
+    /// that moment. Taking the nearest one the moment it appears spends a fresh character on the
+    /// worst fight available while easier ground — gold, gear, hearts, and the map itself — lies
+    /// unwalked beside it.
+    ///
+    /// **A frontier node with no level at all counts as gentler.** No level means no combat
+    /// (`Place::has_combat`), so it is free to walk to and cannot be the thing being avoided.
+    ///
+    /// Only asked while the portal is shut. Once it is open the objective is the portal itself and
+    /// this bar would keep a run wandering instead of finishing.
+    fn gentler_ground_remains(&self, here: &str, ok: &impl Fn(&Place) -> bool) -> bool {
+        if self.anomaly_is_open().unwrap_or(false) {
+            return false;
+        }
+        self.places.values().any(|p| {
+            p.key != here
+                && p.is_frontier()
+                && !p.avoid
+                && !self.abandoned.contains(&p.key)
+                && !p.nothing_left_to_reveal()
+                && !p.triggers_anomaly()
+                && ok(p)
         })
     }
 
@@ -4576,6 +4694,18 @@ mod tests {
             "camp",
             vec![node("l4", "Grim Barrow — level 4 crypt"), node("l2", "Quiet Glade meadow")],
         ));
+
+        // **The dev's rule of 2026-08-16 reversed what this used to assert.** Opening the portal
+        // needs a win above level 3, so the trigger is the hardest fight available; a meadow with no
+        // level is free. The meadow goes first, and `l4` is not even offered as somewhere to
+        // explore while it stands.
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.target, "l2", "the gentle ground before the level 4 crypt");
+        assert_ne!(plan.reason, Goal::OpenAnomaly);
+
+        // With the meadow walked and nothing left under the bar, the trigger is the plan again.
+        m.entry("l2").visited = true;
+        m.entry("l2").hidden = Some(0);
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::OpenAnomaly);
         assert_eq!(plan.target, "l4");
@@ -4734,7 +4864,10 @@ mod tests {
         // is a level 4 trigger we cannot reach, so it stops being what we claim to be doing;
         // `next_hop`'s any-frontier fallback used to supply this same step under a goal that was
         // not being pursued. Now the goal is the step.
-        assert_eq!(hop.plan.reason, Goal::RouteTo(Box::new(Goal::OpenAnomaly)));
+        // Since 2026-08-16 the errand is exploring rather than routing to the trigger: `l4` is a
+        // level 4 node and `l2` is not, so the trigger is queued behind the gentler ground rather
+        // than declined for want of a route. The move and the honesty about it are unchanged.
+        assert_eq!(hop.plan.reason, Goal::Explore);
         assert_eq!(hop.plan.target, "l2", "we say where we are actually going");
     }
 
@@ -6013,6 +6146,91 @@ mod tests {
         }
     }
 
+    /// **A chest at a dead end is still worth the two steps.** Task #16.
+    ///
+    /// The leaf rule is right for exploring and wrong for loot: a leaf's only neighbour is the one
+    /// you arrive from, so it reveals nothing — but "nothing to reveal" is not "nothing to gain",
+    /// and a chest sits at a leaf often enough. The task named this exception when the rule was
+    /// written; this is it landing.
+    ///
+    /// Only while unopened, which is the other half. `getAreaButtons` offers `Open` on an incomplete
+    /// chest and nothing at all once it is done (`overworld/generators/forest.lua:186-188`), so an
+    /// emptied chest really is a leaf with nothing behind it — and walking back to it is exactly the
+    /// bounce the leaf rule exists to prevent.
+    #[test]
+    fn an_unopened_chest_is_worth_a_detour_that_reveals_nothing() {
+        let leaf = |heading: &str, done: bool| {
+            let mut p = Place { heading: heading.into(), ..Place::default() };
+            p.connections = 1;
+            p.neighbours.insert("here".into());
+            p.completed = done;
+            p
+        };
+
+        // The control: an ordinary leaf is still skipped, or this proves only that the rule is gone.
+        assert!(
+            leaf("Fangfoss grave", false).nothing_left_to_reveal(),
+            "an ordinary dead end reveals nothing and is not a destination"
+        );
+        assert!(
+            !leaf("Riccall chest", false).nothing_left_to_reveal(),
+            "an unopened chest is worth the two steps whatever it reveals"
+        );
+        assert!(
+            leaf("Riccall chest", true).nothing_left_to_reveal(),
+            "and an emptied one is a leaf again — walking back is the bounce this prevents"
+        );
+    }
+
+    /// **The whole frontier under level 4 first, and only then the trigger.**
+    ///
+    /// The dev, 2026-08-16: *we don't have the warrior's gear to carry us through difficult crypts,
+    /// so instead of beelining for the nearest level 4 node, I now want the pre-anomaly navigator to
+    /// visit every node that is lower than level 4, so that we only visit a level 4 node when the
+    /// entire frontier is at least level 4.*
+    ///
+    /// Both halves are needed and neither alone is enough: suppressing the trigger branch while
+    /// leaving `Explore` free to walk onto the same node would move the problem rather than fix it.
+    #[test]
+    fn the_trigger_waits_until_nothing_gentler_is_left() {
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "start",
+            "camp",
+            vec![
+                node("l4", "Grim Barrow — level 4 crypt"),
+                node("l2", "Quiet Glade meadow"),
+                node("l3", "Fangfoss — level 2 crypt"),
+            ],
+        ));
+
+        // Two nodes under the bar. Whichever is chosen, it is not the level 4 one, and the errand
+        // is not the trigger.
+        let plan = m.next_target().expect("a plan");
+        assert_ne!(plan.target, "l4", "the level 4 crypt is not the first stop");
+        assert_ne!(plan.reason, Goal::OpenAnomaly);
+
+        // Walk the meadow. The level 2 crypt is still under the bar, so still first.
+        m.entry("l2").visited = true;
+        m.entry("l2").hidden = Some(0);
+        let plan = m.next_target().expect("a plan");
+        assert_eq!(plan.target, "l3", "a level 2 crypt is gentler ground too");
+
+        // Walk that as well and the frontier is level 4 and above, which is when the rule lets go.
+        m.entry("l3").visited = true;
+        m.entry("l3").hidden = Some(0);
+        let plan = m.next_target().expect("a plan");
+        assert_eq!(plan.reason, Goal::OpenAnomaly);
+        assert_eq!(plan.target, "l4");
+
+        // **And the bar is lifted the moment the portal opens**, or it would keep a run wandering
+        // instead of finishing. `l4` stops being a trigger then, so the check is on the predicate.
+        let mut open = WorldMap::new();
+        open.fold(&dump("start", "camp", vec![node("l2", "Quiet Glade meadow")]));
+        open.hell = Some(0.1);
+        assert!(!open.gentler_ground_remains("start", &|_: &Place| true));
+    }
+
     /// **Corruption takes completion away, and the save is how we hear about it.**
     ///
     /// The dev, watching `spike-run-20260816-0310Z.md` stall: *the navigator is confused because the
@@ -6095,7 +6313,7 @@ mod tests {
             Some(Goal::CloseAnomaly),
             "the control: the errand really is the anomaly, or this proves nothing about it"
         );
-        let (door, why) = m.choose_exit(&[exit("l39"), exit("l60")]).expect("two doors");
+        let (door, why, _) = m.choose_exit(&[exit("l39"), exit("l60")]).expect("two doors");
         assert_eq!(door, "l39", "four hops from the portal, against six the other way");
         assert_eq!(why.why(), "nearest to the target", "and ranked, not fallen back on");
 
@@ -6140,7 +6358,7 @@ mod tests {
         // worth knowing rather than working around: the override only matters where the two
         // disagree, and under `Explore` they rarely can.
         assert_eq!(
-            m.choose_exit(&[exit("l39"), exit("l60")]).map(|(d, _)| d),
+            m.choose_exit(&[exit("l39"), exit("l60")]).map(|(d, _, _)| d),
             Some("l60".to_string()),
             "with nothing named to walk to, the unwalked door is still where exploring goes"
         );
@@ -6639,7 +6857,7 @@ e	l4	l11
         assert_eq!(m.get("l40").map(|p| p.risk()), Some(Risk::Free));
 
         let doors = [door("l57"), door("l40")];
-        let (going, why) = m.choose_exit(&doors).expect("two doors");
+        let (going, why, _) = m.choose_exit(&doors).expect("two doors");
         assert_eq!(going, "l57", "toward the anomaly, through the corruption, because that is where it is");
         assert_eq!(why.why(), "safest, and toward the anomaly");
 
@@ -6647,7 +6865,7 @@ e	l4	l11
         m.note_health_level(crate::rest::Health { current: 1, max: 20 });
         assert!(m.wants_rest());
         assert_eq!(
-            m.choose_exit(&doors).map(|(k, _)| k).as_deref(),
+            m.choose_exit(&doors).map(|(k, _, _)| k).as_deref(),
             Some("l40"),
             "a run that needs a bed takes the safe door, which is the whole point of the ordering"
         );
@@ -6699,7 +6917,7 @@ e	l4	l11
 
         // `choose_exit` rather than `exit_toward`, because the reason is the point: picking `l57`
         // by luck out of the safety fallback would pass the first assertion and fix nothing.
-        let (chosen, why) = m
+        let (chosen, why, _) = m
             .choose_exit(&[door("shrine7"), door("l40"), door("l57")])
             .expect("three doors is not no doors");
         assert_eq!(chosen, "l57", "the door that leads to the shrine, not the one that is merely safe");
@@ -7869,6 +8087,23 @@ e	l4	l11
             vec![node("shrine2", "Gransmoor shrine"), node("l39", "Eight Timberland — level 4 forest")],
         ));
         m.hell = Some(0.0);
+        // **What this measures changed on 2026-08-16 and the game fact behind it did not.**
+        // Consecrating still needs `hell ~= 0`, so a run cannot finish a shrine before the portal
+        // opens — but it was never this branch that enforced that, and the shrine branch below is
+        // deliberately reachable with the portal shut, because `Pray` is available there and worth
+        // having. What used to keep the run off shrines early was `OpenAnomaly` outranking them,
+        // and the dev's rule has queued the trigger behind every node under level 4 — which a
+        // shrine, carrying no level at all, is.
+        //
+        // So the assertion is the half that is still this test's own: the trigger is taken as soon
+        // as nothing gentler is left, and not before.
+        assert_ne!(
+            m.next_target().unwrap().reason,
+            Goal::OpenAnomaly,
+            "a level 4 forest is not the first stop while an unwalked shrine stands"
+        );
+        m.entry("shrine2").visited = true;
+        m.entry("shrine2").hidden = Some(0);
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::OpenAnomaly);
         assert_eq!(plan.target, "l39");
