@@ -51,12 +51,11 @@ pub const CHANGED: f64 = 12.0;
 ///
 /// Measured on a real half-filled board: empty slots read **17.0–21.8**, occupied ones **58.2–161.1**,
 /// where the 58.2 was an already-*selected* tile (selection darkens it, so that is the hardest case
-/// to call occupied).
+/// to call occupied). Forty sits in a 2.7× gap between the two populations.
 ///
-/// ## A burnt-out tile is dark, and forty called it an empty slot
+/// ## A burnt-out tile reads below this, and that is not this constant's problem
 ///
-/// That calibration had no burnt tile in it, and a burnt one is not merely dim — it is charred
-/// black. Turn 17 of the anomaly fight, 2026-08-16 (`tests/frames/board-burnt-out-tile.png`):
+/// Turn 17 of the anomaly, 2026-08-16 (`tests/frames/board-burnt-out-tile.png`):
 ///
 /// ```text
 /// I=101.9  N= 97.0  R= 50.6  C=166.3
@@ -65,16 +64,16 @@ pub const CHANGED: f64 = 12.0;
 /// P= 99.3  J= 81.0  C=171.2  Æ= 35.1
 /// ```
 ///
-/// Fifteen tiles between 50 and 171, and one at **35.1**. [`Board::wait_until_ready`] requires every
-/// slot to read occupied, so it waited for a board that was already full and still, and could never
-/// have stopped waiting. The dev watched it happen and said so: *the board never filled/settled
-/// statement is incorrect; even the formerly burning tiles burnt out and stopped animating.*
+/// A charred tile at **35.1**, and [`Board::wait_until_ready`] waited out its timeout on a board
+/// that was full and still. The first fix was to drop this to 28.0, between that 35.1 and the empty
+/// population's 21.8 — which works and is **the wrong lever**: it spends the 2.7× margin against
+/// bare backboard down to 1.6×, on the strength of one burnt sample, to answer a question the board
+/// answers exactly.
 ///
-/// Twenty-eight sits between the empty population's 21.8 and that 35.1. **The margin is thinner than
-/// the one it replaces** — 1.6× rather than 2.7× — and it rests on a single burnt sample, so
-/// `wait_until_ready` no longer treats a failure to settle as fatal: see there. A threshold this
-/// close wants the backstop.
-pub const OCCUPIED: f64 = 28.0;
+/// The dev's answer: *if the top tile of a column is occupied, then all of those underneath it are.*
+/// Tiles fall, so a column empties from the top, and the tile above that `Æ` read 166.3. See
+/// [`Board::occupancy`], which applies that and leaves this number where it was measured.
+pub const OCCUPIED: f64 = 40.0;
 
 /// How often to re-capture while waiting for a click to show. The capture floor is 4.4 ms, but
 /// polling that hard is near-continuous GDI work for no measurable latency gain.
@@ -294,6 +293,9 @@ pub struct Board<'a> {
     win: &'a GameWindow,
     /// Tile centres in client coordinates, indexed as the board dump is.
     centres: Vec<(i32, i32)>,
+    /// Tiles per column, in the same order the centres are laid out — see [`Board::occupancy`],
+    /// which needs to know where one column ends and the next begins.
+    rows_per_col: Vec<usize>,
     /// The rectangle the cheap capture reads, and the offset tile coordinates need.
     rect: (i32, i32, i32, i32),
     /// The region watched to tell the on-screen keyboard from the tile board.
@@ -321,6 +323,7 @@ impl<'a> Board<'a> {
         Ok(Board {
             win,
             centres: layout::tile_centres(geom, cw, ch),
+            rows_per_col: geom.rows_per_col.clone(),
             rect: layout::board_rect(geom, cw, ch),
             keyboard: crate::typist::wildcard::region(cw, ch),
             // 55% of a tile: inside the face, so a small mapping error still samples the right tile
@@ -383,8 +386,39 @@ impl<'a> Board<'a> {
     }
 
     /// Which tile positions actually hold a tile.
+    ///
+    /// ## Gravity decides this, and brightness only starts the argument
+    ///
+    /// The dev, 2026-08-16: *tiles move from top to bottom because of gravity. If the top tile of a
+    /// column is occupied, then all of those underneath it are.*
+    ///
+    /// That is the whole shape of a board mid-refill. Tiles fall, so a column empties from the
+    /// **top** — the gap is never in the middle and never at the bottom. So one bright reading high
+    /// in a column settles every slot below it, whatever their own pixels say.
+    ///
+    /// Which matters because the pixels lie for a whole class of tile. A burnt-out tile is charred
+    /// black and read **35.1** at the anomaly on 2026-08-16, under an [`OCCUPIED`] of 40 whose
+    /// calibration had never seen one — and [`Board::wait_until_ready`] then waited out its timeout
+    /// on a board that was already full and still. The tile directly above that one read 166.3.
+    ///
+    /// So this is not a threshold problem and lowering the threshold was the wrong lever: it traded
+    /// a 2.7× margin against bare backboard for a 1.6× one, to fix a case the board's own geometry
+    /// answers exactly. `OCCUPIED` is back where it was measured.
+    ///
+    /// Indices run column-major, `ri = 0` at the **bottom** (`layout::tile_centres`, where a higher
+    /// `ri` computes a smaller `y`), so within each column the fill is a suffix from index 0.
     pub fn occupancy(&self) -> Result<Vec<bool>, crate::Error> {
-        Ok(self.read()?.into_iter().map(|l| l > OCCUPIED).collect())
+        let mut seen: Vec<bool> = self.read()?.into_iter().map(|l| l > OCCUPIED).collect();
+        let mut at = 0usize;
+        for &rows in &self.rows_per_col {
+            let col = &mut seen[at..at + rows];
+            // The highest slot reading occupied. Everything under it is occupied by gravity.
+            if let Some(top) = (0..rows).rev().find(|&ri| col[ri]) {
+                col[..top].fill(true);
+            }
+            at += rows;
+        }
+        Ok(seen)
     }
 
     /// Blocks until every slot holds a tile **and** the board has stopped moving.
@@ -417,7 +451,7 @@ impl<'a> Board<'a> {
                 .zip(&previous)
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0f64, f64::max);
-            let full = now.iter().all(|l| *l > OCCUPIED);
+            let full = self.occupancy()?.into_iter().all(|o| o);
             previous = now;
             // Consecutive, not cumulative: a tile can pause mid-bounce, so one still frame is not
             // stillness. And an empty slot resets the count however still it is.
@@ -826,11 +860,14 @@ mod tests {
         }
         let frame = Frame { width: info.width as i32, height: info.height as i32, bgra };
 
-        // The 4x4 grid's centres in this capture, read off the frame.
-        let (cols, rows) = ([787, 902, 1017, 1132], [588, 703, 818, 933]);
+        // The 4x4 grid's centres in this capture, **in dump order**: column-major, and `ri = 0` is
+        // the bottom row (`layout::tile_centres` gives a higher `ri` a smaller `y`). Reading these
+        // row-major is a mistake this test made first, and it turns a column into a row.
+        let cols = [787, 902, 1017, 1132];
+        let rows_bottom_up = [933, 818, 703, 588];
         let mut read: Vec<f64> = Vec::new();
-        for &y in &rows {
-            for &x in &cols {
+        for &x in &cols {
+            for &y in &rows_bottom_up {
                 read.push(luma(&frame, x, y, 14));
             }
         }
@@ -838,14 +875,30 @@ mod tests {
 
         let dimmest = read.iter().cloned().fold(f64::MAX, f64::min);
         assert!(
-            dimmest < 40.0,
-            "the fixture must still contain the burnt tile that caused this: dimmest {dimmest:.1}"
+            dimmest < OCCUPIED,
+            "the fixture must still contain the tile brightness cannot call: dimmest {dimmest:.1}"
         );
-        assert!(
-            read.iter().all(|l| *l > OCCUPIED),
-            "every slot on this board holds a tile, dimmest {dimmest:.1} against {OCCUPIED}"
-        );
-        // And the empty-slot population it has to stay clear of, from the original calibration.
+
+        // **Brightness alone gets this board wrong, and that is the point of the test.**
+        let by_pixels: Vec<bool> = read.iter().map(|l| *l > OCCUPIED).collect();
+        assert!(!by_pixels.iter().all(|o| *o), "the premise: one slot reads as bare backboard");
+
+        // Gravity settles it. Indices are column-major with `ri = 0` at the bottom, and this board
+        // is four columns of four, so the charred tile is index 0 of its column with three bright
+        // tiles above it.
+        let rows_per_col = [4usize, 4, 4, 4];
+        let mut seen = by_pixels.clone();
+        let mut at = 0;
+        for &rows in &rows_per_col {
+            let col = &mut seen[at..at + rows];
+            if let Some(top) = (0..rows).rev().find(|&ri| col[ri]) {
+                col[..top].fill(true);
+            }
+            at += rows;
+        }
+        assert!(seen.iter().all(|o| *o), "every column has a bright tile above the dark one");
+
+        // And the empty-slot population the threshold still has to stay clear of.
         assert!(OCCUPIED > 21.8, "an empty slot reads 17.0-21.8 and must not read as a tile");
     }
 
