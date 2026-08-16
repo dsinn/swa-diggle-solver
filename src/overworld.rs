@@ -4804,7 +4804,8 @@ impl WorldMap {
             return None;
         }
         let mut cur = from.to_string();
-        let mut last: Option<String> = None;
+        // Every node the chain could legally end on, nearest first.
+        let mut reach: Vec<String> = Vec::new();
         // Bounded so a cycle in our own edges cannot spin here. Ten hops is far past the point where
         // the saving matters.
         for _ in 0..10 {
@@ -4812,49 +4813,107 @@ impl WorldMap {
             if !self.can_travel_direct(&cur, &next) {
                 break;
             }
-            if next != to {
-                // **A level 4+ node in the middle of the chain is not crossed and not landed on.**
-                //
-                // The dev, 2026-08-17: *when doing fast hops, make sure the in-game traveller
-                // doesn't cross over a level 4+ node if it's in between.* Arrivals fire at every node
-                // on the path (`overworldview.lua:1210-1216`), so a chain that passes one takes its
-                // fight, and pre-anomaly it also opens the portal
-                // (`overworld/events/arrived/world_evil.lua:15-21`).
-                //
-                // **Breaks without taking it**, which is the difference from every other stop here.
-                // This used to be `shut && p.triggers_anomaly()` and it *did* take the node — "up to
-                // it, never through it" — which was only ever defensible when the node was the next
-                // ordinary step anyway. Several hops into a chain it is not: it commits us to a fight
-                // nothing chose. Stopping short hands the decision back to the single-step machinery,
-                // which has the level 4 rule (`gentler_ground_remains`) and a health gate; the fast
-                // hop has neither and should not be the reason we set foot anywhere dangerous.
-                //
-                // Unconditional on the portal, per the dev. The old `shut` qualifier only ever
-                // covered the anomaly trigger, and a level 6 crypt is a fight we did not choose
-                // whether or not the portal is already open.
-                //
-                // An unknown node counts as dangerous: we cannot read a level off a heading we do
-                // not have.
-                let dangerous =
-                    self.places.get(&next).map(|p| p.level().unwrap_or(0) > 3).unwrap_or(true);
-                if dangerous {
-                    break;
-                }
-                if self.places.get(&next).map(stop_at).unwrap_or(true) {
-                    // Worth going *to* — a shrine we would otherwise stride past, which is a place
-                    // we want to be rather than one we want to avoid.
-                    last = Some(next);
-                    break;
-                }
-            }
-            cur = next.clone();
-            last = Some(next);
-            if cur == to {
+            reach.push(next.clone());
+            if next == to {
                 break;
             }
+            // Worth going *to* — a shrine we would otherwise stride past, which is a place we want
+            // to be rather than one we want to avoid. An unknown node stops the chain too.
+            if self.places.get(&next).map(stop_at).unwrap_or(true) {
+                break;
+            }
+            cur = next;
         }
-        // One hop is not a multi-hop. Anything the caller could have worked out itself is `None`.
-        last.filter(|k| !self.can_step_is_adjacent(from, k))
+        // **The longest hop whose every shortest route is gentle**, rather than the longest hop.
+        //
+        // The dev, 2026-08-17: *don't remove fast hops because of potential intermediate level 4+
+        // nodes. Use BFS to find all the shortest paths from source to destination based on what is
+        // known; if none of the shortest paths contain a lv4+ node, you're clear to do the fast hop.*
+        //
+        // The first version of this broke the chain at the first dangerous node it walked past, which
+        // threw away the hop over a node the game might never route through. What decides it is not
+        // our route but the game's, and the game's is a **shortest** path — see
+        // [`WorldMap::shortest_paths_are_gentle`] for why that is a fact about
+        // `canTravelToIndirect` rather than an assumption.
+        //
+        // Furthest first, so a long hop is preferred and a shorter one is the fallback rather than
+        // the whole answer.
+        reach
+            .iter()
+            .rev()
+            .find(|k| self.shortest_paths_are_gentle(from, k, k.as_str() == to))
+            // One hop is not a multi-hop. Anything the caller could have worked out itself is `None`.
+            .filter(|k| !self.can_step_is_adjacent(from, k))
+            .cloned()
+    }
+
+    /// Distance in hops from `origin` to every node our own edges can reach.
+    fn hops_from(&self, origin: &str) -> BTreeMap<String, usize> {
+        let mut dist: BTreeMap<String, usize> = BTreeMap::new();
+        dist.insert(origin.to_string(), 0);
+        let mut queue: std::collections::VecDeque<String> = [origin.to_string()].into();
+        while let Some(k) = queue.pop_front() {
+            let d = dist[&k];
+            let Some(p) = self.places.get(&k) else { continue };
+            for n in &p.neighbours {
+                if !dist.contains_key(n) {
+                    dist.insert(n.clone(), d + 1);
+                    queue.push_back(n.clone());
+                }
+            }
+        }
+        dist
+    }
+
+    /// Could the game route us through a level 4+ node on the way to `to`?
+    ///
+    /// **Every** shortest path is checked, not the one we would have walked, and that is forced by
+    /// how the game chooses. `canTravelToIndirect` (`overworldview.lua:1330-1373`) is a
+    /// breadth-first search — `toCheck` is popped from the back (`table.remove(toCheck)`) and pushed
+    /// at the front (`table.insert(toCheck, 1, location2)`), so a ring is exhausted before the next
+    /// begins — and `pathHash[key]` is written only `if not pathHash[key]`, so the predecessor that
+    /// sticks is the shallowest one. The path handed to `travelTo` is therefore a **shortest** path.
+    ///
+    /// Which one, we cannot know: ties are broken by `pairs(location.connections)`, whose order Lua
+    /// does not define. So the only safe question is whether *all* of them are gentle, and that is
+    /// the dev's rule of 2026-08-17.
+    ///
+    /// The standard characterisation, over the edges we have recorded: `n` lies on some shortest
+    /// path exactly when `d(from, n) + d(n, to) == d(from, to)`. Two breadth-first sweeps answer it
+    /// for every node at once.
+    ///
+    /// `from` is exempt because we are already standing on it. `to` is exempt only when it is the
+    /// errand's own destination — the planner chose that and has its own rules for choosing it — and
+    /// **not** when it is an intermediate node this chain picked, because landing there is then our
+    /// doing and nobody else's.
+    ///
+    /// ## What this deliberately does not do, and it is worth doing later
+    ///
+    /// A shortest path with a level 6 crypt on it blocks the hop outright, even when a slightly
+    /// longer route round the crypt exists and the game would happily walk it if asked. The fix is
+    /// to aim at an intermediate node that forces the detour, and then hop again — the dev's own
+    /// suggestion, parked as post-MVP. Until then this is conservative in the direction of taking an
+    /// ordinary step, which is what the run did before fast hops existed.
+    fn shortest_paths_are_gentle(&self, from: &str, to: &str, exempt_end: bool) -> bool {
+        let out = self.hops_from(from);
+        let back = self.hops_from(to);
+        let Some(&total) = out.get(to) else { return false };
+        for (key, &d) in &out {
+            if back.get(key).map(|b| d + b) != Some(total) {
+                continue; // not on any shortest path
+            }
+            if key == from || (exempt_end && key == to) {
+                continue;
+            }
+            // An unknown node counts as dangerous: we cannot read a level off a heading we do not
+            // have, and a hop is an optimisation — declining one costs a press, taking a bad one can
+            // cost the run.
+            let gentle = self.places.get(key).map(|p| p.level().unwrap_or(0) <= 3).unwrap_or(false);
+            if !gentle {
+                return false;
+            }
+        }
+        true
     }
 
     /// Is `b` a neighbour of `a` in our own graph? Used to tell a multi-hop from an ordinary step.
@@ -7288,6 +7347,60 @@ mod tests {
         let mut corrupt = town(all, vec![]);
         corrupt.entry("l25").corrupted = true;
         assert_eq!(corrupt.far_hop_inside("l25sub2", "l25_path_to_l4"), None);
+    }
+
+    /// A level 4+ node **off** every shortest path does not cancel the hop.
+    ///
+    /// The dev, 2026-08-17: *don't remove fast hops because of potential intermediate level 4+
+    /// nodes. Use BFS to find all the shortest paths from source to destination based on what is
+    /// known; if none of the shortest paths contain a lv4+ node, you're clear.*
+    ///
+    /// The case that separates the two rules is **our route not being the game's route**.
+    /// `first_step_toward` prefers paved ground, which is the dev's own crossing rule, so the chain
+    /// walks `a -> c -> e -> d` down the road; the game runs a breadth-first search
+    /// (`overworldview.lua:1330-1373`) and takes `a -> b -> d`, which is shorter and never goes near
+    /// the crypt. Breaking the chain at `c` threw away a hop the game would have walked safely.
+    #[test]
+    fn a_crypt_the_game_would_never_route_through_does_not_cancel_the_hop() {
+        let mut m = WorldMap::default();
+        // Two ways from `a` to `d`: the short brush path, and a longer paved one past a level 6
+        // crypt. Every node cleared, so travel legality is not what is being tested here.
+        for (x, y) in [("a", "b"), ("b", "d"), ("a", "c"), ("c", "e"), ("e", "d")] {
+            m.entry(x).neighbours.insert(y.into());
+            m.entry(y).neighbours.insert(x.into());
+        }
+        // Paved *and* dangerous, which is the combination that makes the chain walk into it:
+        // `type_is` reads the heading's suffix and `level()` its `— level N` part, and the 1043Z run
+        // shows the form is real (`Bainton Clump — level 1 road`).
+        m.entry("c").heading = "Bessingby — level 6 road".into();
+        m.entry("e").heading = "Bessingby road".into();
+        m.entry("b").heading = "Bessingby thicket".into();
+        m.here = Some("a".into());
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = { hell = 0.1 }, completedAreas = {
+                     a = true, b = true, c = true, d = true, e = true } } }",
+            )
+            .unwrap(),
+        );
+
+        // **The positive control.** Without this the test would pass on a map where nothing ever
+        // went near the crypt, and prove nothing: the chain has to actually walk into `c` for the
+        // old break-at-the-first-dangerous-node rule to have refused this hop.
+        assert_eq!(
+            m.first_step_toward("a", "d", true).as_deref(),
+            Some("c"),
+            "our own route takes the road past the crypt, which is the whole point"
+        );
+        // And the game's does not: `a -> b -> d` is the only shortest path, so the hop is clear.
+        assert_eq!(m.far_hop("a", "d").as_deref(), Some("d"));
+
+        // And the rule still bites when the crypt *is* unavoidable: drop the brush path and every
+        // shortest route runs through `c`.
+        let mut only_the_road = m.clone();
+        only_the_road.entry("a").neighbours.remove("b");
+        only_the_road.entry("b").neighbours.remove("a");
+        assert_eq!(only_the_road.far_hop("a", "d"), None);
     }
 
     /// A forest interior is still crossed one node at a time.
