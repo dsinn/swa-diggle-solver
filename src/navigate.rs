@@ -2176,6 +2176,11 @@ fn skip_cinematic(r: &mut Run) -> Result<(), String> {
 /// A press that changes nothing is the ordinary way the right arrow ends: `activeIf` is
 /// `(relativeIndex+8)<#shopInventory` (`shop.lua:215`), so it goes inert on the last page rather
 /// than refusing audibly.
+///
+/// **Starting from offset zero is checked, not assumed.** `relativeIndex` is a module-local that
+/// outlives any one visit, so a shelf left on page two would put every click one page out. It does
+/// not happen: `core.load` opens with `relativeIndex = 0` (`shop.lua:360`), and the event shop's
+/// `core.tempshop` does the same (`:314`). Only ever paging right follows from that.
 fn page_the_shop_to(r: &mut Run, index: usize) -> usize {
     let want = crate::shopplay::page_of(index);
     let mut at = 0usize;
