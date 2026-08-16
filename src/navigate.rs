@@ -3764,6 +3764,29 @@ pub fn drive(
                     r.map.abandon(at);
                     if spent || bought {
                         r.map.bought_the_heart(&container);
+                        // **A heart raises the ceiling, so buying one makes us hurt.** The dev,
+                        // 2026-08-16: *after we buy the healthBuff, we should top up our health.*
+                        //
+                        // `healthBuff` adds four **maximum** health and no current health
+                        // (`items/ephemeral.lua:4-9`), so a run that walked in full walks out at
+                        // 20/24 — and at 20/28 after emptying a shelf of two, which is what
+                        // happened at Stillingfleet before the run died in the next crypt. Nothing
+                        // noticed, because the arrival branch that asks `top_up_at` runs when we
+                        // *land* on a settlement and we are already standing in this one.
+                        //
+                        // The save is re-read first rather than trusted from before the purchase:
+                        // `top_up_at` decides on `Health::is_full`, and the reading it would
+                        // otherwise use was taken when the old maximum was still the maximum — a
+                        // full bar that is no longer full. The purchase has already been confirmed
+                        // from this same file, so the flush has happened.
+                        if let Some(h) = r.apply_save() {
+                            r.log.push_str(&format!("  health is now {}/{}\n", h.current, h.max));
+                        }
+                        if r.map.top_up_at(&container) {
+                            r.log.push_str(
+                                "  the heart raised the ceiling — going back for the bed\n",
+                            );
+                        }
                     }
                     continue;
                 }

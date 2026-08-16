@@ -2909,7 +2909,11 @@ impl WorldMap {
             m.gold = self.gold;
             m
         });
-        let target = outside.as_ref().unwrap_or(self).next_target().map(|p| p.target);
+        // **The errand is kept, not just the destination.** It decides whether the anti-backtracking
+        // rule below is allowed to overrule a measured answer — see there.
+        let plan = outside.as_ref().unwrap_or(self).next_target();
+        let errand = plan.as_ref().map(|p| p.reason.clone());
+        let target = plan.map(|p| p.target);
         if let Some(target) = target.as_ref() {
             let dist = self.distances(target);
             // A door whose road we have written off is not a door. `abandoned` is the driver's
@@ -2941,7 +2945,28 @@ impl WorldMap {
                 // means heading for a node we have never stood on. Preference must not collapse onto
                 // already-visited ground: an unvisited exit is not a worse bet than the room we just
                 // left, it is an unmeasured one, and unmeasured is the entire point of exploring.
-                if Some(&best.to_key) == entrance.as_ref() {
+                //
+                // ## And that argument is only true while exploring, which is why it is gated now
+                //
+                // **It killed a run on 2026-08-16.** The anomaly is `start`, the adventure *begins*
+                // at `start`, so the objective was a node we had stood on and every hop out of it
+                // was recorded: from Stillingfleet, `distances` put `l39` — the way we came in — at
+                // four hops from the portal and `l60` at six. The measured answer was to turn round.
+                // This overrode it because `l60` was unvisited, and `l60` was a level 7 crypt with a
+                // six-deep queue. `spike-run-20260816-0226Z.md` step 38, and the run ends on step 39.
+                //
+                // The dev, on that run: *we wandered farther away from the anomaly as opposed to
+                // towards it.* Exactly so, and the log said `not back out the way we came` at every
+                // crossing after the portal opened while `nearest to the target` had been firing
+                // before it.
+                //
+                // So the override now applies only under [`Goal::Explore`], which is the errand its
+                // own justification is written about. With a *named* destination — the anomaly, a
+                // bed, a heart, a shrine — a measured distance is the whole point of having
+                // measured, and refusing it because the door is familiar is how a run walks away
+                // from its objective.
+                let exploring = matches!(errand, Some(Goal::Explore) | None);
+                if exploring && Some(&best.to_key) == entrance.as_ref() {
                     if let Some(onward) = exits.iter().find(|e| {
                         Some(&e.to_key) != entrance.as_ref()
                             && !self.places.get(&e.to_key).map(|p| p.visited).unwrap_or(false)
@@ -5946,6 +5971,102 @@ mod tests {
         for junk in ["shrine2subs", "shrine2_shrine_", "shrine2_shrine_subs"] {
             assert!(!m.places.contains_key(junk), "the suffix strip must not mint `{junk}`");
         }
+    }
+
+    /// **The decision that killed the run of 2026-08-16**, and the exploring case it must not break.
+    ///
+    /// Standing inside Stillingfleet with the portal open. The anomaly is `start`, the adventure
+    /// began there, and the road back — `l39`, the door we came in by — is four hops from it while
+    /// `l60` is six. The measured answer is to turn round. The run took `l60`, a level 7 crypt, and
+    /// died in it, because the anti-backtracking rule overrode the ranking on the grounds that `l60`
+    /// was unvisited.
+    ///
+    /// That argument belongs to exploring, and the second half of this test is the control: with no
+    /// errand naming a destination, an unvisited door is still preferred over the room we just left.
+    #[test]
+    fn a_named_destination_is_worth_walking_back_towards() {
+        let build = || {
+            let mut m = WorldMap::new();
+            // The road walked in: start -> l19 -> l39 -> l52, and l60 hanging off l52.
+            m.fold(&dump("start", "Cottam campfire", vec![node("l19", "Gipsyville — level 2 crypt")]));
+            m.fold(&dump("l19", "Gipsyville — level 2 crypt", vec![node("l39", "Eight Timberland — level 4 forest")]));
+            m.fold(&dump("l39", "Eight Timberland — level 4 forest", vec![node("l52", "Stillingfleet village")]));
+            m.fold(&dump(
+                "l52",
+                "Stillingfleet village",
+                vec![
+                    node("l39", "Eight Timberland — level 4 forest"),
+                    node("l60", "Asselby — level 7 crypt"),
+                ],
+            ));
+            m.fold(&inside_dump(
+                "l52",
+                "l52sub1",
+                "Stillingfleet general store",
+                vec![],
+                vec![exit("l39"), exit("l60")],
+            ));
+            m.entered_from = Some("l39".into());
+            m
+        };
+
+        // The portal open, so the anomaly is the errand and `start` is where it is.
+        let mut m = build();
+        m.hell = Some(0.1);
+        assert_eq!(
+            m.next_target().map(|p| p.reason),
+            Some(Goal::CloseAnomaly),
+            "the control: the errand really is the anomaly, or this proves nothing about it"
+        );
+        let (door, why) = m.choose_exit(&[exit("l39"), exit("l60")]).expect("two doors");
+        assert_eq!(door, "l39", "four hops from the portal, against six the other way");
+        assert_eq!(why.why(), "nearest to the target", "and ranked, not fallen back on");
+
+        // **The control: exploring, where the old rule's reasoning holds.** An unvisited door is
+        // unmeasured rather than worse, and the room we just left has nothing more to teach us.
+        //
+        // A separate map, because the one above cannot produce this errand: with the portal shut,
+        // `l39` is a level 4 forest and therefore an `OpenAnomaly` candidate, so the plan still
+        // names a destination. Every level here is under the trigger's bar, the purse is empty and
+        // the bar is full, which leaves exploring as the only thing left to want.
+        // The container is `l9` because the fixture helper re-heads every other one as
+        // "Ulrome — level 6 village" (`container_heading`), and a level 6 node is an `OpenAnomaly`
+        // candidate — which would name a destination and defeat the point of this half.
+        let mut m = WorldMap::new();
+        m.fold(&dump("start", "Cottam campfire", vec![node("l19", "Gipsyville — level 2 crypt")]));
+        m.fold(&dump(
+            "l19",
+            "Gipsyville — level 2 crypt",
+            vec![node("f1", "Frontier — level 1 forest"), node("l39", "Eight Timberland — level 2 forest")],
+        ));
+        m.fold(&dump("l39", "Eight Timberland — level 2 forest", vec![node("l9", "Saltagh Park — level 1 forest")]));
+        m.fold(&dump(
+            "l9",
+            "Saltagh Park — level 1 forest",
+            vec![
+                node("l39", "Eight Timberland — level 2 forest"),
+                node("l60", "Asselby — level 2 crypt"),
+            ],
+        ));
+        m.fold(&inside_dump("l9", "l9sub1", "Saltagh clearing", vec![], vec![exit("l39"), exit("l60")]));
+        m.entered_from = Some("l39".into());
+        m.hell = Some(0.0);
+        m.gold = 0;
+        m.note_health_level(crate::rest::Health { current: 20, max: 20 });
+        assert_eq!(
+            m.next_target().map(|p| p.reason),
+            Some(Goal::Explore),
+            "the control only controls if the errand really is exploring"
+        );
+        // The door, not the reason. On this map the two agree — exploring *targets* the unwalked
+        // node, so ranking reaches `l60` on its own and the override never has to fire. That is
+        // worth knowing rather than working around: the override only matters where the two
+        // disagree, and under `Explore` they rarely can.
+        assert_eq!(
+            m.choose_exit(&[exit("l39"), exit("l60")]).map(|(d, _)| d),
+            Some("l60".to_string()),
+            "with nothing named to walk to, the unwalked door is still where exploring goes"
+        );
     }
 
     /// A heart before the anomaly, and every clause of the dev's rule.
