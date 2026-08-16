@@ -4736,15 +4736,25 @@ impl WorldMap {
     /// The dev, 2026-08-16, watching a run leave a town a node at a time: *the multi-hop in that
     /// town still didn't work when we were trying to leave town after resting at the inn.*
     ///
-    /// ## Why "surface only" was too broad, and what actually justified it
+    /// ## Why "surface only" was too broad, and why "settlements only" still was
     ///
     /// [`crate::subworld`] assumes every subworld is fogged, on the grounds that `thickFog` collapses
     /// visibility to "standing there or adjacent right now" (`overworldview.lua:696-699`) and that we
     /// cannot detect it — `lost_woods.getTypeName` reads `forest` until the area flag is set, so a
-    /// heading tells us nothing. Both true, and neither reaches a village: **`thickFog = true`
-    /// appears in exactly one place in the game, `lost_woods.lua:15`**, with `:47` turning it back
-    /// off for the corrupt variant. The ambiguity that motivated the blanket rule is *forest against
-    /// lost woods*; a village and a town are a different generator and say so in the heading.
+    /// heading tells us nothing. The first half is true and the second is **only true from outside**:
+    /// `thickFog = true` appears in exactly one place in the game, `lost_woods.lua:15`, with `:47`
+    /// turning it back off for the corrupt variant.
+    ///
+    /// This was restricted to settlements for one commit on the strength of that ambiguity, and the
+    /// dev's report was that forests never took a fast hop. The restriction was unnecessary, because
+    /// **the ambiguity is already resolved by the time this function can be called**. The mist event
+    /// sets `lost_woods_known_<key>` in the same `onSelect` that calls `enterSubworld`
+    /// (`overworld/events/arrived/lost_woods.lua:23-27`) — the flag is written *before* we are
+    /// inside — and from then on `getTypeName` prints `lost woods` in every heading. [`Place::in_lost_woods`]
+    /// already carries exactly that, set in [`WorldMap::fold`] for the container and every subnode.
+    ///
+    /// So the question is not "which kind of subworld is this" but "is this the one kind that fogs",
+    /// and we can answer it standing inside. A forest that has not swallowed us is ordinary ground.
     ///
     /// The measurement that appeared to back the rule does not either. The run that clicked an exit
     /// several nodes off and moved the screen 0.015 is explained where [`WorldMap::cross_toward`]
@@ -4757,8 +4767,8 @@ impl WorldMap {
     /// ## Uncorrupted, because corruption brings the fog back
     ///
     /// The dev, 2026-08-17: *once a settlement is corrupted, the thick fog re-appears, but if that
-    /// hasn't happened, then there is no thick fog to guard against.* Which is why this asks
-    /// `is_settlement() && !corrupted` and not merely the first half.
+    /// hasn't happened, then there is no thick fog to guard against.* Applied to every subworld and
+    /// not only settlements, because the mechanism below is not about settlements.
     ///
     /// The mechanism is not `thickFog` itself — that really is set in one file — but the general
     /// cloud rule beside it, and the effect is the same. `isCloudCovered` (`overworldview.lua:701-706`)
@@ -4781,12 +4791,12 @@ impl WorldMap {
     /// stops short of anything [`WorldMap::blocks_departure`] names. **This is the conservative half
     /// of a decision the dev has not made**; barrelling through is one line away if that is wanted.
     pub fn far_hop_inside(&self, from: &str, to: &str) -> Option<String> {
-        let open_for_business = self
+        let clear_air = self
             .inside()
             .and_then(|c| self.places.get(c))
-            .map(|c| c.is_settlement() && !c.corrupted)
+            .map(|c| !c.corrupted && !c.in_lost_woods)
             .unwrap_or(false);
-        if !open_for_business {
+        if !clear_air {
             return None;
         }
         self.far_chain(from, to, &|p: &Place| self.blocks_departure(&p.key))
@@ -7403,31 +7413,56 @@ mod tests {
         assert_eq!(only_the_road.far_hop("a", "d"), None);
     }
 
-    /// A forest interior is still crossed one node at a time.
+    /// A forest crosses in one press too — and only a **lost woods** does not.
     ///
-    /// The narrowing is to settlements specifically, because `village.lua` is a different generator
-    /// and its heading says so — the ambiguity `crate::subworld` documents is forest against lost
-    /// woods, which no heading resolves.
+    /// The dev, 2026-08-17: *the forest navigator still isn't taking advantage of fast-hops for
+    /// visited nodes.* It was restricted to settlements on the grounds that a heading cannot tell a
+    /// forest from a lost woods. True from outside, and irrelevant here: the mist event writes
+    /// `lost_woods_known_<key>` in the same `onSelect` that calls `enterSubworld`
+    /// (`overworld/events/arrived/lost_woods.lua:23-27`), so by the time we are inside one the
+    /// heading already says `lost woods` and [`Place::in_lost_woods`] carries it.
     #[test]
-    fn a_forest_interior_does_not_get_the_settlement_shortcut() {
-        let mut m = WorldMap::default();
-        for (a, b) in [("l4sub1", "l4sub2"), ("l4sub2", "l4_path_to_l25")] {
-            m.entry(a).neighbours.insert(b.into());
-            m.entry(b).neighbours.insert(a.into());
-        }
-        m.entry("l4").heading = "Bainton Clump — level 1 forest".into();
-        for k in ["l4sub1", "l4sub2", "l4_path_to_l25"] {
-            m.entry(k).parent = Some("l4".into());
-        }
-        m.here = Some("l4sub1".into());
-        m.apply_save(
-            &crate::game::save::parse(
-                "return { overworld = { areaFlags = { hell = 0.1 }, completedAreas = {
-                     l4sub1 = true, l4sub2 = true, l4_path_to_l25 = true } } }",
-            )
-            .unwrap(),
+    fn a_forest_crosses_in_one_press_but_a_lost_woods_does_not() {
+        let forest = |container_heading: &str| {
+            let mut m = WorldMap::default();
+            for (a, b) in [("l4sub1", "l4sub2"), ("l4sub2", "l4_path_to_l25")] {
+                m.entry(a).neighbours.insert(b.into());
+                m.entry(b).neighbours.insert(a.into());
+            }
+            m.entry("l4").heading = container_heading.into();
+            for k in ["l4sub1", "l4sub2", "l4_path_to_l25"] {
+                m.entry(k).parent = Some("l4".into());
+            }
+            m.here = Some("l4sub1".into());
+            m.apply_save(
+                &crate::game::save::parse(
+                    "return { overworld = { areaFlags = { hell = 0.1 }, completedAreas = {
+                         l4sub1 = true, l4sub2 = true, l4_path_to_l25 = true } } }",
+                )
+                .unwrap(),
+            );
+            m
+        };
+
+        assert_eq!(
+            forest("Bainton Clump — level 1 forest")
+                .far_hop_inside("l4sub1", "l4_path_to_l25")
+                .as_deref(),
+            Some("l4_path_to_l25"),
+            "an ordinary forest is ordinary ground"
         );
-        assert_eq!(m.far_hop_inside("l4sub1", "l4_path_to_l25"), None);
+
+        // The one that fogs. `in_lost_woods` is set by `fold` from the container's live heading;
+        // set directly here because this test is about the gate and not about folding.
+        let mut lost = forest("Howden Timberland — level 2 lost woods");
+        lost.entry("l4").in_lost_woods = true;
+        assert_eq!(lost.far_hop_inside("l4sub1", "l4_path_to_l25"), None);
+
+        // And corruption closes it whatever the kind, which is the dev's rule applied past
+        // settlements: `setAreaIncomplete` takes completion away and the clouds come back with it.
+        let mut corrupt = forest("Bainton Clump — level 1 forest");
+        corrupt.entry("l4").corrupted = true;
+        assert_eq!(corrupt.far_hop_inside("l4sub1", "l4_path_to_l25"), None);
     }
 
     /// A node the current dump never mentions can still be clicked, because the frame places it.
