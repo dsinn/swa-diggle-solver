@@ -660,6 +660,39 @@ impl Fight<'_> {
         ));
 
         let board = Board::new(self.win, &geom)?.with_click_frames(self.click_frames.clone());
+
+        // **Which tiles animate on their own, from the save rather than from watching.**
+        //
+        // Two kinds, and both trip the stray-click guard the same way — they differ from a baseline
+        // taken before they moved, and `Board::select_word`'s 250ms sample only catches whichever
+        // happens to be mid-change during that quarter second.
+        //
+        // - **Bombs.** A digit tile *is* a bomb (`rpg/effects/material/default.lua:54-56`) and its
+        //   number ticks down. This stopped a run eight turns into the anomaly on 2026-08-15.
+        // - **Burning tiles.** `tile.extra.burn` is a turn counter — *"This tile is burning. It has
+        //   0 score. Having burning tiles damages you. Turns remaining: %d"* (`tileboard.lua:170`) —
+        //   and the tile is drawn with a fire overlay whose `fireAlpha` is advanced every frame
+        //   (`tileboard.lua:1713-1715`). So a burning tile is *always* moving, which makes it a
+        //   worse false positive than the bomb: the bomb at least holds still between ticks.
+        //
+        // The dev asked for the second before it had cost a run, which is the right time to ask.
+        //
+        // **Read before the wait, because the wait needs it too.** This used to be computed after
+        // the board had been declared ready, which left `wait_until_ready` watching a tile the save
+        // could already have told it would never stop moving.
+        let restless: Vec<usize> = tiles
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                let bomb = !t.letter.is_empty() && t.letter.chars().all(|c| c.is_ascii_digit());
+                bomb || t.burn().is_some_and(|b| b > 0)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if !restless.is_empty() {
+            log.push_str(&format!("  tiles that move on their own: {restless:?}\n"));
+        }
+
         self.park();
         // **Waiting for stillness is a courtesy, not a precondition. After the timeout, type anyway.**
         //
@@ -679,7 +712,7 @@ impl Fight<'_> {
         // `click_and_confirm`), a click that lands wrong is a **setback rather than an ending**
         // (task #30), and a word that comes out wrong can be cleared and retried. So the cost of
         // typing into a genuinely moving board is a wasted turn; the cost of refusing was the run.
-        match board.wait_until_ready(Duration::from_secs(20))? {
+        match board.wait_until_ready(Duration::from_secs(20), &restless)? {
             crate::combat::Ready::Settled => {}
             // A slot reads empty on a board that has not twitched for seconds. Either a charred tile
             // brightness cannot call, or a gap the board will never fill — both fine to play on,
@@ -695,34 +728,6 @@ impl Fight<'_> {
         // Kept past the submission: if the game comes back with the avoidable-murder dialog, the
         // word survives the cancel and has to come off, and this is the only record of what the
         // board looked like before it went on.
-        // **Which tiles animate on their own, from the save rather than from watching.**
-        //
-        // Two kinds, and both trip the stray-click guard the same way — they differ from a baseline
-        // taken before they moved, and `Board::select_word`'s 250ms sample only catches whichever
-        // happens to be mid-change during that quarter second.
-        //
-        // - **Bombs.** A digit tile *is* a bomb (`rpg/effects/material/default.lua:54-56`) and its
-        //   number ticks down. This stopped a run eight turns into the anomaly on 2026-08-15.
-        // - **Burning tiles.** `tile.extra.burn` is a turn counter — *"This tile is burning. It has
-        //   0 score. Having burning tiles damages you. Turns remaining: %d"* (`tileboard.lua:170`) —
-        //   and the tile is drawn with a fire overlay whose `fireAlpha` is advanced every frame
-        //   (`tileboard.lua:1713-1715`). So a burning tile is *always* moving, which makes it a
-        //   worse false positive than the bomb: the bomb at least holds still between ticks.
-        //
-        // The dev asked for the second before it had cost a run, which is the right time to ask.
-        let restless: Vec<usize> = tiles
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| {
-                let bomb = !t.letter.is_empty() && t.letter.chars().all(|c| c.is_ascii_digit());
-                bomb || t.burn().is_some_and(|b| b > 0)
-            })
-            .map(|(i, _)| i)
-            .collect();
-        if !restless.is_empty() {
-            log.push_str(&format!("  tiles that move on their own: {restless:?}
-"));
-        }
         let placed = match board.select_word(&steps, &restless) {
             Ok(placed) => placed,
             Err(e) => {

@@ -97,6 +97,10 @@ pub const SETTLED_SAMPLES: usize = 4;
 ///
 /// Sixty times the ordinary bar, so it can never be reached by accident on the way to the normal
 /// case, and still fast enough that a turn spent here is a pause rather than a stall.
+///
+/// **Left where it was measured when the stillness check narrowed to the column tops**, because the
+/// narrowing changed which turns pay this and not what the number has to distinguish. What it had
+/// to be safe against — a board still dropping tiles — is exactly what a moving top slot reports.
 pub const STILL_ENOUGH_SAMPLES: usize = 60;
 
 /// What [`Board::wait_until_ready`] concluded, and on which evidence.
@@ -324,6 +328,36 @@ fn compare_selection(changed: &[usize], expected: &[usize], restless: &[usize]) 
     }
 }
 
+/// The dump index of the top slot of each column, skipping any column with no slots at all.
+///
+/// Indices run column-major with `ri = 0` at the **bottom** (`layout::tile_centres` gives a higher
+/// `ri` a smaller `y`), so a column's top slot is the last index in its run.
+///
+/// `rows_per_col` here is the geometry of the board being played — [`Board::new`] takes it from the
+/// same `Geometry` the turn's dump was resolved against, so these are the heights the board will
+/// *end* at, not a nominal shape it might not reach. That is what makes them the right slots to
+/// watch: see [`Board::wait_until_ready`].
+fn column_tops(rows_per_col: &[usize]) -> Vec<usize> {
+    let mut tops = Vec::with_capacity(rows_per_col.len());
+    let mut at = 0usize;
+    for &rows in rows_per_col {
+        if rows > 0 {
+            tops.push(at + rows - 1);
+        }
+        at += rows;
+    }
+    tops
+}
+
+/// The largest luminance move between two readings, looking only at `watched`.
+///
+/// Split out from the poll for the same reason [`compare_selection`] is: the judgement is the part
+/// worth testing and the loop around it is only a clock. Zero when `watched` is empty, which is the
+/// honest answer for a board with no slots — there is nothing that could be moving.
+fn worst_move_at(watched: &[usize], now: &[f64], previous: &[f64]) -> f64 {
+    watched.iter().map(|&i| (now[i] - previous[i]).abs()).fold(0.0f64, f64::max)
+}
+
 /// Drives tile selection on a live board.
 pub struct Board<'a> {
     win: &'a GameWindow,
@@ -332,6 +366,9 @@ pub struct Board<'a> {
     /// Tiles per column, in the same order the centres are laid out — see [`Board::occupancy`],
     /// which needs to know where one column ends and the next begins.
     rows_per_col: Vec<usize>,
+    /// Dump index of the top slot of each column — see [`column_tops`]. The only places a falling
+    /// tile can enter, and therefore the only places [`Board::wait_until_ready`] watches for motion.
+    column_tops: Vec<usize>,
     /// The rectangle the cheap capture reads, and the offset tile coordinates need.
     rect: (i32, i32, i32, i32),
     /// The region watched to tell the on-screen keyboard from the tile board.
@@ -360,6 +397,7 @@ impl<'a> Board<'a> {
             win,
             centres: layout::tile_centres(geom, cw, ch),
             rows_per_col: geom.rows_per_col.clone(),
+            column_tops: column_tops(&geom.rows_per_col),
             rect: layout::board_rect(geom, cw, ch),
             keyboard: crate::typist::wildcard::region(cw, ch),
             // 55% of a tile: inside the face, so a small mapping error still samples the right tile
@@ -508,18 +546,54 @@ impl<'a> Board<'a> {
     /// A permanent gap is a real board state as well as a misread one: tiles explode and are not
     /// always replaced. Either way the letters come from the console dump rather than these pixels,
     /// so playing on is right in both.
-    pub fn wait_until_ready(&self, timeout: Duration) -> Result<Ready, crate::Error> {
+    ///
+    /// ## Both halves of the question live at the tops of the columns
+    ///
+    /// The dev's design, and it is the same rule [`Board::occupancy`] already runs, read the other
+    /// way round. Gravity says a column fills from the bottom, so **the top slot is the last one in
+    /// its column to stop moving** — a tile cannot come to rest above an empty slot, and every
+    /// falling tile enters through the top. If the tops have held still, the fill is over.
+    ///
+    /// So motion is sampled at [`column_tops`] and nowhere else, which costs nothing and buys the
+    /// case the whole-board version could not survive: **a burning tile animates forever**. Its fire
+    /// overlay is advanced every frame (`tileboard.lua:1713-1715`), so under the old reading `worst`
+    /// never fell below [`QUIET`], `quiet` never accumulated past zero, and *neither* branch below
+    /// could be reached — the caller paid its whole timeout and typed anyway on every turn a tile
+    /// was alight. Below the top of its column such a tile is now simply not looked at.
+    ///
+    /// The fullness half is already asking about the same slots, which is worth seeing because it
+    /// means there is one rule here and not two: `occupancy().all()` can only be true if every
+    /// column's top slot read brighter than [`OCCUPIED`] *on its own pixels*, since the gravity fill
+    /// runs downward from the brightest slot and has nothing above a top to argue from.
+    ///
+    /// ## `restless`, because a top can be alight too
+    ///
+    /// The narrowing alone leaves the same veto standing wherever the burning tile happens to sit at
+    /// the top of its column. That needs no watching to solve: the save already says which tiles
+    /// move on their own — a bomb's digit ticks, a burning tile carries `extra.burn` — and the fight
+    /// loop already computes the list for the stray-click guard. A tile whose motion is *guaranteed*
+    /// carries no evidence about whether the board has settled, so it is dropped from the watch.
+    ///
+    /// If that empties the set — every column topped by a bomb or a flame — the answer is fullness
+    /// alone, which is the right one: a column whose top slot is already occupied is not a column
+    /// waiting to be filled.
+    ///
+    /// **What this still does not fix**, and it is now the only case: a **charred** tile at a top.
+    /// It is dark, it is genuinely still, and nothing in the save marks it (its burn counter has
+    /// expired), so it reads as a gap and costs [`STILL_ENOUGH_SAMPLES`]. That threshold is left
+    /// where it was measured rather than trimmed to suit.
+    pub fn wait_until_ready(
+        &self, timeout: Duration, restless: &[usize],
+    ) -> Result<Ready, crate::Error> {
+        let watched: Vec<usize> =
+            self.column_tops.iter().copied().filter(|i| !restless.contains(i)).collect();
         let deadline = Instant::now() + timeout;
         let mut previous = self.read()?;
         let mut quiet = 0usize;
         while Instant::now() < deadline {
             std::thread::sleep(SAMPLE);
             let now = self.read()?;
-            let worst = now
-                .iter()
-                .zip(&previous)
-                .map(|(a, b)| (a - b).abs())
-                .fold(0.0f64, f64::max);
+            let worst = worst_move_at(&watched, &now, &previous);
             previous = now;
             // Consecutive, not cumulative: a tile can pause mid-bounce, so one still frame is not
             // stillness. Unlike the first version, an empty-reading slot no longer resets the count —
@@ -1007,6 +1081,100 @@ mod tests {
             fallback * 2 < Duration::from_secs(20),
             "and it has to fire well inside the caller's timeout to be the fallback at all: {fallback:?}"
         );
+    }
+
+    /// The tops are the last index of each column's run, and a column with no slots has none.
+    #[test]
+    fn the_top_of_a_column_is_the_last_index_in_its_run() {
+        // The default board: four columns of four.
+        assert_eq!(column_tops(&[4, 4, 4, 4]), vec![3, 7, 11, 15]);
+        // `hench`, the hexagonal five-wide. Sixteen tiles again, and not one top in common with the
+        // board above -- which is why this cannot be computed from the tile count.
+        assert_eq!(column_tops(&[3, 3, 4, 3, 3]), vec![2, 5, 9, 12, 15]);
+        // The `at-l49` wait-phase board, one tile left in the middle column. Empty columns have no
+        // top to watch rather than a top at someone else's index.
+        assert_eq!(column_tops(&[0, 0, 1, 0, 0]), vec![0]);
+        assert_eq!(column_tops(&[]), Vec::<usize>::new());
+    }
+
+    /// The case the narrowing exists for: a tile alight below the top of its column.
+    ///
+    /// Turn 17 of the anomaly is the shape of it. A burning tile pulses on its own forever, so under
+    /// a whole-board reading `worst` never falls under [`QUIET`], `quiet` never leaves zero, and
+    /// neither exit from `wait_until_ready` can be reached however long the caller waits. Watching
+    /// the tops only, the same board is still.
+    #[test]
+    fn a_tile_alight_below_the_top_of_its_column_no_longer_vetoes_stillness() {
+        let rows_per_col = [4usize, 4, 4, 4];
+        let tops = column_tops(&rows_per_col);
+        // Sixteen slots holding steady, except index 9 -- (3,2), the middle of the third column --
+        // which swings 90 between samples the way a flame does.
+        let previous = vec![100.0; 16];
+        let mut now = previous.clone();
+        now[9] = 10.0;
+
+        let whole_board = worst_move_at(&(0..16).collect::<Vec<_>>(), &now, &previous);
+        assert!(whole_board > QUIET, "the premise: the old reading calls this board moving");
+        assert!(
+            worst_move_at(&tops, &now, &previous) < QUIET,
+            "and it is not at a top, so it is not a tile arriving"
+        );
+
+        // The same flame at a top is a different matter, and luminance cannot tell it from a tile
+        // arriving. Watched, it would reset `quiet` every sample and cost the caller's *whole*
+        // timeout -- not the fallback, which is equally unreachable while anything watched is
+        // moving. Which is why the save's answer is needed, and is the test below.
+        now = previous.clone();
+        now[11] = 10.0;
+        assert!(worst_move_at(&tops, &now, &previous) > QUIET);
+    }
+
+    /// The save already knows which tiles will never hold still, so they are not watched.
+    ///
+    /// A bomb's digit ticks and a burning tile's fire overlay advances every frame
+    /// (`tileboard.lua:1713-1715`); `fight.rs` reads both off the dump for the stray-click guard.
+    /// Motion that is *guaranteed* is evidence of nothing, so watching it can only produce a veto.
+    #[test]
+    fn a_top_the_save_says_is_alight_is_not_watched_at_all() {
+        let tops = column_tops(&[4, 4, 4, 4]);
+        let previous = vec![100.0; 16];
+        let mut now = previous.clone();
+        now[11] = 10.0; // the top of column three, burning.
+
+        assert!(worst_move_at(&tops, &now, &previous) > QUIET, "the premise");
+
+        let restless = [11usize];
+        let watched: Vec<usize> = tops.iter().copied().filter(|i| !restless.contains(i)).collect();
+        assert_eq!(watched, vec![3, 7, 15], "the alight top drops out, the others stay");
+        assert!(worst_move_at(&watched, &now, &previous) < QUIET);
+
+        // And with every top alight there is nothing left to watch, which reads as still. That is
+        // the intended answer rather than a hole: fullness still has to hold, and a column whose top
+        // slot is occupied is not a column waiting to be filled.
+        let none: Vec<usize> = Vec::new();
+        assert_eq!(worst_move_at(&none, &now, &previous), 0.0);
+    }
+
+    /// One rule, not two: fullness was already a question about the tops.
+    ///
+    /// `occupancy` fills a column downward from its brightest slot, and a top has nothing above it
+    /// to be rescued by — so `.all()` can only hold when every top read brighter than [`OCCUPIED`]
+    /// on its own pixels. Enumerated over every pattern a four-tall column can show, so it is the
+    /// rule being checked rather than one example of it.
+    #[test]
+    fn occupancy_is_already_a_question_about_the_tops() {
+        for bits in 0u8..16 {
+            let mut col: Vec<bool> = (0..4).map(|i| bits & (1 << i) != 0).collect();
+            let top_is_lit = col[3];
+            if let Some(top) = (0..4).rev().find(|&ri| col[ri]) {
+                col[..top].fill(true);
+            }
+            assert_eq!(
+                col.iter().all(|o| *o),
+                top_is_lit,
+                "pattern {bits:04b}: full after gravity exactly when the top slot was lit"
+            );
+        }
     }
 
     #[test]
