@@ -1055,6 +1055,15 @@ pub enum Goal {
     /// Ranked with the shrine detours rather than with [`Goal::Rest`]: it is not a response to being
     /// hurt, it is preparation bought while the road is free. See [`WorldMap::wants_a_heart`].
     Heart,
+    /// An unopened treasure chest. Task #16.
+    ///
+    /// Ranked with the other detours rather than with exploring, and for the same reason as
+    /// [`Goal::Heart`]: it is not a response to anything, it is loot taken while the road is free.
+    /// **Opening it is a fight** — `Open` calls `scenarios.chest`
+    /// (`overworld/generators/forest.lua:30-39`) — so this only fires while a rest is not wanted,
+    /// which is the dev's own condition: *when the goal is not rest and a chest is visible, detour
+    /// to it, open it, then rejoin the path.*
+    Chest,
     /// A shrine we have not consecrated.
     ///
     /// Ranked below [`Goal::OpenAnomaly`] because consecrating is *impossible* until the anomaly
@@ -2408,6 +2417,30 @@ impl WorldMap {
         if anomaly_open {
             if let Some(p) = pick_shrine() {
                 return Some(Plan { target: p.key.clone(), reason: Goal::Shrine, steered_by: None });
+            }
+        }
+
+        // **A chest, if one is standing about unopened.** Task #16, and the dev's rule verbatim:
+        // *when the goal is not rest and a chest is visible, detour to it, open it, then rejoin the
+        // path.*
+        //
+        // `wants_rest` is the whole of "the goal is not rest", and it is the right gate rather than a
+        // cautious one: `Open` starts a combat scenario (`overworld/generators/forest.lua:30-39`),
+        // so a chest is a fight, and a fight is the last thing a hurt run should detour for. The
+        // rest branch above has already claimed those runs anyway.
+        //
+        // `ok` still demands a route, and `abandon` still writes one off, so this cannot nominate a
+        // chest we could not reach or have already given up on. Nearest first — a chest is worth the
+        // walk, not any length of walk.
+        if !self.wants_rest {
+            let chest = self
+                .places
+                .values()
+                .filter(|p| p.key != here && p.is_chest() && !p.completed && !p.avoid)
+                .filter(|p| !self.abandoned.contains(&p.key) && ok(p))
+                .min_by_key(|p| (dist_or_far(&dist, &p.key), p.key.clone()));
+            if let Some(p) = chest {
+                return Some(Plan { target: p.key.clone(), reason: Goal::Chest, steered_by: None });
             }
         }
 
@@ -6144,6 +6177,45 @@ mod tests {
         for junk in ["shrine2subs", "shrine2_shrine_", "shrine2_shrine_subs"] {
             assert!(!m.places.contains_key(junk), "the suffix strip must not mint `{junk}`");
         }
+    }
+
+    /// **The detour itself**, which is what #16 is named for.
+    ///
+    /// The dev's rule: *when the goal is not rest and a chest is visible, detour to it, open it,
+    /// then rejoin the path.* Both conditions are asserted here, because the leaf exception below
+    /// only makes a chest *reachable* — on its own it would leave a chest unvisited whenever
+    /// something else was the errand, which is every step after the portal opens.
+    #[test]
+    fn an_unopened_chest_earns_a_detour_unless_we_are_hurt() {
+        let build = || {
+            let mut m = WorldMap::new();
+            m.fold(&dump(
+                "here",
+                "camp",
+                vec![node("l5", "Riccall chest"), node("l6", "Bainton Clump — level 1 forest")],
+            ));
+            m.here = Some("here".into());
+            m
+        };
+
+        let m = build();
+        let plan = m.next_target().expect("a plan");
+        assert_eq!(plan.reason, Goal::Chest);
+        assert_eq!(plan.target, "l5");
+
+        // Hurt, and the chest is a fight: `Open` starts a combat scenario, so the bed comes first.
+        let mut hurt = build();
+        hurt.gold = crate::rest::INN_COST;
+        hurt.fold(&dump("here", "camp", vec![node("l7", "Greenoak campfire")]));
+        hurt.fuel = 1;
+        hurt.note_health_level(crate::rest::Health { current: 3, max: 20 });
+        assert!(hurt.wants_rest());
+        assert_ne!(hurt.next_target().expect("a plan").reason, Goal::Chest, "a fight is not a rest");
+
+        // And an opened one is not a destination at all.
+        let mut done = build();
+        done.entry("l5").completed = true;
+        assert_ne!(done.next_target().expect("a plan").reason, Goal::Chest);
     }
 
     /// **A chest at a dead end is still worth the two steps.** Task #16.
