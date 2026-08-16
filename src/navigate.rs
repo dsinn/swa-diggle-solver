@@ -1068,6 +1068,38 @@ impl Run<'_> {
         save.int_at(&path).unwrap_or(0) > 0
     }
 
+    /// Which remembered map belongs to the world we are in.
+    ///
+    /// ## `overworld.seed` really is the world, and a small number is not evidence otherwise
+    ///
+    /// Worth writing down because it was doubted and the doubt was wrong. The seed reads `0` for
+    /// several different adventures and `5` for others, which looks like a bucket rather than an
+    /// identifier — and I argued from that that a fresh profile could absorb a foreign map, and made
+    /// `clear` delete the cache to prevent it. The dev asked whether we were sure. We were not.
+    ///
+    /// The map is a **pure function of this number**: `overworldview.lua:672` hands
+    /// `overworldData.seed` to the generator and `overworld/generators/world.lua:65` opens with
+    /// `love.math.newRandomGenerator(seed)`. So seed 0 is one specific world, reproducible, not
+    /// "unseeded".
+    ///
+    /// The saves agree. Two adventures days apart, both seed 0, on `l10`:
+    ///
+    /// ```text
+    /// in-village ['l1','l18','l19','l4','l7'] | ping-pong ['l1','l18','l19','l4','l7']
+    /// ```
+    ///
+    /// — identical neighbourhoods, and every road in the older save present in the newer. They share
+    /// a cache file because they are the same world, which is what the key is *for*.
+    ///
+    /// Two consequences worth keeping:
+    ///
+    /// - **A cache survives a `clear` on purpose.** A fresh profile on the same seed gets the whole
+    ///   road network and every position from step one, which is the difference between a run that
+    ///   can route and one that cannot. `completed` and `visited` are deliberately not restored
+    ///   ([`crate::overworld::WorldMap::absorb_cache`]), so the new adventure still starts with
+    ///   nothing cleared.
+    /// - **A pinned seed is a repeatable world.** `ui/classselection.lua:950` lets the player fix it,
+    ///   which makes a chosen map replayable for testing.
     fn map_cache_path(&self) -> Option<PathBuf> {
         let save = crate::game::save::load(&self.save_dir.join("mainSaveData")).ok()?;
         let seed = save.int_at("overworld.seed")?;
