@@ -7650,6 +7650,23 @@ mod tests {
             Some("l25_path_to_l4"),
             "three hops of inn-to-door in one press"
         );
+
+        // **And it is never a node the dump names**, which is what made the first call site dead.
+        //
+        // `far_chain` ends in `!can_step_is_adjacent`, so the key it returns is by construction not
+        // a neighbour of where we stand — while `Adjacency::nodes` is the dump's *adjacent
+        // connections*, which is exactly where `fold` builds `neighbours` from. Looking for one in
+        // the other can never match, so the far hop inside a settlement could not fire at all, and
+        // three live runs crossed uncorrupted villages hop by hop with the feature "landed".
+        //
+        // The position that does exist for it is in `Adjacency::exits`, which prints every road out
+        // of the container at any distance. See the crossing branch in `navigate::drive`.
+        let m = town(all, vec![]);
+        let far = m.far_hop_inside("l25sub2", "l25_path_to_l4").expect("the hop above");
+        assert!(
+            !m.get("l25sub2").unwrap().neighbours.contains(&far),
+            "a far hop that is adjacent is not a far hop — so it is never in the dump's node list"
+        );
         // The surface entry point still refuses inside, which is what keeps a fogged forest from
         // trying this. Same map, same route, different rule.
         assert_eq!(town(all, vec![]).far_hop("l25sub2", "l25_path_to_l4"), None);

@@ -4232,11 +4232,53 @@ pub fn drive(
                 r.map.door_note().unwrap_or_else(|| "none recorded".into()),
                 r.map.door_reason().map(|d| d.why()).unwrap_or("held from earlier"),
             ));
+            // **This looked in the wrong list, and so it never once fired.** — the dev, three times
+            //
+            // `far_hop_inside` ends in `far_chain`, whose last act is
+            // `.filter(|k| !self.can_step_is_adjacent(from, k))` — one hop is not a multi-hop, so the
+            // key it returns is **never adjacent to `here`**. This then looked for that key in
+            // `fresh.nodes`, which is the dump's *adjacent connections* (`overworldview.lua:1030-1035`)
+            // and is where `fold` builds `neighbours` from. So the two conditions are mutually
+            // exclusive by construction: every node in `fresh.nodes` is adjacent, and the far hop is
+            // never adjacent. `9922815` shipped a feature that could not run, and three live runs
+            // crossing uncorrupted villages hop by hop is what that looks like from outside.
+            //
+            // **The right list was already in the dump.** `Subworld exit positions` prints every one
+            // of the container's roads out, with coordinates, **at any distance**
+            // (`overworldview.lua:1040-1047`) — that is the whole reason a crossing can steer toward
+            // a door it cannot yet reach. And the door is exactly what a "leave the town in one
+            // press" hop is aiming at: `Crossing::Step`'s `toward` is `<container>_path_to_<x>`.
+            //
+            // This satisfies the requirement the comment below states and the old code only appeared
+            // to: the position is **printed in this dump**, not remembered. `lostOrientation`
+            // re-rolls every interior coordinate on re-entry (`forest.lua:483-490`), so a remembered
+            // interior position is worth nothing — and nothing here remembers one.
+            //
+            // Still guarded by [`crate::observe::hud::is_map_point`], because an exit is routinely
+            // off-screen: one live dump put two of them at (2153, -3) and (1958, 1654). Off the map
+            // we can click, the far hop is declined and the ordinary adjacent step stands.
+            //
+            // A chain that stops **short** of the door — on an ordinary interior node — is declined
+            // in silence, because that is a node no dump gives us a position for and there is
+            // nothing to aim at. Reaching those needs a per-subworld frame, which is a real piece of
+            // work and is written up in #21 rather than half-done here.
             let far_inside: Option<(String, (f64, f64))> = match &mv {
-                Crossing::Step { toward, .. } => r
-                    .map
-                    .far_hop_inside(&here, toward)
-                    .and_then(|f| fresh.nodes.iter().find(|n| n.key == f).map(|n| (f, (n.x, n.y)))),
+                Crossing::Step { toward, .. } => r.map.far_hop_inside(&here, toward).and_then(|f| {
+                    let want = f.strip_prefix(&format!("{container}_path_to_"))?.to_string();
+                    let e = fresh.exits.iter().find(|e| e.to_key == want)?;
+                    let (cw, ch) = r.win.client_size().ok()?;
+                    match crate::observe::hud::is_map_point(e.x as i32, e.y as i32, cw, ch) {
+                        true => Some((f, (e.x, e.y))),
+                        false => {
+                            r.log.push_str(&format!(
+                                "  `{f}` is one press away but its road is drawn at \
+                                 ({:.0}, {:.0}), off the map we can click — hopping instead\n",
+                                e.x, e.y
+                            ));
+                            None
+                        }
+                    }
+                }),
                 _ => None,
             };
             let (what, at) = match &mv {
@@ -4250,11 +4292,12 @@ pub fn drive(
                 // the surface far hop below. Only `Step` gets it: the other three arms exist
                 // precisely because no route is known, and there is no chain to walk without one.
                 //
-                // The far node has to be **named in this dump**. On the surface a node absent from
-                // the dump is placed from the world frame, and that is exactly what must not happen
-                // here — `lostOrientation` re-rolls every interior coordinate on re-entry
-                // (`forest.lua:483-490`), so a remembered position inside a subworld is worth
-                // nothing. A node the dump does not name falls back to the ordinary single step.
+                // The far node's position has to come **from this dump**, and it does — see the
+                // exits lookup above. On the surface a node absent from the dump is placed from the
+                // world frame, and that is exactly what must not happen here: `lostOrientation`
+                // re-rolls every interior coordinate on re-entry (`forest.lua:483-490`), so a
+                // remembered position inside a subworld is worth nothing. A door this dump does not
+                // draw somewhere clickable falls back to the ordinary single step.
                 Crossing::Step { to, toward } if far_inside.is_some() => {
                     let (far, n) = far_inside.as_ref().expect("guarded");
                     (
