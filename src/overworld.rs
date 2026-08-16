@@ -3136,29 +3136,33 @@ impl WorldMap {
         // from here — walk to it, arrive on it, hand over to the driver — which is task #18's
         // generalisation arriving one errand at a time rather than as an abstraction invented
         // around a single case.
-        // **The bed outranks the shelf, and the order here is the whole of that rule.**
+        // **A shelf we can see outranks the bed; a shelf we cannot does not.**
         //
-        // The dev's, after watching a run stand in front of a general store at 2/20 health with an
-        // inn in the same village. `wants_rest` is not a preference, it is the state that gets runs
-        // killed: the two level 6 crypts that ended the evening were both entered hurt. So a village
-        // that can do both does the bed first, and the heart on the way out — `wants_rest` clears
-        // when the inn heals us, and `store_inside` is asked again on the next step.
+        // The dev, 2026-08-16: *once we are in a settlement with that goal, buy as many healthBuffs
+        // as possible while still topping up your health at the inn before we leave the settlement.*
+        //
+        // The order matters for one reason and it is arithmetic: a heart raises **maximum** health
+        // and gives none (`items/ephemeral.lua:4-9`). Resting first fills a bar that the purchase
+        // then lengthens, so the bed has to come last or it is partly wasted — a run that rested at
+        // Stillingfleet and then bought two walked out at 20/28. `hearts_affordable` holds
+        // [`crate::rest::INN_COST`] back over the whole visit, so that last bed is always still
+        // affordable, and buying is what sets `wants_rest` again (see the driver's purchase branch).
+        //
+        // **The previous rule was the reverse, and the case it was written for is still live.** A
+        // run once stood in front of a general store at 2/20 health with an inn in the same village,
+        // and `wants_rest` is not a preference — the two level 6 crypts that ended that evening were
+        // both entered hurt. What that case actually turns on is *knowledge*, not priority: the inn
+        // was not known yet, the store was, and the fallback went shopping mid-search.
+        //
+        // So the shelf only wins when it is **found**. `store_inside` returning `Some` means a
+        // general store is on the map in this village; anything less falls straight through to the
+        // bed, which leaves the hurt-run case exactly as it was.
+        // When neither is found the answer is `None`, which is what makes `cross_toward` explore —
+        // and exploring is how either of them gets found at all. The old shape said that through a
+        // `seeking_a_rest` match whose arms both came to `None` once the store was asked first.
         let inn = self
-            .inn_inside(&parent)
-            .or_else(|| match self.seeking_a_rest(&parent) {
-                // **Still looking for the bed, so the shelf waits.** This is the case that actually
-                // went wrong, and it is subtler than "prefer the inn": the inn was not *known* yet.
-                // The store had already been seen, `inn_inside` returned nothing because nothing in
-                // the map was an inn, and the fallback took the store — so a run at 2/20 walked past
-                // the search it was in the middle of and went shopping.
-                //
-                // `seeking_a_rest` is exactly "we are in a village, we want a bed, and no inn here
-                // has been written off", which is the same thing as "keep looking". Returning `None`
-                // leaves `dest` empty, and an empty `dest` is what makes `cross_toward` explore —
-                // which is how the inn gets found.
-                true => None,
-                false => self.store_inside(&parent),
-            })
+            .store_inside(&parent)
+            .or_else(|| self.inn_inside(&parent))
             .map(|p| p.key.clone());
         let leaving_to = match inn.is_some() || self.seeking_a_rest(&parent) || self.seeking_a_heart(&parent) {
             // The errand outranks the crossing, and leaves the commitment untouched rather than
@@ -6198,6 +6202,80 @@ mod tests {
         assert_eq!(m.hearts_affordable(), 10);
         m.gold = 0;
         assert_eq!(m.hearts_affordable(), 0, "never negative, whatever the purse");
+    }
+
+    /// **The shelf comes before the bed, and only when the shelf has been found.**
+    ///
+    /// The dev, 2026-08-16: *once we are in a settlement with that goal, buy as many healthBuffs as
+    /// possible while still topping up your health at the inn before we leave the settlement.*
+    ///
+    /// The reason is arithmetic rather than taste: a heart raises maximum health and gives none, so
+    /// resting first fills a bar the purchase then lengthens. `hearts_affordable` keeps the bed
+    /// affordable across the whole visit, which is what makes "last" safe.
+    ///
+    /// The second half is the case the **previous** rule was written for and must still hold: a run
+    /// at 2/20 with the inn found and no store on the map yet goes to bed, exactly as before.
+    #[test]
+    fn a_found_shelf_is_visited_before_the_bed_and_an_unfound_one_is_not() {
+        let both = |gold: i64, health: crate::rest::Health| {
+            let mut m = WorldMap::new();
+            m.fold(&dump("here", "camp", vec![node("l11", "Rowlston Covert village")]));
+            m.fold(&inside_dump(
+                "l11",
+                "l11sub1",
+                "Rowlston Covert road",
+                vec![
+                    node("l11sub2", "Rowlston Covert general store"),
+                    node("l11sub3", "The Wobbly Cat inn"),
+                ],
+                vec![],
+            ));
+            m.gold = gold;
+            m.note_health_level(health);
+            m
+        };
+
+        // Hurt, with both in the same village and the price in hand: the shelf first.
+        let mut m = both(HEART_FLOOR, crate::rest::Health { current: 2, max: 20 });
+        assert!(m.wants_rest(), "the bed is genuinely wanted, or this proves nothing");
+        assert!(m.wants_a_heart());
+        match m.cross_toward(&[]) {
+            Some(Crossing::Step { toward, .. }) | Some(Crossing::Probe { toward, .. }) => {
+                assert_eq!(toward, "l11sub2", "the store, with the bed still paid for after it")
+            }
+            other => panic!("expected a step toward the store, got {other:?}"),
+        }
+        assert_eq!(m.hearts_affordable(), 1, "and exactly one night is held back");
+
+        // **The case the old rule existed for.** Same village, same wound, no store on the map:
+        // straight to bed, unchanged.
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("l11", "Rowlston Covert village")]));
+        m.fold(&inside_dump(
+            "l11",
+            "l11sub1",
+            "Rowlston Covert road",
+            vec![node("l11sub3", "The Wobbly Cat inn")],
+            vec![],
+        ));
+        m.gold = HEART_FLOOR;
+        m.note_health_level(crate::rest::Health { current: 2, max: 20 });
+        match m.cross_toward(&[]) {
+            Some(Crossing::Step { toward, .. }) | Some(Crossing::Probe { toward, .. }) => {
+                assert_eq!(toward, "l11sub3", "a shelf we cannot see does not outrank a bed we can")
+            }
+            other => panic!("expected a step toward the inn, got {other:?}"),
+        }
+
+        // And below the floor there is no heart errand at all, so the bed wins on its own terms.
+        let mut m = both(HEART_FLOOR - 1, crate::rest::Health { current: 2, max: 20 });
+        assert!(!m.wants_a_heart());
+        match m.cross_toward(&[]) {
+            Some(Crossing::Step { toward, .. }) | Some(Crossing::Probe { toward, .. }) => {
+                assert_eq!(toward, "l11sub3", "a pound short of the goal is not the goal")
+            }
+            other => panic!("expected a step toward the inn, got {other:?}"),
+        }
     }
 
     /// Inside the village, the errand is the general store.
