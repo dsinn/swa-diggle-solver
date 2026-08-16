@@ -575,6 +575,36 @@ impl Place {
         crate::subworld::triggers_anomaly(self.parent.as_deref(), self.level())
     }
 
+    /// Would arriving here open the anomaly **now**, in the state we currently believe it to be in?
+    ///
+    /// [`Place::triggers_anomaly`] answers the question from the heading alone, which is what a
+    /// planner wants when it is deciding whether a node is the kind of place that opens portals.
+    /// This one adds the clause the event's own check carries and the heading cannot:
+    ///
+    /// ```lua
+    /// return not location.parentNode
+    /// and overworldview.locationHasCombat(location)
+    /// and (location.level or 0) > 3
+    /// ```
+    ///
+    /// — `overworld/events/arrived/world_evil.lua:15-18`, and `locationHasCombat` opens with
+    /// `if core.areaIsComplete(location.key) then return false end` (`overworldview.lua:305-310`).
+    ///
+    /// So **a level 5 crypt we have already cleared is as harmless to walk through as a road**, and
+    /// the difference is not academic: the run of 2026-08-16 left Colden Brake through `l41`, a
+    /// level 5 crypt, when `l20` — a level 2 crypt already cleared — stood at the same distance
+    /// from the target. Refusing every high-level node, cleared or not, would have made the way back
+    /// through our own footprints look as dangerous as the way forward, and a rule that cannot tell
+    /// those apart cannot route a corrupted world at all.
+    ///
+    /// Deliberately **not** substituted into [`WorldMap::gentler_ground_remains`], which asks a
+    /// different question — "is there anywhere gentle left to go" — and answers it about frontier
+    /// nodes, where completion is nearly always false anyway. Two callers, two questions; collapsing
+    /// them is how the shrine filters drifted apart.
+    pub fn opens_the_anomaly(&self) -> bool {
+        self.triggers_anomaly() && !self.completed
+    }
+
     /// The rules in force where this place sits.
     pub fn rules(&self) -> crate::subworld::Rules {
         crate::subworld::Rules::for_parent(self.parent.as_deref())
@@ -3054,6 +3084,39 @@ impl WorldMap {
             (Some(g), Some(t)) => format!("{g:?} -> {t}"),
             _ => "no errand".to_string(),
         };
+        // **Pre-anomaly, what is on the other side of a door has to be under level 4.**
+        //
+        // The dev's rule, 2026-08-16, and it is the level 4 rule (#44) finally being asked at the
+        // place that decides. `gentler_ground_remains` governs which surface node
+        // [`WorldMap::next_target`] may *nominate*; nothing governed which door we left by, and a
+        // crossing picks its own way out. So the run of 2026-08-16 obeyed the rule at every
+        // destination it chose — `l19`, `l18`, `l32`, `l25`, `l4`, `l20`, all level 2 or under —
+        // and then walked out of a village through a level 5 crypt, because the door ranking had
+        // never heard of it.
+        //
+        // Two escapes, both necessary:
+        //
+        // - **the portal is already open**, when there is nothing left to preserve and high level
+        //   *is* the corruption we are heading for;
+        // - **the target itself is the trigger**, which is [`Goal::OpenAnomaly`] doing its job. A
+        //   rule that forbade the door to the node we have decided to open the anomaly at would
+        //   deadlock the errand it is meant to sequence.
+        //
+        // `opens_the_anomaly` rather than `triggers_anomaly`, so a level 5 crypt we have already
+        // cleared stays a perfectly good way home — see there for the game's own condition.
+        let gentle_doors_only = !self.anomaly_is_open().unwrap_or(false)
+            && !target
+                .as_deref()
+                .and_then(|t| self.places.get(t))
+                .map(|p| p.opens_the_anomaly())
+                .unwrap_or(false);
+        let opens_the_portal = |to: &str| {
+            gentle_doors_only
+                && self.places.get(to).map(|p| p.opens_the_anomaly()).unwrap_or(false)
+        };
+        if gentle_doors_only {
+            note.push_str("; gentle doors only");
+        }
         if let Some(target) = target.as_ref() {
             let dist = self.distances(target);
             {
@@ -3078,11 +3141,37 @@ impl WorldMap {
                     .map(|c| self.abandoned.contains(&exit_node_key(c, to)))
                     .unwrap_or(false)
             };
-            if let Some(best) = exits
-                .iter()
-                .filter(|e| dist.contains_key(&e.to_key) && !written_off(&e.to_key))
-                .min_by_key(|e| dist_or_far(&dist, &e.to_key))
-            {
+            // **A tie between doors was being broken by the order the game printed them in.**
+            //
+            // `min_by_key` returns the *first* minimum, and the exits arrive in whatever order
+            // `verboseAdjacencyData` walked them. Live 2026-08-16, leaving Colden Brake for Aike
+            // town: `door choice: Heart -> l25; doors l20=1 l38=2 l41=1`. `l20` is a level 2 crypt
+            // we had already cleared and `l41` is a level 5 crypt we had not; both one hop from the
+            // target; the dump printed `l41` first, so `l41` won, and arriving there opened the
+            // anomaly. That is the alphabetical-bed bug of 2026-08-15 one layer down — an arbitrary
+            // order standing in for a preference nobody wrote.
+            //
+            // `Risk` is the preference, and it is already the fallback branch's first key when we
+            // want a rest. Here it is strictly a tie-break: distance still decides, and safety only
+            // speaks when distance has nothing left to say. `Free < Forest < Fight < Unseen <
+            // Corrupt`, so a cleared node beats an unfought one and either beats a corrupted one.
+            let ranked_by = |gentle: bool| {
+                exits
+                    .iter()
+                    .filter(|e| dist.contains_key(&e.to_key) && !written_off(&e.to_key))
+                    .filter(|e| !gentle || !opens_the_portal(&e.to_key))
+                    .min_by_key(|e| {
+                        let risk =
+                            self.places.get(&e.to_key).map(|p| p.risk()).unwrap_or(Risk::Unseen);
+                        (dist_or_far(&dist, &e.to_key), risk as i64, &e.to_key)
+                    })
+            };
+            // **The gentle pass first, then the same ranking with the rule lifted.**
+            //
+            // Lifted rather than fatal, for the reason the `written_off` filter is dropped when it
+            // empties: being inside a subworld with no door named is worse than any one door. A
+            // village whose every exit is a level 4+ node has to be left by one of them.
+            if let Some(best) = ranked_by(true).or_else(|| ranked_by(false)) {
                 // Retreating through the entrance is only right when it is genuinely the way on —
                 // backtracking to an inn, say.
                 //
@@ -3181,6 +3270,18 @@ impl WorldMap {
             .collect();
         let mut ranked: Vec<&crate::observe::adjacency::Exit> =
             if live.is_empty() { exits.iter().collect() } else { live };
+        // **And here too, because this branch runs more often than the ranked one.**
+        //
+        // Distance can say nothing about a node we have never stood on, which is most of them, so
+        // "unranked, fell back on risk and bearing" is the ordinary case rather than the exceptional
+        // one — the comment above this branch says as much. A rule that only guarded the measured
+        // path would be a rule that mostly did not run. Same shape as everything else here: applied
+        // when it leaves something, dropped when it would leave nothing.
+        let gentle: Vec<&crate::observe::adjacency::Exit> =
+            ranked.iter().copied().filter(|e| !opens_the_portal(&e.to_key)).collect();
+        if !gentle.is_empty() {
+            ranked = gentle;
+        }
         // `f64` has no `Ord`, so the heuristic is bucketed into integers rather than compared as a
         // float. Rounding is harmless here — the question is which door points the right way, not
         // by how many pixels — and it keeps the whole key sortable and total.
@@ -6940,6 +7041,155 @@ e	l4	l11
             m.choose_exit(&doors).map(|(k, _, _)| k).as_deref(),
             Some("l40"),
             "a run that needs a bed takes the safe door, which is the whole point of the ordering"
+        );
+    }
+
+    /// Colden Brake, 2026-08-16, and it is the decision that opened the anomaly.
+    ///
+    /// ```text
+    /// 78. crossing `e2` toward `e2_path_to_l41` (nearest to the target) via `e2_path_to_l41`
+    ///   door choice: Heart -> l25; doors l20=1 l38=2 l41=1
+    /// ```
+    ///
+    /// `l20` is a level 2 crypt already cleared. `l41` is Crockey, a level 5 crypt. Both one hop
+    /// from the target. `min_by_key` keeps the first minimum and the game printed `l41` first, so a
+    /// coin toss with no coin sent a run into a level 5 crypt on the way to a shop — and arriving
+    /// there fired `You feel the ground rumble` (steps 79-81), which is the whole adventure's
+    /// difficulty settled by the order of a print statement.
+    ///
+    /// Two rules now stand between that and a repeat, and the test asserts the outcome rather than
+    /// which of them did it, because either alone is enough and both are wanted.
+    #[test]
+    fn a_door_onto_an_unfought_level_5_crypt_loses_to_a_cleared_one() {
+        use crate::observe::adjacency::Exit;
+        let door = |to: &str| Exit { x: 0.0, y: 0.0, to_key: to.into(), to_heading: "".into() };
+
+        let mut m = WorldMap::default();
+        for (a, b) in
+            [("e2", "l20"), ("e2", "l38"), ("e2", "l41"), ("l20", "l25"), ("l41", "l25")]
+        {
+            m.entry(a).neighbours.insert(b.into());
+            m.entry(b).neighbours.insert(a.into());
+        }
+        m.entry("l20").heading = "Keyingham — level 2 crypt".into();
+        m.entry("l38").heading = "Bellasize Regrowth — level 4 forest".into();
+        m.entry("l41").heading = "Crockey — level 5 crypt".into();
+        m.entry("l25").heading = "Aike shrine".into();
+        m.entry("e2sub6").parent = Some("e2".into());
+        m.here = Some("e2sub6".into());
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = { hell = 0 },
+                     completedAreas = { l20 = true, e2 = true } } }",
+            )
+            .unwrap(),
+        );
+        assert_eq!(m.inside(), Some("e2"), "the fixture must be standing inside the village");
+
+        // The exits in the order the game printed them, which is the order that decided it.
+        let (chosen, why, note) = m
+            .choose_exit(&[door("l41"), door("l38"), door("l20")])
+            .expect("three doors is not no doors");
+        assert_eq!(chosen, "l20", "the cleared level 2 crypt, not the unfought level 5 one");
+        assert_eq!(why.why(), "nearest to the target", "and by ranking, not by falling back");
+        assert!(note.contains("gentle doors only"), "the log must say the rule was in force: {note}");
+    }
+
+    /// The level 4 rule at a door, where it costs something.
+    ///
+    /// The tie above is the easy case — a cleared node is both gentler *and* safer, so two
+    /// independent rules agree. Here the trigger door is genuinely nearer, and obeying the dev's
+    /// rule means walking further. That is the trade they asked for: *only visit a level 4 node when
+    /// the entire frontier is at least level 4.*
+    ///
+    /// The control is `l41` itself, **cleared**. Same level, same distance, same errand — and the
+    /// measured answer wins again, because a level 5 crypt whose fight is already won cannot open
+    /// anything (`overworldview.lua:305-310`, via [`Place::opens_the_anomaly`]). That isolates the
+    /// clause under test: this is a rule about opening the portal, not about big numbers.
+    ///
+    /// A portal-open control was tried here first and proves nothing, because opening it changes
+    /// the *errand* too — with `hell ~= 0` the shrine needs `reachable_without_a_fight`, `l41` is
+    /// the fight in the way, and the target moves out from under the comparison.
+    #[test]
+    fn a_nearer_door_loses_to_a_gentler_one_unless_its_fight_is_already_won() {
+        use crate::observe::adjacency::Exit;
+        let door = |to: &str| Exit { x: 0.0, y: 0.0, to_key: to.into(), to_heading: "".into() };
+
+        let world = |cleared: &str| {
+            let mut m = WorldMap::default();
+            // `l41` reaches the shrine in one hop; `l20` takes three. Distance alone says `l41`.
+            for (a, b) in [
+                ("e2", "l20"),
+                ("e2", "l41"),
+                ("l41", "shrine3"),
+                ("l20", "l9"),
+                ("l9", "l8"),
+                ("l8", "shrine3"),
+            ] {
+                m.entry(a).neighbours.insert(b.into());
+                m.entry(b).neighbours.insert(a.into());
+            }
+            m.entry("l20").heading = "Keyingham — level 2 crypt".into();
+            m.entry("l41").heading = "Crockey — level 5 crypt".into();
+            m.entry("shrine3").heading = "Gembling shrine".into();
+            m.entry("e2sub6").parent = Some("e2".into());
+            m.here = Some("e2sub6".into());
+            m.apply_save(
+                &crate::game::save::parse(&format!(
+                    "return {{ overworld = {{ areaFlags = {{ hell = 0 }},
+                         completedAreas = {{ e2 = true, {cleared} }} }} }}"
+                ))
+                .unwrap(),
+            );
+            m
+        };
+
+        let doors = [door("l41"), door("l20")];
+        assert_eq!(
+            world("").choose_exit(&doors).map(|(k, _, _)| k).as_deref(),
+            Some("l20"),
+            "three hops through gentle ground beats one hop through a level 5 crypt"
+        );
+        assert_eq!(
+            world("l41 = true,").choose_exit(&doors).map(|(k, _, _)| k).as_deref(),
+            Some("l41"),
+            "the same crypt, already cleared, opens nothing — so the measured answer stands"
+        );
+    }
+
+    /// A village whose every exit is a level 4+ node still has to be left.
+    ///
+    /// The rule is a preference expressed as a filter, and every filter in `choose_exit` is dropped
+    /// when it would leave nothing — being inside a subworld with no door named is worse than any
+    /// one door. Without this the rule would turn a perfectly ordinary map into a stall, which is
+    /// how `inside {container} with no crossing plan` ended runs before.
+    #[test]
+    fn the_level_4_door_rule_never_leaves_a_village_with_no_way_out() {
+        use crate::observe::adjacency::Exit;
+        let door = |to: &str| Exit { x: 0.0, y: 0.0, to_key: to.into(), to_heading: "".into() };
+
+        let mut m = WorldMap::default();
+        for (a, b) in [("e2", "l41"), ("e2", "l45"), ("l41", "shrine3")] {
+            m.entry(a).neighbours.insert(b.into());
+            m.entry(b).neighbours.insert(a.into());
+        }
+        m.entry("l41").heading = "Crockey — level 5 crypt".into();
+        m.entry("l45").heading = "Bessingby — level 5 crypt".into();
+        m.entry("shrine3").heading = "Gembling shrine".into();
+        m.entry("e2sub6").parent = Some("e2".into());
+        m.here = Some("e2sub6".into());
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = { hell = 0 },
+                     completedAreas = { e2 = true } } }",
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            m.choose_exit(&[door("l41"), door("l45")]).map(|(k, _, _)| k).as_deref(),
+            Some("l41"),
+            "no gentle door exists, so the rule lifts rather than stalling the crossing"
         );
     }
 
