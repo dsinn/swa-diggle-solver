@@ -119,6 +119,17 @@ pub struct Place {
     /// Set when a dump reports us inside a subworld whose parent is this key. Mirroring the game's
     /// type table would be the other way to know, and it is exactly the drift this project avoids.
     pub subworld_container: bool,
+    /// `<key>_attack` is in `areaFlags`: a fight for this settlement is happening now.
+    ///
+    /// Its buildings answer `Enter` with `ui.building_empty` while it lasts
+    /// (`overworld/generators/village.lua:97`, `:371-388`) — the same button, a different room, and
+    /// no bed in it. Cleared when the attack is beaten (`:54`).
+    pub under_attack: bool,
+    /// `<key>_attacked` is in `areaFlags`: this settlement, or this building, was lost.
+    ///
+    /// Permanent. All that is left is `Loot` (`village.lua:393-395`), which is task #26 and not a
+    /// rest. See [`Place::trades`].
+    pub sacked: bool,
     /// A lost woods we have already been swallowed by, and will not enter again.
     ///
     /// Set from the `lost_woods_known_*` save flags — see [`crate::subworld::LOST_WOODS_KNOWN`].
@@ -511,7 +522,27 @@ impl Place {
     /// `completed` is the release, not the corruption flag, for the same reason it is everywhere
     /// else here: corruption is a bill, and clearing the node pays it.
     pub fn stocks_a_heart(&self) -> bool {
-        self.is_settlement() && (!self.corrupted || self.completed)
+        self.is_settlement() && (!self.corrupted || self.completed) && self.trades()
+    }
+
+    /// Are this settlement's buildings open for business at all?
+    ///
+    /// The dev, 2026-08-16: *the inn at a village that is under attack or lost cannot be rested at.*
+    /// The same is true of its shop, because `getAreaButtons` swaps the button set for **every**
+    /// building in the village at once (`overworld/generators/village.lua:84-98`), and the inn and
+    /// the general store carry the same three sets (`:371`, `:393`, `:323`, `:332`).
+    ///
+    /// Two states, one answer, and the first is the dangerous one:
+    ///
+    /// - **under attack** — `Enter` still says `Enter`, and opens `ui.building_empty` instead of
+    ///   `ui.inn`. A button that looks right and does nothing we want is worse than a missing one,
+    ///   because the driver's press succeeds and the errand quietly does not.
+    /// - **lost** — only `Loot` remains, which is #26 and not a rest.
+    ///
+    /// Read from `areaFlags`, which is where the game itself reads it, and drawn on the map as an
+    /// attack indicator — so this is the same information a player has.
+    pub fn trades(&self) -> bool {
+        !self.under_attack && !self.sacked
     }
 
     /// A village or a town — somewhere with an inn and shops inside.
@@ -2067,6 +2098,46 @@ impl WorldMap {
             for k in spent {
                 self.heart_bought.insert(k);
             }
+            // **A settlement whose buildings are shut**, which the game decides entirely from these
+            // two flags (`overworld/generators/village.lua:84-98`):
+            //
+            // ```lua
+            // if areaFlag(location.key..'_attacked')
+            // or areaFlag(location.parentNode.key..'_attacked')
+            // or areaFlag(location.parentNode.key..'_attack').playerAttack then
+            //     return location.typeData.destroyedAreaButtons or {}
+            // end
+            // return areaFlag(location.parentNode.key..'_attack')
+            //     and location.typeData.underAttackAreaButtons or location.typeData.areaButtons
+            // ```
+            //
+            // The dev, 2026-08-16: *the inn at a village that is under attack or lost cannot be
+            // rested at.* The Lua is blunter than that even — under attack, `Enter` opens
+            // `ui.building_empty` (`:371-388`) rather than `ui.inn`, so the button is **the same
+            // word doing something else**; destroyed, the only button left is `Loot` (`:393-395`).
+            // The general store carries the identical three sets (`:323`, `:332`), so this shuts the
+            // heart errand as well as the bed.
+            //
+            // `_attack` is the live fight and clears when it is won (`village.lua:54`); `_attacked`
+            // is the aftermath and does not.
+            let sacked: Vec<String> = flags
+                .map
+                .keys()
+                .filter_map(|k| k.strip_suffix("_attacked"))
+                .map(|s| s.to_string())
+                .collect();
+            for k in sacked {
+                self.entry(&k).sacked = true;
+            }
+            let besieged: Vec<String> = flags
+                .map
+                .keys()
+                .filter_map(|k| k.strip_suffix("_attack"))
+                .map(|s| s.to_string())
+                .collect();
+            for k in besieged {
+                self.entry(&k).under_attack = true;
+            }
             // `<key>_used`, which for a campfire decides whether resting there is free or futile.
             let used: Vec<String> = flags
                 .map
@@ -2548,6 +2619,10 @@ impl WorldMap {
                 // a long-corrupted village expecting a bed will find a loot pile, and `completed`
                 // will say it may sleep there. See task #26, which wants the loot anyway.
                 .filter(|p| p.key != here && !p.avoid && (!p.corrupted || p.completed) && ok(p))
+                // A settlement under attack or lost has no bed — see [`Place::trades`]. Campfires
+                // are unaffected by it and excluded elsewhere entirely
+                // (`rest::CAMPFIRE_REST_IS_BUILT`).
+                .filter(|p| !p.is_settlement() || p.trades())
                 .filter_map(|p| crate::rest::site(&p.heading).map(|s| (p, s)))
                 .filter(|(p, s)| crate::rest::can_rest_at(*s, self.gold, self.fuel, !p.used))
                 .collect();
@@ -4272,6 +4347,12 @@ impl WorldMap {
         if !self.wants_rest || self.gold < crate::rest::INN_COST {
             return None;
         }
+        // The village's buildings must actually be open — see [`Place::trades`]. Under attack the
+        // inn's `Enter` opens an empty room, so a run that ignored this would walk the whole village
+        // and press a button that works.
+        if !self.places.get(container).map(|p| p.trades()).unwrap_or(true) {
+            return None;
+        }
         self.places
             .values()
             .find(|p| p.parent.as_deref() == Some(container) && p.is_inn() && !self.abandoned.contains(&p.key))
@@ -4321,7 +4402,7 @@ impl WorldMap {
         if !self.wants_rest || self.gold < crate::rest::INN_COST {
             return false;
         }
-        if !self.places.get(container).map(|p| p.is_settlement()).unwrap_or(false) {
+        if !self.places.get(container).map(|p| p.is_settlement() && p.trades()).unwrap_or(false) {
             return false;
         }
         !self
@@ -5584,6 +5665,64 @@ mod tests {
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Rest);
         assert_eq!(plan.target, "l10", "a freed inn is a rest stop again");
+    }
+
+    /// A village under attack, or lost, is neither a bed nor a shop.
+    ///
+    /// The dev, 2026-08-16: *the inn at a village that is under attack or lost cannot be rested at.*
+    /// `getAreaButtons` (`overworld/generators/village.lua:84-98`) swaps the button set for every
+    /// building in the village at once, from two `areaFlags` and nothing else.
+    ///
+    /// The under-attack case is the one worth a test rather than a comment: `Enter` still reads
+    /// `Enter` and opens `ui.building_empty` instead of `ui.inn` (`:371-388`). A driver that ignored
+    /// this would cross the village, press a button, succeed, and rest nothing — which is the
+    /// campfire stall again with a working button in place of a missing one.
+    #[test]
+    fn a_village_under_attack_or_lost_is_not_somewhere_to_rest_or_shop() {
+        let village = |flag: &str| {
+            let mut m = WorldMap::new();
+            m.fold(&dump(
+                "l1",
+                "Weedley Copse crypt",
+                vec![node("l10", "Ulrome village"), node("l11", "Rowlston village")],
+            ));
+            m.note_health(
+                crate::rest::Health { current: 12, max: 12 },
+                crate::rest::Health { current: 7, max: 12 },
+            );
+            m.gold = 200;
+            if !flag.is_empty() {
+                m.apply_save(
+                    &crate::game::save::parse(&format!(
+                        "return {{ player = {{ gold = 200 }}, overworld = {{
+                             areaFlags = {{ hell = 0, {flag} }} }} }}"
+                    ))
+                    .unwrap(),
+                );
+            }
+            m
+        };
+
+        // Untouched, `l10` is the nearer bed and the planner says so.
+        assert_eq!(village("").next_target().unwrap().target, "l10", "the premise");
+
+        // `l10_attack` — villagers are fighting for it right now. `Enter` opens an empty room.
+        let besieged = village("l10_attack = { attackingEnemies = 3 }");
+        assert!(besieged.get("l10").unwrap().under_attack);
+        assert!(!besieged.get("l10").unwrap().trades(), "an empty room is not an inn");
+        let plan = besieged.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Rest);
+        assert_eq!(plan.target, "l11", "the other village, which still has a bed");
+
+        // `l10_attacked` — it was lost. Only `Loot` is left, and that is #26, not a rest.
+        let sacked = village("l10_attacked = 4");
+        assert!(sacked.get("l10").unwrap().sacked);
+        assert_eq!(sacked.next_target().unwrap().target, "l11", "a sacked village is not a bed");
+
+        // And the shelf goes with the bed, because the general store carries the same three button
+        // sets (`village.lua:323`, `:332`).
+        assert!(!sacked.get("l10").unwrap().stocks_a_heart(), "nor a shop");
+        assert!(village("").get("l10").unwrap().stocks_a_heart(), "the control");
     }
 
     /// A campfire is never the rest destination, in any of the states that used to choose it.

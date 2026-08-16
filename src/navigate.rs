@@ -4370,6 +4370,10 @@ pub fn drive(
             let top_up = r.map.top_up_at(&p.key);
             let rest_here = p.is_settlement()
                 && (!p.corrupted || p.completed)
+                // Under attack or lost, every building in the village answers `Enter` with an empty
+                // room or a `Loot` button — see [`crate::overworld::Place::trades`]. Entering to
+                // rest or shop is then a walk across a subworld for nothing.
+                && p.trades()
                 && ((r.map.wants_rest() && r.map.gold() >= crate::rest::INN_COST)
                     || top_up
                     || (r.map.wants_a_heart() && !r.map.heart_is_spent(&p.key)));
