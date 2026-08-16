@@ -4702,6 +4702,57 @@ impl WorldMap {
         self.store_inside(container)
             .or_else(|| self.inn_inside(container))
             .or_else(|| self.chest_inside(container))
+            .or_else(|| self.shrine_inside(container))
+    }
+
+    /// A shrine inside this subworld that has never been prayed at. — the dev's rule, 2026-08-17
+    ///
+    /// *Any pre-anomaly shrine should be solved as an errand anyway, just like an overworld shrine.
+    /// The behaviour should be to Pray there, and then leave the Consecration for later.*
+    ///
+    /// **The case that prompted it.** `shrine1` is `Gripthorpe Brush — level 1 forest`: the shrine is
+    /// a `woodland shrine` **subnode** (`forest.lua:223`), and the surface node is the forest holding
+    /// it. So the run travelled there under `Goal::Shrine`, entered — and the goal was satisfied by
+    /// standing on the container. `next_target` excludes `here`, the planner moved on to a heart, and
+    /// the crossing walked out the far side. Live 2026-08-16 2103Z, steps 11 to 13: the errand did not
+    /// fail, it *evaporated on arrival*.
+    ///
+    /// ## Why these conditions and no others
+    ///
+    /// They are the surface rule with the anomaly branch removed, and they have to stay that way —
+    /// `next_target`'s `pick_shrine` is the pair this must agree with, and the last time a shrine
+    /// filter drifted from its partner a shrine sat `[done] [corrupted]` and unconsecrated for a whole
+    /// run. Pre-anomaly, `worth_a_trip` reduces to `!p.used`, and both of the `!anomaly_open ||`
+    /// clauses pass trivially. That leaves: a shrine, not avoided, not abandoned, **not used**.
+    ///
+    /// - **Pre-anomaly only.** `Consecrate` is drawn only while `hell ~= 0` (`shrine.lua:92-95`), so
+    ///   before the portal opens there is nothing here but the prayer — which is the dev's "leave the
+    ///   Consecration for later" made mechanical rather than remembered. After it opens, an interior
+    ///   shrine is governed by [`WorldMap::worth_consecrating_here`] on arrival, which is the
+    ///   "consecrate it if we are walking through anyway" rule and deliberately not a reason to stop.
+    /// - **`!used`, not `!completed`.** `<key>_used` is what the game sets when a prayer lands, and
+    ///   `completed` is about the fight. A shrine with no fight is `completed` on arrival
+    ///   (`e799771`), so asking that would skip every peaceful shrine there is.
+    /// - **`!abandoned` is load-bearing, not hygiene.** A shrine whose puzzle the driver gave up on is
+    ///   *genuinely unused* — the game never set the flag, because nothing was prayed — so without
+    ///   this the errand would send us back to it for ever. That is the thirty-step
+    ///   `l10 -> shrine2 -> l10` bounce, and it is the reason the surface filter carries the same
+    ///   clause.
+    ///
+    /// Last in [`WorldMap::errand_inside`], matching the surface ordering, where the chest branch
+    /// comes before the pre-anomaly shrine pick. Nearest first, ties broken by key, because a
+    /// `places` hash map would otherwise choose differently on different runs from the same state.
+    fn shrine_inside(&self, container: &str) -> Option<&Place> {
+        if self.anomaly_is_open().unwrap_or(false) {
+            return None;
+        }
+        let dist = self.here.as_deref().map(|h| self.distances(h)).unwrap_or_default();
+        self.places
+            .values()
+            .filter(|p| p.parent.as_deref() == Some(container))
+            .filter(|p| p.is_shrine() && !p.used && !p.avoid)
+            .filter(|p| !self.abandoned.contains(&p.key))
+            .min_by_key(|p| (dist_or_far(&dist, &p.key), p.key.clone()))
     }
 
     /// An unopened chest in this subworld, nearest first.
@@ -7918,6 +7969,69 @@ mod tests {
             node_at("d", "D", 150.0, 50.0),
         ]));
         assert_eq!(m.get("d").unwrap().pos, Some((300.0, 100.0)));
+    }
+
+    /// A shrine inside a forest is an errand, not something to walk past. — the dev, 2026-08-17
+    ///
+    /// Live 2026-08-16 2103Z, steps 11 to 13: the run travelled to `shrine1` under `Goal::Shrine`,
+    /// entered it, and crossed straight out the far side. The shrine is a **subnode**, the goal was
+    /// satisfied by standing on the container, and `next_target` excludes `here` — so the errand
+    /// evaporated on arrival rather than failing.
+    #[test]
+    fn a_shrine_inside_a_forest_is_stopped_at_before_the_crossing_leaves() {
+        let forest = |flags: &str| {
+            let mut m = WorldMap::new();
+            m.fold(&inside_dump(
+                "shrine1",
+                "shrine1sub1",
+                "Gripthorpe Brush road",
+                vec![
+                    node("shrine1sub2", "Gripthorpe Brush woodland shrine"),
+                    node("shrine1_path_to_l5", "Road to Dalton Copse"),
+                ],
+                vec![exit("l5")],
+            ));
+            m.entry("shrine1").heading = "Gripthorpe Brush — level 1 forest".into();
+            m.apply_save(
+                &crate::game::save::parse(&format!(
+                    "return {{ overworld = {{ areaFlags = {{ {flags} }} }} }}"
+                ))
+                .unwrap(),
+            );
+            m
+        };
+
+        // The heading is what makes it a shrine — `woodland shrine` ends in the word, so the same
+        // `is_shrine` that names a surface `shrineN` names this.
+        let m = forest("hell = 0");
+        assert!(m.get("shrine1sub2").unwrap().is_shrine(), "the premise");
+        assert_eq!(
+            m.errand_inside("shrine1").map(|p| p.key.as_str()),
+            Some("shrine1sub2"),
+            "we came here for the shrine; standing on the forest is not having been"
+        );
+
+        // Prayed at already — `<key>_used` is the game's own record — so there is nothing to stop
+        // for and the crossing is a crossing again.
+        assert_eq!(forest("hell = 0, shrine1sub2_used = 1").errand_inside("shrine1"), None);
+
+        // **`used`, not `completed`.** A shrine with no fight is complete on arrival (`e799771`), so
+        // asking that would skip every peaceful shrine there is.
+        let mut done = forest("hell = 0");
+        done.entry("shrine1sub2").completed = true;
+        assert!(done.errand_inside("shrine1").is_some(), "completed says nothing about praying");
+
+        // A shrine the driver gave up on is still `!used`, because nothing was ever prayed. Without
+        // the abandoned clause this errand would send the run back to it for ever — the thirty-step
+        // `l10 -> shrine2 -> l10` bounce, in a subworld.
+        let mut given_up = forest("hell = 0");
+        given_up.abandon("shrine1sub2");
+        assert_eq!(given_up.errand_inside("shrine1"), None);
+
+        // With the portal open there is no prayer left to make the trip for: consecrating is the
+        // only thing on offer, and that is `worth_consecrating_here` on arrival — something we do
+        // walking through, never a reason to stop. The dev: leave the Consecration for later.
+        assert_eq!(forest("hell = 0.1").errand_inside("shrine1"), None);
     }
 
     /// #26: what is left to loot in a village the demons have taken.
