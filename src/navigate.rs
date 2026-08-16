@@ -1254,6 +1254,43 @@ impl Run<'_> {
         }
     }
 
+    /// Is the area-button slot offering `Combat` for whatever is selected right now?
+    ///
+    /// The dev's rule, 2026-08-16: *make sure the Combat press is either preceded by a console check
+    /// if it's available and tells you when the node is interactable, or a template inlier check so
+    /// that we know when it's available.*
+    ///
+    /// It has to be the template. The console prints the adjacency dump and nothing else
+    /// (`overworldview.lua:1025-1053`); selecting a location is silent (`:475`, `:1493`), and no line
+    /// anywhere names the selected node's buttons. There is no console channel to check.
+    ///
+    /// Always logged, match or no match, because the score is the diagnosis. A blind press that
+    /// achieves nothing and a press that lands on the wrong plank produce the same
+    /// `screen moved 0.000`, and telling them apart took a screenshot read by hand — see
+    /// [`crate::act::AREA_COMBAT`] for the run this cost.
+    fn combat_is_on_offer(&mut self) -> bool {
+        match crate::act::score_exact(self.win, &crate::act::AREA_COMBAT) {
+            Ok(q) => {
+                self.log.push_str(&format!(
+                    "  area slot: {} (Combat {q:.4}, gate {})\n",
+                    match q >= crate::act::AREA_BUTTON_SHOWING {
+                        true => "Combat",
+                        false => "something else",
+                    },
+                    crate::act::AREA_BUTTON_SHOWING
+                ));
+                q >= crate::act::AREA_BUTTON_SHOWING
+            }
+            // A capture fault is not a `Combat`. Reported rather than swallowed, for the reason
+            // `wait_for` counts faults: a blind check and an absent button look identical and want
+            // opposite fixes.
+            Err(e) => {
+                self.log.push_str(&format!("  area slot could not be read: {e}\n"));
+                false
+            }
+        }
+    }
+
     fn snap_area_slot(&mut self, tag: &str) {
         // `default` is 250x100 (`ui/elements/button.lua:17`), and [`AREA_BUTTON`] is its centre.
         let (x, y) = (AREA_BUTTON.0 - 125, AREA_BUTTON.1 - 50);
@@ -4053,7 +4090,41 @@ pub fn drive(
             let _ = click_at_in(r.win, ax, ay);
             std::thread::sleep(Duration::from_millis(900));
             r.pump();
-            let _ = r.click_area_button("Travel (subworld)");
+            // **`Travel` is not always what is on offer, and pressing it when it is not stalls the
+            // run in silence.**
+            //
+            // A forest subnode holding enemies offers `Combat` and nothing else
+            // (`overworld/generators/forest.lua:86-87`). There is no `Travel` on it to press, no
+            // console line saying so, and the slot coordinate is shared — so the press lands on
+            // nothing, `here` never changes, and the arrival wait runs out. That is how the run of
+            // 2026-08-16 ended, four steers deep into a forest that had been peaceful the first time
+            // we crossed it and had enemies put back on its roads by corruption.
+            //
+            // Fighting is the right answer rather than a detour, and it is the dev's standing
+            // ruling: **for the MVP, stick to the path and fight through whatever is standing on
+            // it** — the full argument is under `WorldMap::cross_toward`, where backing out was
+            // tried and called off. `canTravelToDirect` needs one endpoint complete
+            // (`overworldview.lua:1316-1321`), so an uncleared node on the route is not a thing to
+            // route around; it is the toll.
+            //
+            // The press is handed straight back to the top of the loop, which is where `Pregame` and
+            // `CombatEntered` already have handlers. Nothing here tries to predict which arrives.
+            if r.combat_is_on_offer() {
+                r.log.push_str(
+                    "  the slot offers `Combat`, so this node is a fight and not a step — taking it\n",
+                );
+                if matches!(r.click_area_button("Combat"), Ok(true)) {
+                    r.combat_expected = true;
+                    continue;
+                }
+                // A press the diff could not see is not a press that failed — the pregame animates
+                // in and an early frame is identical to the map it replaced. The fight branch's own
+                // recovery covers this case; here it is enough to fall through and let the arrival
+                // wait below decide, since a fight that did open will change `here` when it ends.
+                r.log.push_str("  the Combat press showed no movement — waiting to see what arrived\n");
+            } else {
+                let _ = r.click_area_button("Travel (subworld)");
+            }
             // Arrival, not pixels.
             //
             // A frame diff over one second called a *successful* move a failure: travel begins with
@@ -4359,6 +4430,17 @@ pub fn drive(
             // that were being duplicated here. Being inside a subworld needs no handler at all: the
             // map path deals with it.
             let inside_before = r.map.inside().map(str::to_string);
+            // **Read, not gated.** This branch presses the slot knowing full well it may not say
+            // `Combat`: `getLocationButtons` tests `typeData.subworld` before `basicCombatZone`
+            // (`overworldview.lua:462-467`), so the same press enters a forest (`Explore`) or a
+            // village (`Visit`), and a chest offers `Open`. Requiring `Combat` here would refuse
+            // every crossing we make.
+            //
+            // So the score goes in the log and decides nothing. It is still worth having: the slot
+            // capture this replaced was written under the fixed name `combat-live` whatever it
+            // showed, and the one from 2026-08-16 is a picture of the word **Explore** filed as
+            // evidence of a fight.
+            let _ = r.combat_is_on_offer();
             r.snap_area_slot("combat-live");
             if !matches!(r.click_area_button("Combat"), Ok(true)) {
                 // **A screen diff is a worse witness than the observer, so ask the observer.**

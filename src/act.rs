@@ -1115,6 +1115,60 @@ pub const MURDER_CANCEL: Button = Button {
     click: (1117, 620),
 };
 
+/// The overworld area-button slot showing **`Combat`**.
+///
+/// The one thing this answers: *is the selected node one we must fight rather than walk onto?*
+///
+/// A forest subnode holding enemies offers `Combat` **and nothing else** —
+/// `return subnodeHasEnemies(location) and combatButton or location.typeData.areaButtons`
+/// (`overworld/generators/forest.lua:86-87`), where `subnodeHasEnemies` reads the parent's area flag
+/// (`:6-11`). There is no `Travel` on that node to press. So a run that presses `Travel` at the slot
+/// coordinate presses nothing, nothing moves, and no console line says why.
+///
+/// That is exactly how the run of 2026-08-16 ended. `l4` was a level 1 spider forest when we first
+/// crossed it and every subnode was peaceful; we came back after the anomaly opened, corruption had
+/// put enemies back on the roads, and steps 97-101 walked `l4sub13 -> l4sub5 -> l4sub1 -> l4_plaza
+/// -> l4sub3` pressing `Travel` at a slot that read `Combat`, then stopped with `no arrival`. The
+/// stop frame (`spike-frames-live/gave-up.png`) shows `Bainton Clump — level 6 crossroads` selected
+/// with `Combat` in the slot, which is where this template is cut from.
+///
+/// ## Why a template and not the console
+///
+/// Because the console cannot answer it. `overworldview.lua` prints the adjacency dump
+/// (`:1025-1053`) and nothing else — no line names the selected location's buttons, and selection
+/// itself (`:475`, `:1493`) is silent. The dev asked for a console check *or* a template check; only
+/// one of the two exists.
+///
+/// ## Calibrated against the confusable planks, not against the map
+///
+/// Every area button is the same wooden plank at the same coordinate with different lettering, so
+/// the background matches perfectly and only the glyphs can separate them — the same trap as
+/// `Finish` versus `Give up` on [`COMBAT_FINISH`]. Measured with `inlier_probe` against the slot
+/// captures a live run left behind:
+///
+/// ```text
+/// area-combat.png vs itself                  1.0000
+/// area-combat.png vs Explore                 0.8731
+/// area-combat.png vs Visit                   0.8616
+/// area-combat.png vs Combat, greyed out      0.7367
+/// ```
+///
+/// [`AREA_BUTTON_SHOWING`] sits at 0.95, in the middle of the measured gap. Note the greyed `Combat`
+/// scoring *lowest* of the three: an inactive button is a bigger pixel difference than a different
+/// word, which is the right way round — a `Combat` we cannot press is not a `Combat` worth pressing.
+pub const AREA_COMBAT: Button = Button {
+    name: "area Combat",
+    template: "area-combat.png",
+    search: (54, 860, 320, 976),
+    origin: (62, 868),
+    click: (187, 918),
+};
+
+/// How well the area-button slot must match before we believe what it says.
+///
+/// Placed in the gap measured on [`AREA_COMBAT`]: nearest confusable 0.8731, exact 1.0000.
+pub const AREA_BUTTON_SHOWING: f64 = 0.95;
+
 /// The inn's `Rest`, on the inn screen.
 ///
 /// `button('Rest', 1, 0.9, { xOffset = -2 })` (`ui/inn.lua:55`) with the 250x100 `default` size, so
@@ -1529,6 +1583,7 @@ pub const ALL: &[&Button] =
     &INN_REST,
     &REST_CONFIRM,
     &MURDER_CANCEL,
+    &AREA_COMBAT,
 ];
 
 /// Start menu `Continue`. Measured on 52.3 at 1920x1080; `Restart` is the adjacent button at
@@ -2626,6 +2681,49 @@ mod threshold_tests {
             "expected the inversion to still hold: ground {ground:.4} vs selected {selected:.4}. \
              If this now fails, the template or the metric changed and REWARD_SCREEN_PRESENT can \
              be reconsidered."
+        );
+    }
+
+    /// [`AREA_BUTTON_SHOWING`] sits in a gap that was measured, against the states it can be
+    /// mistaken for.
+    ///
+    /// Every area button is the same plank at the same coordinate, so background agreement is total
+    /// and only the lettering separates them — a threshold guessed here would be a threshold picked
+    /// out of the air. The three confusables are the ones a crossing actually meets: `Explore` (the
+    /// corrupted forest we are trying to enter), `Visit` (a settlement subnode), and `Combat` greyed
+    /// out (offered but not pressable).
+    ///
+    /// The slot captures are 250x100, exactly template-sized, so [`score`] and `score_at_origin`
+    /// would both be measuring the same single comparison. `crop` is given the whole frame.
+    #[test]
+    fn the_combat_plank_is_separable_from_the_planks_it_shares_a_slot_with() {
+        let tpl = Template::load(&PathBuf::from("templates").join(AREA_COMBAT.template)).unwrap();
+        let against = |name: &str| -> Option<f64> {
+            let f = frame(name)?;
+            assert_eq!(
+                (f.width, f.height),
+                (tpl.width as i32, tpl.height as i32),
+                "{name} must be a slot-sized capture for this comparison to mean anything"
+            );
+            find_at_scale_in(&f, &tpl, 1.0, 1, None).map(|m| m.inliers)
+        };
+        let Some(explore) = against("area-explore.png") else {
+            eprintln!("SKIP: frame corpus not present");
+            return;
+        };
+        let visit = against("area-visit.png").unwrap();
+        let greyed = against("area-combat-greyed.png").unwrap();
+        let worst = explore.max(visit).max(greyed);
+        assert!(
+            worst < AREA_BUTTON_SHOWING,
+            "the nearest confusable must fall under the gate: Explore {explore:.4}, \
+             Visit {visit:.4}, greyed Combat {greyed:.4}, gate {AREA_BUTTON_SHOWING}"
+        );
+        // A margin rather than a bare inequality: a gate resting a thousandth above the loudest
+        // wrong answer is a gate that the next capture moves. This one has 0.07 under it.
+        assert!(
+            AREA_BUTTON_SHOWING - worst > 0.05,
+            "the gap is too thin to trust: worst confusable {worst:.4} vs gate {AREA_BUTTON_SHOWING}"
         );
     }
 }
