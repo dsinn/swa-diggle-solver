@@ -185,18 +185,31 @@ pub fn describe(dir: &Path) -> String {
 /// The bare number reads like a progress meter you compare against some high threshold, and it is
 /// not one: `hellOpens` writes `0.1` (`utils\events.lua:39`) and the game's own test is
 /// `overworldview.areaFlag'hell' ~= 0` (`overworld\locations\shrine.lua:50`), matched by
-/// [`crate::overworld::WorldMap::anomaly_is_open`]. Zero is the only closed state.
+/// [`crate::overworld::WorldMap::anomaly_is_open`]. Zero means it has never opened.
 ///
 /// So `hell=0.1` has been read as "corruption is barely started, the portal is shut" — by me, more
 /// than once, while planning a run around it. Every checkpoint in the store shows `0.1`, including
 /// ones taken deep into a run, which is the tell: if it were a meter it would have moved. The value
 /// still prints, because it does grow and a future question may want it, but it prints *behind* the
 /// answer rather than in place of it.
+///
+/// ## Why zero is **not yet open** rather than "closed"
+///
+/// The dev, 2026-08-17, on this line printing `anomaly closed (hell=0)`: *"closed" is ambiguous
+/// because it could mean we fought through the lv8 node.* It is worse than ambiguous — **a closed
+/// anomaly is the win condition**, the thing the whole MVP is defined as reaching, so the one
+/// reading this word could be given is the exact opposite of what `hell = 0` says. It is the state a
+/// run has not started from, not the state it is trying to finish in.
+///
+/// The mirror case is still unanswered and is not `hell`'s to answer: **`OPEN` cannot tell a portal
+/// we have opened from one we have opened and beaten**, because `hell` only ever grows. Saying that
+/// would mean asking whether the anomaly node is in `completedAreas`, which is a different question
+/// from a different part of the save.
 fn describe_hell(hell: Option<f64>) -> String {
     match hell {
         Some(h) if h != 0.0 => format!("OPEN (hell={h})"),
-        Some(h) => format!("closed (hell={h})"),
-        None => "closed (hell unset)".into(),
+        Some(h) => format!("not yet open (hell={h})"),
+        None => "not yet open (hell unset)".into(),
     }
 }
 
@@ -375,9 +388,16 @@ mod tests {
     }
 
     #[test]
-    fn only_zero_and_a_missing_flag_are_closed() {
-        assert!(describe_hell(Some(0.0)).starts_with("closed"));
-        assert!(describe_hell(None).starts_with("closed"));
+    fn only_zero_and_a_missing_flag_have_never_opened() {
+        assert!(describe_hell(Some(0.0)).starts_with("not yet open"));
+        assert!(describe_hell(None).starts_with("not yet open"));
+
+        // **Never the word "closed" for this**, whatever else the phrasing becomes. A closed anomaly
+        // is the win condition — see [`describe_hell`] — so it is the one reading `hell = 0` must
+        // not invite.
+        for h in [Some(0.0), None, Some(0.1), Some(3.0)] {
+            assert!(!describe_hell(h).contains("closed"), "{h:?} must not read as closed");
+        }
     }
 
     #[test]
