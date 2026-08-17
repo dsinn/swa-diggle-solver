@@ -660,11 +660,42 @@ impl Place {
     /// destination — matching them would make the planner target a node whose parent is where it
     /// actually wants to go.
     pub fn is_shrine(&self) -> bool {
-        self.type_is("shrine")
-            || self
-                .key
-                .strip_prefix("shrine")
-                .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+        self.type_is("shrine") || key_is_major_shrine(&self.key)
+    }
+
+    /// Can this shrine **ever** be consecrated, or is a consecration here impossible?
+    ///
+    /// `showConsecrateButton` opens with `shrineLocation.majorShrine` (`shrine.lua:93-96`), and
+    /// `majorShrine` is set only on overworld nodes whose key starts `shrine`
+    /// (`overworld/generators/world.lua:87-90`). A subworld node can still qualify, but only by
+    /// **promotion**: `setShrineLocation` (`shrine.lua:420-427`) reassigns `shrineLocation` to the
+    /// parent when
+    ///
+    /// ```lua
+    /// if location.parentNode.majorShrine and location.type=='shrine' then
+    /// ```
+    ///
+    /// so the promotion needs the node's own type to be plain `'shrine'`. The plaza qualifies — it
+    /// is keyed `<parent>_plaza` and takes the forest's plaza type (`generators/forest.lua:638-640`),
+    /// which for a shrine forest is `'shrine'`. A **woodland shrine does not**: it is typed
+    /// `'shrine_woodland'` (`:222-224`, `:630-631`), keeps itself as `shrineLocation`, and has no
+    /// `majorShrine` of its own. `Consecrate` can therefore never appear at one.
+    ///
+    /// ## Asked of the key, not the heading, and that is deliberate
+    ///
+    /// The heading would answer this too — `woodland shrine` is the `typeName` — but headings come
+    /// from adjacency dumps and only exist for somewhere this run has seen, which is the same
+    /// lifetime trap written up on [`Place::is_shrine`]. A shrine rebuilt from save flags alone
+    /// comes back unheaded, and an unheaded woodland shrine would read as consecratable. Keys are
+    /// always known, and they fail in neither direction.
+    ///
+    /// **A woodland shrine is still worth visiting.** `showPrayButton` (`shrine.lua:98-101`) has
+    /// `not shrineLocation.majorShrine` as the first arm of its middle clause, so at a minor shrine
+    /// that clause is satisfied unconditionally — the blessing is available the moment the word is
+    /// won, portal open or shut. It owes a prayer and never a consecration.
+    pub fn can_be_consecrated(&self) -> bool {
+        key_is_major_shrine(&self.key)
+            || self.key.strip_suffix("_plaza").is_some_and(key_is_major_shrine)
     }
 
     /// Would arriving here open the anomaly?
@@ -1180,6 +1211,17 @@ pub const HEART_FLOOR: i64 = HEART_COST + crate::rest::INN_COST;
 /// the unit could change at all; none of them may start testing it against a literal.
 fn dist_or_far(dist: &BTreeMap<String, usize>, key: &str) -> usize {
     dist.get(key).copied().unwrap_or(usize::MAX)
+}
+
+/// Is this the key of a **major** shrine — `shrine` followed by digits and nothing else?
+///
+/// The game's own test is `hereData.key:sub(1,6)=='shrine'` (`overworld/generators/world.lua:87-90`),
+/// applied while laying out the overworld, so it only ever sees overworld keys. Ours has to run
+/// against every key we know, and `sub(1,6)` would swallow `shrine1sub7` and `shrine1_path_to_l5`
+/// with it. Digits-only is the same test restricted to the population the game applied it to.
+fn key_is_major_shrine(key: &str) -> bool {
+    key.strip_prefix("shrine")
+        .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// The key of the road node inside `parent` that leads out to `to`.
@@ -4882,6 +4924,15 @@ impl WorldMap {
         if !p.is_shrine() || p.consecrated {
             return false;
         }
+        // **A minor shrine owes a prayer and never a consecration** — see
+        // [`Place::can_be_consecrated`]. Without this the answer here is yes for a woodland shrine
+        // the moment the anomaly opens, and the arrival branch's `!used || worth_consecrating_here`
+        // sends the run back into one it has already prayed at. There it finds no `Consecrate`
+        // (impossible) and no `Pray` (`areaUnused` is already false), returns neither, and the
+        // pre-MVP rule stops the run over an interaction that was never available.
+        if !p.can_be_consecrated() {
+            return false;
+        }
         // Consecrating needs the anomaly open at all (`shrine.lua:93-96`).
         if !self.anomaly_is_open().unwrap_or(false) {
             return false;
@@ -5446,6 +5497,52 @@ mod tests {
 
     fn node_at(key: &str, heading: &str, x: f64, y: f64) -> Node {
         Node { key: key.into(), heading: heading.into(), x, y, connections: 2 }
+    }
+
+    /// A woodland shrine is a shrine that can never be consecrated, and the run must not go back for
+    /// one.
+    ///
+    /// Pinned because the rule lives in the *game*, three files from anything we control, and
+    /// nothing else here would notice it changing: `showConsecrateButton` needs
+    /// `shrineLocation.majorShrine` (`shrine.lua:93-96`), which a `shrine_woodland` never has and
+    /// never gets by promotion (`:420-427`).
+    ///
+    /// The plaza is the case that makes this more than a prefix test. It is a subworld node, so it
+    /// has no `majorShrine` of its own, and it is consecratable anyway — its type is plain `'shrine'`
+    /// (`generators/forest.lua:638-640`) so `setShrineLocation` hands the flag to its parent. Get
+    /// this arm wrong in the safe-looking direction and the run stops walking back for consecrations
+    /// it *can* claim.
+    #[test]
+    fn a_woodland_shrine_can_never_be_consecrated_but_a_plaza_can() {
+        let consecratable = |key: &str, heading: &str| {
+            let mut p = Place::default();
+            p.key = key.into();
+            p.heading = heading.into();
+            assert!(p.is_shrine(), "`{key}` has to be a shrine at all for this to mean anything");
+            p.can_be_consecrated()
+        };
+        assert!(consecratable("shrine1", "Gripthorpe Brush shrine"), "the overworld node itself");
+        assert!(consecratable("shrine1_plaza", "Gripthorpe Brush shrine"), "promoted to its parent");
+        assert!(
+            !consecratable("shrine1sub1", "Gripthorpe Brush woodland shrine"),
+            "a woodland shrine inside a shrine's own forest — the one the run of 2026-08-17 stopped at"
+        );
+        assert!(
+            !consecratable("l4sub24", "Bainton Clump woodland shrine"),
+            "and the same node type in an ordinary forest, which is where most of them are"
+        );
+
+        // The heading is what `is_shrine` leans on, and it is the field that goes missing when a
+        // place is rebuilt from save flags alone. The key still has to carry the answer.
+        let mut unheaded = Place::default();
+        unheaded.key = "shrine1sub1".into();
+        assert!(
+            !unheaded.can_be_consecrated(),
+            "an unheaded woodland shrine must not read as consecratable"
+        );
+        let mut rebuilt = Place::default();
+        rebuilt.key = "shrine2".into();
+        assert!(rebuilt.can_be_consecrated(), "and an unheaded major shrine must still read as one");
     }
 
     /// Exploring with the portal live must walk **toward the corruption**, even when that is the
@@ -10133,14 +10230,25 @@ e	l4	l11
         // **corrupted** one has to be fought through again, so it is never a destination -- it is
         // worth something only when we are already standing on it.
         //
-        // here — detour(shrine) is a dead end; here — mid(shrine) — rift is the route.
+        // here — shrine2(shrine) is a dead end; here — shrine1(shrine) — rift is the route.
+        //
+        // **The shrines are keyed `shrineN` because the game keys them that way**, and since
+        // 2026-08-17 that is load-bearing rather than cosmetic: `majorShrine` is set from
+        // `key:sub(1,6)=='shrine'` (`overworld/generators/world.lua:87-90`), and `Consecrate` needs
+        // it (`shrine.lua:93-96`), so [`Place::can_be_consecrated`] reads the key. These used to be
+        // `mid` and `detour`, which no overworld shrine can be called — a fixture in a state play
+        // cannot produce, quietly asserting on it.
         let mut m = WorldMap::new();
         m.fold(&dump(
             "here",
             "camp",
-            vec![node("detour", "Faraway shrine"), node("mid", "Midway shrine")],
+            vec![node("shrine2", "Faraway shrine"), node("shrine1", "Midway shrine")],
         ));
-        m.fold(&dump("mid", "Midway shrine", vec![node("here", "camp"), node("rift", "The Rift anomaly")]));
+        m.fold(&dump(
+            "shrine1",
+            "Midway shrine",
+            vec![node("here", "camp"), node("rift", "The Rift anomaly")],
+        ));
         m.here = Some("here".into());
         m.hell = Some(0.1);
 
@@ -10151,14 +10259,14 @@ e	l4	l11
 
         // The route is a separate question from the goal, and it is unchanged.
         let route = m.anomaly_route().unwrap();
-        assert!(route.contains(&"mid".to_string()), "route: {route:?}");
-        assert!(!route.contains(&"detour".to_string()), "the dead-end shrine is not on the way");
+        assert!(route.contains(&"shrine1".to_string()), "route: {route:?}");
+        assert!(!route.contains(&"shrine2".to_string()), "the dead-end shrine is not on the way");
 
         // Corrupt both. Now neither is a destination, and the portal is what is left -- which is
         // also the control: without the corruption filter this would still say `Shrine`, so the
         // first assertion above would pass for the wrong reason.
-        m.entry("mid").corrupted = true;
-        m.entry("detour").corrupted = true;
+        m.entry("shrine1").corrupted = true;
+        m.entry("shrine2").corrupted = true;
         assert_eq!(
             m.next_target().unwrap().reason,
             Goal::CloseAnomaly,
@@ -10167,15 +10275,18 @@ e	l4	l11
 
         // Arrival is the other axis and it did not move: the one on the way earns its fight
         // because we are crossing it regardless, the dead end does not.
-        assert!(m.worth_consecrating_here("mid"), "we are walking through it regardless");
-        assert!(!m.worth_consecrating_here("detour"), "a corrupted dead end is not worth the fight");
+        assert!(m.worth_consecrating_here("shrine1"), "we are walking through it regardless");
+        assert!(
+            !m.worth_consecrating_here("shrine2"),
+            "a corrupted dead end is not worth the fight"
+        );
 
         // **And once the fight is won the objection is spent.** Corruption is a bill, not a
         // property; `completed` means it has been paid and cannot be charged twice. The dead end is
         // still a dead end and still off every route — that is what makes this the right control.
-        m.entry("detour").completed = true;
+        m.entry("shrine2").completed = true;
         assert!(
-            m.worth_consecrating_here("detour"),
+            m.worth_consecrating_here("shrine2"),
             "the fight this was avoiding has already been fought"
         );
     }
@@ -10306,33 +10417,39 @@ e	l4	l11
         //
         // Both halves are asserted on one map, because the two used to drift apart and the drift is
         // what left `shrine1` unconsecrated for four runs.
+        // Keyed `shrine1` rather than `s1`, because `Consecrate` is gated on `majorShrine` and the
+        // game derives that from the key (`world.lua:87-90`) — see [`Place::can_be_consecrated`].
         let mut m = WorldMap::new();
-        let mut d = dump("here", "camp", vec![node("s1", "Faraway shrine"), node("l2", "Quiet Glade meadow")]);
+        let mut d =
+            dump("here", "camp", vec![node("shrine1", "Faraway shrine"), node("l2", "Quiet Glade meadow")]);
         d.hidden = 1;
         m.fold(&d);
         m.hell = Some(0.1);
-        m.entry("s1").corrupted = true;
+        m.entry("shrine1").corrupted = true;
 
         assert_ne!(m.next_target().unwrap().reason, Goal::Shrine, "the fight is still owed");
-        assert!(!m.worth_consecrating_here("s1"), "and the arrival test agrees while it is owed");
+        assert!(
+            !m.worth_consecrating_here("shrine1"),
+            "and the arrival test agrees while it is owed"
+        );
 
-        m.entry("s1").completed = true;
+        m.entry("shrine1").completed = true;
         assert_ne!(
             m.next_target().unwrap().reason,
             Goal::Shrine,
             "cleared or not, a corrupted shrine is not somewhere we set off for"
         );
         assert!(
-            m.worth_consecrating_here("s1"),
+            m.worth_consecrating_here("shrine1"),
             "but standing on it, the consecration is free and we take it"
         );
 
         // Uncorrupt the same shrine and it becomes a destination, which is what pins the filter to
         // corruption rather than to something else about the fixture.
-        m.entry("s1").corrupted = false;
+        m.entry("shrine1").corrupted = false;
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Shrine);
-        assert_eq!(plan.target, "s1");
+        assert_eq!(plan.target, "shrine1");
     }
 
     /// A shrine on the far side of any fight is not cheap, so it is not a destination.
