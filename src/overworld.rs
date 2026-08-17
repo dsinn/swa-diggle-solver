@@ -3127,19 +3127,26 @@ impl WorldMap {
                 // `world_evil.lua:15-18` fires on `locationHasCombat and level > 3`, so the errand
                 // did not merely pick an expensive fight, it ended the phase it belonged to.
                 //
-                // ## This is not the ruling of 2026-08-16 being re-litigated
+                // ## `triggers_anomaly()` alone, and the missing `&& !completed` is the point
                 //
-                // An `opens_the_anomaly` was removed from [`Place`] as guarding a state that cannot
-                // happen — see the note there — and that reasoning was about **clearing a crypt**:
-                // you cannot complete a level 5 crypt without first arriving at it, so the flag is
-                // always already set by the time `completed` is true. It is sound, and it is about
-                // a different caller: `choose_exit`'s door filter, choosing where to *walk through*.
+                // This first read `triggers_anomaly() && !completed`, which is the predicate removed
+                // from [`Place`] as guarding an unreachable state — and I cited that note as having
+                // been about the whole rule. It is not. The dev, 2026-08-17:
                 //
-                // A shrine is a destination we go to for a **prayer**, and a shrine can sit on a
-                // level 9 forest. `shrine7` was uncompleted, level 9, and the portal was shut — the
-                // state that note calls unreachable, reached, and the run log is the fixture. So
-                // the predicate is applied here rather than restored there.
-                .filter(|p| anomaly_open || !(p.triggers_anomaly() && !p.completed))
+                // > There was apparently code to check whether a lv4+ node was considered "gentle"
+                // > as internally, that is the case when it's already been cleared. However, that
+                // > specific situation cannot happen because no nodes with levels are considered
+                // > cleared to begin with.
+                //
+                // The unreachable state is **level 4+, cleared, portal still shut**. Clearing needs
+                // arriving and arriving opens the portal, so while `hell == 0` a level 4+ node is
+                // uncompleted without exception. `!completed` is therefore *always true* here, and
+                // writing it says the opposite — that a cleared one is a case worth admitting.
+                //
+                // So the rule is the trigger and nothing else. That also leaves nothing for the note
+                // on [`Place`] to disagree with: it retired a redundant clause, and this adds a
+                // filter at a caller that never had one.
+                .filter(|p| anomaly_open || !p.triggers_anomaly())
                 // **With the portal open, a shrine has to be cheap or it is not a destination.**
                 //
                 // The dev's rule, 2026-08-15: target only unconsecrated, uncorrupted shrines that
@@ -5765,6 +5772,9 @@ mod tests {
     /// The level 1 shrine is the control, and it is the half that stops this being "switch the
     /// shrine errand off pre-anomaly". The dev, on the woodland shrine the same day: *triggering a
     /// fight at a shrine is fine.* A fight is fine; ending the pre-anomaly phase to get one is not.
+    ///
+    /// The rule is [`Place::triggers_anomaly`] alone — see the filter for why `&& !completed` was a
+    /// clause about a world that cannot exist, and why this test does not build one.
     #[test]
     fn a_shrine_that_would_open_the_anomaly_is_not_a_pre_anomaly_errand() {
         let mut m = WorldMap::new();
@@ -5796,13 +5806,12 @@ mod tests {
             );
         }
 
-        // Once it is cleared it no longer triggers, so it stops being excluded for this reason.
-        m.entry("shrine7").completed = true;
-        assert!(
-            !(m.get("shrine7").unwrap().triggers_anomaly()
-                && !m.get("shrine7").unwrap().completed),
-            "a cleared node cannot fire the arrival event again"
-        );
+        // **No `completed` case here, deliberately.** The obvious third assertion — clear `shrine7`
+        // and watch it stop being excluded — is a green test in a world that cannot exist: while
+        // `hell == 0` a level 4+ node is uncompleted without exception, because clearing it needs
+        // arriving and arriving opens the portal. That is precisely the mistake the note on
+        // [`Place::triggers_anomaly`] was kept to record, and it was written here anyway on the
+        // first attempt before the dev caught it.
     }
 
     /// With the portal open, a prayed-at **minor** shrine must stop being a destination.
