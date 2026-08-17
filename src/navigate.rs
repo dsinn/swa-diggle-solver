@@ -65,6 +65,16 @@ const SHOW_AREA_BUTTONS: (i32, i32) = (32, 918);
 /// `Combat` / `Travel` / `Visit` all land here — which is why the area buttons must be known to be
 /// the right ones before it is clicked.
 const AREA_BUTTON: (i32, i32) = (187, 918);
+/// How many times [`Run::left_the_overworld`] repeats a press before accepting it will not land.
+///
+/// Three. One retry would cover a single swallowed release; the third exists because nothing yet
+/// says the loss is independent between presses, and the cost of an extra look is a second against
+/// a stalled run.
+const LEAVE_TRIES: usize = 3;
+/// How long one such press gets to produce its screen. Eight times the game's 0.5 s
+/// `transitionDuration` (`utils/defaultconfig.lua:5`), and a deadline rather than a sleep — a screen
+/// that opens at once costs nothing, so this is only ever paid by a press that did not land.
+const LEAVE_LANDS_WITHIN: Duration = Duration::from_secs(4);
 const EMPTY_MAP: (i32, i32) = (1750, 160);
 /// Touch this file to stop the run **gracefully** at the next step boundary.
 ///
@@ -1959,6 +1969,96 @@ impl Run<'_> {
         let moved = before.diff_fraction(&after, crate::observe::settle::FULL);
         self.log.push_str(&format!("  clicked {what}: screen moved {moved:.3}\n"));
         Ok(moved > 0.05)
+    }
+
+    /// Presses the area slot and does not report success until the overworld is **actually behind
+    /// us**, retrying the press if it is not.
+    ///
+    /// ## Why this exists rather than [`Run::click_area_button`]
+    ///
+    /// That one confirms with a pixel diff, and `moved > 0.05` answers *did anything change*, not
+    /// *where are we now*. Those come apart in both directions. A press that opens nothing still
+    /// moves the screen — the button's own `down` artwork, a tooltip clearing, the map drifting —
+    /// and a press that opens a screen whose first frame is a fade moves almost nothing. Both
+    /// mistakes have ended runs, and the second is the one that ends them silently, because the
+    /// driver walks off to work on a screen that never arrived.
+    ///
+    /// So the split is by *intent*, and it is the distinction to keep: a press meant to keep us on
+    /// the map (`Travel`) is a diff question and stays with `click_area_button`; a press meant to
+    /// take us **off** it (`Visit`, `Shop`, `Combat`) is an identity question and belongs here.
+    ///
+    /// ## The retry, and why it is safe
+    ///
+    /// The overworld demonstrably swallows presses. Live 2026-08-17 at `shrine1sub1` the dev heard
+    /// the button's own click and the shrine never opened — `button_down` plays inside
+    /// `mousepressed` (`ui/elements/button.lua:278-281`) and only for a shown, active button, so the
+    /// press landed and the *release* went missing (`mousereleased` bails on `if not down`, and
+    /// `down` belongs to the button instance, which anything rebuilding the area buttons replaces).
+    ///
+    /// **The screen is identified before every press, not only after.** That is what makes a retry
+    /// safe to fire at all: the coordinate that opens a screen from the map is, on several of the
+    /// screens it opens, the plaque that leaves again — `Visit` at (188, 918) and the shrine's own
+    /// `Go back` are the same point. Pressing blind a second time into a screen that opened *late*
+    /// would close it, turning a recoverable stall into a silent walk-away. Checking first also
+    /// makes the call idempotent, so a caller that is already off the map pays one look and nothing
+    /// else.
+    ///
+    /// ## Where this is *not* used, deliberately
+    ///
+    /// The inn confirms on [`crate::innplay::ENTERED`] — a line the game itself prints — and the
+    /// fight branch polls [`crate::act::identify`] with its own recovery around a pregame that can
+    /// arrive as either of two screens. Both are stronger or more specific than this, and swapping
+    /// them for a template check would be a downgrade dressed as consistency.
+    fn left_the_overworld(
+        &mut self,
+        what: &str,
+        landed: &[crate::act::Screen],
+    ) -> Option<crate::act::Screen> {
+        for attempt in 1..=LEAVE_TRIES {
+            let now = crate::act::identify(self.win);
+            if landed.contains(&now) {
+                if attempt > 1 {
+                    self.log.push_str(&format!(
+                        "  `{what}` reached {now:?} on press {attempt} — the overworld swallowed \
+                         the first {}\n",
+                        attempt - 1
+                    ));
+                }
+                return Some(now);
+            }
+            // Same read-only cursor oracle `click_area_button` takes, and the same reason: the
+            // coordinate is transcribed from Lua multipliers, and a wrong transcription looks
+            // exactly like a right one until a run dies on it.
+            if let Some(miss) = crate::win::cursor::miss_by(self.win, AREA_BUTTON) {
+                self.log
+                    .push_str(&format!("  the game has a control selected {miss:.0} px from `{what}`\n"));
+            }
+            let (bx, by) = self.win.client_to_screen(AREA_BUTTON.0, AREA_BUTTON.1).ok()?;
+            if !self.tap(&format!("area button: {what}"), bx, by) {
+                self.log.push_str(&format!("  the `{what}` press did not go out\n"));
+                return None;
+            }
+            self.park();
+            let deadline = Instant::now() + LEAVE_LANDS_WITHIN;
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(150));
+                let s = crate::act::identify(self.win);
+                if landed.contains(&s) {
+                    // Pumped on the way out: arrival prints, and the caller's next move usually
+                    // reads them.
+                    self.pump();
+                    self.log.push_str(&format!("  `{what}` opened {s:?}\n"));
+                    return Some(s);
+                }
+            }
+            self.pump();
+            self.log.push_str(&format!(
+                "  `{what}` press {attempt} of {LEAVE_TRIES} left us on the map (observer says \
+                 {:?})\n",
+                crate::act::identify(self.win)
+            ));
+        }
+        None
     }
 
     /// The most recent dump whose coordinates have stopped moving.
@@ -3858,8 +3958,31 @@ pub fn drive(
             // rather than being discovered by a failed match afterwards. Unknown reads as closed —
             // the conservative direction, since it only costs the older `Pray` attempt.
             let anomaly_open = r.map.anomaly_is_open().unwrap_or(false);
-            // Reached from the map, so the shrine still has to be opened with `Visit`.
-            match crate::shrineplay::play(r.win, &r.keys, anomaly_open, false) {
+            // **The navigator opens the screen; the driver only plays it.** — the dev, 2026-08-17:
+            // *the navigator should make sure we leave the overworld before dispatching the shrine
+            // driver.*
+            //
+            // The driver can open a shrine perfectly well and still be the wrong place to enforce
+            // this, because what it owns is the *word*, not the map. When the `Visit` press was its
+            // problem, a swallowed press became "could not identify the grid" — a shrine-shaped
+            // report for a navigation fault, three layers from the thing that actually went wrong.
+            // Worse, its probe then typed into the overworld, which binds user functions to keys.
+            //
+            // So the handover has a precondition now, and it is checked by the side that owns the
+            // map. `play` is told the screen is already open, and every state it can find there is
+            // one of its own.
+            if r.left_the_overworld(
+                "Visit",
+                &[crate::act::Screen::Shrine, crate::act::Screen::ShrineConsecrate],
+            )
+            .is_none()
+            {
+                return Stop::Failed(format!(
+                    "shrine {key}: `Visit` never took us off the map after {LEAVE_TRIES} presses — \
+                     a navigation fault, not a shrine one"
+                ));
+            }
+            match crate::shrineplay::play(r.win, &r.keys, anomaly_open, true) {
                 Ok(played) => {
                     let log = played.log.clone();
                     r.log.push_str(&log);
@@ -4017,10 +4140,13 @@ pub fn drive(
                 if r.map.get(at).map(|p| p.is_general_store()).unwrap_or(false) {
                     r.log.push_str(&format!("{step}. at **{at}** in `{container}` - the general store
 "));
-                    // The same press as every other area button, confirmed the same way. `Shop` sits
-                    // in the slot `Visit` and `Combat` share (`village.lua:312-320`), so this is
-                    // machinery that already works.
-                    if !matches!(r.click_area_button("Shop"), Ok(true)) {
+                    // The same press as every other area button, and now confirmed by *which screen
+                    // arrived* rather than by the screen having changed. `Shop` sits in the slot
+                    // `Visit` and `Combat` share (`village.lua:312-320`), so it is the same press
+                    // the shrine makes and it is lost the same way — and a shop that failed to open
+                    // used to be indistinguishable from one that opened and stocked nothing, since
+                    // the very next thing this does is read an inventory off the console.
+                    if r.left_the_overworld("Shop", &[crate::act::Screen::Shop]).is_none() {
                         r.map.abandon(at);
                         r.log.push_str("  the shop did not open - writing the store off
 ");
