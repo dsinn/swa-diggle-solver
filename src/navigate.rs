@@ -742,6 +742,11 @@ pub struct Run<'a> {
     /// Public only because `spike_run` builds a `Run` with struct-literal syntax, as every other
     /// field here does. Callers should leave it at `0` and never write to it again.
     pub logged: usize,
+    /// The last `affirmative slot:` line and how many times running it has been produced.
+    ///
+    /// See [`Run::note_affirmative`]. Public for the same struct-literal reason as [`Run::logged`];
+    /// start it at `None`.
+    pub affirm_repeat: Option<(String, usize)>,
     /// The game's own `right-*.png` artwork, for reading the affirmative slot off the screen.
     ///
     /// This replaced a tally of `Lore screen:` console lines. The tally could only ever answer "how
@@ -1575,6 +1580,54 @@ impl Run<'_> {
         self.keys.click(x, y).is_ok()
     }
 
+    /// Logs an `affirmative slot:` reading, folding up a run of identical ones.
+    ///
+    /// **The arrival wait produces these by the hundred.** It polls every 300 ms for up to 30
+    /// seconds and calls [`Run::clear_text_screen`] each time, so a crossing that never arrives
+    /// writes one line per poll. The run of 2026-08-17 0436Z ended with roughly five hundred
+    /// consecutive copies of `affirmative slot: Absent (score 0.04, margin 0.00)` — the tail of the
+    /// report was that and nothing else, and the last thing the driver actually *did* was five
+    /// hundred lines above the stop.
+    ///
+    /// Survivable while the log only appeared at exit. Not survivable now it streams
+    /// ([`Run::flush_log`]), because the noise arrives on the terminal in real time and buries the
+    /// line someone is watching for.
+    ///
+    /// **The first reading is still logged in full**, which is what keeps the calibration argument
+    /// at the call site true: a threshold that has never been measured against a live screen has to
+    /// show its score for the negative case, or `Absent` cannot be told from a bar set too high.
+    /// What is dropped is only the identical repeats behind it, replaced by a count when the streak
+    /// ends.
+    ///
+    /// The count is emitted lazily, so a streak that is still open when something else logs will
+    /// have its summary land after that line rather than before it. Accepted rather than solved:
+    /// the alternative is routing every write in this file through one place, and the streaks this
+    /// exists for are produced by a loop that logs nothing else.
+    fn note_affirmative(&mut self, line: String) {
+        if let Some((last, n)) = &mut self.affirm_repeat {
+            if *last == line {
+                *n += 1;
+                return;
+            }
+        }
+        self.close_affirmative_run();
+        self.log.push_str(&line);
+        self.affirm_repeat = Some((line, 1));
+    }
+
+    /// Ends a streak of identical affirmative readings, noting how many were folded away.
+    ///
+    /// Called at the top of every step so a count cannot span two of them, and whenever the reading
+    /// itself changes.
+    pub fn close_affirmative_run(&mut self) {
+        if let Some((_, n)) = self.affirm_repeat.take() {
+            if n > 1 {
+                self.log
+                    .push_str(&format!("  … the affirmative slot said that {} more times\n", n - 1));
+            }
+        }
+    }
+
     /// Prints whatever has been added to [`Run::log`] since the last call, and flushes it.
     ///
     /// **The log used to reach the terminal exactly once, at exit.** `spike_run` accumulates every
@@ -2312,7 +2365,11 @@ impl Run<'_> {
         // Logged even when there is nothing to do. A gate that has never been calibrated against a
         // live screen must show its score for the negative case too, or `Absent` is
         // indistinguishable from a threshold set too high.
-        self.log.push_str(&format!(
+        //
+        // Which is why this collapses repeats rather than dropping the negative case: the *first*
+        // reading still shows its score, and only the identical ones behind it are folded up. See
+        // [`Run::note_affirmative`].
+        self.note_affirmative(format!(
             "  affirmative slot: {:?} (score {:.2}, margin {:.2})\n",
             first.state, first.score, first.margin
         ));
@@ -3225,6 +3282,10 @@ pub fn drive(
         // **Every step, at the top.** Placed before the exits below rather than after the step's
         // work, so a run that ends on this iteration has already shown everything the previous one
         // wrote — the `Stop` arms all return without coming back here.
+        //
+        // The affirmative streak is closed first so its count belongs to the step that produced it
+        // and cannot be attributed to the next one.
+        r.close_affirmative_run();
         r.flush_log();
         if Instant::now() >= deadline {
             return Stop::Exhausted;
@@ -4634,6 +4695,28 @@ pub fn drive(
                         unmeasured = true;
                         break;
                     };
+                    // **A measurement that does not match its drag is not a measurement.**
+                    //
+                    // `measure` reports `None` when it cannot correlate; it cannot report a
+                    // correlation that landed on the wrong piece of map, and that is what ended the
+                    // run of 0436Z — 380 px sideways from a pull that asked for none, folded into
+                    // `at`, and every later click aimed from the false position. See
+                    // [`pan::Shift::agrees_with`].
+                    //
+                    // Routed into `unmeasured` rather than given a recovery of its own, because it
+                    // *is* the same condition: the view moved by an amount we do not know. The cure
+                    // written there — locate-me, which ends the motion and asks the game where the
+                    // player is instead of reading the view — is exactly what an unknown position
+                    // wants.
+                    if !got.agrees_with(want) {
+                        r.log.push_str(&format!(
+                            "  the pan measured ({:.0}, {:.0}) against ({:.0}, {:.0}) asked — that \
+                             is not this drag, so where `{what}` sits is unknown\n",
+                            got.dx, got.dy, want.dx, want.dy
+                        ));
+                        unmeasured = true;
+                        break;
+                    }
                     at = pan::moved(at, got);
                     r.log.push_str(&format!(
                         "  panned by ({:.0}, {:.0}) of ({:.0}, {:.0}) wanted; `{}` now at ({:.0}, {:.0})\n",

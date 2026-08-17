@@ -60,7 +60,56 @@ impl Shift {
     pub fn matters(&self) -> bool {
         self.dx.abs() >= 4.0 || self.dy.abs() >= 4.0
     }
+
+    /// Is this measurement consistent with the drag that was asked for?
+    ///
+    /// **A measurement can be wrong, and wrong is not the same as absent.** [`measure`] returns
+    /// `None` when it cannot correlate the patch at all, and callers handle that. What it cannot
+    /// report is a correlation that *succeeded* on the wrong piece of map — and the result is not a
+    /// near miss, it is a displacement with no relation to the drag.
+    ///
+    /// The run of 2026-08-17 0436Z ended on one. Crossing `l10`:
+    ///
+    /// ```text
+    /// panned by (380, -132) of (0, -293) wanted;  → now at (1868, 1121)
+    /// panned by (-68, -162) of (-68, -161) wanted; → now at (1800, 959)
+    /// input 140: click (1800,959) — crossing: select
+    /// area slot: something else (Combat 0.1257, gate 0.95)
+    /// ```
+    ///
+    /// 380 px sideways from a drag that asked for none. The second pull then measured almost exactly
+    /// what it requested — it was a good drag — but it moved from an already-false belief about
+    /// where the node was, so the click landed on empty ground. `0.1257` is an **empty** area slot;
+    /// a slot with a button in it scored ~0.86 elsewhere in the same run.
+    ///
+    /// ## The rule, per axis
+    ///
+    /// - **An axis the drag did not ask to move must not have moved much.** This is the case above
+    ///   and it is unambiguous.
+    /// - **An axis it did ask for may fall short, including to nothing** — scrolling is clamped to
+    ///   the map bounds (`clampWithinBoundsX`, `overworldview.lua:293-297`) and says nothing when it
+    ///   clamps, so a short pull is ordinary. Only the *direction* is asserted.
+    ///
+    /// [`CROSS_AXIS_SLACK`] is a judgement rather than a measurement, and it is not load-bearing:
+    /// the failure this exists for was 380 px against a limit of 16, more than an order of magnitude
+    /// clear of wherever the line is drawn.
+    pub fn agrees_with(&self, want: Shift) -> bool {
+        let axis = |got: f64, asked: f64| {
+            if asked.abs() < 1.0 {
+                return got.abs() <= CROSS_AXIS_SLACK;
+            }
+            got.abs() <= CROSS_AXIS_SLACK || got.signum() == asked.signum()
+        };
+        axis(self.dx, want.dx) && axis(self.dy, want.dy)
+    }
 }
+
+/// How far an axis may move when the drag asked nothing of it before the measurement is disbelieved.
+///
+/// Sixteen pixels, which is the node hit box the game itself uses: `mouseIsOverLocation` accepts a
+/// click within `(selectionRadiusX or 16) * scale * zoomMult` (`overworldview.lua:1280-1293`), so at
+/// zoom 1 a cross-axis error smaller than this cannot move a click off the node it was aimed at.
+const CROSS_AXIS_SLACK: f64 = 16.0;
 
 /// Where a point recorded before a shift is now.
 pub fn moved(point: (f64, f64), by: Shift) -> (f64, f64) {
@@ -91,6 +140,44 @@ pub fn corrected(dump: &Adjacency, by: Shift) -> Adjacency {
 /// A node exactly on the boundary is not usefully clickable: its sprite is half drawn, and the
 /// click point is the node's centre rather than whatever pixel happens to be visible.
 const EDGE: f64 = 120.0;
+
+#[cfg(test)]
+mod agreement_tests {
+    use super::*;
+
+    /// The measurement that ended the run of 2026-08-17 0436Z, and the good one beside it.
+    ///
+    /// Both numbers are transcribed from the log rather than invented, which is what makes the
+    /// second assertion worth as much as the first: the pull that followed the bad one was almost
+    /// perfect, so a rule that rejected it too would have thrown away a working pan and left the
+    /// crossing no better off.
+    #[test]
+    fn a_pan_that_moved_sideways_from_a_vertical_request_is_disbelieved() {
+        let asked = Shift { dx: 0.0, dy: -293.0 };
+        let measured = Shift { dx: 380.0, dy: -132.0 };
+        assert!(!measured.agrees_with(asked), "380 px on an axis we asked nothing of");
+
+        let good = Shift { dx: -68.0, dy: -162.0 };
+        assert!(good.agrees_with(Shift { dx: -68.0, dy: -161.0 }), "the next pull was fine");
+    }
+
+    /// Clamping is ordinary and must not read as a fault.
+    ///
+    /// `clampWithinBoundsX` says nothing when it clamps, so a pull that asked for a lot and got a
+    /// little — or nothing — is the map's own edge answering, which [`pan_again`] already treats as
+    /// a reason to stop rather than a reason to distrust the number.
+    ///
+    /// [`pan_again`]: crate::navigate
+    #[test]
+    fn a_short_or_clamped_pull_still_agrees() {
+        let asked = Shift { dx: 0.0, dy: -300.0 };
+        assert!(Shift { dx: 0.0, dy: -40.0 }.agrees_with(asked), "short is clamping, not error");
+        assert!(Shift { dx: 0.0, dy: 0.0 }.agrees_with(asked), "and nothing at all is the bound");
+        assert!(Shift { dx: 9.0, dy: -40.0 }.agrees_with(asked), "a little cross-axis slop is fine");
+        // The wrong way, by more than the slack, is not clamping.
+        assert!(!Shift { dx: 0.0, dy: 120.0 }.agrees_with(asked), "backwards is not a short pull");
+    }
+}
 
 /// The shift that would bring `point` into a comfortably clickable part of the window.
 ///

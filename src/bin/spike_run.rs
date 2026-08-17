@@ -113,6 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         log: String::from("# Spike: the run\n\n"),
         // Nothing shown yet, so the whole header is still owed to the terminal.
         logged: 0,
+        affirm_repeat: None,
         affirm: affirm::ButtonArt::load(Path::new(&cfg.game_dir), "right")?,
         answered_event: None,
         recentre_misses: 0,
@@ -404,6 +405,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if p.consecrated { " [consecrated]" } else { "" },
         ));
     }
+    // The stop itself ends a step, so a streak of identical affirmative readings can still be open
+    // here — and the run that motivated the folding ended in the middle of one five hundred long.
+    // Closed before the summary so the count is reported rather than silently dropped.
+    r.close_affirmative_run();
     // Two different logs on purpose: the files get the whole run, the terminal gets only what
     // `Run::flush_log` has not already shown. Printing `out` here as well would repeat every step
     // a second time under the summary.
