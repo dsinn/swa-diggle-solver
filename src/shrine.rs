@@ -935,6 +935,100 @@ mod tests {
         panic!("did not find {answer} within the budget; history {:?}", s.history());
     }
 
+    /// Rebuilds a solver's state from a path, so the tree walk below can branch without cloning.
+    ///
+    /// `reset` refills `live` without re-parsing the word lists, which is the expensive part.
+    fn restore(s: &mut Solver, path: &[(String, Pattern)]) {
+        s.reset();
+        for (g, p) in path {
+            s.observe(g, *p);
+        }
+    }
+
+    /// The most guesses this solver can be made to spend, over **every** answer it might face.
+    ///
+    /// The whole decision tree rather than a sample: the first guess is fixed, so answers sharing a
+    /// colouring share a subtree, and the tree has one node per reachable *state* rather than one
+    /// per answer. Returns the depth and a witness word.
+    fn deepest(s: &mut Solver, path: &mut Vec<(String, Pattern)>) -> (usize, String) {
+        let Some(g) = s.propose() else {
+            panic!("candidate set emptied with history {:?}", s.history());
+        };
+        let win = solved(s.length);
+        let mut groups: HashMap<Pattern, u32> = HashMap::new();
+        for &i in &s.live {
+            let p = feedback(g.as_bytes(), s.answers.get(i as usize));
+            groups.entry(p).or_insert(i);
+        }
+        let depth = path.len() + 1;
+        let mut worst = (0usize, String::new());
+        for (&p, &witness) in &groups {
+            let (d, w) = match p == win {
+                // This guess *is* the answer for that candidate — the group has exactly one member.
+                true => (depth, g.clone()),
+                false => {
+                    path.push((g.clone(), p));
+                    restore(s, path);
+                    let got = deepest(s, path);
+                    path.pop();
+                    restore(s, path);
+                    got
+                }
+            };
+            if d > worst.0 {
+                worst = (d, if w.is_empty() { s.answers.word(witness as usize) } else { w });
+            }
+        }
+        worst
+    }
+
+    /// **Can any word exhaust the budget?** — the dev, 2026-08-17
+    ///
+    /// Ignored by default because it walks the entire decision tree at every length and band, which
+    /// is minutes rather than milliseconds. Run it with
+    /// `cargo test --release no_answer_exhausts -- --ignored --nocapture`.
+    ///
+    /// The answer is what decides whether a shrine can ever be *lost* by playing it correctly, and
+    /// so whether a failed shrine is ever the shrine's fault rather than ours. `hasLost` is
+    /// `not hasWon() and #submitions > maxGuesses` (`shrineview.lua:62`).
+    ///
+    /// **No, and by nothing to spare.** Measured 2026-08-17 over all twelve configurations and 76 578
+    /// answers, worst case against budget:
+    ///
+    /// | length | Easy | Hard | Wild | budget |
+    /// |---|---|---|---|---|
+    /// | 4 | 6 (`pump`) | 7 (`fava`) | **8** (`zine`) | 8 |
+    /// | 5 | **6** (`patch`) | **6** (`moppy`) | **6** (`hamal`) | 6 |
+    /// | 6 | 4 (`differ`) | **6** (`zinger`) | **6** (`waller`) | 6 |
+    /// | 7 | 4 (`trapped`) | **6** (`zigging`) | **6** (`gagging`) | 6 |
+    ///
+    /// So the shrine is always winnable played correctly — and in five of the twelve, including
+    /// every band the driver actually uses when the difficulty cannot be read, it wins on the **last
+    /// guess**. There is no slack to absorb a misread colouring: one wrong classification does not
+    /// cost a turn, it costs the shrine. That is why a failed shrine stops the run rather than being
+    /// written off — see the shrine branch in [`crate::navigate::drive`].
+    #[test]
+    #[ignore = "exhaustive tree walk over every shrine answer; run explicitly"]
+    fn no_answer_exhausts_the_guess_budget() {
+        for len in MIN_LEN..=MAX_LEN {
+            for band in [Band::Easy, Band::Hard, Band::Wild] {
+                let mut s = Solver::new(&Baked, len, band).unwrap();
+                let total = s.remaining();
+                let (worst, word) = deepest(&mut s, &mut Vec::new());
+                println!(
+                    "length {len} {band:?}: worst case {worst} of {} guesses over {total} answers \
+                     (witness {word:?})",
+                    max_guesses(len)
+                );
+                assert!(
+                    worst <= max_guesses(len),
+                    "length {len} {band:?}: {word:?} needs {worst}, budget is {}",
+                    max_guesses(len)
+                );
+            }
+        }
+    }
+
     #[test]
     fn every_configuration_has_a_legal_opener() {
         for len in MIN_LEN..=MAX_LEN {

@@ -3842,6 +3842,11 @@ pub fn drive(
             // an unexpected screen must still count as having had its go, or the guard protects
             // nothing in exactly the cases it exists for.
             r.shrines_tried.insert(key.clone());
+            // **Crash-safety, and no longer the loop guard it was.** Since a failed play stops the
+            // run outright (below), the only visit that gets past this line is one that worked — and
+            // a worked shrine sets `_used`, which is what `worth_a_trip` reads. What this still buys
+            // is the case where `play` never returns at all.
+            //
             // The planner has to be told as well, and this is the whole reason `abandon` exists.
             // `shrines_tried` only stops us *entering* the shrine again; it says nothing about
             // whether the shrine is worth walking to, and a shrine left unprayed is still unused as
@@ -3865,16 +3870,34 @@ pub fn drive(
                         );
                     }
                     if !played.prayed && !played.consecrated {
-                        // Not fatal, and deliberately not a stop: the blessing is a bonus, and a run
-                        // that cannot claim it should still get on with the anomaly. It is logged
-                        // loudly because a shrine we walked to and failed to use is a wasted trip.
-                        r.log.push_str(&format!(
-                            "  shrine: left un{}\n",
+                        // **Pre-MVP, this stops the run on purpose.** — the dev, 2026-08-17:
+                        // *if the driver has a critical error with the interaction itself, since
+                        // we're pre-MVP, we should stall on purpose.*
+                        //
+                        // It used to log loudly and walk on, on the reasoning that the blessing is a
+                        // bonus. What settled it is that **no shrine can be lost by playing it
+                        // correctly**: the exhaustive tree walk in `shrine::tests::
+                        // no_answer_exhausts_the_guess_budget` plays every answer at every length and
+                        // band, and the worst case never exceeds the budget. So a shrine we failed to
+                        // use is never the shrine's fault — it is our grid reading, our click, or our
+                        // colour classification, every time, and those are exactly the faults that
+                        // stop being findable once the run walks away from them.
+                        //
+                        // The margin is what makes this urgent rather than tidy: the worst case is
+                        // **exactly** the budget in five of the twelve configurations — 8 of 8 at
+                        // length 4 Wild, 6 of 6 at every length from 5 up in Hard and Wild — so a
+                        // single misread colouring is not a setback, it is the shrine. There is no
+                        // slack to absorb one.
+                        return Stop::Failed(format!(
+                            "shrine {key} left un{} — no word can exhaust the budget, so this is an \
+                             interaction fault worth stopping on",
                             if anomaly_open { "consecrated" } else { "prayed" }
                         ));
                     }
                 }
-                Err(e) => r.log.push_str(&format!("  shrine failed: {e}\n")),
+                // Same rule, and this one was never even a judgement call: an error out of `play` is
+                // the interaction failing outright.
+                Err(e) => return Stop::Failed(format!("shrine {key} failed: {e}")),
             }
             // Re-read before anything plans on it. `_used` reaches the save when the shrine screen
             // is *exited*, which the driver has just done, so this is the first moment the flag is
