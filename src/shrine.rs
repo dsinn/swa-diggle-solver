@@ -935,98 +935,121 @@ mod tests {
         panic!("did not find {answer} within the budget; history {:?}", s.history());
     }
 
-    /// Rebuilds a solver's state from a path, so the tree walk below can branch without cloning.
-    ///
-    /// `reset` refills `live` without re-parsing the word lists, which is the expensive part.
-    fn restore(s: &mut Solver, path: &[(String, Pattern)]) {
-        s.reset();
-        for (g, p) in path {
-            s.observe(g, *p);
-        }
+    // ## Two replays here, and the sweep behind them lives in a binary — the dev's question, 2026-08-17
+    //
+    // *Do the tests run fast enough to cover the entire dictionaries, or should we hardcode the
+    // "last guess" answers?* Both were measured, and the split follows the numbers:
+    //
+    // | | debug | release | runs |
+    // |---|---|---|---|
+    // | `shrine_selfplay` — every word in every band | — | ~90 s, threaded | on demand |
+    // | `the_answers_with_no_slack_…` — all 346 | 129 s | 7.5 s | on demand |
+    // | `the_hardest_word_of_each_shrine_…` — 8 words | 3 s | — | **always** |
+    //
+    // `cargo test` is a **debug** build and the suite is thirteen seconds, so the full replay cannot
+    // live in it. The eight-word one costs nothing in wall clock, because it runs alongside the rest.
+    //
+    // **The exhaustive sweep is `shrine_selfplay` and always was** — it plays every word in every
+    // band and reports the mean, the worst case and anything over budget, threaded. What it did not
+    // report until now is how many answers land *exactly on* the budget, which is the number that
+    // decides all of this; it writes them to `data/shrine-hardest.txt`.
+    //
+    // **The at-risk set is small and exact**: 346 answers across eight configurations win on the
+    // *last* allowed guess. The other four have a guess in hand, so a misread costs them a turn
+    // rather than the shrine — which is why the pinned list is those eight and not all twelve.
+    //
+    // **What a pinned list cannot do, and why the sweep stays the authority.** It only knows
+    // *yesterday's* hard words. Change an opener, `ENDGAME_MAX`, `best_guess` or the dictionaries and
+    // some other word becomes the hardest, and both tests here will pass while it goes over budget.
+    // That is the same trap as a baked `OPENERS` table confirming itself — see
+    // [`Solver::compute_opener`], which exists so the constant cannot. **After touching any of those,
+    // rerun `shrine_selfplay`**, which regenerates the list and fails loudly on a real regression.
+
+    /// Every `(length, band, answer)` in the generated zero-slack list.
+    fn hardest() -> Vec<(usize, &'static str, &'static str)> {
+        include_str!("../data/shrine-hardest.txt")
+            .lines()
+            .map(str::trim_end)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| {
+                let mut f = l.split('\t');
+                let (Some(len), Some(band), Some(word)) = (f.next(), f.next(), f.next()) else {
+                    panic!("malformed line in shrine-hardest.txt: {l:?}");
+                };
+                (len.parse().expect("a length"), band, word)
+            })
+            .collect()
     }
 
-    /// The most guesses this solver can be made to spend, over **every** answer it might face.
-    ///
-    /// The whole decision tree rather than a sample: the first guess is fixed, so answers sharing a
-    /// colouring share a subtree, and the tree has one node per reachable *state* rather than one
-    /// per answer. Returns the depth and a witness word.
-    fn deepest(s: &mut Solver, path: &mut Vec<(String, Pattern)>) -> (usize, String) {
-        let Some(g) = s.propose() else {
-            panic!("candidate set emptied with history {:?}", s.history());
-        };
-        let win = solved(s.length);
-        let mut groups: HashMap<Pattern, u32> = HashMap::new();
-        for &i in &s.live {
-            let p = feedback(g.as_bytes(), s.answers.get(i as usize));
-            groups.entry(p).or_insert(i);
-        }
-        let depth = path.len() + 1;
-        let mut worst = (0usize, String::new());
-        for (&p, &witness) in &groups {
-            let (d, w) = match p == win {
-                // This guess *is* the answer for that candidate — the group has exactly one member.
-                true => (depth, g.clone()),
-                false => {
-                    path.push((g.clone(), p));
-                    restore(s, path);
-                    let got = deepest(s, path);
-                    path.pop();
-                    restore(s, path);
-                    got
-                }
+    fn replay(words: &[(usize, &str, &str)]) -> usize {
+        let mut solvers: HashMap<(usize, &str), Solver> = HashMap::new();
+        let mut played = 0usize;
+        for &(len, band, answer) in words {
+            let b = match band {
+                "Easy" => Band::Easy,
+                "Hard" => Band::Hard,
+                "Wild" => Band::Wild,
+                other => panic!("unknown band {other:?}"),
             };
-            if d > worst.0 {
-                worst = (d, if w.is_empty() { s.answers.word(witness as usize) } else { w });
+            // One solver per configuration, reset between words: rebuilding re-parses nearly a
+            // megabyte of word lists, which would swamp the solving itself. See [`Solver::reset`].
+            let s = solvers.entry((len, band)).or_insert_with(|| {
+                Solver::new(&Baked, len, b).expect("word lists for every configuration")
+            });
+            s.reset();
+            let budget = max_guesses(len);
+            let mut solved_in = None;
+            for turn in 1..=budget {
+                let guess = s.propose().unwrap_or_else(|| {
+                    panic!("{answer} ({len} {band}): candidates emptied on guess {turn}")
+                });
+                if guess == answer {
+                    solved_in = Some(turn);
+                    break;
+                }
+                s.observe(&guess, feedback(guess.as_bytes(), answer.as_bytes()));
             }
+            assert_eq!(
+                solved_in,
+                Some(budget),
+                "{answer} ({len} {band}) is listed as needing exactly {budget}; \
+                 regenerate data/shrine-hardest.txt if the solver changed"
+            );
+            played += 1;
         }
-        worst
+        played
     }
 
-    /// **Can any word exhaust the budget?** — the dev, 2026-08-17
+    /// One zero-slack word per configuration, on every `cargo test`.
     ///
-    /// Ignored by default because it walks the entire decision tree at every length and band, which
-    /// is minutes rather than milliseconds. Run it with
-    /// `cargo test --release no_answer_exhausts -- --ignored --nocapture`.
-    ///
-    /// The answer is what decides whether a shrine can ever be *lost* by playing it correctly, and
-    /// so whether a failed shrine is ever the shrine's fault rather than ours. `hasLost` is
-    /// `not hasWon() and #submitions > maxGuesses` (`shrineview.lua:62`).
-    ///
-    /// **No, and by nothing to spare.** Measured 2026-08-17 over all twelve configurations and 76 578
-    /// answers, worst case against budget:
-    ///
-    /// | length | Easy | Hard | Wild | budget |
-    /// |---|---|---|---|---|
-    /// | 4 | 6 (`pump`) | 7 (`fava`) | **8** (`zine`) | 8 |
-    /// | 5 | **6** (`patch`) | **6** (`moppy`) | **6** (`hamal`) | 6 |
-    /// | 6 | 4 (`differ`) | **6** (`zinger`) | **6** (`waller`) | 6 |
-    /// | 7 | 4 (`trapped`) | **6** (`zigging`) | **6** (`gagging`) | 6 |
-    ///
-    /// So the shrine is always winnable played correctly — and in five of the twelve, including
-    /// every band the driver actually uses when the difficulty cannot be read, it wins on the **last
-    /// guess**. There is no slack to absorb a misread colouring: one wrong classification does not
-    /// cost a turn, it costs the shrine. That is why a failed shrine stops the run rather than being
-    /// written off — see the shrine branch in [`crate::navigate::drive`].
+    /// The cheap half of the split described on [`the_answers_with_no_slack_are_still_solved_in_time`]:
+    /// every `(length, band)` that has no guess in hand is exercised to its full depth, so gross
+    /// breakage in the opener table, the endgame search or the word lists shows up in the ordinary
+    /// suite rather than only when someone remembers to run the slow one.
     #[test]
-    #[ignore = "exhaustive tree walk over every shrine answer; run explicitly"]
-    fn no_answer_exhausts_the_guess_budget() {
-        for len in MIN_LEN..=MAX_LEN {
-            for band in [Band::Easy, Band::Hard, Band::Wild] {
-                let mut s = Solver::new(&Baked, len, band).unwrap();
-                let total = s.remaining();
-                let (worst, word) = deepest(&mut s, &mut Vec::new());
-                println!(
-                    "length {len} {band:?}: worst case {worst} of {} guesses over {total} answers \
-                     (witness {word:?})",
-                    max_guesses(len)
-                );
-                assert!(
-                    worst <= max_guesses(len),
-                    "length {len} {band:?}: {word:?} needs {worst}, budget is {}",
-                    max_guesses(len)
-                );
-            }
-        }
+    fn the_hardest_word_of_each_shrine_is_still_solved_in_time() {
+        let all = hardest();
+        let mut seen: Vec<(usize, &str)> = Vec::new();
+        let sample: Vec<(usize, &str, &str)> = all
+            .iter()
+            .filter(|(len, band, _)| {
+                let fresh = !seen.contains(&(*len, band));
+                if fresh {
+                    seen.push((*len, band));
+                }
+                fresh
+            })
+            .copied()
+            .collect();
+        assert_eq!(replay(&sample), 8, "eight configurations win on the last guess");
+    }
+
+    /// All 346 of them, which is 7.5 s in release and over two minutes in debug.
+    #[test]
+    #[ignore = "the full zero-slack list; run with --release after touching the solver"]
+    fn the_answers_with_no_slack_are_still_solved_in_time() {
+        let played = replay(&hardest());
+        assert!(played > 300, "the hardest-word list looks truncated: {played} words");
     }
 
     #[test]
