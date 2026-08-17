@@ -5222,22 +5222,60 @@ pub fn drive(
                 // log: the frame could not speak for the node at all, or it did and the answer is
                 // somewhere no click may go. The first is an unregistered island; the second is an
                 // ordinary consequence of the map being bigger than the window.
-                None => match r.map.screen_position(&fresh, &far).map(|(x, y)| {
-                    // Unknown client size counts as unusable: aiming needs the window's
-                    // measurements, and guessing at them is what this branch is being fixed for.
-                    let clickable = r
-                        .win
-                        .client_size()
-                        .map(|(cw, ch)| crate::observe::hud::is_map_point(x as i32, y as i32, cw, ch))
-                        .unwrap_or(false);
-                    ((x, y), clickable)
-                }) {
-                    Some(((x, y), false)) => r.log.push_str(&format!(
-                        "  `{far}` is travellable in one press but the frame puts it at \
-                         ({x:.0}, {y:.0}), which is off the map we can click — stepping to `{}` \
-                         instead\n",
-                        hop.step
-                    )),
+                // Bound before the `match` rather than used as its scrutinee, because the
+                // off-window arm now needs `&mut r` and a scrutinee holding a borrow of `r.map`
+                // would forbid it.
+                None => {
+                    let placed = r.map.screen_position(&fresh, &far).map(|(x, y)| {
+                        // Unknown client size counts as unusable: aiming needs the window's
+                        // measurements, and guessing at them is what this branch is being fixed for.
+                        let clickable = r
+                            .win
+                            .client_size()
+                            .map(|(cw, ch)| {
+                                crate::observe::hud::is_map_point(x as i32, y as i32, cw, ch)
+                            })
+                            .unwrap_or(false);
+                        ((x, y), clickable)
+                    });
+                    match placed {
+                    Some(((x, y), false)) => {
+                        r.log.push_str(&format!(
+                            "  `{far}` is travellable in one press but the frame puts it at \
+                             ({x:.0}, {y:.0}), which is off the map we can click\n"
+                        ));
+                        // **Make the map smaller rather than give up the hop.**
+                        //
+                        // The dev, 2026-08-17: *fast-hopping to the shrine after the anomaly opened
+                        // also did not work; we did adjacent hops the slow way again.* The run of
+                        // 0436Z declined `shrine7` four times running — placed at y = 1566, 1538,
+                        // 1440, 1235 against a 1080-px window — and walked it one node at a time.
+                        // The hop was computed correctly every time; only the aiming failed.
+                        //
+                        // **Zoom, not drag, and the reason is staleness.** Dragging the node into
+                        // view is #56 and would leave every *other* coordinate in `fresh` shifted by
+                        // an amount we measured rather than knew — including `hop.step`'s, which is
+                        // where we fall back to. Zooming invalidates them honestly:
+                        // [`Run::zoom_out`] sets `positions_stale_at` and `needs_recentre`, so the
+                        // `continue` below re-derives the whole step from a dump taken after the
+                        // change. Nothing is carried across it. That is the same reasoning the
+                        // crossing branch already records where it reaches for the zoom first.
+                        //
+                        // It cannot spin: `zoom_out` is once per run — a step out halves
+                        // `targetZoomMul`, clamped at `0.5` (`overworldview.lua:996`), so from the
+                        // default `1` the first press is already at the floor — and it returns
+                        // `false` thereafter, which falls through to the ordinary step exactly as
+                        // before. Halving toward the centre is also enough for the numbers above:
+                        // 1566 comes back to about 1053.
+                        if r.zoom_out() {
+                            continue;
+                        }
+                        r.log.push_str(&format!(
+                            "  and the map is already as small as it goes — stepping to `{}` \
+                             instead\n",
+                            hop.step
+                        ));
+                    }
                     Some(((x, y), true)) => {
                         r.log.push_str(&format!(
                             "  `{far}` is travellable in one press and is not in this dump — placed \
@@ -5257,7 +5295,8 @@ pub fn drive(
                          stepping to `{}` instead\n",
                         hop.step
                     )),
-                },
+                    }
+                }
             }
         }
         let hop = hop;
