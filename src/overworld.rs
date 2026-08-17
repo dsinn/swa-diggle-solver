@@ -3072,7 +3072,23 @@ impl WorldMap {
         // whole run — the arrival test would have consecrated it on sight, while this filter dropped
         // it before `ok` could even ask for a route, so the run never went. Dropping only the
         // `completed` clause here is what let the pair drift apart.
-        let worth_a_trip = |p: &Place| !p.used || (anomaly_open && !p.consecrated);
+        //
+        // **And the pair drifted again on 2026-08-17, the other way round.**
+        // [`Place::can_be_consecrated`] was added to the arrival test and not to this one. The
+        // consecration clause below is `!consecrated`, which for a **minor** shrine is true and stays
+        // true for ever: `Consecrate` requires `majorShrine` (`shrine.lua:93-96`), so a woodland
+        // shrine can never take the flag that would retire it. A prayed-at woodland shrine would
+        // therefore have become a permanent `Goal::Shrine` the moment the portal opened — the same
+        // shape as the `shrine1 -> l10 -> shrine1` bounce recorded at the closed-portal branch, but
+        // with nothing that could ever end it, because arrival would decline the trip this filter
+        // kept proposing.
+        //
+        // So the consecration half is gated on the consecration being *possible*. The prayer half is
+        // not, and must not be: `showPrayButton` leads with `not shrineLocation.majorShrine`
+        // (`shrine.lua:98-101`), so an unprayed minor shrine is a real errand whatever the portal is
+        // doing.
+        let worth_a_trip =
+            |p: &Place| !p.used || (anomaly_open && p.can_be_consecrated() && !p.consecrated);
         let pick_shrine = || {
             self.places
                 .values()
@@ -5620,6 +5636,53 @@ mod tests {
             !m.worth_consecrating_here("shrine1_plaza"),
             "the parent carries the consecration, so the plaza is finished with"
         );
+    }
+
+    /// With the portal open, a prayed-at **minor** shrine must stop being a destination.
+    ///
+    /// The pairing this pins is stated at `worth_a_trip` itself: the goal filter and
+    /// [`WorldMap::worth_consecrating_here`] must agree, and this project has now watched them drift
+    /// apart twice in opposite directions. The second time was self-inflicted on 2026-08-17 —
+    /// `can_be_consecrated` went into the arrival test alone, leaving the goal filter proposing a
+    /// trip that arrival would always decline.
+    ///
+    /// A minor shrine can never take `_consecrated`, so `!p.consecrated` is true for ever; without
+    /// the gate this is not a bounce that ends, it is one that cannot.
+    ///
+    /// The major shrine in the same fixture is the control. It differs only in its key, and it *is*
+    /// still a destination — so this cannot pass by the shrine branch having switched itself off.
+    #[test]
+    fn an_open_portal_does_not_make_a_prayed_minor_shrine_a_destination_for_ever() {
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "l10",
+            "Trenwick — level 1 crypt",
+            vec![node("shrine1", "Swanland shrine"), node("l4sub9", "Bainton Clump woodland shrine")],
+        ));
+        m.here = Some("l10".into());
+        m.hell = Some(0.1);
+        for k in ["shrine1", "l4sub9"] {
+            m.entry(k).completed = true;
+            m.entry(k).visited = true;
+            // Prayed at, so the only thing either could still owe is a consecration.
+            m.entry(k).used = true;
+        }
+
+        // The major shrine still owes one, so the branch is alive and the fixture is routable.
+        let plan = m.next_target().expect("a plan");
+        assert_eq!(plan.reason, Goal::Shrine, "the major shrine is genuinely unconsecrated");
+        assert_eq!(plan.target, "shrine1");
+
+        // Retire it, and nothing may fall through to the woodland shrine.
+        m.entry("shrine1").consecrated = true;
+        if let Some(plan) = m.next_target() {
+            assert_ne!(
+                plan.reason,
+                Goal::Shrine,
+                "a minor shrine can never be consecrated, so this errand could never end: {plan:?}"
+            );
+            assert_ne!(plan.target, "l4sub9", "and it must not be the target under any goal");
+        }
     }
 
     /// A woodland shrine is a shrine that can never be consecrated, and the run must not go back for
