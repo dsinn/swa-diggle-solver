@@ -737,6 +737,11 @@ pub struct Run<'a> {
     pub dumps: usize,
     pub save_dir: PathBuf,
     pub log: String,
+    /// How much of [`Run::log`] has already reached the terminal. See [`Run::flush_log`].
+    ///
+    /// Public only because `spike_run` builds a `Run` with struct-literal syntax, as every other
+    /// field here does. Callers should leave it at `0` and never write to it again.
+    pub logged: usize,
     /// The game's own `right-*.png` artwork, for reading the affirmative slot off the screen.
     ///
     /// This replaced a tally of `Lore screen:` console lines. The tally could only ever answer "how
@@ -1568,6 +1573,39 @@ impl Run<'_> {
             self.inputs
         ));
         self.keys.click(x, y).is_ok()
+    }
+
+    /// Prints whatever has been added to [`Run::log`] since the last call, and flushes it.
+    ///
+    /// **The log used to reach the terminal exactly once, at exit.** `spike_run` accumulates every
+    /// line into one `String` and prints it in `finish`, so a run in progress showed *nothing* —
+    /// and a run that is still going is precisely when someone is watching and wants to know what
+    /// it thinks it is doing. The dev, 2026-08-17, watching a ping-pong with no way to see the
+    /// errand driving it: *your output log should be flushed more frequently.*
+    ///
+    /// It is not stdout buffering, so `--nocapture`-style fixes would not have helped; the text did
+    /// not exist yet. This emits the new tail per step instead, which also means a run killed
+    /// part-way — Ctrl-C, a crash, a `taskkill` — leaves its reasoning on the screen rather than
+    /// taking it down with the process. `finish` still writes the whole log to both files, so the
+    /// archive is unchanged; it just no longer reprints what has already been shown.
+    ///
+    /// Byte-sliced rather than line-buffered because `log` is only ever appended to, so the cursor
+    /// can only fall inside it — and every push ends in `\n`, so the boundary is never mid-character
+    /// even with the em-dashes this project's log lines are full of.
+    pub fn flush_log(&mut self) {
+        use std::io::Write;
+        if self.logged >= self.log.len() {
+            return;
+        }
+        let fresh = &self.log[self.logged..];
+        print!("{fresh}");
+        let _ = std::io::stdout().flush();
+        self.logged = self.log.len();
+    }
+
+    /// What has not yet been printed, so `finish` can show the tail without repeating the run.
+    pub fn unflushed(&self) -> &str {
+        &self.log[self.logged.min(self.log.len())..]
     }
 
     /// Pumps the console until a line **equal to** `line` appears, or the deadline passes.
@@ -3184,6 +3222,10 @@ pub fn drive(
     }
 
     for step in 1.. {
+        // **Every step, at the top.** Placed before the exits below rather than after the step's
+        // work, so a run that ends on this iteration has already shown everything the previous one
+        // wrote — the `Stop` arms all return without coming back here.
+        r.flush_log();
         if Instant::now() >= deadline {
             return Stop::Exhausted;
         }

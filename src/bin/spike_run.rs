@@ -111,6 +111,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dumps: 0,
         save_dir: save_dir.clone(),
         log: String::from("# Spike: the run\n\n"),
+        // Nothing shown yet, so the whole header is still owed to the terminal.
+        logged: 0,
         affirm: affirm::ButtonArt::load(Path::new(&cfg.game_dir), "right")?,
         answered_event: None,
         recentre_misses: 0,
@@ -243,7 +245,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             if let Err(e) = start_new_run(&mut r, &cfg.game_dir) {
                 r.log.push_str(&format!("ABORT: {e}\n"));
-                return finish(&mut game, &r.log, &archive);
+                return finish(&mut game, &r.log, r.unflushed(), &archive);
             }
         } else {
             // **Ask the observer before giving up.** The dev's standing rule, and this was the one
@@ -263,7 +265,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             r.log.push_str(&format!("  screen: {:?}\n", diggle_solver::act::identify(&win)));
             r.log_button_scores();
             r.snap_screen("startup-no-menu");
-            return finish(&mut game, &r.log, &archive);
+            return finish(&mut game, &r.log, r.unflushed(), &archive);
         }
     }
     let by = Instant::now() + Duration::from_secs(40);
@@ -273,7 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if r.latest.is_none() {
         r.log.push_str("ABORT: no adjacency dump\n");
-        return finish(&mut game, &r.log, &archive);
+        return finish(&mut game, &r.log, r.unflushed(), &archive);
     }
     let mut health = r.apply_save();
     // **What earlier runs learned, before this one decides where to go.**
@@ -402,8 +404,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if p.consecrated { " [consecrated]" } else { "" },
         ));
     }
+    // Two different logs on purpose: the files get the whole run, the terminal gets only what
+    // `Run::flush_log` has not already shown. Printing `out` here as well would repeat every step
+    // a second time under the summary.
     let out = r.log.clone();
-    finish(&mut game, &out, &archive)
+    let tail = r.unflushed().to_string();
+    finish(&mut game, &out, &tail, &archive)
 }
 
 /// Writes the report and, unless asked not to, closes the game.
@@ -415,8 +421,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Note this leaves the save unflushed: `mainSaveData` is written on screen *exit*, so a checkpoint
 /// taken while the game is still up records the last screen the player left, not the current one.
+/// `log` is the whole run and goes to both files; `tail` is only what the terminal has not seen
+/// yet, because [`diggle_solver::navigate::Run::flush_log`] has been printing each step as it
+/// happened. They were one argument until 2026-08-17, when the log started streaming.
 fn finish(
-    game: &mut diggle_solver::game::launch::GameProcess, log: &str, archive: &str,
+    game: &mut diggle_solver::game::launch::GameProcess, log: &str, tail: &str, archive: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Both names, on every exit. `REPORT` is what habit and the handoff notes reach for; the
     // archived copy is the one still there after the next run.
@@ -426,13 +435,13 @@ fn finish(
     };
     if std::env::var("DIGGLE_KEEP_OPEN").as_deref() == Ok("1") {
         write(log)?;
-        println!("{log}");
+        print!("{tail}");
         println!("\n-- game left running (DIGGLE_KEEP_OPEN=1); close it before any checkpoint --");
         return Ok(());
     }
     game.close(Duration::from_secs(15));
     write(log)?;
-    println!("{log}");
+    print!("{tail}");
     println!("-- archived as {archive} --");
     Ok(())
 }

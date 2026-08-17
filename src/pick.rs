@@ -217,6 +217,14 @@ pub struct Rank {
     /// material is `wood0` (`rpg/effects/material/default.lua:4`), which `wood_only` accepts, so a
     /// wood-only kill can still be spending one.
     pub hoarded: f64,
+    /// Ligature tiles this word gets **rid** of. Higher is better. See [`shed`].
+    ///
+    /// The mirror image of [`Rank::hoarded`], and ranked directly below it on the dev's call,
+    /// 2026-08-17: *ranking the ash usage underneath hoarding works.* Gold is damage held in
+    /// reserve and an ash is a tile that clogs the board, so the two want opposite treatment — but
+    /// the reserve is worth more than the tidying, and a word must never burn a `Q` to take out the
+    /// rubbish.
+    pub shed: usize,
     /// Total slots every hazard tile on the board would fall by. Higher is better.
     pub hazard_fall: usize,
     /// Distance of the resulting board from its target letter distribution. **Lower** is better.
@@ -242,6 +250,9 @@ impl Rank {
         }
         if self.hoarded != other.hoarded {
             return self.hoarded < other.hoarded;
+        }
+        if self.shed != other.shed {
+            return self.shed > other.shed;
         }
         if self.hazard_fall != other.hazard_fall {
             return self.hazard_fall > other.hazard_fall;
@@ -368,6 +379,53 @@ pub fn hoarded(tiles: &[Tile], consumed: &[usize], scorer: &Scorer) -> f64 {
         .sum()
 }
 
+/// Ligatures the board is better off without, by **the game's own name** for them.
+///
+/// The dev, 2026-08-17: *we need a way to try to get rid of the ash (æ ligature) because there are
+/// so few words that can use it.*
+///
+/// Named rather than matched on the letters, because the name is what the game writes
+/// (`ligature = 'ash'`, `rpg/enemies/slimes.lua:27`) and the letters are not a reliable handle — a
+/// two-character tile is as likely to be a `QU`, which is the opposite of a problem.
+///
+/// **Only the ones that are hard to spend belong here.** `ui/objects/tile.lua:40-51` lists the full
+/// set — `QU`, `thorn`, `eth`, `TH`, `ash`, `ethel`, `ED`, `ES`, `LY`, `ING` — and most of them are
+/// *good*: `ING` and `ED` are the commonest suffixes in English and `QU` carries the `U` that makes
+/// a `Q` playable at all. Adding one here says "spend this when convenient", which is a claim about
+/// how few words can use it and wants the same measurement the shrine dictionaries got, not a guess.
+const SHED: &[&str] = &["ash"];
+
+/// Is this a tile we would rather the board stopped holding?
+fn sheddable(t: &Tile) -> bool {
+    // A **wildcard's** `ligature` is a letter-class pattern like `[AEIOU]` rather than a name
+    // (`crate::observe::board::Quality::ligature`), and the two uses are told apart by the tile's
+    // letter. Excluding wildcards outright is the cheap half of that test, and a wildcard is the
+    // last tile we would want to shed in any case.
+    !t.is_wildcard() && t.quality.ligature.as_deref().is_some_and(|l| SHED.contains(&l))
+}
+
+/// How many tiles worth being rid of this word takes off the board. Higher is better.
+///
+/// The inverse of [`hoarded`], deliberately built the same way — same walk over `consumed`, same
+/// shape — so the two read as the pair they are.
+///
+/// **A count, not a value.** `hoarded` prices gold at [`Scorer::tile_score`] because a `Q` really is
+/// a bigger reserve than a `Z`. There is no matching scale here: an ash is not *worth* anything, it
+/// is in the way, and one of them is one of them. If a second entry ever joins [`SHED`] with a
+/// genuinely different nuisance value, this is where that would be priced.
+///
+/// ## What this does and does not reach
+///
+/// [`Rank`] only ever compares words that **already kill** — see this module's header. So the ash
+/// leaves the board opportunistically, on turns where more than one word is lethal and the choice
+/// is free. On a turn with a single killing word, or none, nothing here applies. That matches the
+/// dev's framing — *only skip the ash if we can't achieve what we otherwise want for this turn* —
+/// and it is worth being clear that the turns where a clogged board hurts most are the ones this
+/// cannot help with. Reaching those means ranking non-lethal candidates, which is a separate job.
+pub fn shed(tiles: &[Tile], consumed: &[usize]) -> usize {
+    consumed.iter().filter_map(|&i| tiles.get(i)).filter(|t| sheddable(t)).count()
+}
+
 /// Letter counts of what would be left standing.
 pub fn remaining_counts(tiles: &[Tile], consumed: &[usize]) -> [usize; ALPHABET] {
     letters::counts_of(
@@ -392,6 +450,7 @@ pub fn rank(
         wood_only: prefs.wood_only_pays && wood_only(tiles, consumed, scorer),
         heals_fully: prefs.heal_at.is_some_and(|at| damage >= at),
         hoarded: hoarded(tiles, consumed, scorer),
+        shed: shed(tiles, consumed),
         hazard_fall: hazard_fall(tiles, geometry, consumed, scorer),
         deviation: target.deviation(&remaining_counts(tiles, consumed)),
     }
@@ -478,7 +537,7 @@ mod tests {
             wood_only: wood,
             heals_fully: false,
             hoarded: 0.0,
-            hazard_fall: 0,
+            shed: 0, hazard_fall: 0,
             deviation: 0.0,
         };
         // Neither of these clears the board, so a threshold rule calls them equal. They are not.
@@ -510,7 +569,7 @@ mod tests {
             wood_only: wood,
             heals_fully: heal,
             hoarded,
-            hazard_fall: 0,
+            shed: 0, hazard_fall: 0,
             deviation: 0.0,
         };
         let both = tier(true, true, 99.0);
@@ -544,19 +603,76 @@ mod tests {
     /// The rule in the shape it is actually used — a comparison between candidates, not a score.
     #[test]
     fn between_two_kills_the_one_that_spends_less_wins() {
-        let plain = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 0, deviation: 9.0 };
-        let golden = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 40.0, hazard_fall: 0, deviation: 0.0 };
+        let plain = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, shed: 0, hazard_fall: 0, deviation: 9.0 };
+        let golden = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 40.0, shed: 0, hazard_fall: 0, deviation: 0.0 };
         assert!(plain.better_than(&golden), "a tidier board is not worth a Q");
         assert!(!golden.better_than(&plain));
 
         // Below the payout, though. `wood_only` is gear paying out for real, and this is a saving.
-        let paid = Rank { fire_eaten: 0, wood_only: true, heals_fully: false, hoarded: 40.0, hazard_fall: 0, deviation: 9.0 };
+        let paid = Rank { fire_eaten: 0, wood_only: true, heals_fully: false, hoarded: 40.0, shed: 0, hazard_fall: 0, deviation: 9.0 };
         assert!(paid.better_than(&plain), "a payout in hand outranks a tile kept back");
 
         // And the wildcard case the dev asked for: same gold either way, so do not also burn one.
-        let gold_only = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 10.0, hazard_fall: 0, deviation: 0.0 };
-        let gold_and_wild = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 11.0, hazard_fall: 0, deviation: 0.0 };
+        let gold_only = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 10.0, shed: 0, hazard_fall: 0, deviation: 0.0 };
+        let gold_and_wild = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 11.0, shed: 0, hazard_fall: 0, deviation: 0.0 };
         assert!(gold_only.better_than(&gold_and_wild), "no reason to spend a wildcard as well");
+    }
+
+    /// An ash is spent when spending it is free, and never at the cost of a gold tile.
+    ///
+    /// Both halves of the dev's rule, 2026-08-17: *only skip the ash if we can't achieve what we
+    /// otherwise want for this turn*, and *ranking the ash usage underneath hoarding works.*
+    ///
+    /// The second assertion is the one with teeth. Placed above `hoarded` this rule would trade a
+    /// `Q` — the board's biggest reserve — for the sake of tidying, which is precisely the waste
+    /// `hoarded` exists to prevent, and the failure would only ever show up as a fight lost several
+    /// turns later.
+    #[test]
+    fn an_ash_is_shed_when_it_is_free_and_never_at_the_price_of_gold() {
+        let r = |hoarded: f64, shed: usize, deviation: f64| Rank {
+            fire_eaten: 0,
+            wood_only: false,
+            heals_fully: false,
+            hoarded,
+            shed,
+            hazard_fall: 0,
+            deviation,
+        };
+        // Nothing else to separate them, so getting rid of the ash decides it.
+        assert!(r(0.0, 1, 0.0).better_than(&r(0.0, 0, 0.0)), "with all else equal, dump the ash");
+        assert!(!r(0.0, 0, 0.0).better_than(&r(0.0, 1, 0.0)), "strictly, in one direction");
+
+        // **Underneath hoarding.** A Q is worth 40; an ash is worth being rid of. Not that much.
+        assert!(
+            r(0.0, 0, 0.0).better_than(&r(40.0, 1, 0.0)),
+            "a reserve kept back beats an ash spent"
+        );
+
+        // Above the hygiene terms, though, so it is not merely decorative.
+        assert!(r(0.0, 1, 99.0).better_than(&r(0.0, 0, 0.0)), "shedding beats a tidier board");
+    }
+
+    /// The predicate reads the game's ligature **name**, and only the ones we want gone.
+    ///
+    /// `QU` is the control and the reason this is not a test about two-character tiles: it is a
+    /// ligature, it is not a nuisance, and a rule that shed every ligature would throw away the `U`
+    /// that makes a `Q` playable.
+    #[test]
+    fn only_the_ligatures_worth_losing_count_as_shed() {
+        let lig = |letter: &str, name: &str| Tile {
+            letter: letter.to_string(),
+            quality: crate::observe::board::Quality {
+                ligature: Some(name.to_string()),
+                ..Default::default()
+            },
+        };
+        let tiles = vec![lig("AE", "ash"), lig("QU", "QU"), Tile::plain("E"), lig("AE", "ash")];
+
+        assert_eq!(shed(&tiles, &[0]), 1, "the ash counts");
+        assert_eq!(shed(&tiles, &[1]), 0, "the QU does not — it is a ligature we want");
+        assert_eq!(shed(&tiles, &[2]), 0, "and a plain letter is not a ligature at all");
+        assert_eq!(shed(&tiles, &[0, 3]), 2, "two ashes are worth two");
+        assert_eq!(shed(&tiles, &[]), 0, "a word that spends nothing sheds nothing");
     }
 
     /// Two columns of three. Flat indices are column-major with row 1 at the bottom
@@ -694,16 +810,16 @@ mod tests {
 
     #[test]
     fn a_payout_outranks_tidier_letters_and_wood_outranks_a_falling_hazard() {
-        let wood = Rank { fire_eaten: 0, wood_only: true, heals_fully: false, hoarded: 0.0, hazard_fall: 0, deviation: 99.0 };
-        let hazard = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 5, deviation: 1.0 };
+        let wood = Rank { fire_eaten: 0, wood_only: true, heals_fully: false, hoarded: 0.0, shed: 0, hazard_fall: 0, deviation: 99.0 };
+        let hazard = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, shed: 0, hazard_fall: 5, deviation: 1.0 };
         assert!(wood.better_than(&hazard), "a wood-only kill outranks any number of falls");
 
-        let falls = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 2, deviation: 50.0 };
-        let tidy = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 1, deviation: 0.0 };
+        let falls = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, shed: 0, hazard_fall: 2, deviation: 50.0 };
+        let tidy = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, shed: 0, hazard_fall: 1, deviation: 0.0 };
         assert!(falls.better_than(&tidy), "a falling hazard outranks a tidier board");
 
-        let a = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 1, deviation: 3.0 };
-        let b = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, hazard_fall: 1, deviation: 4.0 };
+        let a = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, shed: 0, hazard_fall: 1, deviation: 3.0 };
+        let b = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, shed: 0, hazard_fall: 1, deviation: 4.0 };
         assert!(a.better_than(&b), "with the payouts equal, lower deviation wins");
         assert!(!b.better_than(&a));
         assert!(!a.better_than(&a), "better_than is strict");

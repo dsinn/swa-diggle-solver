@@ -157,11 +157,30 @@ pub fn index_of(letter: char) -> Option<usize> {
 ///
 /// Non-letter tiles are skipped rather than bucketed somewhere: a `!` is not a letter the board is
 /// short of, and counting it as one would make hazard tiles look like distribution problems.
+///
+/// ## A ligature counts as every letter it carries
+///
+/// This read `chars().next()` until 2026-08-17, which is one letter per tile — and a tile's letter
+/// is a *string*, because ligatures are real tiles carrying more than one. `slimes.lua:27` builds an
+/// ash as `{'AE', {ligature = 'ash'}}`, so the board reports the two characters `AE`; `ui/objects/tile.lua:40-51`
+/// lists the rest — `QU`, `TH`, `SS`, `ED`, `ES`, `LY`, `ING`.
+///
+/// So every ligature was being counted as its **first letter alone**: an ash read as a plain `A`,
+/// and the distribution believed the board held a common vowel where it held a tile few words can
+/// spend. `QU` read as a `Q` with its `U` invisible, which is the opposite error — the `U` is
+/// exactly what makes a `Q` playable.
+///
+/// The dev's rule, 2026-08-17: *ligatures should increment the counts for each letter that it is
+/// made of.* Iterating the characters is also what makes three-letter ligatures need no further
+/// thought — `ING` adds one each to `I`, `N` and `G` by the same loop, with nothing to extend when
+/// `-est` and `-ing` suffix tiles arrive.
 pub fn counts_of<'a>(letters: impl IntoIterator<Item = &'a str>) -> [usize; ALPHABET] {
     let mut counts = [0usize; ALPHABET];
     for l in letters {
-        if let Some(i) = l.chars().next().and_then(index_of) {
-            counts[i] += 1;
+        for c in l.chars() {
+            if let Some(i) = index_of(c) {
+                counts[i] += 1;
+            }
         }
     }
     counts
@@ -248,6 +267,38 @@ mod tests {
             t.deviation(&decent),
             t.deviation(&awful)
         );
+    }
+
+    /// A ligature tile is worth every letter printed on it, not just the first.
+    ///
+    /// The dev's rule, 2026-08-17. Until then this counted `chars().next()`, so an ash read as a
+    /// lone `A` — the distribution believed the board held a common vowel where it held a tile
+    /// almost nothing can spend — and a `QU` read as a `Q` with its `U` invisible, which is the
+    /// same bug pointing the other way, since the `U` is what makes the `Q` playable.
+    ///
+    /// `ING` is here as the forward-looking half: three-letter suffix tiles are expected, and the
+    /// character loop that fixes the two-letter case has to cover them with nothing added.
+    #[test]
+    fn a_ligature_counts_as_every_letter_it_carries() {
+        let at = |c: char| index_of(c).unwrap();
+
+        let ash = counts_of(["AE"]);
+        assert_eq!(ash[at('A')], 1, "the ash carries an A");
+        assert_eq!(ash[at('E')], 1, "**and an E, which the first-character read threw away**");
+        assert_eq!(ash.iter().sum::<usize>(), 2, "and nothing else");
+
+        let qu = counts_of(["QU"]);
+        assert_eq!((qu[at('Q')], qu[at('U')]), (1, 1), "a QU is a Q and the U that makes it usable");
+
+        // Three characters, for the suffix tiles that do not exist here yet.
+        let ing = counts_of(["ING"]);
+        assert_eq!((ing[at('I')], ing[at('N')], ing[at('G')]), (1, 1, 1));
+        assert_eq!(ing.iter().sum::<usize>(), 3);
+
+        // Mixed with plain tiles, which is what a real board looks like.
+        let board = counts_of(["E", "AE", "T"]);
+        assert_eq!(board[at('E')], 2, "one plain E and the ash's E");
+        assert_eq!(board.iter().sum::<usize>(), 4);
     }
 
     #[test]
