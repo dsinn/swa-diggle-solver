@@ -360,15 +360,17 @@ pub fn infer_length(before: &Frame, after: &Frame, client_w: i32, client_h: i32)
 /// sky the grid's top row sits against — so the residue stays above a quarter of the peak
 /// indefinitely.
 ///
-/// So: two seconds, named for what it is. The game's own `transitionDuration` defaults to 0.5 s
-/// (`utils/defaultconfig.lua:5`), so this is four times the nominal fade.
+/// So: **four seconds, and it is now a deadline rather than a sleep.** The game's own
+/// `transitionDuration` defaults to 0.5 s (`utils/defaultconfig.lua:5`), so this is eight times the
+/// nominal fade.
 ///
-/// Nothing downstream depends on it being exactly right, which is what makes a fixed wait acceptable
-/// here rather than merely convenient. Every consumer re-checks: [`infer_length`] declines on a
-/// mid-fade frame instead of guessing, [`read_row`] returns `None` until the row is fully coloured,
-/// and [`leave`] confirms the back plaque is gone. This only has to be long enough that those checks
-/// usually pass first time.
-const TRANSITION_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// It used to be a flat two-second `sleep` that every consumer re-checked afterwards, on the
+/// reasoning that nothing downstream depended on it being exactly right. That reasoning was sound
+/// and is exactly why this became a poll: [`crate::act::wait_for`] returns the *instant* the screen
+/// is recognisable, so a shrine that opens in 200 ms costs 200 ms, and the four seconds are only
+/// ever paid by a press that genuinely did not land. The old sleep paid two seconds every time and
+/// still could not tell those two cases apart.
+const VISIT_OPENS_WITHIN: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// The overworld `Visit` button on a completed shrine.
 ///
@@ -382,6 +384,79 @@ const TRANSITION_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// caller must know the area is complete; that is why [`play`] is only reached through the map's
 /// `completed` flag rather than by seeing a button.
 pub const VISIT_CLICK: (i32, i32) = (188, 918);
+
+/// How many times to press `Visit` before accepting that the shrine will not open.
+///
+/// **Three, because the overworld demonstrably swallows presses.** Live 2026-08-17 at `shrine1sub1`
+/// the dev *heard the button's own click* and the screen never changed; `gave-up.png` caught the map
+/// still up with `Visit` un-pressed, and the run stopped on an unplayed shrine.
+///
+/// That sound is the evidence that makes a retry the right remedy rather than a guess.
+/// `button_down` plays inside `mousepressed` (`ui/elements/button.lua:278-281`) and only on a button
+/// that is both `show` and `active`, so the press was delivered, in bounds, to a live `Visit`. What
+/// never happened was the *release*: `mousereleased` (`:289-295`) bails on `if not down then return`,
+/// and `down` is per button **instance**. Any rebuild of the area buttons between our press and our
+/// release hands the release to a fresh object whose `down` is nil, and it is dropped in silence —
+/// `core.refreshAreaButtons` (`overworldview.lua:474-481`) rebuilds exactly that list. **That last
+/// step is inference, not a reading**: it is the only path I found that clears `down` without
+/// running `activate`, but nothing yet proves it is the one that fired. The retry does not depend on
+/// it being right — it only depends on the loss being intermittent, which the sound proves.
+const VISIT_ATTEMPTS: usize = 3;
+
+/// Presses `Visit` until the shrine screen is up, and says whether it ever was.
+///
+/// The confirmation is [`crate::act::SHRINE_GOBACK`], the same plaque [`consecrate`] has always
+/// checked and the same one `identify` reads. This run measured its discrimination for free: on the
+/// subworld map it scored **0.1311** against a 0.90 bar, so "the plaque is absent" and "we are still
+/// looking at the map" are the same statement.
+///
+/// **The retry is guarded, because a stray press here is not harmless.** `Visit` sits at (188, 918)
+/// and the shrine screen's own `Go back` occupies that coordinate once it is up — `SHRINE_GOBACK`'s
+/// template spans it, and its click point is (113, 972) in the same plaque. So pressing again into a
+/// screen that opened *late* would shut the shrine the previous press just opened, turning a
+/// recoverable stall into a silent walk-away. Hence the second look before every retry: `wait_for`
+/// last sampled a poll ago, and this closes that gap.
+///
+/// (An older note here claimed this coordinate collided with `Consecrate` and `Pray`. It does not —
+/// both are at (1733, 972), the far side of the screen. The collision is with `Go back`, which is
+/// the more dangerous one, and the reason that note is now corrected rather than merely deleted.)
+fn open_the_shrine(
+    win: &crate::win::window::GameWindow,
+    input: &dyn crate::win::input::Input,
+    log: &mut String,
+) -> Result<bool, crate::Error> {
+    for attempt in 1..=VISIT_ATTEMPTS {
+        input.click(VISIT_CLICK.0, VISIT_CLICK.1)?;
+        let opened = crate::act::wait_for(
+            win,
+            &crate::act::SHRINE_GOBACK,
+            crate::act::SHRINE_GOBACK_PRESENT,
+            VISIT_OPENS_WITHIN,
+        );
+        if opened.found() {
+            log.push_str(&match attempt {
+                1 => "  shrine: entered\n".to_string(),
+                n => format!("  shrine: entered on press {n} — the overworld swallowed the first {}\n", n - 1),
+            });
+            return Ok(true);
+        }
+        log.push_str(&format!(
+            "  shrine: press {attempt} of {VISIT_ATTEMPTS} did not open the screen (back plaque \
+             best {:.4} over {} looks)\n",
+            opened.best, opened.looks
+        ));
+        // Close the race described above before pressing again.
+        let late = crate::act::score_exact(win, &crate::act::SHRINE_GOBACK).unwrap_or(0.0);
+        if late >= crate::act::SHRINE_GOBACK_PRESENT {
+            log.push_str(&format!(
+                "  shrine: the screen arrived at {late:.4} as we were giving up on it — not \
+                 pressing again, that would press `Go back`\n"
+            ));
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 /// How long to wait for the shrine screen to come **back** after a consecration.
 ///
@@ -541,8 +616,10 @@ fn spend_the_solve(
              re-entering to look for `Pray`\n",
             back.best
         ));
-        input.click(VISIT_CLICK.0, VISIT_CLICK.1)?;
-        std::thread::sleep(TRANSITION_WAIT);
+        // Not fatal if it never opens: `claim_blessing` below refuses to press anything it cannot
+        // identify, so the cost of arriving here on the map is a logged miss rather than a wrong
+        // button. Retried anyway, because this is the same overworld press that is known to be lost.
+        open_the_shrine(win, input, &mut out.log)?;
     }
     claim_blessing(win, out, PRAY_ALREADY_THERE)?;
     Ok(())
@@ -625,8 +702,12 @@ fn spend_the_solve(
 /// (`shrine.lua:514`). That is the game handing us the consecration on the way out of the fight.
 ///
 /// Pass `true` there and step 1 is skipped. It has to be skipped rather than merely wasted: the
-/// `Visit` click shares its coordinate with the shrine screen's own right-hand slot, which is where
-/// `Consecrate` and `Pray` live (`shrine.lua:241`, `:296`).
+/// `Visit` coordinate lands on the shrine screen's own `Go back` plaque once that screen is up, so a
+/// press aimed at opening a shrine that is *already* open closes it instead. See
+/// [`open_the_shrine`], which guards its retries against the same collision.
+///
+/// (This note used to name `Consecrate` and `Pray` as the buttons underneath. That was wrong — both
+/// sit at (1733, 972), the far side of the screen. The hazard is `Go back`.)
 pub fn play(
     win: &crate::win::window::GameWindow,
     input: &dyn crate::win::input::Input,
@@ -640,15 +721,25 @@ pub fn play(
     let mut out = Played::default();
     let (cw, ch) = win.client_size()?;
 
-    // 1. Open the word screen. `Visit` is a plain click: there is no template for it, and the
-    //    confirmation is the grid answering the length probe below rather than the button vanishing.
+    // 1. Open the word screen, and **confirm it opened** — see [`open_the_shrine`].
+    //
+    //    This used to click `Visit` and sleep, on the reasoning that the grid answering the length
+    //    probe below was confirmation enough. It is not, and the difference is not academic. When
+    //    the press is lost the probe types its `a` and its backspace into the *overworld*, which
+    //    binds user functions to keys (`overworld.lua:1359-1368` — zoom, inventory, screenshot). So
+    //    a swallowed click did not merely fail; it fired stray keystrokes at the map and then
+    //    reported the shrine as unplayable. Confirming first is what makes the probe safe to run.
     let before_visit = capture_window(win)?;
     match already_open {
         true => out.log.push_str("  shrine: already open — the fight handed it to us\n"),
         false => {
-            input.click(VISIT_CLICK.0, VISIT_CLICK.1)?;
-            std::thread::sleep(TRANSITION_WAIT);
-            out.log.push_str("  shrine: entered\n");
+            if !open_the_shrine(win, input, &mut out.log)? {
+                out.log.push_str(
+                    "  shrine: `Visit` never opened the screen — leaving without playing, and \
+                     without typing the probe into the map\n",
+                );
+                return Ok(out);
+            }
         }
     }
 
@@ -738,10 +829,13 @@ pub fn play(
         // Not on the shrine screen, or the grid is somewhere this does not model. Guessing a grid is
         // not an option, so give up and hand the screen back — the same exit as the success path.
         //
-        // Did clicking `Visit` change anything at all? That separates "we are on the shrine screen
-        // and the grid is somewhere this does not model" from "the click never landed and we are
-        // still looking at the map" — which want opposite fixes, and which a bare "could not
-        // identify the grid" would conflate.
+        // The back plaque has already answered the question this used to ask. Reaching here means
+        // the shrine screen *is* up (or the fight handed it to us), so this is now the narrow case
+        // it always claimed to be: a shrine screen whose grid is somewhere this does not model.
+        //
+        // The diff is kept anyway, because it is the one number that would catch the screen having
+        // moved on underneath us between the plaque check and the probe — a possibility no template
+        // check covers.
         let moved = capture_window(win)
             .map(|now| before_visit.diff_fraction(&now, crate::observe::settle::FULL))
             .unwrap_or(0.0);
@@ -923,19 +1017,8 @@ pub fn consecrate(
 
     // 1. Open the shrine screen. Same plain click `play` uses, and confirmed the same way it
     //    confirms everything on this screen -- by the back plaque, which is what `identify` reads.
-    input.click(VISIT_CLICK.0, VISIT_CLICK.1)?;
-    std::thread::sleep(TRANSITION_WAIT);
-    let opened = crate::act::wait_for(
-        win,
-        &crate::act::SHRINE_GOBACK,
-        crate::act::SHRINE_GOBACK_PRESENT,
-        Duration::from_secs(6),
-    );
-    if !opened.found() {
-        out.log.push_str(&format!(
-            "  consecrate: the shrine screen did not open (back plaque best {:.4})\n",
-            opened.best
-        ));
+    if !open_the_shrine(win, input, &mut out.log)? {
+        out.log.push_str("  consecrate: the shrine screen did not open — not consecrating blind\n");
         return Ok(out);
     }
 
