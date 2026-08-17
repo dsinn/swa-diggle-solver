@@ -2003,17 +2003,36 @@ impl Run<'_> {
     /// makes the call idempotent, so a caller that is already off the map pays one look and nothing
     /// else.
     ///
+    /// ## The console is the instrument; the template is the fallback
+    ///
+    /// **The project's standing rule** — the dev, 2026-08-17: *prefer the console, it should be the
+    /// robust one when there are no timing issues to work around.* A printed line is the game
+    /// stating what it did. A template match is us inferring it from pixels, and it can be wrong in
+    /// both directions: a screen mid-fade scores like an absent one, and a plaque shared by four
+    /// screens identifies none of them. So `says` is checked first on every poll, and `landed` only
+    /// backs it up.
+    ///
+    /// **But the two answer different questions, and that is why both are here.** The console
+    /// reports an *event* — "this screen just became active" — which is exactly right for confirming
+    /// a press took, and useless for asking where we already are: an event we were not listening
+    /// for leaves no trace. The template reports *state*, which is what the pre-press check needs.
+    /// So the console confirms the transition and the template establishes the starting position,
+    /// and neither substitutes for the other.
+    ///
+    /// A caller with no line to wait on passes `None` and gets the template alone, which is still
+    /// better than a pixel diff.
+    ///
     /// ## Where this is *not* used, deliberately
     ///
-    /// The inn confirms on [`crate::innplay::ENTERED`] — a line the game itself prints — and the
-    /// fight branch polls [`crate::act::identify`] with its own recovery around a pregame that can
-    /// arrive as either of two screens. Both are stronger or more specific than this, and swapping
-    /// them for a template check would be a downgrade dressed as consistency.
+    /// The inn already does exactly this with [`crate::innplay::ENTERED`], and the fight branch
+    /// polls [`crate::act::identify`] with its own recovery around a pregame that can arrive as
+    /// either of two screens. Converting them would be a downgrade dressed as consistency.
     fn left_the_overworld(
         &mut self,
         what: &str,
+        says: Option<&str>,
         landed: &[crate::act::Screen],
-    ) -> Option<crate::act::Screen> {
+    ) -> bool {
         for attempt in 1..=LEAVE_TRIES {
             let now = crate::act::identify(self.win);
             if landed.contains(&now) {
@@ -2024,7 +2043,7 @@ impl Run<'_> {
                         attempt - 1
                     ));
                 }
-                return Some(now);
+                return true;
             }
             // Same read-only cursor oracle `click_area_button` takes, and the same reason: the
             // coordinate is transcribed from Lua multipliers, and a wrong transcription looks
@@ -2033,22 +2052,43 @@ impl Run<'_> {
                 self.log
                     .push_str(&format!("  the game has a control selected {miss:.0} px from `{what}`\n"));
             }
-            let (bx, by) = self.win.client_to_screen(AREA_BUTTON.0, AREA_BUTTON.1).ok()?;
+            let Ok((bx, by)) = self.win.client_to_screen(AREA_BUTTON.0, AREA_BUTTON.1) else {
+                self.log.push_str(&format!("  could not place the `{what}` press on screen\n"));
+                return false;
+            };
+            // Marked **before** the press, so a line the game prints faster than we can ask for it
+            // is still inside the window we go on to search.
+            let mark = self.feed.mark();
             if !self.tap(&format!("area button: {what}"), bx, by) {
                 self.log.push_str(&format!("  the `{what}` press did not go out\n"));
-                return None;
+                return false;
             }
             self.park();
             let deadline = Instant::now() + LEAVE_LANDS_WITHIN;
             while Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(150));
+                // Pumped first, and every time round: the console is the thing being waited on, not
+                // a courtesy read on the way out.
+                self.pump();
+                if let Some(line) = says {
+                    if self.feed.seen_line_since(mark, line) {
+                        self.log.push_str(&format!("  `{what}` opened it — the game said `{line}`\n"));
+                        return true;
+                    }
+                }
                 let s = crate::act::identify(self.win);
                 if landed.contains(&s) {
-                    // Pumped on the way out: arrival prints, and the caller's next move usually
-                    // reads them.
-                    self.pump();
-                    self.log.push_str(&format!("  `{what}` opened {s:?}\n"));
-                    return Some(s);
+                    // Worth saying which instrument answered. If this branch is the one that keeps
+                    // firing at a screen that *does* print a line, the line is wrong or the pump is
+                    // behind — and that is a fault worth seeing rather than passing silently.
+                    self.log.push_str(&format!(
+                        "  `{what}` opened {s:?} — recognised from the screen{}\n",
+                        match says {
+                            Some(l) => format!(", with no `{l}` on the console"),
+                            None => String::new(),
+                        }
+                    ));
+                    return true;
                 }
             }
             self.pump();
@@ -2058,7 +2098,7 @@ impl Run<'_> {
                 crate::act::identify(self.win)
             ));
         }
-        None
+        false
     }
 
     /// The most recent dump whose coordinates have stopped moving.
@@ -3971,12 +4011,14 @@ pub fn drive(
             // So the handover has a precondition now, and it is checked by the side that owns the
             // map. `play` is told the screen is already open, and every state it can find there is
             // one of its own.
-            if r.left_the_overworld(
+            // `Shrine screen:` is the game's own word for it (`shrine.lua:431-432`); the two screen
+            // fingerprints are the backstop, and the weaker one — `Screen::Shrine` is a back plaque
+            // four screens share, which is precisely the ambiguity the console line does not have.
+            if !r.left_the_overworld(
                 "Visit",
+                Some(crate::act::SHRINE_SCREEN),
                 &[crate::act::Screen::Shrine, crate::act::Screen::ShrineConsecrate],
-            )
-            .is_none()
-            {
+            ) {
                 return Stop::Failed(format!(
                     "shrine {key}: `Visit` never took us off the map after {LEAVE_TRIES} presses — \
                      a navigation fault, not a shrine one"
@@ -4146,7 +4188,11 @@ pub fn drive(
                     // the shrine makes and it is lost the same way — and a shop that failed to open
                     // used to be indistinguishable from one that opened and stocked nothing, since
                     // the very next thing this does is read an inventory off the console.
-                    if r.left_the_overworld("Shop", &[crate::act::Screen::Shop]).is_none() {
+                    if !r.left_the_overworld(
+                        "Shop",
+                        Some(crate::act::SHOP_OPENED),
+                        &[crate::act::Screen::Shop],
+                    ) {
                         r.map.abandon(at);
                         r.log.push_str("  the shop did not open - writing the store off
 ");

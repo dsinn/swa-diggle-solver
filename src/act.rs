@@ -981,6 +981,18 @@ pub const SHOP_BACK: (i32, i32) = (1727, 918);
 /// The console line `core.onActive` prints when a shop UI opens (`shop.lua:253`).
 pub const SHOP_OPENED: &str = "Opened shop UI";
 
+/// The console line `onActive` prints when the shrine screen becomes active (`shrine.lua:431-432`).
+///
+/// **Unconditional, and that is what makes it usable.** The `print` sits one line *above*
+/// `if not activeGameTypeIs'main' then return end`, so it announces every activation of the mode —
+/// including the return trip after a consecration beam hands the screen back via `setActiveMode`.
+///
+/// Preferred over [`SHRINE_GOBACK`] for confirming that a `Visit` press landed, because that plaque
+/// answers "is there a way out of here" and several screens have one; this answers "the shrine
+/// screen just opened" and nothing else prints it. The trailing colon is the game's, not a typo —
+/// [`crate::observe::feed::Feed::seen_line_since`] matches whole lines.
+pub const SHRINE_SCREEN: &str = "Shrine screen:";
+
 /// A back plaque at `ss(0, 0.9)` — **and the shrine is only one of the screens that has one**.
 ///
 /// The inn declares the same button from the same `back.png` (`ui/inn.lua:68-71`), so does the rest
