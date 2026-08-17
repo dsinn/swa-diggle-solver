@@ -3093,6 +3093,23 @@ impl WorldMap {
             self.places
                 .values()
                 .filter(|p| p.key != here && !p.avoid && p.is_shrine())
+                // **A surface destination, so nothing with a parent.** [`Place::is_shrine`] answers
+                // by key *or* heading, and only the key arm excludes subnodes — its own doc says
+                // matching them "would make the planner target a node whose parent is where it
+                // actually wants to go". The heading arm re-admits exactly what the key arm keeps
+                // out, as soon as a dump names one: `Gripthorpe Brush woodland shrine` ends in
+                // `shrine`, so `shrine1sub1` and `shrine1_plaza` are both candidates here.
+                //
+                // Mostly hidden today, and hidden is not fixed. Our graph has no edge across a
+                // subworld boundary (see [`WorldMap::plan`]'s note), so `dist` scores an interior
+                // node `usize::MAX` and `ok`'s route test drops it — but `plan` runs a **second pass
+                // with `need_route` off**, and there the route test is not there to catch it. What is
+                // left is a target `next_hop` cannot step toward.
+                //
+                // The right entry to an interior shrine is its container, and once inside,
+                // [`WorldMap::shrine_inside`] and [`WorldMap::worth_consecrating_here`] own it. This
+                // says that in the filter instead of relying on a distance that happens to sort last.
+                .filter(|p| p.parent.is_none())
                 .filter(|p| !self.abandoned.contains(&p.key))
                 .filter(|p| worth_a_trip(p))
                 // **With the portal open, a shrine has to be cheap or it is not a destination.**
@@ -5635,6 +5652,70 @@ mod tests {
         assert!(
             !m.worth_consecrating_here("shrine1_plaza"),
             "the parent carries the consecration, so the plaza is finished with"
+        );
+    }
+
+    /// A shrine **inside** a subworld is reached through its container, never targeted directly.
+    ///
+    /// `is_shrine` answers by key or by heading, and only the key arm excludes subnodes. The moment a
+    /// dump names one, its heading ends in `shrine` and it becomes a candidate — so this pins the
+    /// filter rather than the naming, because the naming is what the errand path needs to keep
+    /// working.
+    ///
+    /// Both halves matter and they pull opposite ways: `next_target` must offer the **container**,
+    /// and [`WorldMap::shrine_inside`] must still find the **subnode** once we are in there. A fix
+    /// that made `is_shrine` stricter would have satisfied the first and broken the second.
+    ///
+    /// ## The fixture has to reach the second pass, and the first version did not
+    ///
+    /// [`WorldMap::next_target`] is `plan(false, true).or_else(|| plan(false, false))`, and only the
+    /// **second** call drops the route test — which is the one thing otherwise keeping an interior
+    /// node out, since our graph has no edge across a subworld boundary. Written the obvious way,
+    /// with the forest left unexplored, this test passed with the filter deleted: an unvisited `l4`
+    /// is a frontier, `Goal::Explore` answered from the routed pass, and the fallback never ran.
+    ///
+    /// So everything else here is deliberately finished — visited, no hidden neighbours, nothing
+    /// owed — until the unroutable shrine is the only candidate left and the second pass is the only
+    /// thing that can answer. That is the state the filter exists for, and a fixture that does not
+    /// build it certifies nothing.
+    #[test]
+    fn an_interior_shrine_is_reached_through_its_container_not_targeted_directly() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("l10", "Trenwick crossroads", vec![node("l4", "Bainton Clump — level 1 forest")]));
+        // Standing in the forest teaches us the subnode and its parent, the way arrival does.
+        m.fold(&dump("l4sub9", "Bainton Clump woodland shrine", vec![node("l4sub3", "Bainton Clump road")]));
+        m.entry("l4sub9").parent = Some("l4".into());
+        m.entry("l4sub3").parent = Some("l4".into());
+        m.entry("l4").subworld_container = true;
+        m.here = Some("l10".into());
+        // Nothing on the surface is owed or unknown, so the routed pass has no answer at all.
+        for k in ["l10", "l4"] {
+            let p = m.entry(k);
+            p.visited = true;
+            p.completed = true;
+            p.hidden = Some(0);
+        }
+
+        assert!(m.get("l4sub9").unwrap().is_shrine(), "the premise: the heading names it a shrine");
+        assert!(
+            !m.can_route_to("l4sub9"),
+            "the premise: no edge crosses a subworld boundary, so only the fallback pass can reach it"
+        );
+
+        if let Some(plan) = m.next_target() {
+            assert_ne!(
+                plan.target, "l4sub9",
+                "an interior node is not somewhere `next_hop` can step to: {plan:?}"
+            );
+        }
+
+        // And the errand path, which is the half that needs the subnode to keep matching. A filter
+        // that fixed the above by making `is_shrine` stricter would break this instead.
+        m.here = Some("l4sub3".into());
+        assert_eq!(
+            m.errand_inside("l4").map(|p| p.key.as_str()),
+            Some("l4sub9"),
+            "once inside, the shrine is exactly what we are looking for"
         );
     }
 
