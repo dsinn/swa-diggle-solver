@@ -3112,6 +3112,34 @@ impl WorldMap {
                 .filter(|p| p.parent.is_none())
                 .filter(|p| !self.abandoned.contains(&p.key))
                 .filter(|p| worth_a_trip(p))
+                // **With the portal shut, a shrine that would open it is not a free errand.**
+                //
+                // The dev, 2026-08-17, watching a run at 52/52 walk into `shrine7`, *Cottam Boscage
+                // — level 9 forest*: *why did we even enter the lv9 forest instead of immediately
+                // backtracking? That was nearly suicidal.*
+                //
+                // Both filters below are written `!anomaly_open || …`, so **before the portal opens
+                // they are no-ops** and nothing at all priced a shrine's cost. `worth_a_trip`
+                // reduces to `!used`, which a never-prayed level 9 forest satisfies as happily as a
+                // level 1 one, and `Goal::Shrine` walked us into the fight.
+                //
+                // Arriving is also what *opened* the anomaly, which is the second half of the harm:
+                // `world_evil.lua:15-18` fires on `locationHasCombat and level > 3`, so the errand
+                // did not merely pick an expensive fight, it ended the phase it belonged to.
+                //
+                // ## This is not the ruling of 2026-08-16 being re-litigated
+                //
+                // An `opens_the_anomaly` was removed from [`Place`] as guarding a state that cannot
+                // happen — see the note there — and that reasoning was about **clearing a crypt**:
+                // you cannot complete a level 5 crypt without first arriving at it, so the flag is
+                // always already set by the time `completed` is true. It is sound, and it is about
+                // a different caller: `choose_exit`'s door filter, choosing where to *walk through*.
+                //
+                // A shrine is a destination we go to for a **prayer**, and a shrine can sit on a
+                // level 9 forest. `shrine7` was uncompleted, level 9, and the portal was shut — the
+                // state that note calls unreachable, reached, and the run log is the fixture. So
+                // the predicate is applied here rather than restored there.
+                .filter(|p| anomaly_open || !(p.triggers_anomaly() && !p.completed))
                 // **With the portal open, a shrine has to be cheap or it is not a destination.**
                 //
                 // The dev's rule, 2026-08-15: target only unconsecrated, uncorrupted shrines that
@@ -5716,6 +5744,64 @@ mod tests {
             m.errand_inside("l4").map(|p| p.key.as_str()),
             Some("l4sub9"),
             "once inside, the shrine is exactly what we are looking for"
+        );
+    }
+
+    /// A shrine that would open the anomaly is not an errand while the anomaly is shut.
+    ///
+    /// **The fixture is the run of 2026-08-17 0436Z**, which is why it is a level 9 forest and not
+    /// a round number. The log reads:
+    ///
+    /// ```text
+    /// 17. l55 -> **shrine7** (for shrine7, Shrine)
+    /// 18. skipped the anomaly cinematic
+    /// 19. fighting `shrine7` (Cottam Boscage — level 9 forest)
+    /// ```
+    ///
+    /// at 52/52 health, with the portal shut when the target was chosen. Both cost filters in
+    /// `pick_shrine` are written `!anomaly_open || …`, so before the portal opens nothing priced
+    /// the trip at all.
+    ///
+    /// The level 1 shrine is the control, and it is the half that stops this being "switch the
+    /// shrine errand off pre-anomaly". The dev, on the woodland shrine the same day: *triggering a
+    /// fight at a shrine is fine.* A fight is fine; ending the pre-anomaly phase to get one is not.
+    #[test]
+    fn a_shrine_that_would_open_the_anomaly_is_not_a_pre_anomaly_errand() {
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "l55",
+            "Emswell campfire",
+            vec![
+                node("shrine7", "Cottam Boscage — level 9 forest"),
+                node("shrine1", "Gripthorpe Brush shrine"),
+            ],
+        ));
+        m.here = Some("l55".into());
+        m.hell = Some(0.0);
+
+        assert!(m.get("shrine7").unwrap().triggers_anomaly(), "the premise: level 9 opens it");
+        assert!(!m.get("shrine1").unwrap().triggers_anomaly(), "and a plain shrine does not");
+
+        // The gentle shrine is the errand, so the branch is alive and both are reachable.
+        let plan = m.next_target().expect("a plan");
+        assert_eq!(plan.reason, Goal::Shrine);
+        assert_eq!(plan.target, "shrine1", "the shrine that costs nothing to reach");
+
+        // Take it away and the level 9 one must not inherit the errand.
+        m.entry("shrine1").used = true;
+        if let Some(plan) = m.next_target() {
+            assert_ne!(
+                plan.target, "shrine7",
+                "walking here opens the portal, which is the phase we are still in: {plan:?}"
+            );
+        }
+
+        // Once it is cleared it no longer triggers, so it stops being excluded for this reason.
+        m.entry("shrine7").completed = true;
+        assert!(
+            !(m.get("shrine7").unwrap().triggers_anomaly()
+                && !m.get("shrine7").unwrap().completed),
+            "a cleared node cannot fire the arrival event again"
         );
     }
 
