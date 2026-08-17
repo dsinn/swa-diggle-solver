@@ -2590,6 +2590,7 @@ impl WorldMap {
             for k in consecrated {
                 self.entry(&k).consecrated = true;
             }
+            self.lend_a_shrine_its_plaza_the_rewards_it_earned();
         }
         self.hell = save
             .table_at("overworld.areaFlags")
@@ -4919,6 +4920,64 @@ impl WorldMap {
     /// `shrine1`, won it in two turns, and walked away from the shrine because the node was still
     /// flagged corrupted and no route to the anomaly was known — declining a free consecration on
     /// the strength of a fight it had just finished.
+    /// Copies a major shrine's earned flags onto its plaza, because the game records them there.
+    ///
+    /// ## The mismatch this exists for
+    ///
+    /// A shrine forest has two places that are the same shrine: the overworld node `shrineN`, and
+    /// `shrineN_plaza`, the node you actually stand on inside it. `setShrineLocation`
+    /// (`shrine.lua:420-427`) collapses them — standing on the plaza, `shrineLocation` becomes the
+    /// **parent** — so every reward the game writes goes to `shrineN`. `doPray` calls
+    /// `setAreaUsed(shrineLocation)` (`:133`), and `<dataKey>subs` and `_consecrated` follow the same
+    /// promoted key.
+    ///
+    /// [`WorldMap::apply_save`] projects a flag onto the key it names and no other, so
+    /// `shrineN_plaza` came back `used = false` from a shrine that had just been prayed at — and
+    /// there is no flag the game will ever write that would clear it.
+    ///
+    /// **Measured, not predicted.** The save after the run of 2026-08-17 holds `shrine1_used = true`
+    /// with no `shrine1_plaza_used` beside it, and the checkpoint from before that run has neither.
+    /// So the prayer at the plaza landed, and it landed on the parent.
+    ///
+    /// ## Why this was fixed before the next run rather than filed
+    ///
+    /// [`WorldMap::shrine_inside`] offers any shrine in the container with `!used` as an errand, and
+    /// the arrival branch enters on `!used || worth_consecrating_here`. Both would send the run back
+    /// to a plaza it had already prayed at, where `showPrayButton` needs
+    /// `areaUnused(shrineLocation.key)` (`shrine.lua:101`) — false, since the parent is used — so no
+    /// button appears, `play` returns neither a prayer nor a consecration, and the pre-MVP rule stops
+    /// the run. [`WorldMap::abandon`] masks it within a single run only: `abandoned` is in-memory and
+    /// every run starts with it empty.
+    ///
+    /// ## One way, and only these three flags
+    ///
+    /// Parent to plaza, because that is the direction the game's promotion runs. `corrupted` is
+    /// deliberately not carried: it comes from `_first_corrupt_time`, it is a statement about the
+    /// area and its fight rather than about the shrine's rewards, and nothing has shown the two nodes
+    /// share it.
+    ///
+    /// Written with `get_mut` rather than [`WorldMap::entry`] so it can never mint a place. Inventing
+    /// `shrineN_plaza` for a shrine whose forest we have never entered is exactly the phantom-place
+    /// failure recorded on the `subs` parsing in [`WorldMap::apply_save`]. A plaza we have not met yet
+    /// is picked up by the next `apply_save` after a dump introduces it.
+    fn lend_a_shrine_its_plaza_the_rewards_it_earned(&mut self) {
+        let plazas: Vec<String> = self
+            .places
+            .keys()
+            .filter(|k| k.strip_suffix("_plaza").is_some_and(key_is_major_shrine))
+            .cloned()
+            .collect();
+        for plaza in plazas {
+            let Some(parent) = plaza.strip_suffix("_plaza") else { continue };
+            let Some(p) = self.places.get(parent) else { continue };
+            let (used, played, consecrated) = (p.used, p.played, p.consecrated);
+            let Some(here) = self.places.get_mut(&plaza) else { continue };
+            here.used |= used;
+            here.played |= played;
+            here.consecrated |= consecrated;
+        }
+    }
+
     pub fn worth_consecrating_here(&self, key: &str) -> bool {
         let Some(p) = self.places.get(key) else { return false };
         if !p.is_shrine() || p.consecrated {
@@ -5497,6 +5556,70 @@ mod tests {
 
     fn node_at(key: &str, heading: &str, x: f64, y: f64) -> Node {
         Node { key: key.into(), heading: heading.into(), x, y, connections: 2 }
+    }
+
+    /// A prayer at the plaza is recorded against its parent, and the plaza must not read as unprayed
+    /// because of it.
+    ///
+    /// **The fixture is the real save**, not an invented one. After the run of 2026-08-17 the live
+    /// save holds `shrine1_used = true` and `shrine1_shrine_subs`, with no `shrine1_plaza_*` beside
+    /// them, and the checkpoint from before that run has none of the three. So this is the state the
+    /// game actually produces when you pray at a plaza — which is the difference between pinning a
+    /// rule and pinning a guess about one.
+    ///
+    /// Without the promotion, `shrine1_plaza` comes back `used = false` from a shrine that has just
+    /// been prayed at, `shrine_inside` offers it as an errand again, and the visit finds no `Pray`
+    /// to press. The last assertion is the one that would have stopped the next run.
+    #[test]
+    fn a_plaza_inherits_the_prayer_its_parent_was_credited_with() {
+        let mut m = WorldMap::new();
+        // Both nodes have to be known before the flags mean anything — the promotion never mints a
+        // place, so a plaza we have not seen stays absent rather than becoming a phantom.
+        m.fold(&dump(
+            "shrine1",
+            "Gripthorpe Brush shrine",
+            vec![node("shrine1_plaza", "Gripthorpe Brush shrine")],
+        ));
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = {
+                     hell = 0, shrine1_used = true, shrine1_shrine_subs = 1,
+                 } } }",
+            )
+            .unwrap(),
+        );
+
+        assert!(m.get("shrine1").unwrap().used, "the parent is where the game wrote it");
+        assert!(
+            m.get("shrine1_plaza").unwrap().used,
+            "and the plaza is the same shrine, so its blessing is claimed too"
+        );
+        assert!(m.get("shrine1_plaza").unwrap().played, "the word was played there as well");
+
+        // A plaza nobody has seen must not be conjured by the promotion.
+        assert!(m.get("shrine2_plaza").is_none(), "no phantom plaza for an unseen shrine");
+
+        // The consecration axis is the same mistake in a different flag, so it is pinned here too:
+        // with the portal open, an already-consecrated shrine must not be worth a second trip.
+        m.hell = Some(0.1);
+        m.entry("shrine1").completed = true;
+        m.entry("shrine1_plaza").completed = true;
+        assert!(
+            m.worth_consecrating_here("shrine1_plaza"),
+            "unconsecrated and the portal is open, so this one is genuinely owed"
+        );
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = {
+                     hell = 0.1, shrine1_used = true, shrine1_consecrated = 1,
+                 } } }",
+            )
+            .unwrap(),
+        );
+        assert!(
+            !m.worth_consecrating_here("shrine1_plaza"),
+            "the parent carries the consecration, so the plaza is finished with"
+        );
     }
 
     /// A woodland shrine is a shrine that can never be consecrated, and the run must not go back for
