@@ -127,6 +127,67 @@ pub const INN_COST: i64 = 10;
 /// arrival handler: `Rest` on a campfire is an ordinary area button, and the cost side is already
 /// read — [`fuel`] totals the firewood and `areaUnused` says whether the first rest is free.
 pub const CAMPFIRE_REST_IS_BUILT: bool = false;
+/// **Well-Rested stacks wanted per level of a fight we take on purpose.**
+///
+/// The dev's number, 2026-08-20, after a run reached the anomaly and died at turn 24. Well Rested
+/// is not an aura — it is a bank of overkill heals, one spent per kill that heals
+/// (`rpgview.lua:1204-1209`), each worth `min(floor(overkill/2), missingHealth)` (`:1194`). So the
+/// right unit is "how many kills deep is this fight", and twice the level is the dev's estimate of
+/// that.
+pub const STACKS_PER_LEVEL: i64 = 2;
+
+/// The level at which a deliberate fight starts wanting a full bank.
+///
+/// The dev's line, and **crypts and the anomaly, not forests**: *forests have significantly shorter
+/// combat nodes on the path, and we don't currently have any code for deliberately clearing spider
+/// nests.* A forest is crossed, not cleared, so its level does not describe what we are about to
+/// fight. See [`crate::overworld::Place::deliberate_fight_level`], which is where that distinction
+/// is drawn.
+pub const DEEP_FIGHT: u32 = 6;
+
+/// What a corrupted shrine counts as when nothing has told us its level.
+///
+/// The dev, 2026-08-20: *if we know that a shrine is corrupted and that combat there is our next
+/// objective, simply assume that it's level 7.*
+///
+/// This is not a guess we could avoid making. A shrine rebuilt from save flags comes back
+/// **unheaded** — `completed`, `corrupted` and `consecrated` survive a restart and the heading does
+/// not — and [`crate::overworld::Place::level`] parses the heading. That is the same absence which
+/// cost two runs on 2026-08-14, recorded at `Place::is_shrine`. Without a default the rule would
+/// silently not apply to exactly the shrines we know least about.
+pub const ASSUMED_SHRINE_LEVEL: u32 = 7;
+
+/// How many stacks a fight at `level` is worth banking for.
+pub fn stacks_wanted(level: u32) -> i64 {
+    STACKS_PER_LEVEL * level as i64
+}
+
+/// How many more stacks a fight at `level` wants, given what is banked. Zero when it is satisfied.
+pub fn stacks_short(banked: i64, level: u32) -> i64 {
+    (stacks_wanted(level) - banked).max(0)
+}
+
+/// **Is a fight at this level worth stopping to bank for at all?**
+///
+/// Below [`DEEP_FIGHT`] the answer is no, whatever the bank holds: the errand costs ten gold and a
+/// walk per stack, and a level 5 fight does not repay it.
+pub fn worth_banking_for(level: u32) -> bool {
+    level >= DEEP_FIGHT
+}
+
+/// **Can another stack still be bought?**
+///
+/// One stack per rest, and an inn is the only source we have: `doRest` adds exactly one
+/// (`ui/rest.lua:355-357`), and a campfire adds none without the Bedroll or Tent passive (`:174`,
+/// `items/restgear.lua:165-189`) — which is moot anyway while [`CAMPFIRE_REST_IS_BUILT`] is false.
+///
+/// So this is the inn's own gate, [`INN_COST`], and it is what the dev's floor means: *you can bail
+/// on the "x2 Well-Rested" condition if we have less than 10 gold.* Below the price the requirement
+/// is not merely unmet, it is unmeetable, and holding the run at it would stall rather than prepare.
+pub fn can_bank_a_stack(gold: i64) -> bool {
+    gold >= INN_COST
+}
+
 
 /// A place that can restore health.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +288,45 @@ mod tests {
     fn hp(current: i64, max: i64) -> Health {
         Health { current, max }
     }
+    /// The dev's rule in the two numbers it will actually be asked for.
+    #[test]
+    fn the_bank_wanted_is_twice_the_level() {
+        // The anomaly is level 8, which is the fight this rule was written after.
+        assert_eq!(stacks_wanted(8), 16);
+        // A corrupted shrine with no heading, which is the case the assumption exists for.
+        assert_eq!(stacks_wanted(ASSUMED_SHRINE_LEVEL), 14);
+        // And the shallowest fight the rule applies to at all.
+        assert_eq!(stacks_wanted(DEEP_FIGHT), 12);
+    }
+
+    #[test]
+    fn a_bank_already_deep_enough_asks_for_nothing_more() {
+        assert_eq!(stacks_short(16, 8), 0, "exactly enough is enough");
+        assert_eq!(stacks_short(20, 8), 0, "and a surplus is not a negative errand");
+        assert_eq!(stacks_short(11, 8), 5, "eleven is what a real run reached");
+        assert_eq!(stacks_short(0, 8), 16, "spent out, which is how the 2026-08-20 run arrived");
+    }
+
+    /// **The shallow end is excluded on purpose**, and this is the dev's forest correction.
+    #[test]
+    fn only_a_deep_fight_is_worth_banking_for() {
+        assert!(worth_banking_for(6), "a level 6 crypt is the dev's own line");
+        assert!(worth_banking_for(8), "and the anomaly above it");
+        assert!(!worth_banking_for(5), "below the line the errand costs more than the fight");
+        assert!(!worth_banking_for(0));
+    }
+
+    /// The floor, which is the inn's own gate rather than a number of ours.
+    #[test]
+    fn below_the_inns_price_the_requirement_is_unmeetable_not_merely_unmet() {
+        assert!(can_bank_a_stack(INN_COST), "exactly the price buys exactly one");
+        assert!(!can_bank_a_stack(INN_COST - 1), "the dev's floor: bail below ten gold");
+        assert!(!can_bank_a_stack(0));
+        // Stated as the inn's gate so the two cannot drift: `getCanRest` for an inn is a flat
+        // `getPlayerGold() >= 10` (`ui/rest.lua:49`) and nothing else.
+        assert_eq!(INN_COST, 10);
+    }
+
 
     #[test]
     fn four_lost_is_the_bar() {

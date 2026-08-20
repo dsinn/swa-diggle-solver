@@ -128,10 +128,18 @@ pub const WAKE_UP: ButtonSpec =
 
 /// A hard ceiling on presses at one inn, so a misread block cannot spend a run's whole purse.
 ///
-/// Twelve is four times what a full bar costs from one health at the base rate, so it never binds in
-/// ordinary play; it exists for the case where the arithmetic is wrong rather than the case where
-/// the rest is expensive.
-pub const MAX_PRESSES: usize = 12;
+/// It exists for the case where the arithmetic is wrong, not the case where the rest is expensive,
+/// and it must stay above every number the arithmetic can legitimately produce or it stops being a
+/// guard and starts being a rule.
+///
+/// **Raised from twelve on 2026-08-20**, when banking Well-Rested stacks gave it a second and larger
+/// customer. Twelve was four times what a full bar costs from one health, so it never bound; the
+/// bank asks for [`crate::rest::STACKS_PER_LEVEL`] times the level, which is sixteen for the level 8
+/// anomaly alone — the cap would have silently capped the dev's rule three presses short, at an inn
+/// with the gold in hand and nothing on screen to say why.
+///
+/// Twenty covers a level 10 fight, above anything the anomaly or a crypt has been seen to reach.
+pub const MAX_PRESSES: usize = 20;
 
 /// How many times to press `Rest` before accepting that the rest screen is not going to open.
 ///
@@ -222,25 +230,46 @@ pub fn parse_rest_data(lines: &[String]) -> Option<RestData> {
 
 /// How many times to press `Rest`, from the block the rest screen printed when it opened.
 ///
-/// Three limits, and each has bitten something in this project before:
+/// Two reasons to press, and the greater of them wins:
 ///
 /// - **Enough to fill the bar.** `heal = min(getRestValue(), healthNeed)` per press
 ///   (`ui/rest.lua:353`), so this is a division, not a single click.
+/// - **Enough to bank `stacks_short` Well-Rested stacks**, one per press
+///   (`affectPlayerStatus(statusGive, 1)`, `:355-357`). The dev's rule of 2026-08-20; see
+///   [`crate::rest::stacks_wanted`].
+///
+/// Then two limits on the result:
+///
 /// - **What we can pay for.** `getCanRest` is a flat `getPlayerGold() >= 10` (`:49`), and the
 ///   button simply goes inactive when it fails — a silent stop, not a refusal we would see.
 /// - **[`MAX_PRESSES`]**, so a block we misread costs a bounded amount rather than a purse.
 ///
+/// ## `health_need <= 0` is no longer a reason to stop, and that is the change
+///
+/// It used to return zero at full health, which was right while healing was the only thing a rest
+/// bought. It is not: the stack is granted on its own line, unconditional on the heal
+/// (`ui/rest.lua:355-357`), and the inn will serve a character at full health because `getCanRest`
+/// asks about gold and nothing else. So a run that needs a bank and has a full bar must still press,
+/// and this returning zero was the single line standing in the way.
+///
+/// `health_give <= 0` still stops it, but only when there is no bank to buy either: a rest that
+/// heals nothing *and* banks nothing is a press with no effect at all.
+///
 /// Zero whenever there is nothing to gain, including the case that matters most: `can_rest` already
 /// false, which is the inn telling us it will not serve us before we have touched anything.
-pub fn presses_needed(d: &RestData, gold: i64) -> usize {
-    if !d.can_rest || d.doing_event || d.health_need <= 0 || d.health_give <= 0 {
+pub fn presses_needed(d: &RestData, gold: i64, stacks_short: i64) -> usize {
+    if !d.can_rest || d.doing_event {
         return 0;
     }
-    let to_full = ((d.health_need + d.health_give - 1) / d.health_give) as usize;
+    let banking = stacks_short.max(0) as usize;
+    let to_full = match d.health_need > 0 && d.health_give > 0 {
+        true => ((d.health_need + d.health_give - 1) / d.health_give) as usize,
+        false => 0,
+    };
     // A campfire costs fuel rather than gold, and `can_rest` has already answered for the fuel.
     let affordable =
         if d.campfire { usize::MAX } else { (gold / crate::rest::INN_COST).max(0) as usize };
-    to_full.min(affordable).min(MAX_PRESSES)
+    to_full.max(banking).min(affordable).min(MAX_PRESSES)
 }
 
 #[cfg(test)]
@@ -296,7 +325,7 @@ Rest data = {
         let d = parse_rest_data(&lines(text)).unwrap();
         assert!(d.doing_event);
         // And it stops the loop dead: pressing into a pending event does nothing (`ui/rest.lua:44`).
-        assert_eq!(presses_needed(&d, 763), 0);
+        assert_eq!(presses_needed(&d, 763, 0), 0);
     }
 
     #[test]
@@ -308,14 +337,14 @@ Rest data = {
         let d = parse_rest_data(&lines(text)).unwrap();
         assert!(d.campfire);
         assert_eq!(d.cost, None);
-        assert_eq!(presses_needed(&d, 0), 4, "no gold is no obstacle at a campfire");
+        assert_eq!(presses_needed(&d, 0, 0), 4, "no gold is no obstacle at a campfire");
     }
 
     #[test]
     fn four_presses_fill_a_bar_from_one_of_twenty() {
         // The sandbox's actual state, and the reason this is a loop: 19 missing at 6 a press.
         let d = parse_rest_data(&lines(OPENED)).unwrap();
-        assert_eq!(presses_needed(&d, 763), 4);
+        assert_eq!(presses_needed(&d, 763, 0), 4);
     }
 
     #[test]
@@ -323,21 +352,78 @@ Rest data = {
         // Thirty gold is three rests, whatever the bar says. The button would simply go inactive on
         // the fourth press and the run would be pressing at nothing.
         let d = parse_rest_data(&lines(OPENED)).unwrap();
-        assert_eq!(presses_needed(&d, 30), 3);
-        assert_eq!(presses_needed(&d, 9), 0, "below the inn's ten gold there is nothing to do");
+        assert_eq!(presses_needed(&d, 30, 0), 3);
+        assert_eq!(presses_needed(&d, 9, 0), 0, "below the inn's ten gold there is nothing to do");
     }
 
     #[test]
     fn nothing_to_gain_is_no_presses() {
         let full = RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
-        assert_eq!(presses_needed(&full, 763), 0);
+        assert_eq!(presses_needed(&full, 763, 0), 0);
         let refused =
             RestData { can_rest: false, health_need: 19, health_give: 6, ..Default::default() };
-        assert_eq!(presses_needed(&refused, 763), 0);
+        assert_eq!(presses_needed(&refused, 763, 0), 0);
         // `restInsomnia` gear and a zero-value rest both land here, and neither is worth a click.
         let pointless =
             RestData { can_rest: true, health_need: 19, health_give: 0, ..Default::default() };
-        assert_eq!(presses_needed(&pointless, 763), 0);
+        assert_eq!(presses_needed(&pointless, 763, 0), 0);
+    }
+
+    /// **A full bar is no longer a reason to walk out**, which is the change of 2026-08-20.
+    ///
+    /// The dev's rule wants Well-Rested stacks banked before a deep fight, and a stack is bought by
+    /// pressing `Rest` — one per press, granted on its own line, unconditional on the heal
+    /// (`ui/rest.lua:355-357`). The inn will serve a character at full health because `getCanRest`
+    /// asks about gold and nothing else (`:49`). This function returning zero was the single line
+    /// standing in the way.
+    #[test]
+    fn stacks_are_bought_at_full_health() {
+        let full = RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
+        assert_eq!(presses_needed(&full, 763, 0), 0, "nothing wanted, nothing pressed — as before");
+        assert_eq!(presses_needed(&full, 763, 5), 5, "five stacks short is five presses");
+        // Sixteen is the level 8 anomaly's whole bank, from empty.
+        assert_eq!(presses_needed(&full, 763, 16), 16);
+    }
+
+    /// Healing and banking are two reasons to press, and the **greater** one wins.
+    ///
+    /// Not the sum: a press that heals also banks, so buying four heals has already bought four
+    /// stacks. Adding them would spend twice the gold for the same result.
+    #[test]
+    fn the_two_reasons_to_press_do_not_add_up() {
+        let d = parse_rest_data(&lines(OPENED)).unwrap();
+        assert_eq!(presses_needed(&d, 763, 0), 4, "the bar alone wants four");
+        assert_eq!(presses_needed(&d, 763, 2), 4, "and two stacks come free with them");
+        assert_eq!(presses_needed(&d, 763, 9), 9, "the deeper want is the one that decides");
+    }
+
+    /// The purse still caps it, and the floor is still the inn's own.
+    #[test]
+    fn gold_caps_the_bank_exactly_as_it_caps_the_bar() {
+        let full = RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
+        assert_eq!(presses_needed(&full, 30, 16), 3, "three rests is what thirty gold buys");
+        assert_eq!(
+            presses_needed(&full, crate::rest::INN_COST - 1, 16),
+            0,
+            "the dev's floor: below ten gold the errand is over"
+        );
+    }
+
+    /// **The ceiling has to sit above every number the rule can ask for.**
+    ///
+    /// It was twelve, which never bound while healing was the only customer — four times what a
+    /// full bar costs from one health. The bank asks for twice the level, sixteen for the anomaly
+    /// alone, so twelve would have capped the dev's rule four presses short at an inn with the gold
+    /// in hand and nothing on screen to say why. This is the assertion that keeps the guard a guard.
+    #[test]
+    fn the_press_ceiling_clears_the_deepest_bank_the_rule_can_want() {
+        assert!(
+            MAX_PRESSES >= crate::rest::stacks_wanted(8) as usize,
+            "the level 8 anomaly wants {} presses and the cap is {MAX_PRESSES}",
+            crate::rest::stacks_wanted(8)
+        );
+        let full = RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
+        assert_eq!(presses_needed(&full, 10_000, 500), MAX_PRESSES, "and it is still a ceiling");
     }
 
     #[test]

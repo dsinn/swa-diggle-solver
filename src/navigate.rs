@@ -1825,9 +1825,14 @@ impl Run<'_> {
                 break;
             };
             let gold = self.map.gold();
-            let presses = innplay::presses_needed(&data, gold).min(innplay::MAX_PRESSES - done);
+            // **Two reasons to press, and the inn cannot tell them apart.** The block on screen
+            // answers the health half; the bank half is ours, and comes from the errand the run
+            // is actually on — see [`crate::overworld::WorldMap::stacks_short_ahead`].
+            let banking = self.map.stacks_short_ahead();
+            let presses =
+                innplay::presses_needed(&data, gold, banking).min(innplay::MAX_PRESSES - done);
             self.log.push_str(&format!(
-                "  rest: {} missing, {} a press, {gold} gold — pressing {presses} time(s)\n",
+                "  rest: {} missing, {} a press, {gold} gold, {banking} stack(s) short — pressing {presses} time(s)\n",
                 data.health_need, data.health_give
             ));
             // Nothing left to buy. The only exit from this loop that is not a failure, and the

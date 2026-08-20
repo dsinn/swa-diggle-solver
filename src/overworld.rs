@@ -707,6 +707,54 @@ impl Place {
     pub fn triggers_anomaly(&self) -> bool {
         crate::subworld::triggers_anomaly(self.parent.as_deref(), self.level())
     }
+    /// **The level of a fight we would take here on purpose**, or `None` if arriving is not us
+    /// choosing to fight.
+    ///
+    /// This is the trigger for the Well-Rested bank ([`crate::rest::stacks_wanted`]), and the
+    /// distinction it draws is the dev's, 2026-08-20:
+    ///
+    /// > Forests have significantly shorter combat nodes on the path, and we don't currently have
+    /// > any code for deliberately clearing spider nests.
+    ///
+    /// So a forest's level is not a description of a fight we are about to have — it is the depth
+    /// of somewhere we walk *through*, one short node at a time, and holding the run at an inn for
+    /// sixteen rests before crossing one would be preparation for a fight nobody intends to take.
+    /// The three that do describe an intended fight:
+    ///
+    /// - **The anomaly.** The objective, and the fight the whole rule exists for.
+    /// - **A crypt.** The dev's original wording, and the thing that has killed the most runs.
+    /// - **A corrupted shrine.** Added on the dev's own second thought: *if we wish to fight at a
+    ///   corrupted shrine for whatever reason, perhaps enhanced by rule 1, we do want the "2x
+    ///   Well-Rested" rule.* Rule 1 — four consecrations before the anomaly — is what makes that
+    ///   reachable, so the two arrived together.
+    ///
+    /// ## The corrupted shrine's level is assumed, and has to be
+    ///
+    /// [`Place::level`] parses the heading, and a shrine rebuilt from save flags has none: the
+    /// flags survive a restart and the heading does not. That is the same absence recorded at
+    /// [`Place::is_shrine`], which cost two runs on 2026-08-14. So an unheaded corrupted shrine
+    /// falls back to [`crate::rest::ASSUMED_SHRINE_LEVEL`] rather than dropping out of the rule —
+    /// the dev's instruction, and the safe direction, since the alternative is walking into the one
+    /// fight we know least about with an empty bank.
+    ///
+    /// A shrine we *have* seen this run uses its real level, so `Gripthorpe Brush — level 6 shrine`
+    /// still asks for twelve rather than fourteen.
+    ///
+    /// **Corruption is the whole shrine clause.** An uncorrupted shrine costs no fight at all —
+    /// that is why it is cheap preparation and outranks the portal — so it has nothing to bank for.
+    pub fn deliberate_fight_level(&self) -> Option<u32> {
+        if self.completed {
+            return None;
+        }
+        if self.type_is("anomaly") || self.type_is("crypt") {
+            return self.level();
+        }
+        if self.is_shrine() && self.corrupted {
+            return Some(self.level().unwrap_or(crate::rest::ASSUMED_SHRINE_LEVEL));
+        }
+        None
+    }
+
 
     /// ## There was an `opens_the_anomaly` here, and the state it existed for cannot happen
     ///
@@ -1008,6 +1056,17 @@ pub struct WorldMap {
     gold: i64,
     /// Campfire fuel carried, which makes a campfire usable even at a used area.
     fuel: i64,
+    /// **Well-Rested stacks banked**, summed across both flavours.
+    ///
+    /// A consumable, not an aura: one is spent per kill that heals (`rpgview.lua:1204-1209`), and
+    /// the only source we can reach is an inn at [`crate::rest::INN_COST`] a stack
+    /// (`ui/rest.lua:355-357`). Held here for the same reason `gold` is — the decision it feeds is
+    /// where to go next. See [`crate::rest::stacks_wanted`] for what a fight is worth banking for.
+    ///
+    /// Zero is an **absent key**, not a stored zero: `affectPlayerStatus` deletes a status the
+    /// moment it reaches zero (`overworld.lua:45-47`), so a spent-out character has no
+    /// `statusEffects` entry at all.
+    well_rested: i64,
     /// `player.health` / `player.maxHealth`, as of the last save read.
     ///
     /// Kept here for the same reason `gold` is: the decision it feeds is "where to go next". See
@@ -1201,6 +1260,25 @@ pub const HEART_COST: i64 = 100;
 /// time, which is the wrong way round for a run that keeps dying just short.
 pub const HEART_FLOOR: i64 = HEART_COST + crate::rest::INN_COST;
 
+/// **Major shrines to have consecrated before the anomaly is worth walking into.**
+///
+/// The dev's number, 2026-08-20: *before the anomaly fight, ensure that at least 4 major shrines
+/// have been consecrated. This means that we need to keep exploring if the anomaly opens before
+/// we've revealed 4 shrines.*
+///
+/// Four of a possible seven — `generateNLocationsOfNameAroundLocationsWithinBounds(…, 7, 'shrine',
+/// …)` (`overworld/generators/world.lua:81`) — so the bar is reachable rather than aspirational,
+/// though nothing guarantees all seven get placed or that all of them can be reached.
+///
+/// A consecration pays in gold- and silver-bordered wildcard tiles (`utils/blessings.lua:95-110`),
+/// which is the mechanic this solver handles best, and it is bought with walking rather than
+/// health. That is the whole argument for spending time on it before a level 8 fight.
+///
+/// **This gates the anomaly, it does not forbid it.** See the release at the foot of
+/// [`WorldMap::plan`]: when exploring has nothing left to offer, the run goes anyway rather than
+/// standing still with a plan it will never satisfy.
+pub const SHRINES_BEFORE_THE_ANOMALY: usize = 4;
+
 /// Cost to `key`, or [`usize::MAX`] when no known route reaches it — so unreachable places sort
 /// last rather than first.
 ///
@@ -1345,6 +1423,17 @@ pub enum Goal {
     OpenAnomaly,
     /// Health is down and somewhere nearby can restore it.
     Rest,
+    /// **Not hurt — under-banked.** An inn, to buy Well-Rested stacks before a deliberate deep fight.
+    ///
+    /// Distinct from [`Goal::Rest`] in what it is answering. `Rest` is a response to damage already
+    /// taken and stops when the bar is full; this is preparation for damage not yet taken, it is
+    /// bought at full health, and it stops when the bank is deep enough for the fight ahead
+    /// ([`crate::rest::stacks_wanted`]).
+    ///
+    /// The game permits it: `getCanRest` for an inn is a flat `getPlayerGold() >= 10`
+    /// (`ui/rest.lua:49`) with no health condition, and `doRest` grants the stack on its own line,
+    /// separate from the heal (`:355-357`). So a run at full health can and should keep paying.
+    StockUp,
     /// A village whose general store sells a `Heart` — four maximum health for a hundred gold.
     ///
     /// Ranked with the shrine detours rather than with [`Goal::Rest`]: it is not a response to being
@@ -2601,6 +2690,14 @@ impl WorldMap {
         }
         self.gold = save.int_at("player.gold").unwrap_or(0);
         self.fuel = crate::rest::fuel_from_save(save);
+        // Both flavours, summed. `wellRestedCampfire` is what a fresh character carries
+        // (`rpg/classes/warrior.lua:69` grants two) and `wellRestedInn` is what resting buys; the
+        // heal does not care which it spends, and takes the campfire one first
+        // (`rpgview.lua:1204-1209`).
+        self.well_rested = ["wellRestedCampfire", "wellRestedInn"]
+            .iter()
+            .filter_map(|k| save.int_at(&format!("player.statusEffects.{k}")))
+            .sum();
         // **Health belongs here with gold and fuel, not in the hands of whoever took the reading.**
         //
         // It used to be the caller's job: four sites in the driver did `let now = r.apply_save()`
@@ -2628,7 +2725,140 @@ impl WorldMap {
     /// Returns `None` when there is nothing left worth travelling to, which is a real answer and not
     /// a failure: it means the map is fully explored with no trigger found, and the caller has to
     /// widen the search rather than keep walking.
+    /// Where to go next, with the Well-Rested bank taken into account.
+    ///
+    /// Two layers, deliberately separate. [`WorldMap::next_errand`] answers *what this run wants to
+    /// do*, which is the whole ladder and every rule already written into it. This one asks one
+    /// further question of the answer: **is what we are walking into a fight we should not take
+    /// with an empty bank?** — and if so, buys stacks first.
+    ///
+    /// A wrapper rather than another rung, because the condition is not about a destination's
+    /// merit. Every branch of the ladder can name a deep fight, and a rung would have to be
+    /// repeated in each of them; asking afterwards catches all of them once.
     pub fn next_target(&self) -> Option<Plan> {
+        self.next_errand().map(|p| self.bank_first(p))
+    }
+
+    /// **How many major shrines are consecrated**, counted by shrine rather than by node.
+    ///
+    /// A consecration can be recorded against either half of a promoted pair — `setShrineLocation`
+    /// reassigns to the parent when the plaza's `parentNode.majorShrine` (`shrine.lua:420-427`), and
+    /// the save may carry the flag under `shrineN` or `shrineN_plaza` depending on which node the
+    /// game was standing on. Both satisfy [`Place::can_be_consecrated`], so counting places would
+    /// count one shrine twice and let three shrines pass for four.
+    ///
+    /// Keys are folded to the shrine itself, which is the thing the dev's rule is about.
+    pub fn consecrations(&self) -> usize {
+        self.places
+            .values()
+            .filter(|p| p.consecrated && p.can_be_consecrated())
+            .map(|p| p.key.strip_suffix("_plaza").unwrap_or(&p.key))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    }
+
+    /// **Buy Well-Rested stacks before walking into a deliberate deep fight.**
+    ///
+    /// Returns `plan` untouched unless every clause of the dev's rule holds, in which case the trip
+    /// becomes [`Goal::StockUp`] at the nearest inn:
+    ///
+    /// - the destination is a fight we would be **taking on purpose**
+    ///   ([`Place::deliberate_fight_level`], which excludes forests for the dev's reason);
+    /// - it is deep enough to be worth the errand ([`crate::rest::worth_banking_for`]);
+    /// - the bank is short of twice its level ([`crate::rest::stacks_short`]);
+    /// - **there is still ten gold**, the dev's floor and the inn's own gate — below it the
+    ///   requirement is unmeetable rather than merely unmet, and holding the run at it would stall;
+    /// - and a bed can actually be reached.
+    ///
+    /// The last two are what stop this looping. Every other clause is a fact about the world that
+    /// the errand itself changes: each rest spends ten gold and adds one stack, so the run walks
+    /// toward the condition it is testing and either satisfies it or runs out of money.
+    ///
+    /// Note it does **not** consult `wants_rest`. That flag is about damage taken; this is about
+    /// damage to come, and the two are independent — a run at full health with an empty bank is
+    /// exactly the case this exists for.
+    /// How many more Well-Rested stacks a trip to `target` wants. Zero unless every clause holds.
+    ///
+    /// Split out of [`WorldMap::bank_first`] because the inn needs the same number: the planner uses
+    /// it to decide *whether to go*, and [`crate::navigate::Run::rest_at_inn`] uses it to decide
+    /// **how many times to press `Rest`** once it is there. Two answers from one function, so a
+    /// run cannot set off for stacks it will not then buy.
+    fn stacks_short_for(&self, target: &str) -> i64 {
+        let Some(level) = self.places.get(target).and_then(Place::deliberate_fight_level) else {
+            return 0;
+        };
+        match crate::rest::worth_banking_for(level) {
+            true => crate::rest::stacks_short(self.well_rested, level),
+            false => 0,
+        }
+    }
+
+    /// **How short the bank is for the deepest deliberate fight we know about.**
+    ///
+    /// The *inn's* question, and deliberately a different one from [`WorldMap::bank_first`]'s.
+    /// That one asks "is the place I am walking to a fight I should bank for", because it is
+    /// deciding whether to make a special trip. This one asks "are stacks wanted at all", because
+    /// by the time it is asked we are already standing in the village and the only decision left is
+    /// whether to spend ten gold on the way past.
+    ///
+    /// Asking the ladder again here would answer with the inn we are standing in — whose
+    /// `deliberate_fight_level` is `None` — and the count would collapse to zero exactly where it
+    /// is needed. The deepest known fight is the honest stand-in: the anomaly is on the map from
+    /// the moment the portal opens, and a crypt we have seen does not stop being a crypt because
+    /// this step is heading elsewhere.
+    ///
+    /// ## Why this terminates, which is the part that matters
+    ///
+    /// It is the one question this file has been burned by before — a bed that stays wanted is a
+    /// loop, and `docs/superpowers/notes/navigation-loops.md` catalogues six of them. **Every rest
+    /// moves both terms in the same direction**: one stack banked, ten gold gone. So the condition
+    /// is strictly monotone under its own errand and ends either when the bank is deep enough or
+    /// when the purse drops below [`crate::rest::INN_COST`] — the dev's floor, and the inn's own
+    /// gate. Neither exit depends on anything we cannot see.
+    pub fn stacks_short_ahead(&self) -> i64 {
+        self.places
+            .values()
+            .filter_map(Place::deliberate_fight_level)
+            .filter(|l| crate::rest::worth_banking_for(*l))
+            .max()
+            .map(|l| crate::rest::stacks_short(self.well_rested, l))
+            .unwrap_or(0)
+    }
+
+    /// **Is a bed wanted at all**, for either of the two reasons there are?
+    ///
+    /// [`WorldMap::wants_rest`] is damage already taken; [`WorldMap::stacks_short_ahead`] is damage
+    /// to come. The village-crossing rules ask this rather than `wants_rest` alone, or a run sent to
+    /// an inn by [`WorldMap::bank_first`] would walk into the village at full health, find nothing
+    /// that wanted a bed, and walk out again — which is the exact shape of the campfire stall
+    /// recorded at [`crate::rest::CAMPFIRE_REST_IS_BUILT`], and it ends the same way, with the loop
+    /// guard.
+    ///
+    /// The gold gate is left where it already was in each caller: both of them check it, and both
+    /// check it against the same [`crate::rest::INN_COST`].
+    pub fn wants_a_bed(&self) -> bool {
+        self.wants_rest || self.stacks_short_ahead() > 0
+    }
+
+    fn bank_first(&self, plan: Plan) -> Plan {
+        if self.stacks_short_for(&plan.target) == 0 || !crate::rest::can_bank_a_stack(self.gold) {
+            return plan;
+        }
+        let here = self.here.as_deref().unwrap_or("");
+        let dist = self.distances(here);
+        // The route test only. Hostile ground is the rest goal's concern, and this errand is taken
+        // at whatever health we happen to have — refusing a bed for being awkward to reach would
+        // leave the fight itself as the alternative.
+        let ok = |p: &Place| self.can_route_to(&p.key);
+        match self.best_rest_site(here, &dist, &ok) {
+            Some(bed) if bed.key != plan.target => {
+                Plan { target: bed.key.clone(), reason: Goal::StockUp, steered_by: None }
+            }
+            _ => plan,
+        }
+    }
+
+    fn next_errand(&self) -> Option<Plan> {
         // While a rest is wanted, EVERY branch skips areas that cost a fight to leave — not just the
         // one heading for the objective. A plan is a plan whatever its reason, and arriving at a
         // shrine or a frontier through an uncleared corrupted village hurts exactly as much as
@@ -2957,6 +3187,85 @@ impl WorldMap {
     /// is a statement about what [`WorldMap::next_hop`] can do, and while we are inside, `next_hop`
     /// is not what moves us — [`WorldMap::cross_toward`] is, and it reaches the surface through
     /// exits rather than edges.
+    /// **The best place to sleep**, by site then distance then key — or `None` if none can serve.
+    ///
+    /// Extracted so the two errands that want a bed cannot drift apart. [`Goal::Rest`] asks because
+    /// health is down; [`Goal::StockUp`] asks because the Well-Rested bank is short of what the next
+    /// deliberate deep fight wants. They differ in *why* and not at all in *where*, and this file
+    /// has been bitten twice by two predicates that were meant to agree and quietly stopped —
+    /// see [`Place::is_shrine`] and the `l28 <-> l27` bounce.
+    ///
+    /// `ok` is the caller's own admissibility test, so the hostile-ground and route rules stay where
+    /// they are decided rather than being re-derived here.
+    fn best_rest_site<'a>(
+        &'a self, here: &str, dist: &BTreeMap<String, usize>, ok: &dyn Fn(&Place) -> bool,
+    ) -> Option<&'a Place> {
+        let mut sites: Vec<(&Place, crate::rest::Site)> = self
+            .places
+            .values()
+            // A corrupted rest stop is locked, not lost. Corruption swaps a location's type for
+            // its `corruptType` and puts the place under attack, so the inn sits behind
+            // `underAttackAreaButtons` or `destroyedAreaButtons`
+            // (`overworld/generators/village.lua:371-395`) — while the heading still ends in
+            // "village", which is why nothing else here notices. Met live as
+            // `Ulrome — level 6 village [corrupted]`.
+            //
+            // **Verified, and it is a race.** The inn has three button sets
+            // (`overworld/generators/village.lua:360-393`) and only one of them can serve:
+            //
+            // ```text
+            //   areaButtons            Enter -> ui.inn             the innkeeper, rest works
+            //   underAttackAreaButtons Enter -> ui.building_empty  an empty shell, no rest
+            //   destroyedAreaButtons   a loot button only          the inn is gone for good
+            // ```
+            //
+            // So corruption does not merely gate the inn, it starts a clock: clear the village
+            // in time and the real inn comes back, leave it and the inn is destroyed
+            // permanently. Confirmed by the dev, 2026-08-12, and it replaces the guess that used
+            // to sit here — which had the release right and knew nothing about the deadline.
+            //
+            // `completed` is that release and the filter is correct for it. **The gap is the
+            // third state**: nothing here distinguishes a village still under attack from one
+            // whose inn is already rubble, because both are `corrupted` and neither is
+            // `completed`. Today that costs nothing — both are excluded — but a run that clears
+            // a long-corrupted village expecting a bed will find a loot pile, and `completed`
+            // will say it may sleep there. See task #26, which wants the loot anyway.
+            .filter(|p| p.key != here && !p.avoid && (!p.corrupted || p.completed) && ok(p))
+            // A settlement under attack or lost has no bed — see [`Place::trades`]. Campfires
+            // are unaffected by it and excluded elsewhere entirely
+            // (`rest::CAMPFIRE_REST_IS_BUILT`).
+            .filter(|p| !p.is_settlement() || p.trades())
+            .filter_map(|p| crate::rest::site(&p.heading).map(|s| (p, s)))
+            .filter(|(p, s)| crate::rest::can_rest_at(*s, self.gold, self.fuel, !p.used))
+            .collect();
+        // **Site, then distance, then key.** The middle term is new, and its absence is the
+        // whole of the dev's question of 2026-08-15: *"after we completed the level 7 crypt, why
+        // did the navigator choose such a distant village to rest at instead of the ones we
+        // bought healthBuffs from?"*
+        //
+        // Because the tie-break was `pa.key.cmp(&pb.key)` and nothing else. Two inns of equal
+        // rank were separated **alphabetically**, so the run walked four hops to `l11` while
+        // `l19` — rested at earlier in that same run, and two hops away through `l9` — lost the
+        // comparison to a string. `spike-run-20260815-1913Z.md` steps 49-53 are that walk. It is
+        // not a near miss either: `l100` sorts before `l11`, which sorts before `l2`.
+        //
+        // Distance is in hops rather than anything cleverer, because hops are what we have —
+        // see #21. Unreachable sites sort last rather than being dropped: `next_target` runs the
+        // whole ladder a second time with the route requirement lifted, and a bed we cannot yet
+        // plot a course to is still better than no bed at all.
+        //
+        // The key stays as the final tie-break so the choice is deterministic, which several
+        // tests depend on. **It is no longer ordering anything that matters.**
+        let far = |p: &Place| dist.get(&p.key).copied().unwrap_or(usize::MAX);
+        sites.sort_by(|(pa, sa), (pb, sb)| {
+            sb.rank()
+                .cmp(&sa.rank())
+                .then(far(pa).cmp(&far(pb)))
+                .then(pa.key.cmp(&pb.key))
+        });
+        sites.first().map(|(p, _)| *p)
+    }
+
     fn plan(&self, skip_hostile: bool, need_route: bool) -> Option<Plan> {
         let here = self.here.as_deref().unwrap_or("");
         let need_route = need_route && self.inside().is_none();
@@ -2990,70 +3299,7 @@ impl WorldMap {
         // why the bed was the one thing on this ladder chosen with no idea how far away it was.
         let dist = self.distances(here);
         if self.wants_rest {
-            let mut sites: Vec<(&Place, crate::rest::Site)> = self
-                .places
-                .values()
-                // A corrupted rest stop is locked, not lost. Corruption swaps a location's type for
-                // its `corruptType` and puts the place under attack, so the inn sits behind
-                // `underAttackAreaButtons` or `destroyedAreaButtons`
-                // (`overworld/generators/village.lua:371-395`) — while the heading still ends in
-                // "village", which is why nothing else here notices. Met live as
-                // `Ulrome — level 6 village [corrupted]`.
-                //
-                // **Verified, and it is a race.** The inn has three button sets
-                // (`overworld/generators/village.lua:360-393`) and only one of them can serve:
-                //
-                // ```text
-                //   areaButtons            Enter -> ui.inn             the innkeeper, rest works
-                //   underAttackAreaButtons Enter -> ui.building_empty  an empty shell, no rest
-                //   destroyedAreaButtons   a loot button only          the inn is gone for good
-                // ```
-                //
-                // So corruption does not merely gate the inn, it starts a clock: clear the village
-                // in time and the real inn comes back, leave it and the inn is destroyed
-                // permanently. Confirmed by the dev, 2026-08-12, and it replaces the guess that used
-                // to sit here — which had the release right and knew nothing about the deadline.
-                //
-                // `completed` is that release and the filter is correct for it. **The gap is the
-                // third state**: nothing here distinguishes a village still under attack from one
-                // whose inn is already rubble, because both are `corrupted` and neither is
-                // `completed`. Today that costs nothing — both are excluded — but a run that clears
-                // a long-corrupted village expecting a bed will find a loot pile, and `completed`
-                // will say it may sleep there. See task #26, which wants the loot anyway.
-                .filter(|p| p.key != here && !p.avoid && (!p.corrupted || p.completed) && ok(p))
-                // A settlement under attack or lost has no bed — see [`Place::trades`]. Campfires
-                // are unaffected by it and excluded elsewhere entirely
-                // (`rest::CAMPFIRE_REST_IS_BUILT`).
-                .filter(|p| !p.is_settlement() || p.trades())
-                .filter_map(|p| crate::rest::site(&p.heading).map(|s| (p, s)))
-                .filter(|(p, s)| crate::rest::can_rest_at(*s, self.gold, self.fuel, !p.used))
-                .collect();
-            // **Site, then distance, then key.** The middle term is new, and its absence is the
-            // whole of the dev's question of 2026-08-15: *"after we completed the level 7 crypt, why
-            // did the navigator choose such a distant village to rest at instead of the ones we
-            // bought healthBuffs from?"*
-            //
-            // Because the tie-break was `pa.key.cmp(&pb.key)` and nothing else. Two inns of equal
-            // rank were separated **alphabetically**, so the run walked four hops to `l11` while
-            // `l19` — rested at earlier in that same run, and two hops away through `l9` — lost the
-            // comparison to a string. `spike-run-20260815-1913Z.md` steps 49-53 are that walk. It is
-            // not a near miss either: `l100` sorts before `l11`, which sorts before `l2`.
-            //
-            // Distance is in hops rather than anything cleverer, because hops are what we have —
-            // see #21. Unreachable sites sort last rather than being dropped: `next_target` runs the
-            // whole ladder a second time with the route requirement lifted, and a bed we cannot yet
-            // plot a course to is still better than no bed at all.
-            //
-            // The key stays as the final tie-break so the choice is deterministic, which several
-            // tests depend on. **It is no longer ordering anything that matters.**
-            let far = |p: &Place| dist.get(&p.key).copied().unwrap_or(usize::MAX);
-            sites.sort_by(|(pa, sa), (pb, sb)| {
-                sb.rank()
-                    .cmp(&sa.rank())
-                    .then(far(pa).cmp(&far(pb)))
-                    .then(pa.key.cmp(&pb.key))
-            });
-            if let Some((p, _)) = sites.first() {
+            if let Some(p) = self.best_rest_site(here, &dist, &ok) {
                 return Some(Plan { target: p.key.clone(), reason: Goal::Rest, steered_by: None });
             }
         }
@@ -3295,8 +3541,28 @@ impl WorldMap {
         // health is the single most expensive thing this run can do. On the first pass we would
         // rather go exploring — which is also how an unknown rest site gets found — and the second
         // pass takes it when there is genuinely nothing else.
-        if let Some(p) = self.anomaly().filter(|p| ok(p)) {
-            return Some(Plan { target: p.key.clone(), reason: Goal::CloseAnomaly, steered_by: None });
+        // **And four consecrations before it**, which is the dev's rule of 2026-08-20 and the
+        // reason this branch can now decline.
+        //
+        // A consecration is bought with walking and pays in gold- and silver-bordered wildcards
+        // (`utils/blessings.lua:95-110`); the anomaly is a level 8 fight that the run of that
+        // morning reached and lost at turn 24. So the shrines are not a reward to collect on the
+        // way, they are the preparation the fight needs, and taking the portal early spends a
+        // character that was never made ready.
+        //
+        // Declining here drops through to `OpenAnomaly` and then to exploring — *which is exactly
+        // what the dev asked for*: "we need to keep exploring if the anomaly opens before we've
+        // revealed 4 shrines." The shrine branch above this one has already had its chance and is
+        // reached first, so a shrine we can reach is taken in preference to more exploring.
+        //
+        // **The release is at the foot of this function, not here.** A gate with no release is a
+        // stall: a world that places fewer than four shrines, or puts them behind ground we cannot
+        // cross, would leave the run walking a frontier it has already exhausted for ever. See
+        // there for why it is the last thing tried rather than a clause in this condition.
+        if self.consecrations() >= SHRINES_BEFORE_THE_ANOMALY {
+            if let Some(p) = self.anomaly().filter(|p| ok(p)) {
+                return Some(Plan { target: p.key.clone(), reason: Goal::CloseAnomaly, steered_by: None });
+            }
         }
 
 
@@ -3594,6 +3860,26 @@ impl WorldMap {
         frontier
             .first()
             .map(|p| Plan { target: p.key.clone(), reason: reason.clone(), steered_by: steered_by.clone() })
+            // **The release for [`SHRINES_BEFORE_THE_ANOMALY`].**
+            //
+            // Reached only when every branch above declined *and* there is no frontier left to
+            // walk — so the run has consecrated what it could, explored what it could, and the bar
+            // is still unmet. Nothing further will change that: exploring is the only thing that
+            // reveals a new shrine, and it has just run out.
+            //
+            // Placed here rather than as a clause on the gate so that it cannot fire early. Written
+            // into the condition it would have to reproduce "is there anything else at all worth
+            // doing", which is precisely what the rest of this function computes; asking it *after*
+            // the answer is known is the only version that stays true as branches are added.
+            //
+            // The run then walks into the anomaly under-prepared and probably dies, which is the
+            // honest ending. A plan it can never satisfy is not the safer alternative — it is the
+            // loop guard ending the run four laps later with nothing learned.
+            .or_else(|| {
+                self.anomaly()
+                    .filter(|p| ok(p))
+                    .map(|p| Plan { target: p.key.clone(), reason: Goal::CloseAnomaly, steered_by: None })
+            })
     }
 
     /// The single adjacent node to step to next, and the plan it serves.
@@ -4897,7 +5183,7 @@ impl WorldMap {
     }
 
     fn inn_inside(&self, container: &str) -> Option<&Place> {
-        if !self.wants_rest || self.gold < crate::rest::INN_COST {
+        if !self.wants_a_bed() || self.gold < crate::rest::INN_COST {
             return None;
         }
         // The village's buildings must actually be open — see [`Place::trades`]. Under attack the
@@ -4952,7 +5238,7 @@ impl WorldMap {
     }
 
     fn seeking_a_rest(&self, container: &str) -> bool {
-        if !self.wants_rest || self.gold < crate::rest::INN_COST {
+        if !self.wants_a_bed() || self.gold < crate::rest::INN_COST {
             return false;
         }
         if !self.places.get(container).map(|p| p.is_settlement() && p.trades()).unwrap_or(false) {
@@ -5565,6 +5851,295 @@ mod tests {
         Node { key: key.into(), heading: heading.into(), x: 0.0, y: 0.0, connections: 2 }
     }
 
+    /// Four consecrated major shrines, so [`SHRINES_BEFORE_THE_ANOMALY`] is satisfied.
+    ///
+    /// Fixtures whose subject is the anomaly — its rank against other goals, steering toward it,
+    /// routing to it — say this explicitly. The gate added on 2026-08-20 would otherwise turn every
+    /// one of them into a test of the gate, passing or failing for a reason they never mention.
+    ///
+    /// Keyed at 91 and up so it cannot collide with a shrine a fixture names itself; the game's own
+    /// rule is `key:sub(1,6)=='shrine'` followed by digits (`overworld/generators/world.lua:87-90`),
+    /// which these satisfy.
+    fn ready_for_the_anomaly(m: &mut WorldMap) {
+        for i in 91..91 + SHRINES_BEFORE_THE_ANOMALY {
+            let p = m.entry(&format!("shrine{i}"));
+            p.consecrated = true;
+            // **And prayed at**, which is what makes them finished rather than merely blessed.
+            // `used` is the game's `<key>_used`, set by praying, and `worth_a_trip` reads
+            // `!used` — so a consecrated shrine that had never been prayed at would still be a
+            // live errand, and these fixtures would head for one instead of doing what they test.
+            p.used = true;
+        }
+    }
+
+    /// **What counts as a fight we take on purpose**, which is the dev's forest correction.
+    #[test]
+    fn a_forest_is_crossed_and_a_crypt_is_fought() {
+        let at = |heading: &str| Place { heading: heading.into(), ..Default::default() };
+
+        assert_eq!(at("Riccall — level 6 crypt").deliberate_fight_level(), Some(6));
+        assert_eq!(at("The Rift — level 8 anomaly").deliberate_fight_level(), Some(8));
+
+        // The dev, 2026-08-20: *forests have significantly shorter combat nodes on the path, and we
+        // don't currently have any code for deliberately clearing spider nests.* `shrine7`, the
+        // level 9 forest a run walked into on 2026-08-17, is the live example — deep, and never a
+        // fight we chose.
+        assert_eq!(at("Cottam Boscage — level 9 forest").deliberate_fight_level(), None);
+        assert_eq!(at("Bursall Hedge — level 3 spider forest").deliberate_fight_level(), None);
+        assert_eq!(at("Rowlston Covert village").deliberate_fight_level(), None);
+
+        // A cleared crypt is not a fight at all any more.
+        let done =
+            Place { heading: "Riccall — level 6 crypt".into(), completed: true, ..Default::default() };
+        assert_eq!(done.deliberate_fight_level(), None);
+    }
+
+    /// A corrupted shrine, including the one whose heading a restart threw away.
+    #[test]
+    fn a_corrupted_shrine_with_no_heading_is_assumed_to_be_level_seven() {
+        let seen = Place {
+            key: "shrine1".into(),
+            heading: "Gripthorpe Brush — level 6 shrine".into(),
+            corrupted: true,
+            ..Default::default()
+        };
+        assert_eq!(seen.deliberate_fight_level(), Some(6), "a heading we have beats any assumption");
+
+        // The state a resumed run actually holds: flags survive, the heading does not. This is the
+        // absence recorded at `Place::is_shrine`, which cost two runs on 2026-08-14.
+        let remembered = Place { key: "shrine1".into(), corrupted: true, ..Default::default() };
+        assert_eq!(remembered.heading, "", "the fixture must really be unheaded");
+        assert_eq!(remembered.level(), None, "so nothing can read a level off it");
+        assert_eq!(
+            remembered.deliberate_fight_level(),
+            Some(crate::rest::ASSUMED_SHRINE_LEVEL),
+            "the dev's instruction: assume level 7"
+        );
+
+        // **Corruption is the whole clause.** A clean shrine costs no fight, which is why it is the
+        // cheap preparation that outranks the portal.
+        let clean = Place { key: "shrine1".into(), ..Default::default() };
+        assert_eq!(clean.deliberate_fight_level(), None);
+    }
+
+    /// **Four consecrations before the portal**, and what the run does while it is short.
+    ///
+    /// The dev, 2026-08-20, after the run that reached the anomaly and died at turn 24: *before the
+    /// anomaly fight, ensure that at least 4 major shrines have been consecrated. This means that we
+    /// need to keep exploring if the anomaly opens before we've revealed 4 shrines.*
+    #[test]
+    fn the_portal_waits_for_four_consecrations_and_we_explore_until_then() {
+        let build = || {
+            let mut m = WorldMap::new();
+            m.fold(&dump(
+                "here",
+                "camp",
+                vec![node("rift", "The Rift anomaly"), node("l2", "Bainton Clump road")],
+            ));
+            m.here = Some("here".into());
+            m.hell = Some(0.1);
+            m
+        };
+
+        // Nothing consecrated: the portal is on the map, reachable, and still not the errand.
+        let m = build();
+        assert_eq!(m.consecrations(), 0);
+        assert!(m.anomaly().is_some(), "the portal really is there to be chosen");
+        let plan = m.next_target().expect("a plan");
+        assert_ne!(plan.reason, Goal::CloseAnomaly, "under the bar, the portal waits");
+        assert_eq!(plan.reason, Goal::Explore, "and exploring is what the dev asked for instead");
+
+        // Three is still short. Off by one is the whole point of a bar.
+        let mut m = build();
+        for i in 1..=3 {
+            let p = m.entry(&format!("shrine{i}"));
+            p.consecrated = true;
+            p.used = true;
+        }
+        assert_eq!(m.consecrations(), 3);
+        assert_ne!(m.next_target().unwrap().reason, Goal::CloseAnomaly);
+
+        // The fourth opens the gate.
+        let mut m = build();
+        ready_for_the_anomaly(&mut m);
+        assert_eq!(m.consecrations(), SHRINES_BEFORE_THE_ANOMALY);
+        let plan = m.next_target().expect("a plan");
+        assert_eq!(plan.reason, Goal::CloseAnomaly);
+        assert_eq!(plan.target, "rift");
+    }
+
+    /// **The release**, without which the gate is a stall rather than a rule.
+    ///
+    /// A world that never yields four shrines — too few placed, or all of them behind ground we
+    /// cannot cross — must still end its run at the anomaly rather than walking an exhausted
+    /// frontier for ever. That is the case the loop guard would otherwise have to end.
+    #[test]
+    fn with_nothing_left_to_explore_the_portal_is_taken_anyway() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("rift", "The Rift anomaly")]));
+        m.here = Some("here".into());
+        m.hell = Some(0.1);
+        assert_eq!(m.consecrations(), 0, "still under the bar, and nothing will change that");
+
+        // Exhaust the frontier: everywhere is visited and nowhere is hiding a neighbour, so
+        // exploring has nothing left to offer.
+        for key in ["here", "rift"] {
+            let p = m.entry(key);
+            p.visited = true;
+            p.hidden = Some(0);
+            p.connections = 1;
+        }
+
+        let plan = m.next_target().expect("a plan even so");
+        assert_eq!(
+            plan.reason,
+            Goal::CloseAnomaly,
+            "nothing left to prepare with, so the run goes and dies honestly"
+        );
+        assert_eq!(plan.target, "rift");
+    }
+
+    /// A promoted shrine is **one** consecration, whichever half of the pair carries the flag.
+    ///
+    /// `setShrineLocation` reassigns to the parent when the plaza's `parentNode.majorShrine`
+    /// (`shrine.lua:420-427`), so the save may record it under either key. Counting places rather
+    /// than shrines would let three shrines pass for four.
+    #[test]
+    fn a_shrine_and_its_plaza_are_one_consecration_not_two() {
+        let mut m = WorldMap::new();
+        for key in ["shrine1", "shrine1_plaza"] {
+            let p = m.entry(key);
+            p.consecrated = true;
+            p.used = true;
+        }
+        assert_eq!(m.consecrations(), 1, "one shrine, two nodes");
+
+        // And a minor shrine is not one at all: `Consecrate` needs `majorShrine`
+        // (`shrine.lua:93-96`), so a woodland shrine can never take the flag.
+        m.entry("shrine1sub1").consecrated = true;
+        assert_eq!(m.consecrations(), 1, "a subworld shrine cannot be consecrated at all");
+    }
+
+    /// **Bank Well-Rested stacks before a deliberate deep fight**, and every clause of the dev's
+    /// rule of 2026-08-20.
+    #[test]
+    fn a_deep_fight_sends_us_to_an_inn_for_stacks_first() {
+        let build = || {
+            let mut m = WorldMap::new();
+            m.fold(&dump(
+                "here",
+                "camp",
+                vec![
+                    node("rift", "The Rift — level 8 anomaly"),
+                    node("l11", "Rowlston Covert village"),
+                ],
+            ));
+            m.here = Some("here".into());
+            m.hell = Some(0.1);
+            // **Under `HEART_FLOOR` on purpose.** With the price of a heart in hand that errand
+            // outranks the portal and heads for this very village anyway — see the last assertion
+            // below, which pins that rather than leaving it to chance. Here the question is what
+            // the *portal* does to the plan, so the purse is kept just under it.
+            m.gold = HEART_FLOOR - 1;
+            ready_for_the_anomaly(&mut m);
+            m
+        };
+
+        // Spent out, which is how the run of 2026-08-20 arrived at the portal.
+        let m = build();
+        assert_eq!(m.stacks_short_ahead(), 16, "twice the level 8 anomaly");
+        let plan = m.next_target().expect("a plan");
+        assert_eq!(plan.reason, Goal::StockUp, "the bed comes before the fight");
+        assert_eq!(plan.target, "l11", "and it is the village that has one");
+
+        // A bank already deep enough leaves the errand exactly as it was.
+        let mut m = build();
+        m.well_rested = crate::rest::stacks_wanted(8);
+        assert_eq!(m.stacks_short_ahead(), 0);
+        assert_eq!(m.next_target().unwrap().reason, Goal::CloseAnomaly, "nothing left to buy");
+
+        // **The dev's floor.** Below the inn's price the requirement is unmeetable, not merely
+        // unmet, and holding the run at it would stall instead of preparing.
+        let mut m = build();
+        m.gold = crate::rest::INN_COST - 1;
+        assert_eq!(m.next_target().unwrap().reason, Goal::CloseAnomaly, "broke, so get on with it");
+
+        // Eleven stacks — what a real run reached, in `at-woodland-shrine-unprayed` — is still five
+        // short of the anomaly, so the errand still fires.
+        let mut m = build();
+        m.well_rested = 11;
+        assert_eq!(m.stacks_short_ahead(), 5);
+        assert_eq!(m.next_target().unwrap().reason, Goal::StockUp);
+
+        // **And with the price of a heart, the heart wins the ordering — which costs nothing.**
+        //
+        // Worth pinning rather than discovering later: `Goal::Heart` outranks the portal and walks
+        // to the same village, and `wants_a_bed` is true the whole way, so the bed is taken there
+        // regardless of which errand's name is on the trip. The two rules do not fight.
+        let mut m = build();
+        m.gold = HEART_FLOOR;
+        assert_eq!(m.next_target().unwrap().reason, Goal::Heart);
+        assert_eq!(m.next_target().unwrap().target, "l11", "the same village either way");
+        assert!(m.wants_a_bed(), "and the bank is still short when we get there");
+    }
+
+    /// A forest does not hold the run at an inn, however deep it is.
+    #[test]
+    fn a_level_nine_forest_is_not_worth_banking_for() {
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "here",
+            "camp",
+            vec![
+                node("shrine7", "Cottam Boscage — level 9 forest"),
+                node("l11", "Rowlston Covert village"),
+            ],
+        ));
+        m.here = Some("here".into());
+        m.gold = 500;
+        assert_eq!(m.well_rested, 0, "an empty bank, so only the forest rule can be answering");
+        assert_eq!(
+            m.stacks_short_ahead(),
+            0,
+            "the forest is walked through, not cleared — the dev's correction"
+        );
+        assert!(!m.wants_a_bed(), "so nothing sends us to a bed");
+    }
+
+    /// The bank reads out of `mainSaveData`, and zero is an **absent key**.
+    ///
+    /// `affectPlayerStatus` deletes a status the moment it reaches zero (`overworld.lua:45-47`), so
+    /// a spent-out character has no entry at all rather than a stored `0`. Every shape below was
+    /// transcribed from a checkpoint under `checkpoints/`, which is where the positive control
+    /// lives: without one, "we read no stacks" and "there were no stacks to read" are the same
+    /// result.
+    #[test]
+    fn well_rested_stacks_read_out_of_the_save() {
+        let read = |status: &str| {
+            let mut m = WorldMap::new();
+            m.apply_save(
+                &crate::game::save::parse(&format!("return {{ player = {{ {status} }} }}")).unwrap(),
+            );
+            m.well_rested
+        };
+
+        // `at-woodland-shrine-unprayed`, the furthest state in the store.
+        assert_eq!(read("statusEffects = { wellRestedInn = 11 }"), 11);
+        // `at-shrine1` — the two a fresh character carries (`rpg/classes/warrior.lua:69`).
+        assert_eq!(read("statusEffects = { wellRestedCampfire = 2 }"), 2);
+        // `before-clear`.
+        assert_eq!(read("statusEffects = { wellRestedInn = 5 }"), 5);
+        // `pre-anomaly` and `anomaly-open`, both spent out.
+        assert_eq!(read("statusEffects = {}"), 0);
+        // And a save with no `statusEffects` at all, which is what the live file held after the
+        // 2026-08-20 death.
+        assert_eq!(read("health = 50"), 0);
+
+        // Both flavours at once. The heal does not care which it spends and takes the campfire one
+        // first (`rpgview.lua:1204-1209`), so the bank is their sum.
+        assert_eq!(read("statusEffects = { wellRestedCampfire = 2, wellRestedInn = 3 }"), 5);
+    }
+
     /// The inn can end the rest errand before a health reading could.
     ///
     /// Live 2026-08-10: the run healed to full, walked out, and walked straight back in — because
@@ -5927,6 +6502,7 @@ mod tests {
     #[test]
     fn with_the_portal_open_exploration_heads_into_the_corruption_not_to_the_nearest_node() {
         let mut m = WorldMap::new();
+        ready_for_the_anomaly(&mut m);
         m.fold(&dump(
             "here",
             "camp",
@@ -5991,6 +6567,7 @@ mod tests {
         // The old test was `bearing.is_some()`, which is true here, so this state reported steering
         // and did none. What separates the two is whether anything could be *measured*.
         let mut m = WorldMap::new();
+        ready_for_the_anomaly(&mut m);
         m.fold(&dump(
             "here",
             "camp",
@@ -6471,6 +7048,7 @@ mod tests {
         // without exploring for it -- and after corruption, `start` is usually "(unheaded)" in our
         // map because we only heard of it through save flags.
         let mut m = WorldMap::new();
+        ready_for_the_anomaly(&mut m);
         m.fold(&dump("l39", "Eight Timberland — level 4 forest", vec![node("l29", "Rookdale — level 3 crypt")]));
         m.entry("start").corrupted = true;
         m.hell = Some(0.1);
@@ -6522,6 +7100,7 @@ mod tests {
     #[test]
     fn the_anomaly_itself_outranks_everything() {
         let mut m = WorldMap::new();
+        ready_for_the_anomaly(&mut m);
         m.fold(&dump(
             "start",
             "camp",
@@ -8674,6 +9253,7 @@ mod tests {
     #[test]
     fn with_no_route_we_step_the_way_the_target_lies() {
         let mut m = WorldMap::new();
+        ready_for_the_anomaly(&mut m);
         // Two leaves. Nothing left to reveal at either, so the planner will not explore to them --
         // and they are the only two moves there are.
         m.fold(&dump("here", "The Wold crossroads", vec![
@@ -8912,6 +9492,7 @@ mod tests {
     fn a_named_destination_is_worth_walking_back_towards() {
         let build = || {
             let mut m = WorldMap::new();
+            ready_for_the_anomaly(&mut m);
             // The road walked in: start -> l19 -> l39 -> l52, and l60 hanging off l52.
             m.fold(&dump("start", "Cottam campfire", vec![node("l19", "Gipsyville — level 2 crypt")]));
             m.fold(&dump("l19", "Gipsyville — level 2 crypt", vec![node("l39", "Eight Timberland — level 4 forest")]));
@@ -9462,6 +10043,7 @@ e	l4	l11
         };
 
         let mut m = WorldMap::new();
+        ready_for_the_anomaly(&mut m);
         // West lies a corrupted spider forest; east, a road already cleared. Both border `l62`.
         m.fold(&dump(
             "l62",
@@ -9862,6 +10444,7 @@ e	l4	l11
     #[test]
     fn we_explore_toward_the_errand_we_could_not_route_to() {
         let mut m = WorldMap::new();
+        ready_for_the_anomaly(&mut m);
         m.fold(&dump("here", "The Wold crossroads", vec![
             Node { key: "zwest".into(), heading: "West Field".into(),
                    x: -100.0, y: 0.0, connections: 3 },
@@ -10601,6 +11184,7 @@ e	l4	l11
         // `mid` and `detour`, which no overworld shrine can be called — a fixture in a state play
         // cannot produce, quietly asserting on it.
         let mut m = WorldMap::new();
+        ready_for_the_anomaly(&mut m);
         m.fold(&dump(
             "here",
             "camp",
