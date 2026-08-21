@@ -180,10 +180,10 @@ const NEUTRAL: (i32, i32) = (760, 240);
 
 /// One reading of the area-button slot, said in full: the score and both verdicts it answers.
 ///
-/// Both bars are printed on every line, whichever question the caller asked, because the two dead
-/// presses of 2026-08-20 were diagnosed months apart from a line that gave one number and one bar.
-/// `Combat 0.8731, gate 0.95` is true and says nothing about the thing that mattered — that 0.8731
-/// is comfortably a live plank, and the plank actually on screen was greyed at 0.74.
+/// Both bars are printed on every line, whichever question the caller asked, because the line that
+/// gave one number and one bar was read as "some other button" when it meant "nothing pressable".
+/// `Combat 0.7367, gate 0.95` is true and buries the fact that 0.7367 is the *greyed* reading and
+/// 0.8566 — which the same runs printed 244 times — is a live `Travel`.
 fn slot_reading(q: Option<f64>) -> String {
     let Some(q) = q else { return "  area slot: not read\n".to_string() };
     let verdict = match (q >= crate::act::AREA_BUTTON_SHOWING, q >= crate::act::AREA_BUTTON_LIVE) {
@@ -1448,11 +1448,11 @@ impl Run<'_> {
     ///   sites in the game — the anomaly cinematic (`utils/events.lua:48`) and entering or leaving a
     ///   shrine (`shrine.lua:57`, `:258`). An ordinary pan leaves input enabled. The claim below
     ///   that "input during the animation goes nowhere" is not what stopped that Space.
-    /// * **The slot read is diagnostic and not a gate.** Both failed presses were logged
-    ///   `area slot: something else (Combat 0.8731, gate 0.95)` and pressed anyway — the observer
+    /// * **The slot read is diagnostic and not a gate.** The failed press was logged
+    ///   `area slot: something else (Combat 0.7367, gate 0.95)` and went out anyway — the observer
     ///   said it was looking at something other than a live `Combat` and nothing acted on it. A
-    ///   greyed twin scoring 0.87 against a 0.95 bar is the calibration working; the press ignoring
-    ///   it is not.
+    ///   greyed twin scoring 0.74 against a 0.95 bar is the calibration working; the press ignoring
+    ///   it is not. Fixed 2026-08-21 by [`Run::look_for_a_live_slot`].
     ///
     /// ## Why the middle step is *read* and not merely clicked
     ///
@@ -1755,11 +1755,11 @@ impl Run<'_> {
 
     /// **Look for a live area button, and re-select this node until one appears.**
     ///
-    /// The slot read used to be a line in the log that nothing acted on. Twice on 2026-08-20 it
-    /// printed `area slot: something else (Combat 0.8731, gate 0.95)` and the press went out anyway;
-    /// the frame saved at the stop shows a **greyed `Combat` belonging to another node** in the
-    /// slot, and `Combat did not open at l38` is what that costs. The observer had the answer both
-    /// times.
+    /// The slot read used to be a line in the log that nothing acted on. Step 39 of run
+    /// `spike-run-20260821-0251Z` printed `area slot: something else (Combat 0.7367, gate 0.95)`,
+    /// pressed, moved the screen 0.029, and stopped with `Combat did not open at l38`. **0.7367 is
+    /// exactly the greyed-`Combat` reading from the frame corpus** — the observer did not merely
+    /// doubt the slot, it identified the state precisely, and nothing acted on it.
     ///
     /// ## Why re-selecting is the recovery rather than waiting
     ///
@@ -5628,11 +5628,11 @@ pub fn drive(
             // same measurement answers — greying costs more agreement than the lettering does, and
             // [`crate::act::AREA_BUTTON_LIVE`] is calibrated in the gap between the two.
             //
-            // That is the half this branch was missing on 2026-08-20. Both dead presses logged
-            // `area slot: something else (Combat 0.8731, gate 0.95)` and went out anyway; the frame
-            // saved at the stop shows a greyed `Combat` belonging to a node three hops off. 0.8731
-            // is a *live* plank wearing another word, and the plank on screen scored 0.74 — so the
-            // line was reporting the wrong number against the wrong bar, and nothing read either.
+            // That is the half this branch was missing. Run `0251Z` step 39 logged
+            // `area slot: something else (Combat 0.7367, gate 0.95)`, pressed, and stopped with
+            // `Combat did not open at l38`. 0.7367 is exactly the corpus reading for a greyed
+            // `Combat`, so the observer had identified the state and the only bar on offer was one
+            // that a live `Travel` (0.8566) also fails.
             //
             // [`Run::look_for_a_live_slot`] re-selects and looks again, which is the recovery for a
             // stale slot, and then presses regardless: the bar is calibrated on three short words
@@ -6050,14 +6050,14 @@ mod tests {
 
     /// **The line that reported the wrong number against the wrong bar**, and what it says now.
     ///
-    /// Both dead presses of 2026-08-20 logged `area slot: something else (Combat 0.8731, gate 0.95)`
-    /// and were pressed anyway. Every word of that is true and it hid the fault: 0.8731 is the
-    /// measured reading of a *live* `Explore` plank, so "something else" was a live button — while
-    /// what was actually on screen was a **greyed** `Combat` at 0.7367, belonging to a node three
-    /// hops away. One bar could not distinguish those two, so the line now carries both.
+    /// The dead press at `l38` logged `area slot: something else (Combat 0.7367, gate 0.95)` and
+    /// went out anyway. Every word of it is true and it hid the fault, because the same three words
+    /// covered a live `Travel` at 0.8566 — printed 244 times across the same five runs — and a
+    /// greyed plank at 0.7367. One bar cannot distinguish those, so the line now carries both.
     ///
-    /// The three readings are the corpus figures measured by
-    /// `act::threshold_tests::a_greyed_plank_reads_lower_than_any_live_one`, not invented numbers.
+    /// The readings are measured, not invented: the corpus figures from
+    /// `act::threshold_tests::a_greyed_plank_reads_lower_than_any_live_one`, and the live ones from
+    /// the `area slot:` lines of `spike-run-20260821-*.md`.
     #[test]
     fn a_slot_reading_says_which_of_the_two_bars_it_cleared() {
         // A live `Combat`: over both bars, and the only reading that authorises a `Combat` press.
@@ -6065,10 +6065,15 @@ mod tests {
         assert!(combat.contains("`Combat`"), "{combat}");
         assert!(!combat.contains("nothing pressable"), "{combat}");
 
-        // `Explore`, as measured. Under the naming bar and over the live bar — which is the reading
+        // `Travel`, as measured 244 times. Under the naming bar and over the live bar — the reading
         // the old line called "something else" and this one has to call pressable.
-        let explore = slot_reading(Some(0.8731));
+        let explore = slot_reading(Some(0.8566));
         assert!(explore.contains("a live button, not `Combat`"), "{explore}");
+
+        // And the worst live reading the runs produced, a village subnode at 0.8355. It is the one
+        // that decides where the bar can go, so it is pinned here as well as in the calibration.
+        let worst_live = slot_reading(Some(0.8355));
+        assert!(worst_live.contains("a live button, not `Combat`"), "{worst_live}");
 
         // The greyed plank from the frame that ended the run. Under both.
         let greyed = slot_reading(Some(0.7367));

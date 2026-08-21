@@ -1185,37 +1185,58 @@ pub const AREA_BUTTON_SHOWING: f64 = 0.95;
 /// whatever word is written on the plank.
 ///
 /// A second, much lower bar on the same measurement, and it answers a different question. The gate
-/// above asks *which* button; this asks *whether one is pressable at all*, which is the question two
-/// dead presses on 2026-08-20 turned on — the slot held a greyed `Combat` belonging to a node three
-/// hops away, the observer scored it 0.8731 against a 0.95 bar, and the press went out anyway.
+/// above asks *which* button; this asks *whether one is pressable at all*, which is the question the
+/// dead press at `l38` turned on — the slot held a greyed `Combat`, the observer scored it
+/// **0.7367**, and the press went out against a bar of 0.95 that could not tell that reading from
+/// any other miss.
 ///
 /// **Greying is a bigger pixel difference than the lettering is**, which is what makes one number
-/// able to answer both questions. Re-measured 2026-08-21 against the frame corpus, same probe as
-/// [`AREA_BUTTON_SHOWING`]:
+/// able to answer both questions.
+///
+/// ## Measured twice: on the frame corpus, and on 298 readings a run actually logged
+///
+/// The corpus, same probe as [`AREA_BUTTON_SHOWING`]:
 ///
 /// ```text
 /// live Combat  (the template itself)  1.0000
 /// live Explore                        0.8731
-/// live Visit                          0.8616   <- the worst live plank measured
-/// greyed Combat                       0.7367   <- the confusable this gate exists for
+/// live Visit                          0.8616
+/// greyed Combat                       0.7367
 /// ```
 ///
-/// 0.80 sits in the middle of that gap: 0.062 under the worst live reading and 0.063 over the
-/// greyed one, both wider than the 0.05 margin [`AREA_BUTTON_SHOWING`] is held to.
+/// And every `area slot:` line the runs of 2026-08-17 to 08-21 printed, which is a far better
+/// picture than four captures and was sitting unread in `spike-run-*.md`:
 ///
-/// ## What it may not be used for, and the reason is the corpus
+/// ```text
+///   23 x 1.0000   live `Combat`
+///   16 x 0.8731   live `Explore`
+///  244 x 0.8566   live `Travel`, from every crossing press in five runs
+///    6 x 0.8458   live `Open`, a chest with nothing guarding it
+///    5 x 0.8355   live, a village subnode — `Enter` or `Attack`   <- the worst live reading
+/// ----------------------------------------------------------------  the gap
+///    1 x 0.7367   the greyed `Combat` at `l38` that ended run 0251Z
+///    3 x <0.27    nothing recognisable at all
+/// ```
 ///
-/// Three live planks are measured and all three carry short words. `Travel`, `Open`, `Rest` and
-/// `Wake up` reach this slot too and none of them has been captured, so a live button scoring under
-/// 0.80 is a state this number has never seen and cannot rule out. **So a reading below the bar is
-/// a warning and never a veto**: the caller looks again, re-selects, and presses regardless once its
-/// looks are spent. Being wrong then costs the press we would have made anyway, which is the only
-/// direction an uncalibrated bar may fail in.
+/// So the populations are cleanly separated by about 0.10, and 0.79 is near the midpoint of
+/// **0.7367** and **0.8355** (0.7861): 0.053 over the greyed reading and 0.046 under the worst live
+/// one. Both beat the 0.05 margin against the corpus figures that
+/// `a_greyed_plank_reads_lower_than_any_live_one` holds it to.
 ///
-/// Capturing a live `Travel` and a greyed `Visit` is what would turn this into a veto. Until then
-/// the retry is the whole of the value, and the retry is enough — the fault it exists for is a
-/// **stale** slot, and looking again after re-selecting is what clears one.
-pub const AREA_BUTTON_LIVE: f64 = 0.80;
+/// ## It is still a warning and not a veto
+///
+/// **This paragraph used to say `Travel` and `Open` had never been captured. They had — 250 times
+/// between them, in logs nobody had looked at.** What remains true is thinner: the live population
+/// is five words, `Rest` and `Wake up` are not among them, and the only greyed sample is `Combat`.
+/// A greyed *different* word must score lower than a greyed `Combat` — the lettering disagrees as
+/// well as the alpha — so the gate is safe in that direction, and it is the live side that is
+/// unbounded below.
+///
+/// So a reading under the bar makes the caller look again and re-select, and then press regardless.
+/// Being wrong costs the press we would have made anyway, which is the only direction a bar with an
+/// open-ended population may fail in. What would close it is a greyed `Visit` and a greyed `Travel`
+/// in the corpus; the live side is now well enough sampled to stop worrying about.
+pub const AREA_BUTTON_LIVE: f64 = 0.79;
 
 /// The inn's `Rest`, on the inn screen.
 ///
@@ -2783,9 +2804,12 @@ mod threshold_tests {
     /// greying costs more agreement than the lettering does, and one bar can tell live from dead
     /// across all three.
     ///
-    /// The corpus is three live planks and one greyed one, all short words, which is why the gate is
-    /// asserted as a *warning* threshold: see [`AREA_BUTTON_LIVE`] for why the caller may not veto a
-    /// press on it.
+    /// The corpus is three live planks and one greyed one. The live side is much better sampled by
+    /// the run logs — see [`AREA_BUTTON_LIVE`] for all 298 readings, the worst live one of which is
+    /// **0.8355**, and for why the caller still may not veto a press on this bar.
+    ///
+    /// Both populations are asserted, corpus and live, because the gate has to clear both and the
+    /// live figures are what moved it from 0.80 to 0.79.
     #[test]
     fn a_greyed_plank_reads_lower_than_any_live_one() {
         let tpl = Template::load(&PathBuf::from("templates").join(AREA_COMBAT.template)).unwrap();
@@ -2817,6 +2841,26 @@ mod threshold_tests {
             "the gap is too thin to trust: worst live {worst_live:.4}, greyed {greyed:.4}, \
              gate {AREA_BUTTON_LIVE}"
         );
+        // **The live populations**, from the `area slot:` lines of `spike-run-20260821-*.md`. Not
+        // re-measurable here — they are readings of screens nobody captured — so they are written
+        // down as the numbers the runs printed, which is what a threshold moved by them owes the
+        // next person to touch it.
+        const LIVE_TRAVEL: f64 = 0.8566; // x244, every crossing press in five runs
+        const LIVE_OPEN: f64 = 0.8458; // x6, a chest with nothing guarding it
+        const LIVE_WORST: f64 = 0.8355; // x5, a village subnode
+        const GREYED_AT_L38: f64 = 0.7367; // x1, the reading that ended run 0251Z
+        for live in [LIVE_TRAVEL, LIVE_OPEN, LIVE_WORST] {
+            assert!(live > AREA_BUTTON_LIVE, "{live:.4} is a live plank and must read as one");
+        }
+        assert!(GREYED_AT_L38 < AREA_BUTTON_LIVE, "and the one that ended a run must not");
+        // The same 0.05 either side, which is what took the gate from 0.80 down to 0.79: at 0.80
+        // the worst live reading had only 0.0355 under it.
+        assert!(LIVE_WORST - AREA_BUTTON_LIVE > 0.04, "live margin");
+        assert!(AREA_BUTTON_LIVE - GREYED_AT_L38 > 0.05, "greyed margin");
+        // The greyed reading agrees with the corpus **exactly**, which is what makes the live logs
+        // usable as calibration at all rather than as anecdote.
+        assert!((GREYED_AT_L38 - greyed).abs() < 1e-4, "corpus {greyed:.4} vs live {GREYED_AT_L38}");
+
         // And it is strictly the looser of the two bars, which is what makes `Combat` imply `live`.
         assert!(AREA_BUTTON_LIVE < AREA_BUTTON_SHOWING);
     }
