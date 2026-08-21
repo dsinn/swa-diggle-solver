@@ -1276,6 +1276,32 @@ impl Run<'_> {
     /// is most visible include the moments it is inert. Pressing it then does nothing at all, which
     /// is indistinguishable from a press that worked unless a fresh dump is demanded afterwards.
     ///
+    /// ## Nor can the *wait* be skipped, which was the second attempt
+    ///
+    /// Having established that the arrow press is load-bearing, the obvious salvage was to keep the
+    /// press and drop the twelve-second poll for a pan dump — the dev's point being that a press at
+    /// a fixed coordinate does not need the camera to have finished moving. That is true, and it is
+    /// still not enough. It ended the next run too, `Failed("no arrival at l31")`:
+    ///
+    /// ```text
+    ///   188. standing on `l3`, which is what we came for — selected it without waiting for the pan
+    ///     `l31` is travellable in one press and is not in this dump — placed from the world frame
+    ///     input 362: click (1487,638) — travel: select `l31`
+    ///     input 363: key 0x0020 — travel: press Travel for `l31`
+    ///   Failed("no arrival at l31")
+    /// ```
+    ///
+    /// **Arriving at the node we came for does not mean we are about to enter it.** `l3` is
+    /// *Skipwith Brake — level 6 village [corrupted]*: a settlement whose buildings are shut, so the
+    /// errand moved on and the step became a hop. A hop clicks a **node**, at a coordinate derived
+    /// from the world frame — and the frame is in screen space, so a camera still gliding puts the
+    /// click on empty ground. The press was heard and nothing was selected.
+    ///
+    /// So the two halves cannot be separated after all, for a reason that has nothing to do with
+    /// either of the mechanisms above: **what the step will do is not known when the dump is
+    /// fetched**, and one of the things it may do needs settled coordinates. Any future attempt has
+    /// to make the *step* declare itself first, not the arrival.
+    ///
     /// ## It cannot be skipped before entering a node, and 2026-08-20 is the proof
     ///
     /// The dev asked the reasonable question: when we have already decided to *enter* the node we
