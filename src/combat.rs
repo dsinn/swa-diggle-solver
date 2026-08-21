@@ -953,6 +953,64 @@ mod bomb_tests {
         assert!(!counting.contains(&10));
     }
 
+    /// **An exclamation tile is not a bomb**, and both belong on the restless list.
+    ///
+    /// The dev's correction, 2026-08-21: *the `!` is an exclamation tile, not a bomb tile; bomb
+    /// tiles are numbered.* What `rpg/effects/material/bomb.lua` lists under `['!']` describes a `!`
+    /// tile *made of bomb material* — a property of the material, not of the tile.
+    ///
+    /// The exclamation tile is the `!!!` ligature (`rpg/effects/ligature/!!!.lua`), whose quads are
+    /// generated as `('!'):rep(i+2)`, so `!!`, `!!!` and `!!!!` are one tile at different counts.
+    /// Its tooltip:
+    ///
+    /// > Unselectable tile. Loses a `!` after the start of your turn if it's on the bottom.
+    ///
+    /// Different mechanic from the bomb, same consequence for `known_restless`: it changes without
+    /// being touched. It cost a run on 2026-08-21 — board `V !!!! S R E L E M E ! E A B G G E`,
+    /// stopped with `SelectionFailed { turns: 2, detail: "clicking tile 14 also changed [1]" }`.
+    /// Tile 1 is the `!!!!`; it had not been touched, it had ticked.
+    #[test]
+    fn an_exclamation_tile_counts_down_and_is_one_tile_however_many_marks() {
+        let board = [
+            "V", "!!!!", "S", "R", "E", "L", "E", "M", "E", "!", "E", "A", "B", "G", "G", "E",
+        ];
+        assert_eq!(board.len(), 16, "sixteen tiles");
+        assert_eq!(
+            board.iter().map(|t| t.len()).sum::<usize>(),
+            19,
+            "nineteen characters — the shape that mis-indexes a character-wise reader"
+        );
+
+        let exclamation: Vec<usize> = board
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.is_empty() && l.chars().all(|c| c == '!'))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(exclamation, vec![1, 9], "the `!!!!` and the lone `!`, and nothing else");
+
+        // Tile 14 is the `G` the run clicked and tile 1 is the `!!!!` that moved on its own. That
+        // pair is the whole failure.
+        assert!(exclamation.contains(&1));
+        assert!(!exclamation.contains(&14));
+
+        // A lone `!` has nothing left to shed. On the list anyway: it is unselectable either way, so
+        // excusing it costs nothing, and telling "already spent" from "about to be" would be
+        // reasoning about a tile nobody can pick.
+        assert!(exclamation.contains(&9));
+
+        // **And the two classes must not be confused**, which is the dev's point. A digit is a bomb
+        // and an exclamation is not; neither predicate may claim the other's tiles.
+        let bomb: Vec<usize> = board
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.is_empty() && l.chars().all(|c| c.is_ascii_digit()))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(bomb.is_empty(), "this board has no bomb on it at all");
+        assert!(!exclamation.contains(&0), "nor may an ordinary letter be swept in");
+    }
+
     /// A burning tile is restless for a different reason, and a worse one.
     ///
     /// `tile.extra.burn` is a turn counter (`tileboard.lua:170`: *"This tile is burning. It has 0

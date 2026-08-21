@@ -693,8 +693,35 @@ impl Fight<'_> {
             .iter()
             .enumerate()
             .filter(|(_, t)| {
+                // **Two different tiles that both move on their own**, and they are not the same
+                // thing — the dev's correction, 2026-08-21: *the `!` is an exclamation tile, not a
+                // bomb tile; bomb tiles are numbered.*
+                //
+                // A **bomb** is a digit. `getMaterialName` (`rpg/effects/material/default.lua:54-56`)
+                // is `if tonumber(letter) then return 'bomb' end`, and it explodes at zero. What
+                // `bomb.lua` lists under `['!']` is a `!` tile *made of bomb material*, which is a
+                // property of the material and not what the tile is.
+                //
+                // An **exclamation** tile is the `!!!` ligature (`rpg/effects/ligature/!!!.lua`),
+                // whose quads are generated as `('!'):rep(i+2)` — so `!!`, `!!!` and `!!!!` are one
+                // tile at different counts. Its tooltip is the behaviour that matters here:
+                //
+                // > Unselectable tile. Loses a `!` after the start of your turn if it's on the
+                // > bottom.
+                //
+                // Different mechanics, same consequence for this list: the tile changes without
+                // being touched, so a stray-detection pass must not read the change as a misplaced
+                // click. It cost a run on 2026-08-21 — board `V !!!! S R E L E M E ! E A B G G E`,
+                // stopped with `clicking tile 14 also changed [1]`. Tile 1 is the `!!!!`, and it had
+                // not been touched; it had ticked.
+                //
+                // A lone `!` has nothing left to shed, and is included anyway: it is unselectable
+                // either way, so excusing it from stray detection costs nothing, and a rule that had
+                // to tell "already spent" from "about to be" would be reasoning about a tile nobody
+                // can pick.
+                let exclamation = !t.letter.is_empty() && t.letter.chars().all(|c| c == '!');
                 let bomb = !t.letter.is_empty() && t.letter.chars().all(|c| c.is_ascii_digit());
-                bomb || t.burn().is_some_and(|b| b > 0)
+                bomb || exclamation || t.burn().is_some_and(|b| b > 0)
             })
             .map(|(i, _)| i)
             .collect();
