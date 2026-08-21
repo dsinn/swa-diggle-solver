@@ -137,6 +137,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         frame_alarm: false,
     };
 
+    // **The size is checked before the door, because at the wrong size the door cannot be read.**
+    //
+    // On 2026-08-18 this run opened at 1536x960 and spent the full thirty seconds below scoring
+    // `Unknown` against a start menu that was drawn correctly, then photographed it. The frame was
+    // the only thing that said what had happened, and it said it to a human, later. One line here
+    // says it now. See [`diggle_solver::layout::unsupported`] for why the size is what it is and
+    // why we may not fix it ourselves.
+    let (cw, ch) = win.client_size()?;
+    r.log.push_str(&format!("client {cw}x{ch}\n"));
+    if let Some(why) = diggle_solver::layout::unsupported(cw, ch) {
+        r.log.push_str(&format!("ABORT: {why}\n"));
+        return finish(&mut game, &r.log, r.unflushed(), &archive);
+    }
+
     // Timed because the startup felt slow and nobody could say which part was slow. `wait_for_window`
     // returns as soon as the HWND exists, the fixed 3 s after it is a guess, and `click_when_ready`
     // polls `locate` every 400 ms — three candidates, and guessing between them is how this project

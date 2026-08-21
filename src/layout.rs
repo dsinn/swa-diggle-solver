@@ -105,6 +105,56 @@ pub fn tile_radius(client_w: i32, client_h: i32) -> f64 {
     TILE_SIZE * scale(client_w, client_h) / 2.0
 }
 
+/// The one client size this project is calibrated at.
+///
+/// Everything the observer does — every template crop, every search rectangle, every `_PRESENT`
+/// threshold — was measured against a 1920×1080 client and none of it is parametric yet
+/// (`README.md`, `act.rs`'s registry). Combat is the exception: [`tile_centres`] takes the client
+/// size and has always been derived.
+pub const CALIBRATED: (i32, i32) = (1920, 1080);
+
+/// Why this client size cannot be read, or `None` when it can.
+///
+/// **Why this exists at all.** On 2026-08-18 a run launched outside a working session opened at
+/// 1536×960 and spent thirty seconds failing to recognise a start menu that was drawn perfectly
+/// well; `identify` said `Unknown` and the loudest fingerprint scored 0.71. Nothing was wrong
+/// except the size. The cause is not ours — `main.lua:49-64` computes a window size only when
+/// `userConfig.window.width`/`.height` are set, and `utils/defaultconfig.lua:32-34` sets neither,
+/// so **with no `userConfig` the game opens fullscreen at the desktop size**; `checkpoint::clear`
+/// deletes that file and nothing here may write it back
+/// (`docs/superpowers/plans/2026-07-25-diggle-solver-milestone-1.md:48`).
+///
+/// So the size is the dev's to set, once, by hand — and the only thing we can usefully do is say
+/// so in one line instead of burning thirty seconds and photographing a menu that was fine.
+///
+/// The two failures are named apart because they are two different pieces of work: a 16:9 client
+/// of another size is one substitution (both terms of `x = w * ss_x + s * bw * os_x` carry the
+/// same factor when `w/1920 == h/1080`), while another aspect ratio moves them apart and is a
+/// genuine refactor of the observer.
+pub fn unsupported(client_w: i32, client_h: i32) -> Option<String> {
+    if (client_w, client_h) == CALIBRATED {
+        return None;
+    }
+    let how = match client_w * 9 == client_h * 16 {
+        true => format!(
+            "16:9 at scale {:.3}, which the observer is not parametric over yet",
+            scale(client_w, client_h)
+        ),
+        false => format!(
+            "{:.3}:1, and at any aspect but 16:9 the screen-space and offset terms of a button \
+             centre scale by different factors",
+            client_w as f64 / client_h.max(1) as f64
+        ),
+    };
+    Some(format!(
+        "client is {client_w}x{client_h} — {how}. Every template here was measured at {}x{}. \
+         Set it in the game: Options -> General -> Fullscreen off, Windowed launch resolution \
+         {}x{} (`ui/options.lua:647,653-659`), which the game persists itself. Diggle must not \
+         write that file.",
+        CALIBRATED.0, CALIBRATED.1, CALIBRATED.0, CALIBRATED.1
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +266,51 @@ mod tests {
         let col1_bottom = c[0].1;
         let col2_bottom = c[tall.rows_per_col[0]].1;
         assert!(col1_bottom < col2_bottom, "short column should sit higher: {col1_bottom} vs {col2_bottom}");
+    }
+
+    #[test]
+    fn the_calibrated_client_is_supported_and_nothing_else_is() {
+        // The positive control the abort needs: if this said "unsupported" at 1920x1080 the guard
+        // would refuse every launch that works today.
+        assert_eq!(unsupported(1920, 1080), None);
+        assert!(unsupported(1536, 960).is_some(), "the 2026-08-18 client must be refused");
+    }
+
+    #[test]
+    fn a_sixteen_by_nine_client_is_named_as_a_scale_not_as_an_aspect() {
+        // 1280x720 is the case milestone 1 (#64) makes work with one substitution, and the message
+        // has to say which of the two milestones is missing or it sends the reader to the wrong one.
+        let why = unsupported(1280, 720).expect("not calibrated, so not supported yet");
+        assert!(why.contains("16:9"), "{why}");
+        assert!(why.contains("0.667"), "the scale is the whole of milestone 1: {why}");
+    }
+
+    #[test]
+    fn the_client_that_actually_failed_is_named_as_an_aspect() {
+        // 1536x960 is 1.6:1 -- a 1920x1200 panel at 125%. `scale` would be min(0.800, 0.889) =
+        // 0.800, and resampling by it cannot put the two terms back together, which is why this
+        // case must NOT be reported as a scale.
+        let why = unsupported(1536, 960).expect("refused");
+        assert!(why.contains("1.600"), "{why}");
+        assert!(!why.contains("16:9 at scale"), "1536x960 is not 16:9: {why}");
+    }
+
+    #[test]
+    fn the_message_carries_the_measured_size_and_the_fix() {
+        // The whole point is that one line replaces thirty seconds and a screenshot, so the line
+        // has to answer both "what did it see" and "what do I do".
+        let why = unsupported(1536, 960).expect("refused");
+        assert!(why.contains("1536x960"), "{why}");
+        assert!(why.contains("Fullscreen"), "{why}");
+        assert!(why.contains("Windowed launch resolution"), "{why}");
+    }
+
+    #[test]
+    fn a_degenerate_client_does_not_divide_by_zero() {
+        // A minimised or not-yet-mapped window reports 0x0, and `wait_for_window` returns as soon
+        // as the HWND exists -- so this is reachable, and a panic here would abort a launch that
+        // only needed another poll.
+        let why = unsupported(0, 0).expect("0x0 is not the calibrated size");
+        assert!(why.contains("0x0"), "{why}");
     }
 }

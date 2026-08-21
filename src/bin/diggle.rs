@@ -1041,6 +1041,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let win = game.wait_for_window(Duration::from_secs(20))?;
             std::thread::sleep(Duration::from_secs(3));
             let (cw, ch) = win.client_size()?;
+            // Every coordinate below is the 1920x1080 one. See `layout::unsupported`.
+            if let Some(why) = diggle_solver::layout::unsupported(cw, ch) {
+                echo(&console, format!("ABORT: {why}"));
+                game.close(Duration::from_secs(15));
+                return Ok(());
+            }
             let input = PostMessageInput::new(win);
             input.focus();
             std::thread::sleep(Duration::from_millis(500));
@@ -1340,7 +1346,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut game = diggle_solver::game::launch::GameProcess::launch(&cfg, &console)?;
             echo(&console, format!("launched pid {} — {}", game.pid(), diggle_solver::game::launch::build_command_line(&cfg)));
             let win = game.wait_for_window(Duration::from_secs(20))?;
-            echo(&console, "window up; settling".into());
+            let (cw, ch) = win.client_size()?;
+            echo(&console, format!("window up ({cw}x{ch}); settling"));
+            // The Continue press below is a fixed client point, so a wrong size aims it at
+            // whatever happens to be there. See `layout::unsupported`.
+            if let Some(why) = diggle_solver::layout::unsupported(cw, ch) {
+                echo(&console, format!("ABORT: {why}"));
+                game.close(Duration::from_secs(15));
+                return Ok(());
+            }
             std::thread::sleep(Duration::from_secs(3));
 
             let mut mirror = diggle_solver::observe::log::LogMirror::create(Path::new(
