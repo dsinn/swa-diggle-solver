@@ -6575,6 +6575,59 @@ mod tests {
         );
     }
 
+    /// **The three changes of 2026-08-21 that share `pick_shrine`, exercised together.**
+    ///
+    /// Written as an interaction check rather than for a fault: #70 removed the fight-free route
+    /// filter, #74 admitted corrupted shrines once the clean supply is spent, and the bar dropped to
+    /// three, all on the same afternoon and none of it run. Each has its own test; this asks what
+    /// they do *at once*, which is the case a live run will actually present.
+    ///
+    /// The combination is deliberately the most permissive one reachable: portal open, bar short,
+    /// nothing clean left, and the only candidate corrupted and behind a level 9 forest. Every guard
+    /// that used to refuse it has been removed by one of the three, so if the run can be sent
+    /// somewhere it cannot act, this is where.
+    #[test]
+    fn the_shrine_rules_of_2026_08_21_do_not_combine_into_an_unreachable_target() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("l53", "Beeford Hedge — level 9 forest")]));
+        m.fold(&dump(
+            "l53",
+            "Beeford Hedge — level 9 forest",
+            vec![node("shrine2", "Gransmoor shrine")],
+        ));
+        m.here = Some("here".into());
+        m.hell = Some(0.1);
+        m.entry("shrine2").corrupted = true;
+
+        // The premises, each named so a fixture that drifts says which rule stopped applying.
+        assert!(m.corrupted_shrines_are_needed(), "#74: nothing clean and the bar is short");
+        assert!(
+            !m.reachable_without_a_fight("here", "shrine2"),
+            "#70: the only way there is a level 9 forest, and that no longer disqualifies it"
+        );
+
+        let plan = m.next_target().expect("a plan");
+        assert_eq!(plan.reason, Goal::Shrine);
+        assert_eq!(plan.target, "shrine2");
+
+        // **The half that matters.** A target the driver cannot set off toward is worse than no
+        // target: it is the shape of every loop this project has had. `next_hop` is what the step
+        // actually asks, so ask it.
+        let hop = m.next_hop().expect("a hop toward the shrine we just nominated");
+        assert_eq!(hop.plan.target, "shrine2");
+        assert_eq!(hop.step, "l53", "through the forest, which is the fight we agreed to pay");
+
+        // And with the bar met, the same map must stop offering it — the guard that keeps #74 from
+        // becoming the shrine-chase of 2026-08-15.
+        ready_for_the_anomaly(&mut m);
+        assert!(!m.corrupted_shrines_are_needed());
+        assert_ne!(
+            m.next_target().map(|p| p.reason),
+            Some(Goal::Shrine),
+            "satisfied, so a corrupted shrine behind a level 9 forest is a detour again"
+        );
+    }
+
     /// A corrupted shrine, including the one whose heading a restart threw away.
     #[test]
     fn a_corrupted_shrine_with_no_heading_is_assumed_to_be_level_seven() {
@@ -13017,6 +13070,56 @@ e	l4	l11
             None,
             "and there is no second probe to bounce off"
         );
+    }
+
+    /// **#71 and #57 crossing each other: the walk heads for the shrine, not the door.**
+    ///
+    /// An interaction neither task's own tests reach. #71 put interior shrines back into
+    /// `errand_inside` with the portal open, and `dest` is the errand when there is one
+    /// (`cross_toward`), so the destination of a crossing can now be a shrine subnode. #57 then made
+    /// `doorward` rank candidates by their distance to **`dest`** — which is the door only when there
+    /// is no errand.
+    ///
+    /// Get this wrong and the failure is silent and exactly the one #71 was filed for: the run walks
+    /// out of the forest past a shrine it came for. Worth a test precisely because both halves look
+    /// right in isolation.
+    #[test]
+    fn a_crossing_with_a_shrine_errand_heads_for_the_shrine() {
+        let at = |key: &str, heading: &str, x: f64, y: f64| Node {
+            key: key.into(), heading: heading.into(), x, y, connections: 3,
+        };
+        let door = Exit {
+            x: 1500.0, y: 1500.0, to_key: "l5".into(), to_heading: "Dalton Copse village".into(),
+        };
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump(
+            "shrine1",
+            "shrine1sub1",
+            "Gripthorpe Brush road",
+            vec![
+                at("shrine1sub2", "Gripthorpe Brush woodland shrine", 100.0, 100.0),
+                at("shrine1sub5", "Gripthorpe Brush road", 1400.0, 1400.0),
+            ],
+            vec![door.clone()],
+        ));
+        m.entry("shrine1").heading = "Gripthorpe Brush — level 1 forest".into();
+        m.hell = Some(0.1);
+
+        assert_eq!(
+            m.errand_inside("shrine1").map(|p| p.key.as_str()),
+            Some("shrine1sub2"),
+            "the premise, and it is #71: with the portal open this is still an errand"
+        );
+
+        // `shrine1sub5` sits almost on top of the door, so a crossing that had fallen back to the
+        // exit would take it — which is what makes this fixture able to fail.
+        match m.cross_toward(&[door]) {
+            Some(Crossing::Step { to, toward }) => {
+                assert_eq!(toward, "shrine1sub2", "the errand is the destination, not the road out");
+                assert_eq!(to, "shrine1sub2");
+            }
+            other => panic!("expected a step to the shrine, got {other:?}"),
+        }
     }
 
     /// **The probe goes outward, and never back to where it has stood.**
