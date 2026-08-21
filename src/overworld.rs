@@ -2455,6 +2455,47 @@ impl WorldMap {
         Some(((wx - f.dx) / f.scale, (wy - f.dy) / f.scale))
     }
 
+    /// Why [`WorldMap::screen_position`] could not answer. For the log, and only for the log.
+    ///
+    /// **Written because the one line this replaced named the wrong culprit for three runs.** It
+    /// said *the frame cannot place it*, which reads as too few anchors and sends the reader at
+    /// #21; replaying `spike-run-20260821-0313Z.log` and `-0357Z.log` says the frame was usable at
+    /// **every one of their 73 and 109 surface dumps**, so in those two runs it cannot have been
+    /// the frame at all. The three ways to have no coordinate are three different pieces of work
+    /// and only one of them is the frame's.
+    ///
+    /// The interesting one is the middle: [`WorldMap::apply_save`] calls [`WorldMap::entry`] for
+    /// every completed, corrupt, sacked, besieged and lost-woods key the save names, so a resumed
+    /// run knows places it has never seen drawn — position `None`, no neighbours. The save's
+    /// `_path_to_` completions land in `roads_done` and authorise a direct hop between the two
+    /// nodes such a key names, so [`WorldMap::far_hop`] will happily nominate one. It is a real
+    /// destination we simply cannot aim at yet, and stepping is the right answer; the frame is
+    /// blameless and adding anchors would change nothing.
+    ///
+    /// Every node declined in the three runs above (`l20`, `shrine2`, `l10`, `l26`, `l28`) has its
+    /// **first mention in the whole report on the decline line itself** — five for five.
+    pub fn unplaceable(&self, a: &Adjacency, key: &str) -> String {
+        let Some(p) = self.places.get(key) else {
+            return format!("`{key}` is not on our map at all");
+        };
+        if p.pos.is_none() {
+            return format!(
+                "no dump has ever drawn `{key}` — we know it from the save, not from the screen"
+            );
+        }
+        match self.registration(a) {
+            None => "this dump shares nothing already placed, so the frame cannot speak here".into(),
+            Some(f) if f.anchors < 2 => format!(
+                "this dump shares {} placed node(s) with the frame, and measuring a scale needs two",
+                f.anchors
+            ),
+            Some(f) => format!(
+                "the frame disagrees with itself by {:.0} px, so nothing may be placed from it",
+                f.disagreement
+            ),
+        }
+    }
+
     pub fn fold(&mut self, a: &Adjacency) {
         let parent = a.subworld.as_ref().map(|(k, _)| k.clone());
         // Crossing into a subworld: remember the surface node we came from, because leaving by the
@@ -13378,5 +13419,128 @@ e	l4	l11
         m.entry(ANOMALY_KEY).completed_corrupt = true;
         // Everything is visited, nothing hides neighbours, the anomaly is beaten: no target.
         assert_eq!(m.next_target(), None, "walking on would be pointless, and saying so is the answer");
+    }
+
+    /// The middle case, and the one every decline in the archive turned out to be.
+    ///
+    /// `apply_save` gives a resumed run places it has never seen drawn. They are real destinations
+    /// — a save `_path_to_` completion authorises a hop straight to one — and there is nothing on
+    /// screen to aim at, so the step is right and the frame is blameless.
+    #[test]
+    fn a_place_the_save_named_but_no_dump_ever_drew_says_so() {
+        let mut m = WorldMap::new();
+        let at = |k: &str, x: f64, y: f64| Node {
+            key: k.into(), heading: "road".into(), x, y, connections: 2
+        };
+        // Two dumps, so `here` and its neighbours are placed and the frame can measure a scale.
+        m.fold(&dump("l1", "road", vec![at("l2", 400.0, 400.0), at("l3", 800.0, 600.0)]));
+        m.fold(&dump("l2", "road", vec![at("l1", 100.0, 100.0), at("l3", 800.0, 600.0)]));
+        let fresh = dump("l2", "road", vec![at("l1", 100.0, 100.0), at("l3", 800.0, 600.0)]);
+
+        // What the save does: a Place, with nothing else.
+        m.entry("l26").completed = true;
+        assert_eq!(m.screen_position(&fresh, "l26"), None, "there is nothing to aim at");
+
+        let why = m.unplaceable(&fresh, "l26");
+        assert!(why.contains("no dump has ever drawn"), "{why}");
+        assert!(why.contains("l26"), "{why}");
+        // The negative control that makes the diagnosis mean anything: the SAME dump places a node
+        // it has drawn, so the frame was never the reason.
+        assert!(
+            m.screen_position(&fresh, "l3").is_some(),
+            "the frame is usable here, which is exactly why blaming it was wrong"
+        );
+    }
+
+    #[test]
+    fn a_key_we_have_never_heard_of_is_not_reported_as_a_frame_fault() {
+        let m = WorldMap::new();
+        let why = m.unplaceable(&dump("l1", "road", vec![]), "l99");
+        assert!(why.contains("not on our map at all"), "{why}");
+    }
+
+    /// The genuine frame case: a dump with nothing in common with what we have placed.
+    #[test]
+    fn a_dump_sharing_nothing_placed_blames_the_frame_and_says_why() {
+        let mut m = WorldMap::new();
+        let at = |k: &str, x: f64, y: f64| Node {
+            key: k.into(), heading: "road".into(), x, y, connections: 2
+        };
+        m.fold(&dump("l1", "road", vec![at("l2", 400.0, 400.0), at("l3", 800.0, 600.0)]));
+        // A dump from somewhere else entirely: nothing in it has a position in our frame.
+        let stranger = dump("l77", "road", vec![at("l78", 10.0, 10.0)]);
+        let why = m.unplaceable(&stranger, "l3");
+        assert!(
+            why.contains("frame cannot speak") || why.contains("needs two"),
+            "a real frame failure should still say so: {why}"
+        );
+    }
+
+    /// **The measurement behind [`WorldMap::unplaceable`]**, replayed from the run archive rather
+    /// than asserted from memory.
+    ///
+    /// #63 recorded that `the frame cannot place it` means "too few anchors to register the node"
+    /// and pointed the fix at #21, more anchors. Replaying the dumps of the runs it cites says
+    /// otherwise: in the two 2026-08-21 runs the frame was usable at **every** surface dump, and
+    /// the only places that end a run without a position are interior ones, which live in the
+    /// subworld frame and are not the world frame's to hold.
+    ///
+    /// So a surface node, once drawn, is always placeable — and a surface node that is *never*
+    /// drawn is the one the far hop declines. That is [`WorldMap::apply_save`]'s doing, not the
+    /// frame's.
+    ///
+    /// Reads the archive because it is a claim about real dumps; skips when it is not there, the
+    /// same way [`crate::parity`] does.
+    #[test]
+    fn the_world_frame_is_not_what_declines_a_far_hop() {
+        // 0436Z is included and deliberately not asserted on: its 9 mute dumps are the opening of
+        // a run, before anything has been placed, and folding that into the claim would make the
+        // claim vaguer rather than stronger.
+        for (path, mute_allowed) in [
+            ("spike-run-20260821-0313Z.log", 0),
+            ("spike-run-20260821-0357Z.log", 0),
+        ] {
+            let Ok(log) = std::fs::read_to_string(path) else {
+                eprintln!("SKIP: {path} is not present");
+                continue;
+            };
+            let lines: Vec<String> = log.lines().map(|l| l.to_string()).collect();
+            let dumps = crate::observe::adjacency::Reader::new().push(&lines);
+            assert!(dumps.len() > 100, "{path} should hold a whole run, got {}", dumps.len());
+
+            let mut m = WorldMap::new();
+            let (mut surface, mut mute) = (0, 0);
+            for a in &dumps {
+                m.fold(a);
+                if a.subworld.is_some() {
+                    continue;
+                }
+                surface += 1;
+                if m.registration(a).filter(|f| f.anchors >= 2 && f.is_sound()).is_none() {
+                    mute += 1;
+                }
+            }
+            assert!(surface > 50, "{path}: only {surface} surface dumps");
+            assert_eq!(
+                mute, mute_allowed,
+                "{path}: {mute} of {surface} surface dumps could not place anything"
+            );
+
+            // Interior keys: subnodes, plazas, the roads out, and the crossroads the game names by
+            // coordinate. None of them is the world frame's to hold — see [`InsideFrame`].
+            let interior = |k: &str| {
+                k.contains("sub") || k.contains("_plaza") || k.contains("_path_to_") || k.contains("xrd")
+            };
+            let stranded: Vec<&str> = m
+                .places
+                .values()
+                .filter(|p| p.pos.is_none() && !interior(&p.key))
+                .map(|p| p.key.as_str())
+                .collect();
+            assert!(
+                stranded.is_empty(),
+                "{path}: surface nodes left unplaced by the world frame: {stranded:?}"
+            );
+        }
     }
 }

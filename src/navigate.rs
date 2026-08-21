@@ -5852,11 +5852,19 @@ pub fn drive(
                         });
                         hop.step = far;
                     }
-                    None => r.log.push_str(&format!(
-                        "  `{far}` is travellable in one press and the frame cannot place it — \
-                         stepping to `{}` instead\n",
-                        hop.step
-                    )),
+                    // **Say WHICH of the three, because they are three different repairs.** The
+                    // line here used to read "the frame cannot place it", which reads as too few
+                    // anchors and sends the reader at #21 — and in two of the three runs that
+                    // produced this branch the frame was usable at every surface dump they took.
+                    // See [`crate::overworld::WorldMap::unplaceable`].
+                    None => {
+                        let why = r.map.unplaceable(&fresh, &far);
+                        r.log.push_str(&format!(
+                            "  `{far}` is travellable in one press but cannot be aimed at:                              {why} — stepping to `{}` instead
+",
+                            hop.step
+                        ));
+                    }
                     }
                 }
             }
