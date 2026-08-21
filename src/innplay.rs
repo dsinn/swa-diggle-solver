@@ -257,6 +257,33 @@ pub fn parse_rest_data(lines: &[String]) -> Option<RestData> {
 ///
 /// Zero whenever there is nothing to gain, including the case that matters most: `can_rest` already
 /// false, which is the inn telling us it will not serve us before we have touched anything.
+/// What is still to buy on this visit, discounting what has already landed on it.
+///
+/// **Both numbers this returns are read from the save, and the save is not written until we leave.**
+/// `overworld:save()` runs in the inn's `goBack` (`ui/inn.lua:9`), so `player.gold` and
+/// `player.statusEffects` are frozen at the value they had when the visit began. The rest screen's
+/// own `Rest data` block is fresh — the game prints it each time the screen opens — which is why
+/// `healthNeed` falls across a visit and these two do not.
+///
+/// That asymmetry cost a live run on 2026-08-20. Banking asked for eleven stacks, a dream took the
+/// screen after three or four presses, the loop re-entered and asked again — and got eleven back,
+/// six times over, because nothing it could see had changed. Twenty presses landed against a want of
+/// eleven, two hundred gold went, and the character came out with **25** stacks banked for a fight
+/// that wanted 16. Only [`MAX_PRESSES`] stopped it, which is a misread guard being asked to be a
+/// budget.
+///
+/// `done` is the same counter that already clamps the visit, so the correction is arithmetic rather
+/// than a second reading: each press cost [`crate::rest::INN_COST`] and banked one stack.
+///
+/// The gold half was wrong before the bank existed and had never bitten — `presses_needed` was
+/// driven by `healthNeed`, which the console refreshes, so a stale purse only ever over-allowed a
+/// press the inn would then refuse. Adding a want the console does not report is what made the
+/// staleness reachable.
+pub fn still_wanted(gold: i64, stacks_short: i64, done: usize) -> (i64, i64) {
+    let spent = done as i64 * crate::rest::INN_COST;
+    ((gold - spent).max(0), (stacks_short - done as i64).max(0))
+}
+
 pub fn presses_needed(d: &RestData, gold: i64, stacks_short: i64) -> usize {
     if !d.can_rest || d.doing_event {
         return 0;
@@ -395,6 +422,40 @@ Rest data = {
         assert_eq!(presses_needed(&d, 763, 0), 4, "the bar alone wants four");
         assert_eq!(presses_needed(&d, 763, 2), 4, "and two stacks come free with them");
         assert_eq!(presses_needed(&d, 763, 9), 9, "the deeper want is the one that decides");
+    }
+
+    /// **A visit spends as it goes, and the save does not say so until we leave.**
+    ///
+    /// The 2026-08-20 run in the smallest form that reproduces it: eleven stacks wanted, dreams
+    /// breaking the visit into rounds, and every round re-reading the same frozen numbers.
+    #[test]
+    fn what_is_left_to_buy_falls_as_the_visit_spends() {
+        // Round one: nothing landed yet, so the reading stands as taken.
+        assert_eq!(still_wanted(641, 11, 0), (641, 11));
+
+        // Four presses in — the shape of one dream-interrupted round.
+        assert_eq!(still_wanted(641, 11, 4), (601, 7));
+
+        // And the want is satisfied exactly when the presses have landed, not when the save catches
+        // up. This is the assertion the live run failed: at eleven done it asked for eleven more.
+        assert_eq!(still_wanted(641, 11, 11), (531, 0));
+
+        // Never negative, so an over-long visit cannot wrap into a fresh want.
+        assert_eq!(still_wanted(641, 11, 20), (441, 0));
+        assert_eq!(still_wanted(30, 11, 20), (0, 0), "nor can the purse go through the floor");
+    }
+
+    /// The two together: once the want is spent, the press count is zero and the visit ends.
+    #[test]
+    fn a_satisfied_bank_stops_the_visit_rather_than_running_to_the_ceiling() {
+        let full = RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
+        let (gold, short) = still_wanted(641, 11, 11);
+        assert_eq!(
+            presses_needed(&full, gold, short),
+            0,
+            "eleven landed against eleven wanted is done, and 20 was never the budget"
+        );
+        assert!(MAX_PRESSES > 11, "the fixture must not be proving the ceiling instead");
     }
 
     /// The purse still caps it, and the floor is still the inn's own.

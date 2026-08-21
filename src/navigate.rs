@@ -1824,13 +1824,16 @@ impl Run<'_> {
                 // No press of our own here: `leave_inn` walks out from wherever this is.
                 break;
             };
-            let gold = self.map.gold();
             // **Two reasons to press, and the inn cannot tell them apart.** The block on screen
             // answers the health half; the bank half is ours, and comes from the errand the run
-            // is actually on — see [`crate::overworld::WorldMap::stacks_short_ahead`].
-            // `stacks_to_buy`, not `stacks_short_ahead`: the second is the size of the want,
-            // the first is what the purse may serve once the heart's reserve is out of it.
-            let banking = self.map.stacks_to_buy();
+            // is actually on — see [`crate::overworld::WorldMap::stacks_to_buy`], which is what the
+            // purse may serve once the heart's reserve is out of it.
+            //
+            // **Discounted by what this visit has already landed**, because both of our numbers are
+            // frozen until we leave — see [`innplay::still_wanted`], and the run that banked 25 for
+            // a fight that wanted 16.
+            let (gold, banking) =
+                innplay::still_wanted(self.map.gold(), self.map.stacks_to_buy(), done);
             let presses =
                 innplay::presses_needed(&data, gold, banking).min(innplay::MAX_PRESSES - done);
             self.log.push_str(&format!(
