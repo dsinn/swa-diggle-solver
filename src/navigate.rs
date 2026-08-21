@@ -1328,35 +1328,7 @@ impl Run<'_> {
     /// the map, not of the coordinate: `core:mousereleased` only restores the button when the
     /// release was over **no location** (`:1479-1485`), and one fixed point cannot be empty on every
     /// map. Each attempt is checked, so this converges rather than hoping.
-    /// **The selection without the wait**, for a step whose next action is a fixed-coordinate press.
-    ///
-    /// The dev, 2026-08-20, on the reverted attempt to skip the whole thing: *the greyed out Combat
-    /// means that the crypt was already completed. Why aren't we fixing this forward?* Right on both
-    /// counts. What that failure proved is that the **arrow press** is load-bearing — it sets
-    /// `selectedLocation` to the player's location (`overworldview.lua:490-496`), which is what puts
-    /// our node's buttons in the slot instead of the last node we clicked. It proved nothing about
-    /// the twelve-second poll for a pan dump that follows it.
-    ///
-    /// So the press stays and the wait goes. Entering is one press at a fixed coordinate; it does
-    /// not need coordinates, and it does not need the camera to have finished moving —
-    /// `setInteractionEnabled(false)` has three call sites in the game and an ordinary pan is not
-    /// one of them, so input during the glide lands.
-    ///
-    /// Returns whether the arrow press landed, read from the slot the same way [`Run::recentre`]
-    /// reads it: the arrow is *replaced* by the location's buttons, so an arrow still sitting there
-    /// means the press did not take.
-    fn select_here(&mut self) -> bool {
-        !matches!(self.locate_me(false), Located::Failed)
-    }
-
     fn recentre(&mut self) -> Option<Adjacency> {
-        match self.locate_me(true) {
-            Located::Panned(a) => Some(a),
-            _ => None,
-        }
-    }
-
-    fn locate_me(&mut self, wait_for_pan: bool) -> Located {
         let (cw, ch) = self.win.client_size().unwrap_or((1920, 1080));
         for (n, &(cx, cy)) in EMPTY_MAP_CANDIDATES.iter().enumerate() {
             // Actually check the point is on the map before clicking it.
@@ -1392,23 +1364,13 @@ impl Run<'_> {
             let before = self.dumps;
             let _ = self.tap("show the area buttons", lx, ly);
             self.park();
-            // **Selection only.** The arrow is replaced by the location's buttons when the press
-            // lands, so the slot answers directly and there is nothing to wait for.
-            if !wait_for_pan {
-                self.pump();
-                let after = self.read_slot(&affirm::SHOW_AREA_BUTTONS);
-                return match after.state.is_ready() {
-                    true => Located::Failed,
-                    false => Located::Selected,
-                };
-            }
             let by = Instant::now() + Duration::from_secs(12);
             while Instant::now() < by {
                 std::thread::sleep(Duration::from_millis(250));
                 self.pump();
                 if self.dumps > before {
                     if let Some(a) = self.latest.as_ref().filter(|a| a.reason.contains("pan")) {
-                        return Located::Panned(a.clone());
+                        return Some(a.clone());
                     }
                 }
             }
@@ -1431,7 +1393,7 @@ impl Run<'_> {
                 }
             ));
         }
-        Located::Failed
+        None
     }
 
     /// Clicks the lone area button, having first proved the strip is showing something.
@@ -2883,21 +2845,6 @@ impl Run<'_> {
     }
 }
 
-/// What a locate-me achieved. Three outcomes and only the first carries coordinates.
-///
-/// The arrow's press does three things at once (`overworldview.lua:490-496`) — refresh the area
-/// buttons, centre the screen, and set `selectedLocation` to the player. A caller that only needs
-/// the selection should not be made to wait for the pan that comes with it, and a caller that needs
-/// coordinates must not mistake one for the other.
-enum Located {
-    /// The pan finished and announced itself; the dump is current.
-    Panned(Adjacency),
-    /// The press landed. The selection is ours; the camera may still be moving.
-    Selected,
-    /// The arrow was never pressed, or the pan never arrived.
-    Failed,
-}
-
 /// Skips the anomaly-opening cinematic by reloading the world from the main menu.
 ///
 /// Proven in `spike_anomaly` and, until now, only ever run there — capability built in a spike and
@@ -4004,30 +3951,6 @@ pub fn drive(
                     continue;
                 }
             }
-        } else if r.map.standing_on_what_we_came_for(r.committed_to.as_deref())
-            && r.latest.is_some()
-            && r.select_here()
-        {
-            // **Select, do not wait.** We are standing on the node we walked to and the next action
-            // is one press at a fixed coordinate, so the pan this would otherwise sit through buys
-            // nothing: the area slot is HUD, drawn wherever the camera is, and input during the
-            // glide lands.
-            //
-            // The arrow press itself still happens — see the note at [`Run::recentre`]. Skipping it
-            // outright is what ended the run of 2026-08-20, because it is the press that sets
-            // `selectedLocation` to us, and without it the slot keeps whichever node was clicked
-            // last. The frame showed a greyed `Combat` belonging to a crypt three nodes away.
-            //
-            // `latest.is_some()` guards the binding rather than the decision: nothing on the surface
-            // path reads `fresh` — it is consumed only by `cross_toward` and the crossing arms,
-            // both inside a subworld — but the binding still needs a value, and on the first step of
-            // a run there is not one yet.
-            r.log.push_str(&format!(
-                "{step}. standing on `{}`, which is what we came for — selected it without waiting \
-                 for the pan\n",
-                r.map.here().unwrap_or("?")
-            ));
-            r.latest.clone().expect("guarded")
         } else {
             // The overworld gets the settling for free — it re-centres every step, and `recentre`
             // already refuses a dump older than its own click. What it did not get is the sanity

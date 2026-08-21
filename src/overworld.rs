@@ -2901,34 +2901,6 @@ impl WorldMap {
             .unwrap_or(0)
     }
 
-    /// **Are we standing on the node we set out for, to do the one thing it is entered with?**
-    ///
-    /// The step whose next action is certain before anything is read: a single press on the area
-    /// slot. `committed_to` is the target the last hop was taking us to and `here` is where the
-    /// arrival dump put us, so both halves are known without asking the screen.
-    ///
-    /// Its one caller uses this to take the cheaper of two locate-me forms
-    /// ([`crate::navigate::Run::select_here`] rather than `recentre`) — **not** to skip the press
-    /// altogether, which was tried on 2026-08-20 and ended a run. See the note at
-    /// `Run::recentre` for why the arrow press cannot go: it is what selects our own location.
-    ///
-    /// A fight and a settlement, because both are one press on that slot — `Combat` and `Enter`.
-    /// The dev raised the second: *it seems that we re-centered before entering Boreas town*, and
-    /// the first version's combat-only rule was drawn on a distinction that does not exist. What
-    /// happens *after* the press differs wildly; what this asks about is the press.
-    ///
-    /// Deliberately silent about a step that will click a **node**, where the coordinates a full
-    /// re-centre refreshes are the entire point.
-    pub fn standing_on_what_we_came_for(&self, committed_to: Option<&str>) -> bool {
-        let Some(here) = self.here.as_deref() else { return false };
-        if committed_to != Some(here) {
-            return false;
-        }
-        self.places.get(here).is_some_and(|p| {
-            p.parent.is_none() && ((p.has_combat() && !p.completed) || p.is_settlement())
-        })
-    }
-
     /// Is there still a heart on a shelf somewhere we have not written off?
     ///
     /// Mirrors the filter in [`WorldMap::plan`]'s heart branch, and must keep mirroring it: this is
@@ -6451,51 +6423,6 @@ mod tests {
         // **The roster is not the gate.** `consecrations` counts what has been finished, and knowing
         // seven names finishes none of them.
         assert_eq!(m.consecrations(), 0);
-    }
-
-    /// **What we walked to, and what is entered with one press on the area slot.**
-    ///
-    /// The condition behind taking `select_here` instead of a full `recentre` — the selection
-    /// without the twelve-second wait for a pan nobody is going to use.
-    #[test]
-    fn what_we_came_for_is_known_before_the_camera_is_asked() {
-        let mut m = WorldMap::new();
-        m.fold(&dump("here", "camp", vec![node("l4", "Riccall — level 6 crypt")]));
-        m.here = Some("l4".into());
-
-        assert!(
-            m.standing_on_what_we_came_for(Some("l4")),
-            "we set out for it, we are on it, and the fight is still owed"
-        );
-
-        // **A settlement counts too**, which the first version got wrong. The dev, watching a run
-        // re-centre before Boreas: entering a town is `Enter` on the same slot, one press, and the
-        // combat-only rule was drawn on a distinction that does not exist.
-        let mut m = WorldMap::new();
-        m.fold(&dump("here", "camp", vec![node("l59", "Boreas town")]));
-        m.here = Some("l59".into());
-        assert!(m.standing_on_what_we_came_for(Some("l59")), "a town is one press as well");
-
-        // **Only the node we chose.** Passing through a fight on the way elsewhere is a different
-        // decision, taken later and on other grounds.
-        assert!(!m.standing_on_what_we_came_for(Some("l7")), "committed elsewhere");
-        assert!(!m.standing_on_what_we_came_for(None), "committed to nothing");
-
-        // A fight already won is not one to enter, and its node is not a settlement either.
-        let mut m = WorldMap::new();
-        m.fold(&dump("here", "camp", vec![node("l4", "Riccall — level 6 crypt")]));
-        m.here = Some("l4".into());
-        m.entry("l4").completed = true;
-        assert!(!m.standing_on_what_we_came_for(Some("l4")), "nothing left to fight");
-
-        // An ordinary road is neither, so the camera work stands.
-        let mut m = WorldMap::new();
-        m.fold(&dump("here", "camp", vec![node("l2", "Bainton Clump road")]));
-        m.here = Some("l2".into());
-        assert!(!m.standing_on_what_we_came_for(Some("l2")), "nothing is entered at a road");
-
-        // And nowhere at all, which is the state before the first dump lands.
-        assert!(!WorldMap::new().standing_on_what_we_came_for(Some("l4")), "not anywhere yet");
     }
 
     /// Knowing the roster does not let the anomaly through the gate.
