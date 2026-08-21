@@ -3891,6 +3891,41 @@ pub fn drive(
                     continue;
                 }
             }
+        } else if let Some(a) = r
+            .map
+            .standing_on_the_fight_we_came_for(r.committed_to.as_deref())
+            .then(|| r.latest.clone())
+            .flatten()
+        {
+            // **The camera is not needed to press a button at a fixed coordinate.**
+            //
+            // The dev's observation, 2026-08-20: re-centring before a *hop* is right, because the
+            // positions it refreshes are what the click aims at. Before entering the node we are
+            // already standing on, it is ceremony — the area slot is at (32, 918) and (187, 918)
+            // whatever the camera is doing, and the slot's own template is what decides whether the
+            // press will land. Two clicks and a pan animation, on every arrival at a fight.
+            //
+            // **Nor does stillness matter here**, which was the other reason given and does not
+            // survive reading. `setInteractionEnabled(false)` has three call sites in the whole game
+            // — the anomaly cinematic (`utils/events.lua:48`) and entering or leaving a shrine
+            // (`shrine.lua:57`, `:258`). An ordinary animated pan leaves input enabled, so a press
+            // during the glide lands. `recentre`'s own doc blames a vanished Space on the animation;
+            // the likelier cause is two lines from it — `clearToShowAreaButton` clears the area
+            // buttons and inserts only the arrow (`overworldview.lua:497-502`), so an `affirmative`
+            // had no target. That is a question about *which object is in the slot*, which is
+            // exactly what reading the slot answers.
+            //
+            // **Safe because nothing on this path reads the dump.** `fresh` is consumed only by
+            // `cross_toward` and the crossing arms, all of them inside a subworld; on the surface
+            // `here` and `place` come from the map, which the arrival already folded. The last dump
+            // is handed on so the binding has a value, not because anything looks at it — and if
+            // there is none, this arm does not fire and the ordinary locate-me runs.
+            r.log.push_str(&format!(
+                "{step}. standing on `{}`, which is what we came for — entering it without a \
+                 locate-me\n",
+                r.map.here().unwrap_or("?")
+            ));
+            a
         } else {
             // The overworld gets the settling for free — it re-centres every step, and `recentre`
             // already refuses a dump older than its own click. What it did not get is the sanity
