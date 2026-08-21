@@ -3335,7 +3335,32 @@ impl WorldMap {
     fn has_unexplored_roads(&self, key: &str) -> bool {
         self.places
             .get(key)
-            .map(|p| p.connections as usize > p.neighbours.len())
+            // **And we have not already stood there.** Task #73, the dev 2026-08-21: *one probe per
+            // node, remembered.*
+            //
+            // Standing on a node is the act that makes the game name its neighbours, so a gap that
+            // survives a visit is one visiting cannot close — most often a **secret** neighbour,
+            // which `verboseAdjacencyData` prints as `Hidden location` and never names until a tower
+            // reveals it (`locationIsVisible`, `overworldview.lua:554-556`; task #14 is the reveal).
+            // Counting it as unexplored makes the node a permanent magnet: the errand nominates it,
+            // `next_target` excludes `here` so the pull vanishes on arrival, exploring hops away, and
+            // from over there it is a candidate again.
+            //
+            // **A ranking was tried first and was not enough.** `probe_toward_the_unknown` sorts on
+            // `(visited, dist)`, which decides between candidates — and with a single candidate it
+            // decides nothing. One is the ordinary case: the `l11` / `l13` bounce of the 2030Z run
+            // went three full laps *with that ranking in the binary* before `LOOP_WRITE_OFF` broke
+            // it.
+            //
+            // This is the stricter reading of the dev's earlier correction, not a retreat from it:
+            // *it should be the navigator's responsibility to probe and build the cache, not to
+            // assume from the cache.* Probing is exactly what a visit is. Concluding **after** one is
+            // the responsibility discharged; concluding before it is the thing they objected to.
+            //
+            // `visited` is set only by standing somewhere **this run** and is pointedly not restored
+            // from the map cache, so a resumed run probes afresh — the right side to err on, since a
+            // tower may have revealed the neighbour while we were away.
+            .map(|p| !p.visited && p.connections as usize > p.neighbours.len())
             .unwrap_or(false)
     }
 
@@ -12591,10 +12616,20 @@ e	l4	l11
         }
         assert_eq!(m.access_without_a_fight("here", "l28"), Access::Blocked);
 
-        // Now give `free` a road we have never looked down — the `l28` case, one node earlier. The
-        // answer must stop being a claim about the map.
-        let n = m.entry("free").neighbours.len() as u32;
-        m.entry("free").connections = n + 1;
+        // Now put a road we have never looked down inside the region — the `l28` case, one node
+        // earlier. The answer must stop being a claim about the map.
+        //
+        // **On ground we have not stood on**, which is what changed with #73. Bumping `free`'s own
+        // degree used to do it, but `free` is a dump's `here_key` and so is `visited`: a gap that
+        // survived standing there is a secret neighbour, not an unlooked road, and it no longer
+        // counts. `lane` is named by the dump and never walked to, which is the ordinary shape of a
+        // frontier and needs no hand-set degree at all.
+        m.fold(&dump(
+            "free",
+            "Quiet Glade meadow",
+            vec![node("l49", "Yokefleet — level 6 crypt"), node("lane", "Fordon Lane meadow")],
+        ));
+        assert!(!m.get("lane").unwrap().visited, "the premise: named, never stood on");
         assert_eq!(m.access_without_a_fight("here", "l28"), Access::Unknown);
 
         // And an unlooked road never upgrades a *known* fight into a maybe: the crypt on the only
@@ -12626,23 +12661,82 @@ e	l4	l11
             "a closed fight-free region really has no heart in it"
         );
 
-        // One unlooked road, and the same map is worth walking into.
-        let n = m.entry("free").neighbours.len() as u32;
-        m.entry("free").connections = n + 1;
+        // One unlooked road, and the same map is worth walking into. **Named and never walked to**
+        // since #73 — a gap on `free`, which we have stood on, is a secret neighbour rather than an
+        // unlooked road, and buys no second visit.
+        m.fold(&dump(
+            "free",
+            "Quiet Glade meadow",
+            vec![node("l49", "Yokefleet — level 6 crypt"), node("lane", "Fordon Lane meadow")],
+        ));
         let plan = m.next_target().expect("something to do");
         assert_eq!(plan.reason, Goal::Heart, "the walk is still the heart errand, and says so");
-        assert_eq!(plan.target, "free", "the probe is the node with the road we have not tried");
+        assert_eq!(plan.target, "lane", "the probe is the node with the road we have not tried");
     }
 
-    /// **The probe keeps going outward rather than back to where it has stood.**
+    /// **A node we have stood on is not a probe candidate at all.** Task #73.
+    ///
+    /// The 2030Z bounce, `l11 Argham crossroads` against `l13 Bilton crypt`, and the shape that
+    /// showed the preference added earlier the same day is not enough:
+    ///
+    /// ```text
+    ///   83. l44 -> **l11**  (for l11, Heart)
+    ///   84. l11 -> **l13**  (for l36, Explore)
+    ///   85. l13 -> **l11**  (for l11, Heart)
+    ///   86. l11 -> **l13**  (for l36, Explore)
+    ///   87. l13 -> **l11**  (for l11, Heart)
+    ///   88. `l11` is written off — stood on 2 times with nothing learned
+    /// ```
+    ///
+    /// Three laps. `min_by_key((visited, dist))` ranks candidates against each other, so with
+    /// **one** candidate it changes nothing — and one is the ordinary case. The dev, 2026-08-21,
+    /// choosing between ranking and filtering with this run in front of them: *one probe per node,
+    /// remembered.*
+    #[test]
+    fn a_probe_is_not_offered_the_same_node_twice() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("l13", "Bilton — level 4 crypt", vec![node("l11", "Argham crossroads")]));
+        m.here = Some("l13".into());
+        let dist = m.distances("l13");
+
+        // One candidate, and it declares a road we have never looked down.
+        m.entry("l11").connections = 4;
+        assert!(m.has_unexplored_roads("l11"), "the premise: the game says there is more here");
+        assert_eq!(
+            m.probe_toward_the_unknown("l13", &dist).map(|p| p.key.as_str()),
+            Some("l11"),
+            "so the first probe goes"
+        );
+
+        // Stand on it. The dump names one neighbour and the declared degree is still four, so the
+        // gap survived the one act that could have closed it — a secret neighbour, which
+        // `verboseAdjacencyData` prints as `Hidden location` and never names until a tower reveals
+        // it (`overworldview.lua:554-556`, task #14).
+        m.fold(&dump("l11", "Argham crossroads", vec![node("l13", "Bilton — level 4 crypt")]));
+        m.entry("l11").connections = 4;
+        m.here = Some("l13".into());
+
+        assert!(!m.has_unexplored_roads("l11"), "a gap that survives a visit is not unexplored");
+        assert_eq!(
+            m.probe_toward_the_unknown("l13", &dist),
+            None,
+            "and there is no second probe to bounce off"
+        );
+    }
+
+    /// **The probe goes outward, and never back to where it has stood.**
     ///
     /// The `l11 Argham crossroads` / `l5 Dalton Copse` bounce of 2026-08-21, in the smallest shape
     /// that produces it. Standing on a node is what makes the game name its neighbours, so a gap
     /// that survives a visit is one visiting cannot close — a secret neighbour, most often. The
     /// probe kept nominating it, the errand at the far end nominated the way back, and it took two
     /// full laps and a write-off to break.
+    ///
+    /// Named `..._prefers_...` when it was a ranking. #73 made it a filter, because a ranking has
+    /// nothing to decide when there is one candidate — see
+    /// [`WorldMap::has_unexplored_roads`] and the second half of this test.
     #[test]
-    fn the_heart_probe_prefers_ground_it_has_not_stood_on() {
+    fn the_heart_probe_never_returns_to_ground_it_has_stood_on() {
         let build = || {
             let mut m = WorldMap::new();
             // Two ways out of the camp, both fight-free, both with a road we have not looked down.
@@ -12677,16 +12771,24 @@ e	l4	l11
             "a node we have already stood on has no more roads to give us"
         );
 
-        // **And it is a preference, not a refusal.** With nothing else left, the visited node is
-        // still the only road there is — the dev's rule of 2026-08-15, that the navigator probes
-        // rather than concluding from an incomplete cache.
+        // **And since #73 it is a refusal, not a preference.** This asserted the opposite until
+        // 2026-08-21: with nothing else left, the visited node was still nominated, on the dev's
+        // rule of 2026-08-15 that the navigator probes rather than concluding from an incomplete
+        // cache.
+        //
+        // The 2030Z run is why it changed. A ranking only decides between candidates, and the
+        // ordinary case has **one** — `l11` against `l13` went three full laps with this very
+        // preference in the binary. Concluding *after* a visit is the 2026-08-15 responsibility
+        // discharged, not dodged: standing there is the probe, and it came back empty.
         let mut m = build();
         m.entry("stood").visited = true;
         let n = m.entry("fresh").neighbours.len() as u32;
         m.entry("fresh").connections = n;
-        let plan = m.next_target().expect("a plan");
-        assert_eq!(plan.reason, Goal::Heart);
-        assert_eq!(plan.target, "stood", "the only road left is worth taking even so");
+        assert_ne!(
+            m.next_target().map(|p| p.reason),
+            Some(Goal::Heart),
+            "every road has been walked, so the errand stops rather than re-walking one"
+        );
     }
 
     /// Not a crypt, and still a fight — the four nodes the first rule waved through.
