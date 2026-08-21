@@ -83,9 +83,11 @@ const EMPTY_MAP: (i32, i32) = (1750, 160);
 /// launch and returns nothing. Killing the *game* does leave a report, but it interrupts whatever
 /// was mid-flight: a click, a save write, an unconfirmed reward screen (which discards the reward).
 ///
-/// Checked at the top of the loop, between steps, where nothing is half-done. Consumed on read so a
-/// stale file cannot end the next run before it starts.
-const STOP_FILE: &str = ".diggle-stop";
+/// Checked at the top of the loop, between steps, where nothing is half-done — and, since
+/// 2026-08-21, inside a fight and inside an inn as well, because a step can hold the mouse and
+/// keyboard for minutes. **Consumed here and nowhere else**, so the subsystems that merely *ask*
+/// cannot swallow half a request; see [`crate::config::stop_requested`].
+use crate::config::STOP_FILE;
 
 /// What a visit to an inn actually achieved.
 ///
@@ -304,7 +306,7 @@ impl Doorway {
 /// only way to check `drive`'s wiring without a running game in front of it.
 #[derive(Debug, PartialEq)]
 pub enum Stop {
-    /// Someone asked us to stop, via [`STOP_FILE`].
+    /// Someone asked us to stop, via [`crate::config::STOP_FILE`].
     Requested,
     AnomalyBeaten,
     // `AtShrine` used to live here: arriving at a shrine ended the run, because finishing one needed
