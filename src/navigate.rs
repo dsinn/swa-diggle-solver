@@ -2396,6 +2396,25 @@ impl Run<'_> {
                         "  every neighbour is off-screen — the camera has not caught up with the \
                          map, so these coordinates cannot be used\n",
                     );
+                    // **And ask for the cure, rather than noticing the symptom three times.**
+                    //
+                    // A locate-me centres on the player by construction, so it is exactly what a
+                    // camera that has not caught up needs — the caller's own doc says as much, and
+                    // then gates it behind `MAX_DUMP_MISSES`. Three looks, each preceded by a wait,
+                    // before the one action that would fix it.
+                    //
+                    // Live on 2026-08-20 entering the lost woods: the event's `Continue` calls
+                    // `enterSubworld` (`overworld/events/arrived/lost_woods.lua:22-30`), so the
+                    // teleport lands us inside with the view somewhere else entirely. Every dump
+                    // that followed was refused for the same reason and nothing reached for the
+                    // remedy. The dev, watching it: *Diggle was able to recover but after over a
+                    // minute of doing nothing.*
+                    //
+                    // Setting the flag rather than re-centring here: this is a *reader*, called
+                    // from inside polling loops, and a reader that starts clicking would act in the
+                    // middle of whatever is polling it. The flag is checked at the top of the next
+                    // step, which is where a locate-me belongs.
+                    self.needs_recentre = true;
                 }
             }
             if Instant::now() >= by {
