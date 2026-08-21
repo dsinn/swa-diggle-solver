@@ -312,7 +312,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     // **The two survival conditions, stated before the run starts rather than inferred from it.**
     //
-    // A reader otherwise cannot tell a run that had four shrines and ignored them from one that only
+    // A reader otherwise cannot tell a run that had shrines to spare and ignored them from one that only
     // ever found two, nor a run that skipped the bank from one that had nothing to bank for. Both
     // numbers are free here and both decide where the first hop goes.
     r.log.push_str(&format!(

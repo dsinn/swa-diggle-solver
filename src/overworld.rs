@@ -741,7 +741,7 @@ impl Place {
     /// - **A crypt.** The dev's original wording, and the thing that has killed the most runs.
     /// - **A corrupted shrine.** Added on the dev's own second thought: *if we wish to fight at a
     ///   corrupted shrine for whatever reason, perhaps enhanced by rule 1, we do want the "2x
-    ///   Well-Rested" rule.* Rule 1 — four consecrations before the anomaly — is what makes that
+    ///   Well-Rested" rule.* Rule 1 — [`SHRINES_BEFORE_THE_ANOMALY`] consecrations before the anomaly — is what makes that
     ///   reachable, so the two arrived together.
     ///
     /// ## The corrupted shrine's level is assumed, and has to be
@@ -1430,11 +1430,20 @@ pub const HEART_FLOOR: i64 = HEART_COST + crate::rest::INN_COST;
 ///
 /// The dev's number, 2026-08-20: *before the anomaly fight, ensure that at least 4 major shrines
 /// have been consecrated. This means that we need to keep exploring if the anomaly opens before
-/// we've revealed 4 shrines.*
+/// we've revealed 4 shrines.* **Lowered to three on 2026-08-21**, in the same breath as the
+/// corrupted-shrine exception ([`WorldMap::corrupted_shrines_are_needed`]) — the two arrived
+/// together and are worth reading together: the exception widens what may be spent to meet the bar,
+/// and this lowers the bar, so the pair make a world that could not supply four clean shrines much
+/// less likely to need a fight for the fourth.
 ///
-/// Four of a possible seven — `generateNLocationsOfNameAroundLocationsWithinBounds(…, 7, 'shrine',
+/// Three of a possible seven — `generateNLocationsOfNameAroundLocationsWithinBounds(…, 7, 'shrine',
 /// …)` (`overworld/generators/world.lua:81`) — so the bar is reachable rather than aspirational,
 /// though nothing guarantees all seven get placed or that all of them can be reached.
+///
+/// **The evidence for four being enough is one run, and it is not evidence for three.** The 2030Z
+/// run of 2026-08-21 consecrated four and beat the level 8 anomaly in 13 turns at 84/84 without
+/// taking a point of damage — which says four was ample and says nothing about where the floor is.
+/// Three is the dev's judgement, and the number to revisit first if a run loses that fight.
 ///
 /// A consecration pays in gold- and silver-bordered wildcard tiles (`utils/blessings.lua:95-110`),
 /// which is the mechanic this solver handles best, and it is bought with walking rather than
@@ -1443,7 +1452,7 @@ pub const HEART_FLOOR: i64 = HEART_COST + crate::rest::INN_COST;
 /// **This gates the anomaly, it does not forbid it.** See the release at the foot of
 /// [`WorldMap::plan`]: when exploring has nothing left to offer, the run goes anyway rather than
 /// standing still with a plan it will never satisfy.
-pub const SHRINES_BEFORE_THE_ANOMALY: usize = 4;
+pub const SHRINES_BEFORE_THE_ANOMALY: usize = 3;
 
 /// Cost to `key`, or [`usize::MAX`] when no known route reaches it — so unreachable places sort
 /// last rather than first.
@@ -3054,7 +3063,7 @@ impl WorldMap {
     ///
     /// Diagnostic today: the gate counts consecrations and the release turns on an exhausted
     /// frontier, so neither reads this. It is logged at the start of a run because a reader
-    /// otherwise cannot tell a run that had four shrines and ignored them from one that only ever
+    /// otherwise cannot tell a run that had shrines to spare and ignored them from one that only ever
     /// found two.
     pub fn shrines_known(&self) -> usize {
         self.places.values().filter(|p| key_is_major_shrine(&p.key)).count()
@@ -4089,7 +4098,7 @@ impl WorldMap {
         // health is the single most expensive thing this run can do. On the first pass we would
         // rather go exploring — which is also how an unknown rest site gets found — and the second
         // pass takes it when there is genuinely nothing else.
-        // **And four consecrations before it**, which is the dev's rule of 2026-08-20 and the
+        // **And [`SHRINES_BEFORE_THE_ANOMALY`] consecrations before it**, the dev's rule of 2026-08-20 and the
         // reason this branch can now decline.
         //
         // A consecration is bought with walking and pays in gold- and silver-bordered wildcards
@@ -4104,7 +4113,7 @@ impl WorldMap {
         // reached first, so a shrine we can reach is taken in preference to more exploring.
         //
         // **The release is at the foot of this function, not here.** A gate with no release is a
-        // stall: a world that places fewer than four shrines, or puts them behind ground we cannot
+        // stall: a world that places too few shrines, or puts them behind ground we cannot
         // cross, would leave the run walking a frontier it has already exhausted for ever. See
         // there for why it is the last thing tried rather than a clause in this condition.
         if self.consecrations() >= SHRINES_BEFORE_THE_ANOMALY {
@@ -6462,7 +6471,7 @@ mod tests {
         Node { key: key.into(), heading: heading.into(), x: 0.0, y: 0.0, connections: 2 }
     }
 
-    /// Four consecrated major shrines, so [`SHRINES_BEFORE_THE_ANOMALY`] is satisfied.
+    /// Enough consecrated major shrines that [`SHRINES_BEFORE_THE_ANOMALY`] is satisfied.
     ///
     /// Fixtures whose subject is the anomaly — its rank against other goals, steering toward it,
     /// routing to it — say this explicitly. The gate added on 2026-08-20 would otherwise turn every
@@ -6631,13 +6640,19 @@ mod tests {
         assert_eq!(clean.deliberate_fight_level(), None);
     }
 
-    /// **Four consecrations before the portal**, and what the run does while it is short.
+    /// **The portal waits for [`SHRINES_BEFORE_THE_ANOMALY`]**, and what the run does while short.
     ///
     /// The dev, 2026-08-20, after the run that reached the anomaly and died at turn 24: *before the
     /// anomaly fight, ensure that at least 4 major shrines have been consecrated. This means that we
-    /// need to keep exploring if the anomaly opens before we've revealed 4 shrines.*
+    /// need to keep exploring if the anomaly opens before we've revealed 4 shrines.* Lowered to
+    /// three on 2026-08-21.
+    ///
+    /// **Written against the constant, not against a number.** It named four in its title and
+    /// counted to three by hand, so lowering the bar broke it in a way that read as a regression —
+    /// `assertion left != right failed: CloseAnomaly, CloseAnomaly`, which says nothing about the
+    /// bar at all. Off-by-one is the point of a bar, so the off-by-one is now derived from it.
     #[test]
-    fn the_portal_waits_for_four_consecrations_and_we_explore_until_then() {
+    fn the_portal_waits_for_its_consecrations_and_we_explore_until_then() {
         let build = || {
             let mut m = WorldMap::new();
             m.fold(&dump(
@@ -6658,17 +6673,18 @@ mod tests {
         assert_ne!(plan.reason, Goal::CloseAnomaly, "under the bar, the portal waits");
         assert_eq!(plan.reason, Goal::Explore, "and exploring is what the dev asked for instead");
 
-        // Three is still short. Off by one is the whole point of a bar.
+        // One short is still short. Off by one is the whole point of a bar.
         let mut m = build();
-        for i in 1..=3 {
+        let short = SHRINES_BEFORE_THE_ANOMALY - 1;
+        for i in 1..=short {
             let p = m.entry(&format!("shrine{i}"));
             p.consecrated = true;
             p.used = true;
         }
-        assert_eq!(m.consecrations(), 3);
+        assert_eq!(m.consecrations(), short);
         assert_ne!(m.next_target().unwrap().reason, Goal::CloseAnomaly);
 
-        // The fourth opens the gate.
+        // The last one opens the gate.
         let mut m = build();
         ready_for_the_anomaly(&mut m);
         assert_eq!(m.consecrations(), SHRINES_BEFORE_THE_ANOMALY);
@@ -6679,7 +6695,7 @@ mod tests {
 
     /// **The release**, without which the gate is a stall rather than a rule.
     ///
-    /// A world that never yields four shrines — too few placed, or all of them behind ground we
+    /// A world that never yields enough shrines — too few placed, or all of them behind ground we
     /// cannot cross — must still end its run at the anomaly rather than walking an exhausted
     /// frontier for ever. That is the case the loop guard would otherwise have to end.
     #[test]
