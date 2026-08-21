@@ -1276,6 +1276,47 @@ impl Run<'_> {
     /// is most visible include the moments it is inert. Pressing it then does nothing at all, which
     /// is indistinguishable from a press that worked unless a fresh dump is demanded afterwards.
     ///
+    /// ## It cannot be skipped before entering a node, and 2026-08-20 is the proof
+    ///
+    /// The dev asked the reasonable question: when we have already decided to *enter* the node we
+    /// are standing on, the press is at a fixed coordinate, so why re-centre first? Tried, and it
+    /// ended a run — `Failed("Combat did not open at l38")`, twice on the same node.
+    ///
+    /// The frame it saved is the whole answer. The area slot was showing a **greyed `Combat`**
+    /// belonging to `Keyingham crypt` — a different node entirely — while the player stood at `l38`.
+    /// Pressing it did nothing, twice.
+    ///
+    /// The reason is the last line of the arrow's own handler (`overworldview.lua:490-496`):
+    ///
+    /// ```lua
+    ///     core.refreshAreaButtons(location)
+    ///     core.centreScreenOnPlayer()
+    ///     require'ui.elements.tooltips'.clear(nil, true)
+    ///     selectedLocation = location
+    /// ```
+    ///
+    /// **One press doing three things**, and the camera is the least of them. It sets
+    /// `selectedLocation` to the *player's* location — which is what makes the slot hold our node's
+    /// buttons instead of whichever node was last clicked. Travelling selects the node it clicks, so
+    /// without this press the slot keeps the previous selection's buttons, and they are inert
+    /// because that location is not where we are.
+    ///
+    /// `core.arriveAt` does call `refreshAreaButtons` (`:1420-1424`), which is why this looked safe
+    /// on paper. It does not touch `selectedLocation`, which is the half that matters.
+    ///
+    /// So the re-centre is not ceremony before an entry. It is the selection, and the pan is a side
+    /// effect of it. Two things noted while getting this wrong and worth keeping:
+    ///
+    /// * **Stillness genuinely is not the reason.** `setInteractionEnabled(false)` has three call
+    ///   sites in the game — the anomaly cinematic (`utils/events.lua:48`) and entering or leaving a
+    ///   shrine (`shrine.lua:57`, `:258`). An ordinary pan leaves input enabled. The claim below
+    ///   that "input during the animation goes nowhere" is not what stopped that Space.
+    /// * **The slot read is diagnostic and not a gate.** Both failed presses were logged
+    ///   `area slot: something else (Combat 0.8731, gate 0.95)` and pressed anyway — the observer
+    ///   said it was looking at something other than a live `Combat` and nothing acted on it. A
+    ///   greyed twin scoring 0.87 against a 0.95 bar is the calibration working; the press ignoring
+    ///   it is not.
+    ///
     /// ## Why the middle step is *read* and not merely clicked
     ///
     /// [`affirm::SHOW_AREA_BUTTONS`] shares its slot with the current location's area buttons. Clicking
