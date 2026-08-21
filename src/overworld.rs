@@ -3069,6 +3069,48 @@ impl WorldMap {
             .len()
     }
 
+    /// **Uncorrupted major shrines still available to consecrate**, folded the same way
+    /// [`WorldMap::consecrations`] folds them so a shrine and its plaza never count twice.
+    ///
+    /// The denominator of [`WorldMap::corrupted_shrines_are_needed`]. `abandoned` and `avoid` are
+    /// excluded because a shrine the driver gave up on is not a shrine we can still bank — leaving
+    /// it in would hold the corrupted ones off the list for ever on the strength of one we cannot
+    /// finish.
+    fn clean_shrines_left(&self) -> usize {
+        self.places
+            .values()
+            .filter(|p| p.can_be_consecrated() && !p.consecrated && !p.corrupted && !p.avoid)
+            .filter(|p| !self.abandoned.contains(&p.key))
+            .map(|p| p.key.strip_suffix("_plaza").unwrap_or(&p.key))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    }
+
+    /// **Has the free supply run out with the bar still short?** Task #74.
+    ///
+    /// The dev, 2026-08-21: *a corrupted shrine should become a target when it is the last to
+    /// satisfy the requirement. That also means that if two shrines are in the corruption, then they
+    /// become targets after two consecrations of uncorrupted shrines. Generalize this to any number
+    /// of corrupted shrines.*
+    ///
+    /// Both sentences describe this one condition. The second is what rules out the other reading:
+    /// *we can already see we will need them* would admit a corrupted shrine at nought
+    /// consecrations whenever the clean ones are too few, and the dev put the moment at **after**
+    /// the clean ones are spent. Take the free ones first, always — a corrupted shrine costs a fight
+    /// that can end the run, and a free consecration banked before it is one kept.
+    ///
+    /// **Both halves are load-bearing.** Without the bar test this becomes the shrine-chase of
+    /// 2026-08-15 again, since the clean supply is empty once the bar is met and every corrupted
+    /// shrine would turn back into a detour on the way to the portal.
+    ///
+    /// The count is over shrines we **know about**, which is sound only because this is reached with
+    /// the portal open, and opening it reveals every shrine in the world — the beams, and skipping
+    /// the cutscene does not skip the revelation (`shrine.lua`'s `initStates`, *so we can save right
+    /// away and main menu skip*). Before the portal there is no corruption to weigh anyway.
+    fn corrupted_shrines_are_needed(&self) -> bool {
+        self.consecrations() < SHRINES_BEFORE_THE_ANOMALY && self.clean_shrines_left() == 0
+    }
+
     /// **Buy Well-Rested stacks before walking into a deliberate deep fight.**
     ///
     /// Returns `plan` untouched unless every clause of the dev's rule holds, in which case the trip
@@ -3791,6 +3833,9 @@ impl WorldMap {
         // doing.
         let worth_a_trip =
             |p: &Place| !p.used || (anomaly_open && p.can_be_consecrated() && !p.consecrated);
+        // Hoisted: it walks every place, and asking it once per candidate would make the shrine
+        // branch quadratic in the size of the map for an answer that cannot change inside one pass.
+        let corrupted_are_needed = anomaly_open && self.corrupted_shrines_are_needed();
         let pick_shrine = || {
             self.places
                 .values()
@@ -3864,7 +3909,26 @@ impl WorldMap {
                 //
                 // The cost is bounded and the benefit is not: a shrine bought with a crypt fight is
                 // no longer cheap preparation, it is the level 8 fight's budget spent early.
-                .filter(|p| !anomaly_open || (!p.corrupted && !p.consecrated))
+                //
+                // **Unless it is the only way left to reach the bar** — task #74, and the exception
+                // the gate makes necessary. `SHRINES_BEFORE_THE_ANOMALY` requires consecrations the
+                // world may not be able to supply cleanly, and a rule that refuses corrupted shrines
+                // outright would leave such a world exploring an exhausted frontier until the
+                // release fires. See [`WorldMap::corrupted_shrines_are_needed`], which admits them
+                // only once the clean supply is spent *and* the bar is still short — so the free
+                // ones are always taken first, and none of this reopens once the bar is met.
+                .filter(|p| !anomaly_open || !p.consecrated)
+                //
+                // **And it must be able to advance the bar**, or the exception pays a fight for
+                // nothing. `is_shrine` answers by heading as well as by key, so a minor shrine is a
+                // candidate here — and a minor shrine can never be consecrated
+                // ([`Place::can_be_consecrated`]), so no number of them moves `consecrations`. A
+                // corrupted one is a fight whose reward the gate cannot spend.
+                .filter(|p| {
+                    !anomaly_open
+                        || !p.corrupted
+                        || (corrupted_are_needed && p.can_be_consecrated())
+                })
                 // **The route's cost is NOT a filter, and that is task #70.**
                 //
                 // There was a `reachable_without_a_fight` here, and it is gone. The dev, 2026-08-21:
@@ -6439,6 +6503,104 @@ mod tests {
         let done =
             Place { heading: "Riccall — level 6 crypt".into(), completed: true, ..Default::default() };
         assert_eq!(done.deliberate_fight_level(), None);
+    }
+
+    /// **A corrupted shrine becomes a target exactly when the clean ones cannot reach the bar.**
+    /// Task #74.
+    ///
+    /// The dev, 2026-08-21: *a corrupted shrine should become a target when it is the last to
+    /// satisfy the requirement. That also means that if two shrines are in the corruption, then they
+    /// become targets after two consecrations of uncorrupted shrines. Generalize this to any number
+    /// of corrupted shrines.*
+    ///
+    /// Both sentences describe the same condition — **the clean candidates have run out and the bar
+    /// is still short** — and the second is what rules out the other reading. "We can already see
+    /// we will need them" would admit a corrupted shrine at nought consecrations whenever the clean
+    /// ones are too few, and the dev put the moment at *after two consecrations*: take the free ones
+    /// first, always. That ordering is not a nicety. A corrupted shrine costs a fight that can end
+    /// the run, and a free consecration banked before it is a free consecration kept.
+    #[test]
+    fn a_corrupted_shrine_is_a_target_only_once_the_clean_ones_run_out() {
+        // `clean` uncorrupted and `foul` corrupted, all reachable, portal open.
+        let world = |clean: usize, foul: usize| {
+            let mut m = WorldMap::new();
+            let mut names: Vec<String> = Vec::new();
+            for i in 0..clean + foul {
+                names.push(format!("shrine{}", i + 1));
+            }
+            m.fold(&dump(
+                "here",
+                "camp",
+                names.iter().map(|k| node(k, "Gransmoor shrine")).collect(),
+            ));
+            for (i, k) in names.iter().enumerate() {
+                m.entry(k).corrupted = i >= clean;
+            }
+            m.here = Some("here".into());
+            m.hell = Some(0.1);
+            m
+        };
+        let consecrate = |m: &mut WorldMap, n: usize| {
+            for i in 0..n {
+                let p = m.entry(&format!("shrine{}", i + 1));
+                p.consecrated = true;
+                p.used = true;
+            }
+        };
+        let target = |m: &WorldMap| m.next_target().map(|p| (p.reason, p.target));
+
+        // **The dev's second sentence**, at the bar's own value: two clean, the rest corrupted.
+        // Before the clean ones are spent, a corrupted shrine is not a destination.
+        let mut m = world(2, 2);
+        assert_eq!(
+            target(&m),
+            Some((Goal::Shrine, "shrine1".into())),
+            "the clean one first, even though a corrupted one is exactly as near"
+        );
+        consecrate(&mut m, 1);
+        assert_eq!(target(&m), Some((Goal::Shrine, "shrine2".into())), "and the second clean one");
+
+        // Both clean ones are spent and the bar is still short: now they are targets.
+        consecrate(&mut m, 2);
+        assert!(m.consecrations() < SHRINES_BEFORE_THE_ANOMALY, "the premise: still short");
+        assert_eq!(
+            target(&m),
+            Some((Goal::Shrine, "shrine3".into())),
+            "nothing clean is left and the bar is unmet, so the fight is worth it"
+        );
+
+        // **Generalised.** Plenty of clean shrines and the corrupted ones are never wanted: the bar
+        // is met before they are reached, and `CloseAnomaly` takes over.
+        let mut m = world(SHRINES_BEFORE_THE_ANOMALY, 3);
+        consecrate(&mut m, SHRINES_BEFORE_THE_ANOMALY);
+        m.entry("start").heading = "The Rift — level 8 anomaly".into();
+        m.entry("start").corrupted = true;
+        m.fold(&dump("here", "camp", vec![node("start", "The Rift — level 8 anomaly")]));
+        assert_eq!(
+            target(&m).map(|(r, _)| r),
+            Some(Goal::CloseAnomaly),
+            "the bar is met, so a corrupted shrine is not a detour on the way to the portal"
+        );
+
+        // **A corrupted shrine that cannot advance the bar is never bought.** `is_shrine` answers by
+        // heading too, so `s1` is a candidate; `can_be_consecrated` reads the key, so it can never
+        // be consecrated and no number of them satisfies the gate. Found by an older fixture rather
+        // than by this one, which was too tidy — every shrine in it is keyed `shrineN`.
+        let mut m = world(0, 0);
+        m.fold(&dump("here", "camp", vec![node("s1", "Faraway shrine")]));
+        m.entry("s1").corrupted = true;
+        assert!(m.corrupted_shrines_are_needed(), "the exception is open");
+        assert_ne!(target(&m).map(|(r, _)| r), Some(Goal::Shrine), "and it still does not apply");
+
+        // And with the bar met, a corrupted shrine stays off the list even with clean ones gone —
+        // which is the half that stops this from becoming the 2026-08-15 shrine-chase again.
+        let mut m = world(SHRINES_BEFORE_THE_ANOMALY, 2);
+        consecrate(&mut m, SHRINES_BEFORE_THE_ANOMALY);
+        assert_ne!(
+            target(&m).map(|(_, t)| t),
+            Some(format!("shrine{}", SHRINES_BEFORE_THE_ANOMALY + 1)),
+            "no corrupted shrine is wanted once the requirement is satisfied"
+        );
     }
 
     /// A corrupted shrine, including the one whose heading a restart threw away.
@@ -12510,6 +12672,12 @@ e	l4	l11
         m.fold(&d);
         m.hell = Some(0.1);
         m.entry("shrine1").corrupted = true;
+        // **The bar has to be met, or #74 makes this shrine a target and the test is about a
+        // different rule.** Corruption stops being a veto once the clean supply is spent and
+        // `SHRINES_BEFORE_THE_ANOMALY` is still short — which, on a fixture holding exactly one
+        // shrine and it corrupted, is true from the first line. Satisfying the gate isolates the
+        // 2026-08-15 rule this test is actually about.
+        ready_for_the_anomaly(&mut m);
 
         assert_ne!(m.next_target().unwrap().reason, Goal::Shrine, "the fight is still owed");
         assert!(
