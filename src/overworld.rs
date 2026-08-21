@@ -1056,6 +1056,32 @@ pub struct WorldMap {
     gold: i64,
     /// Campfire fuel carried, which makes a campfire usable even at a used area.
     fuel: i64,
+    /// **The frontier a crossing is currently walking to**, with the container it belongs to.
+    ///
+    /// Memory, and the reason is the rule this file keeps re-learning: *memory or a monotone
+    /// measure, never a ranking* (`docs/superpowers/notes/navigation-loops.md`).
+    ///
+    /// The frontier walk below is argued to be cycle-free because "the BFS distance to the chosen
+    /// frontier strictly decreases with each step". True — **of a fixed frontier**. The pick was
+    /// re-ranked from scratch every step, and the ranking is a function of where we are standing, so
+    /// two nodes could each nominate a target whose route runs through the other. Live in `l48`
+    /// (Rowlston) on 2026-08-20, from the crossroads and back four times:
+    ///
+    /// ```text
+    ///   22. l48xrd33x152 — Heart -> l48sub7
+    ///   23. l48sub4      — Heart -> l48sub11
+    ///   24. l48xrd33x152 — Heart -> l48sub7
+    ///   25. l48sub4      — Heart -> l48sub11
+    /// ```
+    ///
+    /// Each step was individually correct and the pair never terminated, which is the signature of
+    /// every bounce recorded here. Holding the target still is what restores the argument the
+    /// comment already makes.
+    ///
+    /// Keyed by container so leaving invalidates it without anything having to remember to clear it
+    /// — and re-entering a subworld must invalidate it, since `lostOrientation` re-rolls the
+    /// interior (`forest.lua:483-490`).
+    probing_toward: Option<(String, String)>,
     /// **Well-Rested stacks banked**, summed across both flavours.
     ///
     /// A consumable, not an aura: one is spent per kill that heals (`rpgview.lua:1204-1209`), and
@@ -4980,11 +5006,42 @@ impl WorldMap {
             })
             .min()
             .map(|(_, _, _, k)| k.clone());
-        if let Some(step) = frontier.and_then(|f| self.first_step_toward(&here, &f, false)) {
-            return Some(match dest {
-                Some(toward) => Crossing::Probe { to: step, toward },
-                None => Crossing::Seek { to: step },
-            });
+
+        // **Keep walking to the frontier we chose, while it is still worth walking to.**
+        //
+        // See [`WorldMap::probing_toward`] for the `l48` bounce this exists to stop. The ranking
+        // above is re-run from scratch every step and depends on where we are standing; holding the
+        // answer still is what makes the "BFS distance strictly decreases" argument true rather than
+        // merely plausible.
+        //
+        // Every condition here is a reason the old target has stopped being an answer, and each one
+        // hands back to the ranking rather than stalling:
+        //
+        // * a different container — we have left, and an interior is re-rolled on re-entry;
+        // * we are standing on it, so it has taught us what it had;
+        // * it is no longer a frontier, or has nothing left to reveal, or has become unusable;
+        // * no route to it from here, which a corrupted road can take away mid-crossing.
+        let held = self
+            .probing_toward
+            .as_ref()
+            .filter(|(c, _)| c.as_str() == parent.as_str())
+            .map(|(_, k)| k.clone())
+            .filter(|k| k.as_str() != here.as_str())
+            .filter(|k| {
+                self.places.get(k).is_some_and(|p| {
+                    p.is_frontier() && !p.nothing_left_to_reveal() && usable(&p.key)
+                })
+            })
+            .filter(|k| self.first_step_toward(&here, k, false).is_some());
+        let chosen = held.or(frontier);
+        if let Some(f) = chosen {
+            if let Some(step) = self.first_step_toward(&here, &f, false) {
+                self.probing_toward = Some((parent.clone(), f));
+                return Some(match dest {
+                    Some(toward) => Crossing::Probe { to: step, toward },
+                    None => Crossing::Seek { to: step },
+                });
+            }
         }
 
         // Nothing left to learn, or no route to any of it. Same order the real router uses, so
@@ -6905,6 +6962,69 @@ mod tests {
 
     fn exit(to: &str) -> Exit {
         Exit { x: 0.0, y: 0.0, to_key: to.into(), to_heading: format!("{to} heading") }
+    }
+
+    /// **A crossing holds the frontier it chose**, so a re-ranking under its feet cannot bounce it.
+    ///
+    /// The `l48` (Rowlston) loop of 2026-08-20, in the smallest shape that produces it. The run
+    /// alternated between the crossroads and a house four times and the guard ended it:
+    ///
+    /// ```text
+    ///   22. l48xrd33x152 — Heart -> l48sub7
+    ///   23. l48sub4      — Heart -> l48sub11
+    ///   24. l48xrd33x152 — Heart -> l48sub7
+    ///   25. l48sub4      — Heart -> l48sub11
+    /// ```
+    ///
+    /// The frontier walk is argued cycle-free because the BFS distance to the chosen frontier
+    /// strictly decreases — which holds of a **fixed** frontier and not of one re-ranked from each
+    /// new vantage point. Standing somewhere is what makes the game name its neighbours, so the
+    /// ranking's own inputs change as the walk proceeds; here that is modelled by the rival frontier
+    /// gaining connections between the two steps, which is exactly what a dump does.
+    #[test]
+    fn a_crossing_does_not_turn_round_when_the_ranking_moves_under_it() {
+        let house = |k: &str| node(k, "Rowlston house");
+        let build = || {
+            let mut m = WorldMap::new();
+            // xrd — a — f1  and  xrd — b — f2, so both frontiers are two hops from the crossroads
+            // and the walk has a genuine choice.
+            m.fold(&inside_dump(
+                "l48",
+                "xrd",
+                "Rowlston crossroads",
+                vec![house("a"), house("b")],
+                vec![exit("l59")],
+            ));
+            m.fold(&inside_dump("l48", "a", "Rowlston house", vec![node("xrd", "Rowlston crossroads"), house("f1")], vec![exit("l59")]));
+            m.fold(&inside_dump("l48", "b", "Rowlston house", vec![node("xrd", "Rowlston crossroads"), house("f2")], vec![exit("l59")]));
+            m.here = Some("xrd".into());
+            m
+        };
+
+        let mut m = build();
+        let first = m.cross_toward(&[exit("l59")]).expect("a crossing");
+        let step_one = match &first {
+            Crossing::Probe { to, .. } | Crossing::Seek { to } => to.clone(),
+            other => panic!("expected a probe, got {other:?}"),
+        };
+        assert!(step_one == "a" || step_one == "b", "the walk sets off toward a frontier: {step_one}");
+
+        // Take the step, and let the far side of the village suddenly look richer — a dump naming
+        // the rival's neighbours is all it takes. This is the re-ranking that used to turn the walk
+        // round.
+        let rival = if step_one == "a" { "f2" } else { "f1" };
+        m.here = Some(step_one.clone());
+        m.entry(rival).connections = 9;
+
+        let second = m.cross_toward(&[exit("l59")]).expect("a crossing");
+        let step_two = match &second {
+            Crossing::Probe { to, .. } | Crossing::Seek { to } => to.clone(),
+            other => panic!("expected a probe, got {other:?}"),
+        };
+        assert_ne!(
+            step_two, "xrd",
+            "the walk turned round at the first re-ranking — this is the l48 bounce"
+        );
     }
 
     /// A crossroads two hops away beats a dead end next door, because it names more of the village.
