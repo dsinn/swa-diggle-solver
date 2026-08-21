@@ -178,6 +178,26 @@ const NEUTRAL: (i32, i32) = (760, 240);
 // `.diggle-stop`, now checked in the same place rather than partway down, so it is honoured from any
 // state rather than only from the states that reach the middle of the loop.
 
+/// One reading of the area-button slot, said in full: the score and both verdicts it answers.
+///
+/// Both bars are printed on every line, whichever question the caller asked, because the two dead
+/// presses of 2026-08-20 were diagnosed months apart from a line that gave one number and one bar.
+/// `Combat 0.8731, gate 0.95` is true and says nothing about the thing that mattered — that 0.8731
+/// is comfortably a live plank, and the plank actually on screen was greyed at 0.74.
+fn slot_reading(q: Option<f64>) -> String {
+    let Some(q) = q else { return "  area slot: not read\n".to_string() };
+    let verdict = match (q >= crate::act::AREA_BUTTON_SHOWING, q >= crate::act::AREA_BUTTON_LIVE) {
+        (true, _) => "`Combat`",
+        (false, true) => "a live button, not `Combat`",
+        (false, false) => "nothing pressable",
+    };
+    format!(
+        "  area slot: {verdict} ({q:.4}; `Combat` at {}, any live plank at {})\n",
+        crate::act::AREA_BUTTON_SHOWING,
+        crate::act::AREA_BUTTON_LIVE
+    )
+}
+
 /// How many times to click a node, re-deriving its coordinates between tries, before giving up.
 ///
 /// Three: one for the coordinate we were given, and two for coordinates the game is asked to restate
@@ -211,6 +231,21 @@ const SELECT_MOVED: f64 = 0.01;
 // Pressing the arrow answers the same question for the price of a click, because the map's position
 // stops mattering once the game has just restated it. The retry below does that, and the run that
 // followed cleared the exact hop the drift had killed without the correction ever firing.
+
+/// How many times to look at the area-button slot, re-selecting between looks, before pressing anyway.
+///
+/// Three, matching every other retry on this path. Each look after the first costs a
+/// [`Run::select_here`] — a click on empty ground and a click on the arrow, about a second — which
+/// is the whole of the recovery for a slot holding another node's buttons. Two of those and then
+/// the press, because [`Run::look_for_a_live_slot`] may not veto: see there.
+const SLOT_LOOKS: usize = 3;
+
+/// How long to let the strip redraw after re-selecting, before reading it again.
+///
+/// The area buttons are inserted synchronously by the arrow's handler
+/// (`overworldview.lua:488-494`), so this is for the fade rather than for the logic. Half a second
+/// is the nominal transition (`utils/defaultconfig.lua:5`); this is comfortably past it.
+const SLOT_RETRY_PAUSE: Duration = Duration::from_millis(700);
 
 /// How many consecutive locate-me misses to sit through before calling it a stall.
 ///
@@ -915,7 +950,7 @@ pub struct Run<'a> {
     /// perfectly plausible.
     ///
     /// So the cure is not a better detector. `recentre` presses locate-me, which does
-    /// `refreshAreaButtons` and `centreScreenOnPlayer` together (`overworldview.lua:485-494`) and
+    /// `refreshAreaButtons` and `centreScreenOnPlayer` together (`overworldview.lua:488-494`) and
     /// waits for the pan it starts — it ends the glide rather than trying to read around it, and the
     /// dump it returns is settled by construction.
     ///
@@ -1355,7 +1390,7 @@ impl Run<'_> {
     /// belonging to `Keyingham crypt` — a different node entirely — while the player stood at `l38`.
     /// Pressing it did nothing, twice.
     ///
-    /// The reason is the last line of the arrow's own handler (`overworldview.lua:490-496`):
+    /// The reason is the last line of the arrow's own handler (`overworldview.lua:490-493`):
     ///
     /// ```lua
     ///     core.refreshAreaButtons(location)
@@ -1370,8 +1405,41 @@ impl Run<'_> {
     /// without this press the slot keeps the previous selection's buttons, and they are inert
     /// because that location is not where we are.
     ///
-    /// `core.arriveAt` does call `refreshAreaButtons` (`:1420-1424`), which is why this looked safe
-    /// on paper. It does not touch `selectedLocation`, which is the half that matters.
+    /// ## The mechanism stated here was wrong, and the ruling it supports is not
+    ///
+    /// This used to read: *`core.arriveAt` does call `refreshAreaButtons` (`:1420-1424`), which is
+    /// why this looked safe on paper. It does not touch `selectedLocation`, which is the half that
+    /// matters.* Re-read against the source on 2026-08-21, the second sentence is false.
+    /// `refreshAreaButtons` opens with it (`overworldview.lua:474-476`):
+    ///
+    /// ```lua
+    /// function core.refreshAreaButtons(location)
+    ///     selectedLocation = location or core.playerCurrentLocation()
+    ///     selectedLocationName = (location or core.playerCurrentLocation()).key
+    /// ```
+    ///
+    /// So an ordinary arrival does set it, to the node arrived at, and the neat explanation of the
+    /// `l38` frame goes with it.
+    ///
+    /// **The ruling stands on the live evidence rather than on that explanation.** Skipping the
+    /// arrow press ended a run twice on the same node; putting it back fixed it. That is the fact,
+    /// and the dev's call — *stop reverting it, add safeguards* — was made on it.
+    ///
+    /// What the source does supply is two ways the slot ends up holding somebody else's buttons,
+    /// either of which the arrow press cures:
+    ///
+    /// * **Entering or leaving a subworld clears it deliberately.** `basicSubworldZoneButtons`'
+    ///   `Explore` calls `enterSubworld(..., true)` (`:441-457`), whose `noButtons` reaches
+    ///   `arriveAt`'s `supressAreaButtons` branch — `selectedLocation = nil` and
+    ///   `overworld.clearAreaButtons()` (`:1427-1430`). `leaveSubworld` does the same (`:643`).
+    /// * **Clicking a distant node selects that node**, and fills the strip with
+    ///   `travelToLocationButtons` under *its* heading (`:1478-1481`, `:1493-1494`) — which is what
+    ///   a fast hop's press is.
+    ///
+    /// Which of those produced the greyed `Combat` at `l38` is not settled, and pinning it needs a
+    /// run that logs the slot on the step before. [`Run::look_for_a_live_slot`] is the safeguard
+    /// that does not depend on knowing: whatever put another node's buttons there, re-selecting is
+    /// what takes them away.
     ///
     /// So the re-centre is not ceremony before an entry. It is the selection, and the pan is a side
     /// effect of it. Two things noted while getting this wrong and worth keeping:
@@ -1402,7 +1470,7 @@ impl Run<'_> {
     /// The dev, 2026-08-20, on the reverted attempt to skip the whole thing: *the greyed out Combat
     /// means that the crypt was already completed. Why aren't we fixing this forward?* Right on both
     /// counts. What that failure proved is that the **arrow press** is load-bearing — it sets
-    /// `selectedLocation` to the player's location (`overworldview.lua:490-496`), which is what puts
+    /// `selectedLocation` to the player's location (`overworldview.lua:488-494`), which is what puts
     /// our node's buttons in the slot instead of the last node we clicked. It proved nothing about
     /// the twelve-second poll for a pan dump that follows it.
     ///
@@ -1483,7 +1551,7 @@ impl Run<'_> {
             }
             // Two very different failures reach this line, and the run that needed to tell them apart
             // could not. `mousereleased` on the arrow does `refreshAreaButtons` and
-            // `centreScreenOnPlayer` together (`overworldview.lua:485-494`), so a press that lands
+            // `centreScreenOnPlayer` together (`overworldview.lua:488-494`), so a press that lands
             // *replaces* the arrow with the location's buttons. Reading the slot one more time
             // therefore says which half went wrong: an arrow still sitting there was never pressed,
             // an arrow that has gone was pressed and the pan simply went unannounced — and only the
@@ -1660,26 +1728,77 @@ impl Run<'_> {
     /// `screen moved 0.000`, and telling them apart took a screenshot read by hand — see
     /// [`crate::act::AREA_COMBAT`] for the run this cost.
     fn combat_is_on_offer(&mut self) -> bool {
+        let q = self.area_slot_score();
+        self.log.push_str(&slot_reading(q));
+        q.is_some_and(|q| q >= crate::act::AREA_BUTTON_SHOWING)
+    }
+
+    /// The raw agreement between the area-button slot and [`crate::act::AREA_COMBAT`].
+    ///
+    /// One measurement, two questions: *which* button is in the slot
+    /// ([`crate::act::AREA_BUTTON_SHOWING`]) and whether **any live one** is
+    /// ([`crate::act::AREA_BUTTON_LIVE`]). Separated from the verdicts so a caller that wants the
+    /// second does not have to re-capture to get it.
+    ///
+    /// A capture fault answers `None` rather than a low score, because the two want opposite fixes
+    /// and reading a fault as "nothing live" would send the recovery below chasing a slot that was
+    /// never looked at. Reported rather than swallowed, for the reason `wait_for` counts faults.
+    fn area_slot_score(&mut self) -> Option<f64> {
         match crate::act::score_exact(self.win, &crate::act::AREA_COMBAT) {
-            Ok(q) => {
-                self.log.push_str(&format!(
-                    "  area slot: {} (Combat {q:.4}, gate {})\n",
-                    match q >= crate::act::AREA_BUTTON_SHOWING {
-                        true => "Combat",
-                        false => "something else",
-                    },
-                    crate::act::AREA_BUTTON_SHOWING
-                ));
-                q >= crate::act::AREA_BUTTON_SHOWING
-            }
-            // A capture fault is not a `Combat`. Reported rather than swallowed, for the reason
-            // `wait_for` counts faults: a blind check and an absent button look identical and want
-            // opposite fixes.
+            Ok(q) => Some(q),
             Err(e) => {
                 self.log.push_str(&format!("  area slot could not be read: {e}\n"));
-                false
+                None
             }
         }
+    }
+
+    /// **Look for a live area button, and re-select this node until one appears.**
+    ///
+    /// The slot read used to be a line in the log that nothing acted on. Twice on 2026-08-20 it
+    /// printed `area slot: something else (Combat 0.8731, gate 0.95)` and the press went out anyway;
+    /// the frame saved at the stop shows a **greyed `Combat` belonging to another node** in the
+    /// slot, and `Combat did not open at l38` is what that costs. The observer had the answer both
+    /// times.
+    ///
+    /// ## Why re-selecting is the recovery rather than waiting
+    ///
+    /// A slot holding another node's buttons is not a slot that is about to change on its own.
+    /// [`Run::select_here`] is what puts *ours* back: it clicks empty ground, which clears the strip
+    /// down to the arrow (`overworldview.lua:1482-1487`), and then presses the arrow, whose handler
+    /// re-inserts the player's own buttons and sets `selectedLocation` to the player
+    /// (`:488-494`, `:474-476`). That is precisely the state the greyed plank says we are not in.
+    ///
+    /// ## It ends in a press either way, and that is deliberate
+    ///
+    /// [`crate::act::AREA_BUTTON_LIVE`] is calibrated on three live planks, all short words, and
+    /// `Travel`, `Open` and `Wake up` have never been captured — so a live button reading under the
+    /// bar is a state the number has never seen. Refusing on it could stall a run that today merely
+    /// presses and moves on, which would be trading a known fault for an unknown one.
+    ///
+    /// So the looks are spent, the reading is reported, and the press happens regardless. The value
+    /// is entirely in the retry: the fault is a **stale** slot, and re-selecting is what clears one.
+    /// Returns whether the slot ended up reading live, for the caller's log.
+    fn look_for_a_live_slot(&mut self) -> bool {
+        for look in 1..=SLOT_LOOKS {
+            let q = self.area_slot_score();
+            self.log.push_str(&slot_reading(q));
+            if q.is_some_and(|q| q >= crate::act::AREA_BUTTON_LIVE) {
+                return true;
+            }
+            if look == SLOT_LOOKS {
+                break;
+            }
+            self.log.push_str(&format!(
+                "  nothing pressable in the slot — re-selecting this node and looking again \
+                 (look {} of {SLOT_LOOKS})\n",
+                look + 1
+            ));
+            self.select_here();
+            std::thread::sleep(SLOT_RETRY_PAUSE);
+            self.pump();
+        }
+        false
     }
 
     fn snap_area_slot(&mut self, tag: &str) {
@@ -2954,7 +3073,7 @@ impl Run<'_> {
 
 /// What a locate-me achieved. Three outcomes and only the first carries coordinates.
 ///
-/// The arrow's press does three things at once (`overworldview.lua:490-496`) — refresh the area
+/// The arrow's press does three things at once (`overworldview.lua:488-494`) — refresh the area
 /// buttons, centre the screen, and set `selectedLocation` to the player. A caller that only needs
 /// the selection should not be made to wait for the pan that comes with it, and a caller that needs
 /// coordinates must not mistake one for the other.
@@ -5436,11 +5555,26 @@ pub fn drive(
             // village (`Visit`), and a chest offers `Open`. Requiring `Combat` here would refuse
             // every crossing we make.
             //
-            // So the score goes in the log and decides nothing. It is still worth having: the slot
-            // capture this replaced was written under the fixed name `combat-live` whatever it
-            // showed, and the one from 2026-08-16 is a picture of the word **Explore** filed as
-            // evidence of a fight.
-            let _ = r.combat_is_on_offer();
+            // So `Combat` cannot be required here and never has been. What *can* be required is
+            // that the slot holds a **live** button of some kind, which is a different question the
+            // same measurement answers — greying costs more agreement than the lettering does, and
+            // [`crate::act::AREA_BUTTON_LIVE`] is calibrated in the gap between the two.
+            //
+            // That is the half this branch was missing on 2026-08-20. Both dead presses logged
+            // `area slot: something else (Combat 0.8731, gate 0.95)` and went out anyway; the frame
+            // saved at the stop shows a greyed `Combat` belonging to a node three hops off. 0.8731
+            // is a *live* plank wearing another word, and the plank on screen scored 0.74 — so the
+            // line was reporting the wrong number against the wrong bar, and nothing read either.
+            //
+            // [`Run::look_for_a_live_slot`] re-selects and looks again, which is the recovery for a
+            // stale slot, and then presses regardless: the bar is calibrated on three short words
+            // and may not veto. See there.
+            if !r.look_for_a_live_slot() {
+                r.log.push_str(
+                    "  nothing pressable after re-selecting — pressing anyway, since the live bar \
+                     is calibrated on three planks and `Travel` is not one of them\n",
+                );
+            }
             r.snap_area_slot("combat-live");
             if !matches!(r.click_area_button("Combat"), Ok(true)) {
                 // **A screen diff is a worse witness than the observer, so ask the observer.**
@@ -5845,6 +5979,54 @@ pub fn drive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The line that reported the wrong number against the wrong bar**, and what it says now.
+    ///
+    /// Both dead presses of 2026-08-20 logged `area slot: something else (Combat 0.8731, gate 0.95)`
+    /// and were pressed anyway. Every word of that is true and it hid the fault: 0.8731 is the
+    /// measured reading of a *live* `Explore` plank, so "something else" was a live button — while
+    /// what was actually on screen was a **greyed** `Combat` at 0.7367, belonging to a node three
+    /// hops away. One bar could not distinguish those two, so the line now carries both.
+    ///
+    /// The three readings are the corpus figures measured by
+    /// `act::threshold_tests::a_greyed_plank_reads_lower_than_any_live_one`, not invented numbers.
+    #[test]
+    fn a_slot_reading_says_which_of_the_two_bars_it_cleared() {
+        // A live `Combat`: over both bars, and the only reading that authorises a `Combat` press.
+        let combat = slot_reading(Some(0.9812));
+        assert!(combat.contains("`Combat`"), "{combat}");
+        assert!(!combat.contains("nothing pressable"), "{combat}");
+
+        // `Explore`, as measured. Under the naming bar and over the live bar — which is the reading
+        // the old line called "something else" and this one has to call pressable.
+        let explore = slot_reading(Some(0.8731));
+        assert!(explore.contains("a live button, not `Combat`"), "{explore}");
+
+        // The greyed plank from the frame that ended the run. Under both.
+        let greyed = slot_reading(Some(0.7367));
+        assert!(greyed.contains("nothing pressable"), "{greyed}");
+
+        // **The distinction the old line could not make**, stated as an inequality rather than as
+        // two strings: `Explore` and greyed `Combat` used to produce the same verdict.
+        assert_ne!(
+            explore.split('(').next(),
+            greyed.split('(').next(),
+            "a live plank and a greyed one must not read alike — that is the whole fault"
+        );
+
+        // Both bars appear on every line whichever question was asked, so a log read months later
+        // does not need the source to interpret the number.
+        for line in [&combat, &explore, &greyed] {
+            assert!(line.contains(&format!("{}", crate::act::AREA_BUTTON_SHOWING)), "{line}");
+            assert!(line.contains(&format!("{}", crate::act::AREA_BUTTON_LIVE)), "{line}");
+        }
+
+        // A capture fault is not a low score. Saying "nothing pressable" for a slot nobody managed
+        // to look at would send the recovery chasing a stale selection that was never observed.
+        let unread = slot_reading(None);
+        assert!(unread.contains("not read"), "{unread}");
+        assert!(!unread.contains("nothing pressable"), "{unread}");
+    }
 
     /// The guard that should have caught all three ping-pongs, against the shape all three had.
     ///

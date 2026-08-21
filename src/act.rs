@@ -1181,6 +1181,42 @@ pub const AREA_COMBAT: Button = Button {
 /// Placed in the gap measured on [`AREA_COMBAT`]: nearest confusable 0.8731, exact 1.0000.
 pub const AREA_BUTTON_SHOWING: f64 = 0.95;
 
+/// How well the slot must match [`AREA_COMBAT`] before we believe **a live area button** is in it,
+/// whatever word is written on the plank.
+///
+/// A second, much lower bar on the same measurement, and it answers a different question. The gate
+/// above asks *which* button; this asks *whether one is pressable at all*, which is the question two
+/// dead presses on 2026-08-20 turned on — the slot held a greyed `Combat` belonging to a node three
+/// hops away, the observer scored it 0.8731 against a 0.95 bar, and the press went out anyway.
+///
+/// **Greying is a bigger pixel difference than the lettering is**, which is what makes one number
+/// able to answer both questions. Re-measured 2026-08-21 against the frame corpus, same probe as
+/// [`AREA_BUTTON_SHOWING`]:
+///
+/// ```text
+/// live Combat  (the template itself)  1.0000
+/// live Explore                        0.8731
+/// live Visit                          0.8616   <- the worst live plank measured
+/// greyed Combat                       0.7367   <- the confusable this gate exists for
+/// ```
+///
+/// 0.80 sits in the middle of that gap: 0.062 under the worst live reading and 0.063 over the
+/// greyed one, both wider than the 0.05 margin [`AREA_BUTTON_SHOWING`] is held to.
+///
+/// ## What it may not be used for, and the reason is the corpus
+///
+/// Three live planks are measured and all three carry short words. `Travel`, `Open`, `Rest` and
+/// `Wake up` reach this slot too and none of them has been captured, so a live button scoring under
+/// 0.80 is a state this number has never seen and cannot rule out. **So a reading below the bar is
+/// a warning and never a veto**: the caller looks again, re-selects, and presses regardless once its
+/// looks are spent. Being wrong then costs the press we would have made anyway, which is the only
+/// direction an uncalibrated bar may fail in.
+///
+/// Capturing a live `Travel` and a greyed `Visit` is what would turn this into a veto. Until then
+/// the retry is the whole of the value, and the retry is enough — the fault it exists for is a
+/// **stale** slot, and looking again after re-selecting is what clears one.
+pub const AREA_BUTTON_LIVE: f64 = 0.80;
+
 /// The inn's `Rest`, on the inn screen.
 ///
 /// `button('Rest', 1, 0.9, { xOffset = -2 })` (`ui/inn.lua:55`) with the 250x100 `default` size, so
@@ -2737,5 +2773,51 @@ mod threshold_tests {
             AREA_BUTTON_SHOWING - worst > 0.05,
             "the gap is too thin to trust: worst confusable {worst:.4} vs gate {AREA_BUTTON_SHOWING}"
         );
+    }
+
+    /// [`AREA_BUTTON_LIVE`] separates a **pressable** plank from a greyed one, whatever it says.
+    ///
+    /// The other half of the same measurement, and the one that would have saved the two dead
+    /// presses of 2026-08-20. `Explore` and `Visit` are live buttons wearing different words and
+    /// score 0.87 and 0.86; a greyed `Combat` — the same word as the template — scores 0.74. So
+    /// greying costs more agreement than the lettering does, and one bar can tell live from dead
+    /// across all three.
+    ///
+    /// The corpus is three live planks and one greyed one, all short words, which is why the gate is
+    /// asserted as a *warning* threshold: see [`AREA_BUTTON_LIVE`] for why the caller may not veto a
+    /// press on it.
+    #[test]
+    fn a_greyed_plank_reads_lower_than_any_live_one() {
+        let tpl = Template::load(&PathBuf::from("templates").join(AREA_COMBAT.template)).unwrap();
+        let against = |name: &str| -> Option<f64> {
+            find_at_scale_in(&frame(name)?, &tpl, 1.0, 1, None).map(|m| m.inliers)
+        };
+        let Some(explore) = against("area-explore.png") else {
+            eprintln!("SKIP: frame corpus not present");
+            return;
+        };
+        let visit = against("area-visit.png").unwrap();
+        let greyed = against("area-combat-greyed.png").unwrap();
+
+        // The ordering is the claim: every live plank above the bar, the greyed one below it.
+        // The template scores 1.0000 against itself and cannot be the minimum, so it is left out.
+        let worst_live = explore.min(visit);
+        assert!(
+            worst_live > AREA_BUTTON_LIVE,
+            "a live plank must read as live: Explore {explore:.4}, Visit {visit:.4},              gate {AREA_BUTTON_LIVE}"
+        );
+        assert!(
+            greyed < AREA_BUTTON_LIVE,
+            "a greyed plank must not: {greyed:.4} vs gate {AREA_BUTTON_LIVE}"
+        );
+        // A margin on both sides, as above. A bar resting a thousandth off either population is a
+        // bar the next capture moves.
+        assert!(
+            worst_live - AREA_BUTTON_LIVE > 0.05 && AREA_BUTTON_LIVE - greyed > 0.05,
+            "the gap is too thin to trust: worst live {worst_live:.4}, greyed {greyed:.4}, \
+             gate {AREA_BUTTON_LIVE}"
+        );
+        // And it is strictly the looser of the two bars, which is what makes `Combat` imply `live`.
+        assert!(AREA_BUTTON_LIVE < AREA_BUTTON_SHOWING);
     }
 }
