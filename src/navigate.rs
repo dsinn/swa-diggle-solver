@@ -1315,6 +1315,17 @@ impl Run<'_> {
     pub fn apply_save(&mut self) -> Option<crate::rest::Health> {
         let save = crate::game::save::load(&self.save_dir.join("mainSaveData")).ok()?;
         self.map.apply_save(&save);
+        // **The bank has a second home, and mid-fight it is the only one.** `mainSaveData` carries
+        // no `statusEffects` while a fight is in progress; `combatSaveData` carries them under a
+        // different root. Read only when the main save was silent, so the ordinary path never
+        // touches a file the game deletes when a fight ends — see [`crate::fight`].
+        if crate::rest::well_rested_from(&save, crate::rest::STATUS_IN_MAIN).is_none() {
+            if let Ok(c) = crate::game::save::load(&self.save_dir.join("combatSaveData")) {
+                if let Some(w) = crate::rest::well_rested_from(&c, crate::rest::STATUS_IN_COMBAT) {
+                    self.map.note_well_rested(w);
+                }
+            }
+        }
         crate::rest::Health::from_save(&save)
     }
 
@@ -5860,8 +5871,8 @@ pub fn drive(
                     None => {
                         let why = r.map.unplaceable(&fresh, &far);
                         r.log.push_str(&format!(
-                            "  `{far}` is travellable in one press but cannot be aimed at:                              {why} — stepping to `{}` instead
-",
+                            "  `{far}` is travellable in one press but cannot be aimed at: \
+                             {why} — stepping to `{}` instead\n",
                             hop.step
                         ));
                     }

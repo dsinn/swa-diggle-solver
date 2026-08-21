@@ -329,15 +329,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A reader otherwise cannot tell a run that had shrines to spare and ignored them from one that only
     // ever found two, nor a run that skipped the bank from one that had nothing to bank for. Both
     // numbers are free here and both decide where the first hop goes.
+    // **Both Well-Rested numbers, and the fight they are about.** The shortfall on its own is
+    // unreadable: 1519Z printed `16 stack(s) short` here and `0 stack(s) short` at every rest,
+    // with three thousand gold and the same level 8 anomaly on the map throughout — and the two
+    // lines are not even the same function. This one is
+    // [`WorldMap::stacks_short_ahead`], how deep the want is; the inn prints
+    // [`WorldMap::stacks_to_buy`], how much of it the purse may serve. Printing the bank and the
+    // node beside the shortfall is what makes the pair comparable at all. See #66.
     r.log.push_str(&format!(
-        "shrines: {} known, {} consecrated (the portal wants {}); well-rested: {} banked, {} stack(s) short
-
-",
+        "shrines: {} known, {} consecrated (the portal wants {}); well-rested: {} banked, \
+         {} stack(s) short for {}, {} the purse will serve\n\n",
         r.map.shrines_known(),
         r.map.consecrations(),
         diggle_solver::overworld::SHRINES_BEFORE_THE_ANOMALY,
         r.map.well_rested(),
         r.map.stacks_short_ahead(),
+        match r.map.deepest_fight() {
+            Some((key, level)) => format!("`{key}` at level {level}"),
+            None => "no fight worth banking for".to_string(),
+        },
+        r.map.stacks_to_buy(),
     ));
 
     let fight = Fight {

@@ -254,6 +254,41 @@ pub fn fuel_count(items: &[String]) -> i64 {
         .sum()
 }
 
+/// Where `mainSaveData` keeps the player's status effects.
+pub const STATUS_IN_MAIN: &str = "player.statusEffects";
+/// Where `combatSaveData` keeps them — a different root, and the only copy during a fight.
+pub const STATUS_IN_COMBAT: &str = "rpg.player.statusEffects";
+
+/// The Well-Rested bank, or **`None` when this save does not carry the status effects at all**.
+///
+/// ## Absence is not zero, and reading it as zero cost the 1519Z startup line
+///
+/// While a fight is in progress the effects live in `combatSaveData` under `rpg.player`, and
+/// `mainSaveData` has **no `statusEffects` key whatever** — checked in two archived mid-fight
+/// checkpoints, `l1-midfight-depleted` and `in-the-anomaly-turn17`, whose combat saves carry
+/// `wellRestedInn = 3` and `= 6` against a main save with no such table.
+///
+/// The old reading summed `filter_map` over two missing keys and got `0`. On 2026-08-21 1519Z —
+/// the one run of that day's six that resumed **mid-fight** — the startup line therefore said
+/// `16 stack(s) short` against the level 8 anomaly, while the game's own `Player data` print in
+/// the same log said `wellRestedInn = 17` and every later rest correctly said none were wanted.
+/// The bank was 17 the whole time; only our reading was zero, and the cost of that is a run
+/// diverted to an inn for stacks it already holds.
+///
+/// So the two questions are separated: *is the bank readable here* (`Option`) and *what is in it*.
+/// Both flavours are summed — `wellRestedCampfire` is what a fresh character carries
+/// (`rpg/classes/warrior.lua:69` grants two) and `wellRestedInn` is what resting buys; the heal
+/// does not care which it spends, and takes the campfire one first (`rpgview.lua:1204-1209`).
+pub fn well_rested_from(save: &crate::game::save::Table, root: &str) -> Option<i64> {
+    save.table_at(root)?;
+    Some(
+        ["wellRestedCampfire", "wellRestedInn"]
+            .iter()
+            .filter_map(|k| save.int_at(&format!("{root}.{k}")))
+            .sum(),
+    )
+}
+
 /// Fuel carried, read from `mainSaveData.items`.
 pub fn fuel_from_save(save: &crate::game::save::Table) -> i64 {
     let Some(items) = save.table_at("items") else { return 0 };
@@ -465,5 +500,69 @@ mod tests {
         let h = Health::from_save(&save).unwrap();
         assert_eq!(h.missing(), 4);
         assert!(!h.is_full());
+    }
+
+    /// The whole of the 1519Z diagnosis, read out of the real files rather than a fixture.
+    ///
+    /// Two archived mid-fight checkpoints: `mainSaveData` has no status effects at all, and the
+    /// bank is sitting in `combatSaveData` under a different root. Read the first as zero and a
+    /// resumed run walks to an inn for stacks it already has.
+    #[test]
+    fn mid_fight_the_bank_is_only_in_the_combat_save() {
+        let mut checked = 0;
+        for (cp, banked) in [("l1-midfight-depleted", 3), ("in-the-anomaly-turn17", 6)] {
+            let main = format!("checkpoints/{cp}/mainSaveData");
+            let combat = format!("checkpoints/{cp}/combatSaveData");
+            let (Ok(m), Ok(c)) = (std::fs::read_to_string(&main), std::fs::read_to_string(&combat))
+            else {
+                eprintln!("SKIP: {cp} is not present");
+                continue;
+            };
+            let m = crate::game::save::parse(&m).expect("the main save parses");
+            let c = crate::game::save::parse(&c).expect("the combat save parses");
+            assert_eq!(
+                well_rested_from(&m, STATUS_IN_MAIN),
+                None,
+                "{cp}: mid-fight the main save carries no status effects"
+            );
+            assert_eq!(
+                well_rested_from(&c, STATUS_IN_COMBAT),
+                Some(banked),
+                "{cp}: the bank is in the combat save"
+            );
+            checked += 1;
+        }
+        // Prove the signal was there: an empty loop would pass this test saying nothing.
+        assert!(checked > 0, "no mid-fight checkpoint was read, so nothing was proved");
+    }
+
+    /// The other side of it, and the positive control: out of combat the main save answers, and
+    /// answers with a number rather than an absence.
+    #[test]
+    fn out_of_combat_the_main_save_carries_the_bank() {
+        let path = "checkpoints/at-l11-before-shrine-errands/mainSaveData";
+        let Ok(src) = std::fs::read_to_string(path) else {
+            eprintln!("SKIP: {path} is not present");
+            return;
+        };
+        let save = crate::game::save::parse(&src).expect("parses");
+        assert_eq!(well_rested_from(&save, STATUS_IN_MAIN), Some(11));
+    }
+
+    /// Absence and zero are different answers, and the fixture says so without any checkpoint.
+    #[test]
+    fn an_empty_status_table_is_zero_and_a_missing_one_is_unknown() {
+        let with = crate::game::save::parse("return { player = { statusEffects = {} } }").unwrap();
+        assert_eq!(well_rested_from(&with, STATUS_IN_MAIN), Some(0), "present and empty is zero");
+
+        let without = crate::game::save::parse("return { player = { gold = 5 } }").unwrap();
+        assert_eq!(well_rested_from(&without, STATUS_IN_MAIN), None, "absent is not zero");
+
+        // Both flavours, summed — the heal spends either.
+        let both = crate::game::save::parse(
+            "return { player = { statusEffects = { wellRestedCampfire = 2, wellRestedInn = 9 } } }",
+        )
+        .unwrap();
+        assert_eq!(well_rested_from(&both, STATUS_IN_MAIN), Some(11));
     }
 }

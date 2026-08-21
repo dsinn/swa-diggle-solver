@@ -1459,7 +1459,7 @@ pub const HEART_FLOOR: i64 = HEART_COST + crate::rest::INN_COST;
 /// …)` (`overworld/generators/world.lua:81`) — so the bar is reachable rather than aspirational,
 /// though nothing guarantees all seven get placed or that all of them can be reached.
 ///
-/// **The evidence for four being enough is one run, and it is not evidence for three.** The 2030Z
+/// **The evidence for four being enough is one run, and it is not evidence for three.** The 1519Z
 /// run of 2026-08-21 consecrated four and beat the level 8 anomaly in 13 turns at 84/84 without
 /// taking a point of damage — which says four was ample and says nothing about where the floor is.
 /// Three is the dev's judgement, and the number to revisit first if a run loses that fight.
@@ -2025,20 +2025,32 @@ impl WorldMap {
 
     /// Well-Rested stacks banked, both flavours summed, as of the last save read.
     ///
-    /// **Exposed to be logged**, and the 2030Z run is why. Every rest that run printed
-    /// `0 stack(s) short` while the startup line printed `16 stack(s) short` — both from
-    /// [`WorldMap::stacks_short_ahead`], whose only other input is a level 8 node that was on the map
-    /// the whole time and never completed. One of the two readings is wrong and the log cannot say
-    /// which, because the bank itself was never printed. A shortfall is a *derived* number; printing
-    /// it without its operand is what made a contradiction unreadable for a whole run.
+    /// **Exposed to be logged**, and the 1519Z run is why. It printed `16 stack(s) short` at
+    /// startup and `0 stack(s) short` at every rest, with the same level 8 anomaly on the map
+    /// throughout. The bank itself was never printed, so the log could not say which reading was
+    /// wrong — a shortfall is a *derived* number, and printing it without its operand is what made
+    /// a contradiction unreadable for a whole run.
+    ///
+    /// It was the startup one. That run resumed **mid-fight**, and mid-fight `mainSaveData` has no
+    /// status effects at all; see [`crate::rest::well_rested_from`].
     pub fn well_rested(&self) -> i64 {
         self.well_rested
+    }
+
+    /// The bank, from a source [`WorldMap::apply_save`] cannot see.
+    ///
+    /// Its one caller is [`crate::navigate::Run::apply_save`], which reads `combatSaveData` when
+    /// the main save is silent about the effects. Kept as a setter rather than folded into
+    /// `apply_save` because that function takes one table and the second file is the driver's to
+    /// find — the map has never known where the save directory is.
+    pub fn note_well_rested(&mut self, stacks: i64) {
+        self.well_rested = stacks;
     }
 
     /// The frontier node the crossing is currently walking to, if it holds one.
     ///
     /// **Exposed to be logged**, and #57 is why it became necessary. While there were two crossing
-    /// arms, the alternation itself was the diagnosis — the 2030Z run's faults were all found by
+    /// arms, the alternation itself was the diagnosis — the 1519Z run's faults were all found by
     /// watching `probing`/`steering` swap in the log. With one arm the steps read as a coherent walk
     /// whether or not they are going anywhere sensible, so the thing worth printing is no longer
     /// *which rule chose this step* but **where the walk thinks it is going**.
@@ -3046,14 +3058,13 @@ impl WorldMap {
         }
         self.gold = save.int_at("player.gold").unwrap_or(0);
         self.fuel = crate::rest::fuel_from_save(save);
-        // Both flavours, summed. `wellRestedCampfire` is what a fresh character carries
-        // (`rpg/classes/warrior.lua:69` grants two) and `wellRestedInn` is what resting buys; the
-        // heal does not care which it spends, and takes the campfire one first
-        // (`rpgview.lua:1204-1209`).
-        self.well_rested = ["wellRestedCampfire", "wellRestedInn"]
-            .iter()
-            .filter_map(|k| save.int_at(&format!("player.statusEffects.{k}")))
-            .sum();
+        // **Only when this save can answer.** Mid-fight it cannot: the effects are in
+        // `combatSaveData` and there is no `statusEffects` table here at all, which the old
+        // reading summed to zero. See [`crate::rest::well_rested_from`], and
+        // [`WorldMap::note_well_rested`] for where the other copy comes in.
+        if let Some(w) = crate::rest::well_rested_from(save, crate::rest::STATUS_IN_MAIN) {
+            self.well_rested = w;
+        }
         // **Health belongs here with gold and fuel, not in the hands of whoever took the reading.**
         //
         // It used to be the caller's job: four sites in the driver did `let now = r.apply_save()`
@@ -3235,6 +3246,27 @@ impl WorldMap {
             .max()
             .map(|l| crate::rest::stacks_short(self.well_rested, l))
             .unwrap_or(0)
+    }
+
+    /// **Which fight [`WorldMap::stacks_short_ahead`] is pricing.** For the log.
+    ///
+    /// The shortfall alone is not readable: `16 stack(s) short` is `2 x 8 - 0` and equally
+    /// `2 x 9 - 2`, and the run of 2026-08-21 1519Z printed 16 at startup and 0 at every rest with
+    /// three thousand gold in the purse and the same level 8 anomaly on the map throughout. Two
+    /// numbers cannot be told apart by their difference. Naming the node and the bank beside it
+    /// makes the line answer for itself.
+    ///
+    /// Reproduced from `map-cache/world-0.txt` alone: 699 places, deepest `start`
+    /// (`Cottam - level 8 anomaly`), and `stacks_short_ahead` is exactly 16 with an empty bank. So
+    /// the *shortfall* was never in doubt; what the line could not say was what it thought the
+    /// bank held.
+    pub fn deepest_fight(&self) -> Option<(&str, u32)> {
+        self.places
+            .values()
+            .filter_map(|p| p.deliberate_fight_level().map(|l| (l, p.key.as_str())))
+            .filter(|(l, _)| crate::rest::worth_banking_for(*l))
+            .max()
+            .map(|(l, k)| (k, l))
     }
 
     /// **Are we standing on the node we set out for, to do the one thing it is entered with?**
@@ -3448,7 +3480,7 @@ impl WorldMap {
             //
             // **A ranking was tried first and was not enough.** `probe_toward_the_unknown` sorts on
             // `(visited, dist)`, which decides between candidates — and with a single candidate it
-            // decides nothing. One is the ordinary case: the `l11` / `l13` bounce of the 2030Z run
+            // decides nothing. One is the ordinary case: the `l11` / `l13` bounce of the 1519Z run
             // went three full laps *with that ranking in the binary* before `LOOP_WRITE_OFF` broke
             // it.
             //
@@ -3998,7 +4030,7 @@ impl WorldMap {
                 // from at all (`AreaHeading` prints `— level N` only when `locationHasCombat`), so
                 // the number was parsed and then thrown away.
                 //
-                // Live, 2030Z: the eastern shrines were revealed from the south and struck off while
+                // Live, 1519Z: the eastern shrines were revealed from the south and struck off while
                 // a forest stood between, then consecrated from the north twenty steps later. The
                 // detour bought nothing — one step after the second shrine the run took a level 6
                 // forest fight anyway, to explore. The log carries **zero** `RouteTo(Shrine)` lines
@@ -5278,7 +5310,7 @@ impl WorldMap {
         //
         // It was a second arm: no route to the door, but the last dump printed where it *is*, so
         // step to whichever neighbour that dump puts closer. It earned its place — six of the seven
-        // crossings in the 2030Z run ended with a steer as the last decision before the door was
+        // crossings in the 1519Z run ended with a steer as the last decision before the door was
         // named, and a crossing ends by the door being *named*, not walked to.
         //
         // It could not stay as an arm. It carried its own convergence device (`steered_gap`, a
@@ -5681,7 +5713,7 @@ impl WorldMap {
         // **[`WorldMap::top_up`], not `wants_rest`** — task #72, and the whole point of the split.
         //
         // This wrote `wants_rest` until 2026-08-21, which made the doorway rule a detour rule. Live
-        // in the 2030Z run: health 77/80, a three-point drop that neither `note_health`
+        // in the 1519Z run: health 77/80, a three-point drop that neither `note_health`
         // (needs four) nor `note_health_level` (needs half) can act on, and the plan came out
         // `Rest -> l63` — a surface hop taken to heal three points for ten gold. The dev: *why did
         // we rest at Treasured Balsa despite barely having any missing health?*
@@ -5760,7 +5792,7 @@ impl WorldMap {
     ///   available on identical terms before and after the portal opens. And
     ///   `worth_consecrating_here` returns false outright for anything that fails
     ///   [`Place::can_be_consecrated`], which every minor shrine does — so the handoff was to a
-    ///   handler that declines. The dev, 2026-08-21, watching the 2030Z run cross `l53` in three
+    ///   handler that declines. The dev, 2026-08-21, watching the 1519Z run cross `l53` in three
     ///   hops without touching the shrine in it: *at Beeford Hedge, the minor shrine should've been
     ///   an errand.*
     ///
@@ -9367,7 +9399,7 @@ mod tests {
 
     /// **A steer will not walk back into the node the frontier walk just left.** Task #57.
     ///
-    /// The `l63_plaza` ↔ `l63xrd60x-183` bounce of the 2030Z run, three clean laps inside Upton
+    /// The `l63_plaza` ↔ `l63xrd60x-183` bounce of the 1519Z run, three clean laps inside Upton
     /// Braken, and the shape is *two convergence arguments defeating each other*.
     ///
     /// Each arm is sound alone. `Crossing::Steer` carries a monotonic ceiling on the gap to the
@@ -11499,7 +11531,7 @@ e	l4	l11
     /// `nothing_left_to_reveal` — `neighbours.len() >= connections` — and the frontier walk excludes
     /// it. There is nothing to re-open, because it stopped being a destination the moment it ran out
     /// of things to teach. That is the same fact that made the steer keep choosing `l63_plaza` in the
-    /// 2030Z run: the steer had no such filter and the walk always did.
+    /// 1519Z run: the steer had no such filter and the walk always did.
     #[test]
     fn walking_away_from_the_door_does_not_reopen_the_ground_in_front_of_it() {
         let mut m = WorldMap::new();
@@ -12943,7 +12975,7 @@ e	l4	l11
     ///
     /// This asserted the opposite until 2026-08-21, on the rule *go toward the anomaly unless there
     /// is an accessible shrine that does not require combat*. The dev reversed it after watching the
-    /// 2030Z run: *shrines should never be blocked by level unless the anomaly has not yet opened.*
+    /// 1519Z run: *shrines should never be blocked by level unless the anomaly has not yet opened.*
     ///
     /// The reversal is not a change of mind about cost, it is the gate changing what a shrine **is**.
     /// When that rule was written a shrine was optional reward, and paying a crypt for one spent the
@@ -12952,7 +12984,7 @@ e	l4	l11
     /// not a reward to collect on the way, they are the preparation the fight needs.* Preparation we
     /// are required to buy cannot also be refused for costing something.
     ///
-    /// Live: the eastern shrines of the 2030Z run were revealed from the south and struck off the
+    /// Live: the eastern shrines of the 1519Z run were revealed from the south and struck off the
     /// candidate list while a forest stood between, then consecrated from the north twenty steps
     /// later. The whole detour bought nothing — one step after the second shrine the run took a
     /// level 6 forest fight anyway, to explore.
@@ -13079,7 +13111,7 @@ e	l4	l11
 
     /// **A node we have stood on is not a probe candidate at all.** Task #73.
     ///
-    /// The 2030Z bounce, `l11 Argham crossroads` against `l13 Bilton crypt`, and the shape that
+    /// The 1519Z bounce, `l11 Argham crossroads` against `l13 Bilton crypt`, and the shape that
     /// showed the preference added earlier the same day is not enough:
     ///
     /// ```text
@@ -13229,7 +13261,7 @@ e	l4	l11
         // rule of 2026-08-15 that the navigator probes rather than concluding from an incomplete
         // cache.
         //
-        // The 2030Z run is why it changed. A ranking only decides between candidates, and the
+        // The 1519Z run is why it changed. A ranking only decides between candidates, and the
         // ordinary case has **one** — `l11` against `l13` went three full laps with this very
         // preference in the binary. Concluding *after* a visit is the 2026-08-15 responsibility
         // discharged, not dodged: standing there is the probe, and it came back empty.
@@ -13542,5 +13574,40 @@ e	l4	l11
                 "{path}: surface nodes left unplaced by the world frame: {stranded:?}"
             );
         }
+    }
+
+    /// The shortfall and the fight it prices have to agree, or the line is no better than the one
+    /// it replaced. `16` is `2 x 8 - 0` and equally `2 x 9 - 2`.
+    #[test]
+    fn the_deepest_fight_is_the_one_the_shortfall_is_priced_against() {
+        let mut m = WorldMap::new();
+        m.entry("start").heading = "Cottam — level 8 anomaly".into();
+        m.entry("l61").heading = "Meaux — level 7 crypt".into();
+        m.entry("l23").heading = "Smithy — level 3 crypt".into();
+        assert_eq!(m.deepest_fight(), Some(("start", 8)));
+        assert_eq!(m.stacks_short_ahead(), crate::rest::stacks_wanted(8));
+
+        // Clearing it moves both together, which is the property that makes them comparable.
+        m.entry("start").completed = true;
+        assert_eq!(m.deepest_fight(), Some(("l61", 7)));
+        assert_eq!(m.stacks_short_ahead(), crate::rest::stacks_wanted(7));
+
+        // And a map with nothing deep enough says so rather than naming a fight it is not pricing.
+        m.entry("l61").completed = true;
+        assert_eq!(m.deepest_fight(), None, "level 3 is below the banking floor");
+        assert_eq!(m.stacks_short_ahead(), 0);
+    }
+
+    /// The 1519Z line, reconstructed: `16 stack(s) short` came from an empty bank against the
+    /// level 8 anomaly, and the number alone cannot say that.
+    #[test]
+    fn an_empty_bank_and_a_level_eight_anomaly_are_the_sixteen_the_run_printed() {
+        let mut m = WorldMap::new();
+        m.entry("start").heading = "Cottam — level 8 anomaly".into();
+        assert_eq!(m.well_rested, 0);
+        assert_eq!(m.stacks_short_ahead(), 16);
+        // The save's own reading is what settles it, and 17 banked is not 16 short.
+        m.well_rested = 17;
+        assert_eq!(m.stacks_short_ahead(), 0, "a full bank wants nothing");
     }
 }
