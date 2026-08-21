@@ -13759,4 +13759,99 @@ e	l4	l11
         // `l64sub2`. Three bounced crossings out of eleven, in the run that met the MVP.
         assert!(found.len() >= 6, "expected three bounced crossings: {found:?}");
     }
+
+    /// **#73's probe magnet is gone, measured against the two runs it caught.**
+    ///
+    /// `l11 Argham crossroads` declares more roads than any dump names, so
+    /// `connections > neighbours` held there **permanently** and standing on it could not close the
+    /// gap. `next_target` excludes `here`, so the pull vanished on arrival and reappeared one node
+    /// away: the dev watched the run walk `l11 -> l13 -> l11 -> l13` and reported it twice. The fix
+    /// (`1fc548e`) makes a visited node stop counting as unexplored.
+    ///
+    /// Replayed here: fold each run's surface dumps and ask the **new** planner what it would do at
+    /// each position the game really produced. `l11` appears in no immediate reversal in either
+    /// run, against four in each run as they actually happened.
+    ///
+    /// ## What this replay cannot see, which is more than the crossing one
+    ///
+    /// It never calls `apply_save`, so completions, consecrations, gold and health are absent and
+    /// the planner keeps re-targeting things the run had already finished. The replay's *own*
+    /// reversals are all of that kind — `l43 -> shrine3` then `shrine3 -> l43`, a shrine it thinks
+    /// is still unconsecrated — or ordinary goal-completion turns like `l37 -> e4` then
+    /// `e4 -> l12`. So this asserts the narrow thing it can support and not "the planner never
+    /// reverses", which would be false and would deserve to be.
+    #[test]
+    fn the_crossroads_no_longer_pulls_the_run_back_and_forth() {
+        let is_reversal = |a: &(String, String), b: &(String, String)| a.0 == b.1 && a.1 == b.0;
+        let mut runs = 0;
+        for stem in ["spike-run-20260821-1519Z", "spike-run-20260821-0313Z"] {
+            let Ok(log) = std::fs::read_to_string(format!("{stem}.log")) else {
+                eprintln!("SKIP: {stem}.log is not present");
+                continue;
+            };
+            let lines: Vec<String> = log.lines().map(|l| l.to_string()).collect();
+            let dumps = crate::observe::adjacency::Reader::new().push(&lines);
+            assert!(dumps.len() > 100, "{stem}: expected a whole run");
+
+            let mut m = WorldMap::new();
+            let mut seq: Vec<(String, String)> = Vec::new();
+            for a in &dumps {
+                m.fold(a);
+                if a.subworld.is_some() {
+                    continue;
+                }
+                let Some(h) = m.next_hop() else { continue };
+                if h.step == a.here_key {
+                    continue;
+                }
+                let d = (a.here_key.clone(), h.step.clone());
+                if seq.last() != Some(&d) {
+                    seq.push(d);
+                }
+            }
+            assert!(seq.len() > 20, "{stem}: only {} surface decisions to judge", seq.len());
+            assert!(
+                seq.iter().any(|(f, _)| f == "l11"),
+                "{stem}: the run never stood on `l11`, so this proves nothing about the magnet"
+            );
+
+            let magnetic: Vec<_> = seq
+                .windows(2)
+                .filter(|w| is_reversal(&w[0], &w[1]))
+                .filter(|w| w[0].0 == "l11" || w[0].1 == "l11")
+                .collect();
+            assert!(
+                magnetic.is_empty(),
+                "{stem}: `l11` is still pulling the run back and forth: {magnetic:?}"
+            );
+            runs += 1;
+        }
+        if runs == 0 {
+            return;
+        }
+
+        // The control: the runs did bounce there, four times each, and the report says so.
+        let Ok(report) = std::fs::read_to_string("spike-run-20260821-1519Z.md") else {
+            eprintln!("SKIP the control: the report is not present");
+            return;
+        };
+        let mut hops: Vec<(String, String)> = Vec::new();
+        for l in report.lines() {
+            // `NN. from -> **to** (for target, Reason)`
+            let Some((_, rest)) = l.split_once(". ") else { continue };
+            let Some((from, rest)) = rest.split_once(" -> **") else { continue };
+            let Some((to, _)) = rest.split_once("**") else { continue };
+            if from.contains(' ') || to.contains(' ') {
+                continue;
+            }
+            hops.push((from.to_string(), to.to_string()));
+        }
+        let bounced = hops.windows(2).filter(|w| is_reversal(&w[0], &w[1])).count();
+        assert!(
+            bounced >= 4,
+            "the 1519Z report should show the `l11` bounce; found {bounced} reversals in {} hops, \
+             so this detector is measuring nothing",
+            hops.len()
+        );
+    }
 }
