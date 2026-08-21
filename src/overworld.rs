@@ -2679,6 +2679,42 @@ impl WorldMap {
             for k in consecrated {
                 self.entry(&k).consecrated = true;
             }
+            // **The shrine roster, which the game hands over the instant the portal opens.**
+            //
+            // `events.hellOpens` sets `shrineN_explored = 1` for every shrine that exists and
+            // **saves before the beams play** (`utils/events.lua:60-74`), rolling the flags back in
+            // memory only so the animation has something to reveal. Its own comment says why: *so we
+            // can save right away and main menu skip* — the path [`crate::navigate`]'s
+            // `skip_cinematic` takes. So the roster is on disk either way, and reading it costs a
+            // walk of nobody.
+            //
+            // Nothing else tells us. The adjacency dump lists **adjacent** nodes only, and its two
+            // filters are `isCloudCovered` — never true for a neighbour, since adjacency is one of
+            // its own escape clauses (`overworldview.lua:701-706`) — and `locationIsVisible`, which
+            // is about *secret* nodes rather than fog (`:554-556`). The fog lifting changes what a
+            // human sees and nothing about what is printed to us.
+            //
+            // **Keys only, and that is the honest limit of it.** A `Place` made here has no heading,
+            // no edges and no position, so it cannot be routed to and will not be steered toward. It
+            // says *this shrine exists and here is its name* — which is the difference between a run
+            // that knows there are seven to find and one that cannot tell whether four are findable
+            // at all. It does not move [`WorldMap::consecrations`], which counts what has been
+            // finished rather than what has been revealed.
+            //
+            // Major shrines only. [`key_is_major_shrine`] is `shrine` followed by digits and nothing
+            // else, so `shrine1_plaza`, `shrine1sub2` and `shrine1_path_to_l4` are all excluded —
+            // the first two belong to a shrine we have already listed, and inventing places for the
+            // third is the mistake `roads_done` exists to avoid.
+            let roster: Vec<String> = flags
+                .map
+                .keys()
+                .filter_map(|k| k.strip_suffix("_explored"))
+                .filter(|k| key_is_major_shrine(k))
+                .map(|s| s.to_string())
+                .collect();
+            for k in roster {
+                self.entry(&k);
+            }
             self.lend_a_shrine_its_plaza_the_rewards_it_earned();
         }
         self.hell = save
@@ -2748,6 +2784,20 @@ impl WorldMap {
     /// count one shrine twice and let three shrines pass for four.
     ///
     /// Keys are folded to the shrine itself, which is the thing the dev's rule is about.
+    /// **How many major shrines we know the name of**, revealed or walked to.
+    ///
+    /// The denominator to [`WorldMap::consecrations`], and the number that says whether
+    /// [`SHRINES_BEFORE_THE_ANOMALY`] is reachable in this world at all. A world generates up to
+    /// seven (`overworld/generators/world.lua:81`) and nothing guarantees all of them are placed.
+    ///
+    /// Diagnostic today: the gate counts consecrations and the release turns on an exhausted
+    /// frontier, so neither reads this. It is logged at the start of a run because a reader
+    /// otherwise cannot tell a run that had four shrines and ignored them from one that only ever
+    /// found two.
+    pub fn shrines_known(&self) -> usize {
+        self.places.values().filter(|p| key_is_major_shrine(&p.key)).count()
+    }
+
     pub fn consecrations(&self) -> usize {
         self.places
             .values()
@@ -6138,6 +6188,105 @@ mod tests {
         // Both flavours at once. The heal does not care which it spends and takes the campfire one
         // first (`rpgview.lua:1204-1209`), so the bank is their sum.
         assert_eq!(read("statusEffects = { wellRestedCampfire = 2, wellRestedInn = 3 }"), 5);
+    }
+
+    /// **The shrine roster arrives with the portal**, out of the save the cutscene writes early.
+    ///
+    /// `events.hellOpens` flags every shrine and saves *before* the beams (`utils/events.lua:60-74`)
+    /// so the main-menu skip keeps them — which is the skip `skip_cinematic` performs. The flags are
+    /// the only channel: the adjacency dump lists adjacent nodes and says nothing about a shrine
+    /// three hops away, revealed or not.
+    #[test]
+    fn the_shrines_are_named_by_the_save_when_the_portal_opens() {
+        let mut m = WorldMap::new();
+        assert_eq!(m.shrines_known(), 0, "before the portal, nothing has named them");
+        // A vantage point, or `can_route_to` short-circuits to `true` for want of anywhere to stand
+        // and the assertions below would prove nothing.
+        m.fold(&dump("here", "camp", vec![node("l4", "Bainton Clump road")]));
+        m.here = Some("here".into());
+
+        // Seven shrines flagged, which is what `hellOpens` writes for a full world. The noise around
+        // them is real save content, and every piece of it must be ignored.
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = {
+                     hell = 0.1,
+                     shrine1_explored = 1, shrine2_explored = 1, shrine3_explored = 1,
+                     shrine4_explored = 1, shrine5_explored = 1, shrine6_explored = 1,
+                     shrine7_explored = 1,
+                     shrine1_plaza_explored = 1,
+                     shrine1sub2_explored = 1,
+                     shrine1_path_to_l4_explored = 1,
+                     l7_explored = 0,
+                 } } }",
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(m.shrines_known(), 7, "the whole roster, and nothing but the roster");
+        for i in 1..=7 {
+            assert!(m.get(&format!("shrine{i}")).is_some(), "shrine{i} is on the map");
+        }
+
+        // **Keys only.** Nothing here can be routed to, and saying so is the point: the roster tells
+        // the run what to look for, not where it is.
+        let s1 = m.get("shrine1").unwrap();
+        assert_eq!(s1.heading, "", "no dump has named it");
+        assert!(!m.can_route_to("shrine2"), "and nothing in the roster brings an edge with it");
+
+        // **`shrine1` is the exception, and it is not this fold's doing.** The fixture carries
+        // `shrine1_path_to_l4_explored`, and a road's *name* is the statement that its two ends are
+        // adjacent — which `apply_save` has parsed into an edge since long before the roster
+        // existed. So a shrine whose road has been flagged arrives routable, and one whose road has
+        // not arrives as a name. Both are worth having and only the second needed writing.
+        assert!(m.can_route_to("shrine1"), "the road flag names the edge, so this one can be reached");
+        assert!(m.can_route_to("l4"), "and the control: the vantage point really does route somewhere");
+
+        // The plaza, the subnode and the road are not shrines in the roster's sense. The plaza and
+        // subnode belong to a shrine already counted; the road is the mistake `roads_done` exists to
+        // avoid.
+        assert!(!key_is_major_shrine("shrine1_plaza"));
+        assert!(!key_is_major_shrine("shrine1sub2"));
+        assert!(!key_is_major_shrine("shrine1_path_to_l4"));
+
+        // And an ordinary node's fog flag makes nothing at all. `l7_explored = 0` is a live shape:
+        // the value is a highlight that decays (`overworldview.lua:1167-1169`), so zero still means
+        // explored — and it is still not a shrine.
+        assert!(m.get("l7").is_none(), "an ordinary explored node is not roster business");
+
+        // **The roster is not the gate.** `consecrations` counts what has been finished, and knowing
+        // seven names finishes none of them.
+        assert_eq!(m.consecrations(), 0);
+    }
+
+    /// Knowing the roster does not let the anomaly through the gate.
+    ///
+    /// Worth its own assertion because the two numbers are one word apart and the dev's phrasing
+    /// used "revealed" for what the code counts as consecrated. Seven shrines known and none
+    /// consecrated is exactly the state the 2026-08-20 run was in when it walked into the portal.
+    #[test]
+    fn a_full_roster_with_nothing_consecrated_still_holds_the_portal() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("rift", "The Rift anomaly")]));
+        m.here = Some("here".into());
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = {
+                     hell = 0.1,
+                     shrine1_explored = 1, shrine2_explored = 1, shrine3_explored = 1,
+                     shrine4_explored = 1, shrine5_explored = 1, shrine6_explored = 1,
+                     shrine7_explored = 1,
+                 } } }",
+            )
+            .unwrap(),
+        );
+        assert_eq!(m.shrines_known(), 7);
+        assert_eq!(m.consecrations(), 0);
+        assert_ne!(
+            m.next_target().unwrap().reason,
+            Goal::CloseAnomaly,
+            "knowing where they are is not having done them"
+        );
     }
 
     /// The inn can end the rest errand before a health reading could.
