@@ -13610,4 +13610,153 @@ e	l4	l11
         m.well_rested = 17;
         assert_eq!(m.stacks_short_ahead(), 0, "a full bank wants nothing");
     }
+
+    /// A crossing decision, as `(where we stood, where it said to go)`.
+    type Decision = (String, String);
+
+    /// Pairs where the walk said `A -> B` somewhere and `B -> A` somewhere else in the same
+    /// crossing. That is the shape of every subworld bounce this project has had: not a node
+    /// visited twice, which is legal on a route, but two nodes each nominating the other.
+    fn reciprocated(d: &[Decision]) -> Vec<(String, String)> {
+        let set: std::collections::BTreeSet<&Decision> = d.iter().collect();
+        set.iter()
+            .filter(|(a, b)| set.contains(&(b.clone(), a.clone())))
+            .map(|(a, b)| (a.clone(), b.clone()))
+            .collect()
+    }
+
+    /// What the run *actually did*, scraped from its own report.
+    fn decisions_the_run_made(report: &str) -> Vec<(String, Vec<Decision>)> {
+        let mut out: Vec<(String, Vec<Decision>)> = Vec::new();
+        let mut here: Option<String> = None;
+        let between = |l: &str, a: &str, b: &str| -> Option<String> {
+            let rest = l.split_once(a)?.1;
+            Some(rest.split_once(b)?.0.to_string())
+        };
+        for l in report.lines() {
+            if let Some(k) = between(l, "arrived at `", "`") {
+                here = Some(k);
+                continue;
+            }
+            // Three openers, and `steering` is the one that matters: the deleted arm is half of
+            // the alternation the bounce was made of, so a scraper without it reports the old
+            // crossing as clean and the whole control silently proves nothing. It did, once.
+            let step = ["crossing `", "probing `", "steering `"].iter().find_map(|opener| {
+                let rest = l.split_once(opener)?.1;
+                let (container, rest) = rest.split_once("` ")?;
+                // `via \`` without a leading space: splitting the container off at "` " has
+                // already eaten it on a `probing` line, and requiring the space silently dropped
+                // every probe -- which left only the steers, and a bounce made of one arm is not
+                // a bounce. That is how this control first came back empty.
+                let via = between(rest, "via `", "`")?;
+                Some((container.to_string(), via))
+            });
+            if let (Some((container, via)), Some(from)) = (step, here.clone()) {
+                if out.last().map(|(c, _)| c.as_str()) != Some(container.as_str()) {
+                    out.push((container.clone(), Vec::new()));
+                }
+                out.last_mut().expect("just pushed").1.push((from, via));
+            }
+        }
+        out
+    }
+
+    /// **The one-walk crossing does not bounce, measured against the runs that did.**
+    ///
+    /// The rewrite of 2026-08-21 (`ee0ca84`, `b15f33f`) deleted an arm that **six of seven**
+    /// crossings in the 1519Z run ended on, on the argument that a `doorward` ranking term does the
+    /// same job without a second decision-maker to disagree with. That is the change on this branch
+    /// with the least evidence behind it, and it cannot be exercised without a supervised run.
+    ///
+    /// This is the next best thing: replay both runs' interior dumps and ask the **new**
+    /// `cross_toward` what it would do at each position the game really put the player in. Every
+    /// answer is therefore evaluated in a state that actually happened. The *sequence* is
+    /// counterfactual — once the new code diverges the run would have gone elsewhere — so the claim
+    /// is deliberately pointwise: no two nodes nominate each other.
+    ///
+    /// **The positive control is the same measurement on the run's own report**, which finds the
+    /// documented Upton Braken bounce (`l63sub5` against `l63_plaza`) and would fail this test if
+    /// the detector were vacuous.
+    #[test]
+    fn the_one_walk_crossing_nominates_no_pair_that_nominates_it_back() {
+        let mut runs = 0;
+        for stem in ["spike-run-20260821-1519Z", "spike-run-20260821-0357Z"] {
+            let Ok(log) = std::fs::read_to_string(format!("{stem}.log")) else {
+                eprintln!("SKIP: {stem}.log is not present");
+                continue;
+            };
+            let lines: Vec<String> = log.lines().map(|l| l.to_string()).collect();
+            let dumps = crate::observe::adjacency::Reader::new().push(&lines);
+            assert!(dumps.len() > 100, "{stem}: expected a whole run, got {}", dumps.len());
+
+            let mut m = WorldMap::new();
+            // **Per visit, not per container.** Two crossings of the same subworld are two
+            // journeys with two targets, and the interior may re-roll between them
+            // (`subworld::Rules::edges_survive_reentry`). Merging them reports `l63`'s exit to
+            // `l43` and its exit to `l35` as a bounce, when they are two errands months apart in
+            // the run. A bounce is two nodes nominating each other **inside one crossing**.
+            let mut visits: Vec<(String, Vec<Decision>)> = Vec::new();
+            for a in &dumps {
+                m.fold(a);
+                let Some((container, _)) = a.subworld.clone() else {
+                    visits.push((String::new(), Vec::new()));
+                    continue;
+                };
+                if visits.last().map(|(c, _)| c.as_str()) != Some(container.as_str()) {
+                    visits.push((container.clone(), Vec::new()));
+                }
+                // `cross_toward` mutates (it holds a target across steps), and this is a
+                // counterfactual, so it must not be allowed to write back into the replay.
+                let to = match m.clone().cross_toward(&a.exits) {
+                    Some(Crossing::Step { to, .. }) => to,
+                    Some(Crossing::Probe { to, .. }) => to,
+                    Some(Crossing::Seek { to }) => to,
+                    _ => continue,
+                };
+                visits.last_mut().expect("just pushed").1.push((a.here_key.clone(), to));
+            }
+            visits.retain(|(c, d)| !c.is_empty() && !d.is_empty());
+            let decided: usize = visits.iter().map(|(_, d)| d.len()).sum();
+            assert!(decided > 50, "{stem}: only {decided} crossing decisions to judge");
+            assert!(visits.len() > 5, "{stem}: only {} crossings to judge", visits.len());
+
+            for (container, d) in &visits {
+                assert!(
+                    reciprocated(d).is_empty(),
+                    "{stem}, crossing `{container}`: {:?} nominate each other",
+                    reciprocated(d)
+                );
+            }
+            runs += 1;
+        }
+        if runs == 0 {
+            return;
+        }
+
+        // The control. Without it, a detector that finds nothing proves nothing.
+        let Ok(report) = std::fs::read_to_string("spike-run-20260821-1519Z.md") else {
+            eprintln!("SKIP the control: the report is not present");
+            return;
+        };
+        let made = decisions_the_run_made(&report);
+        let found: Vec<_> =
+            made.iter().flat_map(|(c, d)| reciprocated(d).into_iter().map(move |p| (c, p))).collect();
+        println!("the run's own bounces: {found:?}");
+        // Named exactly, not merely counted. This scraper came back empty twice for reasons that
+        // had nothing to do with the crossing — first by not knowing the word `steering`, which is
+        // half of the alternation a bounce is made of, then by requiring a space in ` via ` that a
+        // probe line does not have. Both times it reported the old two-arm crossing as clean.
+        let upton = found
+            .iter()
+            .any(|(c, (a, b))| c.as_str() == "l63" && a == "l63_plaza" && b == "l63xrd60x-183");
+        assert!(
+            upton,
+            "the run's own report must still contain the Upton Braken bounce (`l63_plaza` against \
+             `l63xrd60x-183`); without it this detector is measuring nothing and the assertions \
+             above are worthless. Found: {found:?}"
+        );
+        // Two more the ledger never named: `l39sub1` against `l39sub12`, and `l64sub10` against
+        // `l64sub2`. Three bounced crossings out of eleven, in the run that met the MVP.
+        assert!(found.len() >= 6, "expected three bounced crossings: {found:?}");
+    }
 }
