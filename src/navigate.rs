@@ -184,6 +184,14 @@ const NEUTRAL: (i32, i32) = (760, 240);
 /// after the map has been re-centred. A fourth would be re-asking a question already answered twice —
 /// if two fresh dumps in a row put the node somewhere a click does not select it, the problem is not
 /// staleness.
+/// How many times a hop may press Travel and go nowhere before the run gives up.
+///
+/// Three, matching every other retry on this path — `SELECT_RETRIES`, the shrine `Visit`, the
+/// handover out of the overworld. The number is not measured and does not need to be: each try
+/// costs a locate-me and a re-plan, and the thing it is insuring against is a swallowed press,
+/// which is the single most repeated failure in this project.
+const MAX_HOP_MISSES: usize = 3;
+
 const SELECT_RETRIES: usize = 3;
 /// How much of the area-button strip must change for a click to count as having selected something.
 ///
@@ -759,6 +767,41 @@ pub struct Run<'a> {
     /// Consecutive is the point: a miss while a screen fades in is ordinary and self-correcting, and
     /// only a run of them means the map is genuinely not coming.
     pub recentre_misses: usize,
+    /// Hops that pressed Travel and left us exactly where we were.
+    ///
+    /// The last unretried press on the overworld. Selection already retries with a re-centre
+    /// (`SELECT_RETRIES`), and every other press in this file has learned the same lesson — the
+    /// shrine `Visit`, the handover out of the overworld — but a Travel that took nowhere was a
+    /// stop.
+    ///
+    /// **A missed click is a coordinate failure and coordinates can be renewed**, which is the
+    /// argument already written at the selection loop. It applies just as well one press later: the
+    /// two ways to end up here are a selection that only *looked* like it landed and a Travel the
+    /// game ignored, and a locate-me is the cure for both — it settles the view and re-prints every
+    /// position.
+    ///
+    /// Counted rather than looped in place, so the retry goes through the top of the drive loop and
+    /// gets a fresh screen identification, a fresh plan, and the `needs_recentre` handling with it.
+    /// Cleared by any hop that moves us.
+    pub hop_misses: usize,
+
+    /// This step took the shortcut past the pan wait, so the camera may still be gliding.
+    ///
+    /// The shortcut's premise is that the next action is a press at a **fixed** coordinate, where a
+    /// moving view costs nothing. When the step turns out to click a *node* instead — a hop, at a
+    /// coordinate derived from the world frame in screen space — the premise is gone and the click
+    /// lands wherever the map has slid to. `Failed("no arrival at l31")`, 2026-08-20, at a corrupted
+    /// village whose errand had moved on.
+    ///
+    /// So the hop settles first when this is set. The shortcut keeps its win where the premise
+    /// holds, and pays the pan back on the one path that needs it.
+    ///
+    /// **This is also what makes the selection check trustworthy again.** That check is a screen
+    /// diff over the area strip, and a diff cannot tell a strip that changed because a node was
+    /// selected from one that changed because the whole view moved — so under a gliding camera it
+    /// reports success for a click that selected nothing, which is why the run reached the arrival
+    /// wait at all instead of retrying the selection.
+    pub skipped_the_pan: bool,
     /// Shrines we have already tried to play this run.
     ///
     /// `used` is the real "this shrine is finished" flag, and it is the game's, which is why it is
@@ -4053,6 +4096,7 @@ pub fn drive(
                  for the pan\n",
                 r.map.here().unwrap_or("?")
             ));
+            r.skipped_the_pan = true;
             r.latest.clone().expect("guarded")
         } else {
             // The overworld gets the settling for free — it re-centres every step, and `recentre`
@@ -5611,6 +5655,21 @@ pub fn drive(
         // affirmative slot is empty" two hundred times on the way.
         let mut selected = false;
         let mut at = (target.x as i32, target.y as i32);
+        // **Pay back the pan we skipped, because this click is not at a fixed coordinate.**
+        //
+        // See [`Run::skipped_the_pan`]. The shortcut is taken on the strength of the next action
+        // being a press on the area slot; a hop is the case where that turned out to be wrong, and
+        // it is the only one that needs the camera still. Cheaper than it looks — it happens on the
+        // steps the shortcut fired on and nowhere else.
+        if std::mem::take(&mut r.skipped_the_pan) {
+            let (cw, ch) = r.win.client_size().unwrap_or((1920, 1080));
+            r.log.push_str("  this step skipped the pan and now wants a node — settling first\n");
+            if let Some(a) = r.recentre().filter(|a| !camera_is_lost(&a.nodes, cw, ch)) {
+                if let Some(n) = a.nodes.iter().find(|n| n.key == hop.step) {
+                    at = (n.x as i32, n.y as i32);
+                }
+            }
+        }
         for attempt in 1..=SELECT_RETRIES {
             let Ok(before) = crate::win::capture::capture_window(r.win) else {
                 return Stop::Failed("capture failed".into());
@@ -5696,6 +5755,9 @@ pub fn drive(
             // about to leave.
             arrived = r.map.here().map(|h| h == hop.step).unwrap_or(false);
         }
+        if arrived {
+            r.hop_misses = 0;
+        }
         // **Short of the named node is progress, not failure.** An event on the way pauses the walk
         // (arrivals raise lore and choices), and a fight stops it outright. `here` is correct either
         // way and the top of the loop re-plans from it, so anything that moved us is a step taken.
@@ -5703,8 +5765,37 @@ pub fn drive(
         if !arrived {
             let moved = r.map.here().map(|h| h != here).unwrap_or(false);
             if !moved {
-                return Stop::Failed(format!("no arrival at {}", hop.step));
+                // **A press that took us nowhere is a setback, not the end of the run.**
+                //
+                // The dev, 2026-08-20: *add safeguards so that something as a failed click can be
+                // recovered. We have already built other recovery methods like re-centering.* This
+                // is that, and it is the same cure the selection loop above already reaches for.
+                //
+                // Two things can put us here and a locate-me answers both. The Travel may simply
+                // have been ignored. Or the *selection* only looked like it landed: that check is a
+                // screen diff over the area strip (`SELECT_MOVED`), and a diff cannot tell a strip
+                // that changed because a node was selected from one that changed because the camera
+                // was still gliding — which is exactly the state a step arrives in when it took the
+                // shortcut past the pan wait.
+                //
+                // Re-centring settles the view and re-prints every position, so the retry aims at
+                // coordinates that describe the screen rather than the one before it.
+                r.hop_misses += 1;
+                if r.hop_misses < MAX_HOP_MISSES {
+                    r.log.push_str(&format!(
+                        "  pressed Travel for `{}` and did not move (try {} of {MAX_HOP_MISSES}) — \
+                         re-centring and planning again\n",
+                        hop.step, r.hop_misses
+                    ));
+                    r.needs_recentre = true;
+                    continue;
+                }
+                return Stop::Failed(format!(
+                    "no arrival at {} after {MAX_HOP_MISSES} tries",
+                    hop.step
+                ));
             }
+            r.hop_misses = 0;
             r.log.push_str(&format!(
                 "  stopped at `{}` on the way to `{}` — re-planning from where we stand\n",
                 r.map.here().unwrap_or("somewhere"),

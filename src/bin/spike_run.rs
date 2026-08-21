@@ -117,6 +117,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         affirm: affirm::ButtonArt::load(Path::new(&cfg.game_dir), "right")?,
         answered_event: None,
         recentre_misses: 0,
+        hop_misses: 0,
+        skipped_the_pan: false,
         shrines_tried: std::collections::HashSet::new(),
         rest_failures: std::collections::HashMap::new(),
         slots_captured: std::collections::HashSet::new(),
