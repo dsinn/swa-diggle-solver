@@ -1249,6 +1249,21 @@ pub struct WorldMap {
     /// — and re-entering a subworld must invalidate it, since `lostOrientation` re-rolls the
     /// interior (`forest.lua:483-490`).
     probing_toward: Option<(String, String)>,
+    /// `(container, node)` — where the last crossing step in this subworld set off **from**.
+    ///
+    /// The one-step memory of task #57, and it exists because the two crossing arms each carry a
+    /// convergence argument that constrains only itself. [`Crossing::Steer`] has a monotonic ceiling
+    /// on the gap to the door; [`Crossing::Probe`] holds its frontier target in
+    /// [`WorldMap::probing_toward`]. **Neither device sees the other arm**, and alternating them
+    /// defeats both: the frontier walk steps *away* from the door to somewhere worth learning, and
+    /// from there the steer reads the node we just left as an improvement and goes back.
+    ///
+    /// Live, the 2030Z run: `l63_plaza` ↔ `l63xrd60x-183`, three clean laps inside Upton Braken,
+    /// with `l30` and `l53` showing the same alternation the same run.
+    ///
+    /// Keyed by container for the same reason `probing_toward` is: leaving invalidates it, and
+    /// re-entering must, since `lostOrientation` re-rolls the interior.
+    stepped_from: Option<(String, String)>,
     /// **Well-Rested stacks banked**, summed across both flavours.
     ///
     /// A consumable, not an aura: one is spent per kill that heals (`rpgview.lua:1204-1209`), and
@@ -5053,6 +5068,23 @@ impl WorldMap {
         let parent = self.inside()?.to_string();
         let here = self.here.as_deref()?.to_string();
 
+        // **The one-step memory** — [`WorldMap::stepped_from`], task #57.
+        //
+        // Read before anything decides, and rewritten immediately, so every arm below sets off from
+        // a `here` the next call will know we left. Recorded even when no crossing is returned:
+        // the fact we are standing here is what the next step needs, not whether this one succeeded.
+        //
+        // Discarded when it names the node we are standing on, which happens whenever this is asked
+        // twice without a move in between — a retry is not a step, and treating it as one would rule
+        // out the only neighbour we had.
+        let just_left = self
+            .stepped_from
+            .as_ref()
+            .filter(|(c, _)| c.as_str() == parent.as_str())
+            .map(|(_, k)| k.clone())
+            .filter(|k| k.as_str() != here.as_str());
+        self.stepped_from = Some((parent.clone(), here.clone()));
+
         // Where inside this subworld are we trying to get to?
         //
         // Three answers, and only the third is what crossing a forest ever needed:
@@ -5357,6 +5389,15 @@ impl WorldMap {
             for n in place.neighbours.iter().filter(|n| usable(n)) {
                 let brush = !paved(n);
                 if any_paved && brush {
+                    continue;
+                }
+                // **Not straight back the way we came** — the memory, and it is a refusal rather
+                // than a preference because the alternative is not a stall. A steer left with no
+                // candidate hands down to the frontier walk, which has a route and a held target;
+                // that arm is allowed to pass back through a node, because a route sometimes must.
+                // The steer is the arm that picks by straight-line guess with no route at all, so it
+                // is the one that has to remember.
+                if Some(n) == just_left.as_ref() {
                     continue;
                 }
                 let Some(at) = self.placed_now(n) else { continue };
@@ -9321,6 +9362,62 @@ mod tests {
                 assert_eq!(to, "l2sub22", "toward the door; `l2sub12` is nearer the front of the alphabet");
             }
             other => panic!("expected a steer toward the door, got {other:?}"),
+        }
+    }
+
+    /// **A steer will not walk back into the node the frontier walk just left.** Task #57.
+    ///
+    /// The `l63_plaza` ↔ `l63xrd60x-183` bounce of the 2030Z run, three clean laps inside Upton
+    /// Braken, and the shape is *two convergence arguments defeating each other*.
+    ///
+    /// Each arm is sound alone. `Crossing::Steer` carries a monotonic ceiling on the gap to the
+    /// door, so a steer must strictly improve on the last one. `Crossing::Probe` holds its frontier
+    /// target in `probing_toward`, which is what makes "the BFS distance strictly decreases" true
+    /// rather than merely plausible. **Neither device constrains the other arm**, and they
+    /// alternate: the frontier walk steps *away* from the door to somewhere worth learning, and from
+    /// there the steer sees the node we just left as an improvement and goes back.
+    ///
+    /// A one-step memory is the cheap half of the cure — the dev's call, 2026-08-21 — and it belongs
+    /// on the steer alone. The frontier arm returns `first_step_toward`, a real route, and routes
+    /// sometimes have to pass back through a node; the steer is the arm that picks by straight-line
+    /// guess with no route at all, and *that* is the one that needs to remember.
+    #[test]
+    fn a_steer_does_not_walk_back_into_the_node_the_probe_just_left() {
+        let door = Exit {
+            x: 1479.0, y: -130.0,
+            to_key: "l43".into(), to_heading: "Wold Newton — level 4 crypt".into(),
+        };
+        let at = |key: &str, x: f64, y: f64| Node {
+            key: key.into(), heading: "Upton Braken house".into(), x, y, connections: 4,
+        };
+
+        let mut m = WorldMap::new();
+        // Standing on the plaza, which sits close to the door. Nothing measured yet, so this is the
+        // frontier walk — and it steps *away*, to somewhere that can still teach us something.
+        m.fold(&inside_dump("l63", "l63_plaza", "Upton Braken plaza",
+            vec![at("l63xrd", 200.0, 900.0), at("l63sub3", 260.0, 940.0)],
+            vec![door.clone()]));
+        let away = m.cross_toward(&[door.clone()]);
+        assert!(matches!(away, Some(Crossing::Probe { .. }) | Some(Crossing::Seek { .. })),
+            "the frontier walk goes first, got {away:?}");
+
+        // Arrived at the crossroads. The plaza is now much the nearest thing to the door, and
+        // stepping back to it is an improvement by every measure the steer has.
+        m.fold(&inside_dump("l63", "l63xrd", "Upton Braken crossroads",
+            vec![at("l63_plaza", 1400.0, -100.0), at("l63sub3", 260.0, 940.0)],
+            vec![door.clone()]));
+
+        match m.cross_toward(&[door]) {
+            Some(Crossing::Steer { to, .. }) => {
+                assert_ne!(to, "l63_plaza", "that is the node we were just standing on");
+            }
+            // Refusing the only improving neighbour leaves the steer with nothing, and handing back
+            // to the frontier walk is the right answer rather than a miss — it is the arm that has a
+            // route and a held target.
+            other => assert!(
+                matches!(other, Some(Crossing::Probe { .. }) | Some(Crossing::Seek { .. })),
+                "expected the frontier walk to take over, got {other:?}"
+            ),
         }
     }
 
