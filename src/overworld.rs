@@ -5471,6 +5471,32 @@ impl WorldMap {
         // explore and choosing how to get there cannot disagree.
         let hops = self.distances(&here);
         let exit_prefix = format!("{parent}_path_to_");
+        // **Where the door is, for the ranking below** — task #57, and the whole of the steer folded
+        // into one term.
+        //
+        // `placed_now` answers only for what the latest dump named, which is our neighbours and the
+        // doors. So this orders the frontier nodes *adjacent to us* by how near the door they lie,
+        // and everything further away shares the worst value and falls through to the terms behind
+        // it. That is deliberate and it is exactly the reach the steer had — it only ever looked at
+        // neighbours too — with the difference that the candidates are now frontier nodes rather
+        // than any node at all.
+        //
+        // Absent when the destination has no printed position, which is the fogged-inn search: the
+        // key below then reduces to what it has always been, so the dev's degree rule of 2026-08-15
+        // keeps the village search it was written for.
+        let door_now = dest.as_deref().and_then(|d| self.placed_now(d));
+        let doorward = |p: &Place| -> u64 {
+            match (door_now, self.placed_now(&p.key)) {
+                (Some(d), Some(at)) => {
+                    let g = (at.0 - d.0).powi(2) + (at.1 - d.1).powi(2);
+                    // Squared throughout — it orders the same as the distance and takes no root.
+                    // Clamped rather than cast blind: a NaN or an absurd coordinate must sort last,
+                    // not wrap to zero and win.
+                    if g.is_finite() && g >= 0.0 { g.min(u64::MAX as f64 - 1.0) as u64 } else { u64::MAX }
+                }
+                _ => u64::MAX,
+            }
+        };
         let frontier = self
             .places
             .values()
@@ -5503,12 +5529,55 @@ impl WorldMap {
             // Still under `is_paved`, which is a separate and older rule of the dev's and not one
             // this touches: roads are the map's own structure, and this reorders which road to take
             // rather than licensing the brush.
+            // **Paved, then near, then doorward, then how much it teaches.** The dev settled both
+            // of the orderings in this key on 2026-08-21, and they were settled a few minutes apart.
+            //
+            // *Doorward before degree*, choosing between two of their own rules where they meet:
+            // *how much this node would teach us, before how near it is* was written for **searching**
+            // a village for an inn the fog hides, where there is nothing to head for. Crossing to a
+            // **known** exit is the other case, and there a high-degree node in the wrong direction
+            // is a detour. So when we can see the door, go toward it, and let degree decide between
+            // nodes lying equally near it.
+            //
+            // **And hops above doorward** — the dev: *the number of hops should be higher in the
+            // ranking so that we don't backtrack until our current branch is done.* That is the
+            // placement the goal requires and the reason is worth spelling out: with `doorward`
+            // dominant, a frontier node four hops back that happens to lie nearer the door beats the
+            // one at our feet, and the walk re-crosses ground it has already covered to get there.
+            // Nearest-first makes the search expand outward from where we stand, and `doorward` then
+            // chooses **which branch** to take at each fork rather than which side of the subworld to
+            // be on.
+            //
+            // The doorward term is absent when the destination has no printed position — the fogged
+            // inn — so that search keeps exactly the ordering it was given.
             .filter_map(|p| {
                 let unrevealed = p.connections.saturating_sub(p.neighbours.len() as u32);
-                hops.get(&p.key).map(|d| (!p.is_paved(), std::cmp::Reverse(unrevealed), *d, &p.key))
+                hops.get(&p.key).map(|d| {
+                    // **Which of `hops` and degree leads depends on whether we can see the door**,
+                    // because the two rules were written for two different errands and only look
+                    // like they contradict.
+                    //
+                    // *Crossing to a known exit.* Nearest first, so the search expands outward from
+                    // where we stand and `doorward` chooses which branch at each fork — the dev's
+                    // *don't backtrack until our current branch is done*. Degree decides between
+                    // nodes equally near and equally doorward.
+                    //
+                    // *Searching for something the fog hides* — an inn we have not found, with no
+                    // position to head for. Degree first, which is the rule of 2026-08-15 and the
+                    // village that *got searched a cul-de-sac at a time*. `doorward` is `u64::MAX`
+                    // for every candidate here, so it drops out and this is exactly the key that
+                    // rule was given.
+                    //
+                    // Inverted rather than wrapped in `Reverse` so both orderings are one type.
+                    let near = *d as u64;
+                    let teaches = u64::MAX - unrevealed as u64;
+                    let (lead, trail) =
+                        match door_now.is_some() { true => (near, teaches), false => (teaches, near) };
+                    (!p.is_paved(), lead, doorward(p), trail, &p.key)
+                })
             })
             .min()
-            .map(|(_, _, _, k)| k.clone());
+            .map(|(_, _, _, _, k)| k.clone());
 
         // **Keep walking to the frontier we chose, while it is still worth walking to.**
         //
