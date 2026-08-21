@@ -3826,7 +3826,35 @@ impl WorldMap {
                 // The cost is bounded and the benefit is not: a shrine bought with a crypt fight is
                 // no longer cheap preparation, it is the level 8 fight's budget spent early.
                 .filter(|p| !anomaly_open || (!p.corrupted && !p.consecrated))
-                .filter(|p| !anomaly_open || self.reachable_without_a_fight(here, &p.key))
+                // **The route's cost is NOT a filter, and that is task #70.**
+                //
+                // There was a `reachable_without_a_fight` here, and it is gone. The dev, 2026-08-21:
+                // *shrines should never be blocked by level unless the anomaly has not yet opened.*
+                //
+                // It cannot stay, because it does not price anything — `may_be_a_fight` is
+                // `heading_has_combat || corrupted`, a **boolean**, so a level 1 forest disqualified
+                // a route exactly as hard as a level 9 crypt. The heading is where the level comes
+                // from at all (`AreaHeading` prints `— level N` only when `locationHasCombat`), so
+                // the number was parsed and then thrown away.
+                //
+                // Live, 2030Z: the eastern shrines were revealed from the south and struck off while
+                // a forest stood between, then consecrated from the north twenty steps later. The
+                // detour bought nothing — one step after the second shrine the run took a level 6
+                // forest fight anyway, to explore. The log carries **zero** `RouteTo(Shrine)` lines
+                // in 175 steps, which is what proves this filter and not `ok`'s route test: a
+                // candidate that survived to `ok` and failed it would have said so.
+                //
+                // **What replaced it is the gate, not nothing.** The 2026-08-15 rule this reverses
+                // was written when a shrine was optional reward, and paying a crypt for one spent the
+                // level 8 fight's budget early. [`SHRINES_BEFORE_THE_ANOMALY`] makes four of them a
+                // precondition — see the `CloseAnomaly` branch, which already argues that *the
+                // shrines are not a reward to collect on the way, they are the preparation the fight
+                // needs*. Preparation we are required to buy cannot also be refused for costing
+                // something.
+                //
+                // The pre-anomaly filter above is untouched and is a different rule: `triggers_anomaly`
+                // refuses a level 4+ shrine while `hell == 0` because arriving there is what *opens*
+                // the portal, which is not a question about cost at all.
                 .filter(|p| ok(p))
                 .min_by_key(|p| dist_or_far(&dist, &p.key))
         };
@@ -11148,9 +11176,12 @@ e	l4	l11
     ///
     /// Two other controls were tried here and both were wrong, which is worth leaving written down:
     ///
-    /// - **portal open.** Proves nothing, because opening it changes the errand too — with
-    ///   `hell ~= 0` a shrine needs `reachable_without_a_fight`, `l41` is the fight in the way, and
-    ///   the target moves out from under the comparison.
+    /// - **portal open.** Proved nothing, because opening it changed the errand too: with
+    ///   `hell ~= 0` a shrine then needed `reachable_without_a_fight`, `l41` was the fight in the
+    ///   way, and the target moved out from under the comparison. **That filter was removed on
+    ///   2026-08-21 (#70)**, so the mechanism named here no longer exists — the control is still
+    ///   the wrong one, because `worth_a_trip` and the corruption filter also turn on `hell`, but
+    ///   do not go looking for the route test to explain it.
     /// - **`l41` cleared.** Green, and impossible: clearing a level 5 crypt means arriving at it,
     ///   and arriving is what opens the portal, so `hell == 0` and a completed level 5 node cannot
     ///   both hold. The dev caught it. See the note where `Place::opens_the_anomaly` used to be.
@@ -12395,28 +12426,58 @@ e	l4	l11
         assert_eq!(plan.target, "shrine1");
     }
 
-    /// A shrine on the far side of any fight is not cheap, so it is not a destination.
+    /// A shrine behind a fight is still a destination **once the portal is open**. Task #70.
     ///
-    /// The dev's rule: *go toward the anomaly unless there is an accessible shrine that does not
-    /// require combat.* Crypts were the example the first version generalised from, and the
-    /// generalisation was wrong by most of a map — the route this admitted on 2026-08-15 ran through
-    /// a bandit camp, a level 3 spider forest and a level 5 graveyard, not one of them a crypt.
+    /// This asserted the opposite until 2026-08-21, on the rule *go toward the anomaly unless there
+    /// is an accessible shrine that does not require combat*. The dev reversed it after watching the
+    /// 2030Z run: *shrines should never be blocked by level unless the anomaly has not yet opened.*
+    ///
+    /// The reversal is not a change of mind about cost, it is the gate changing what a shrine **is**.
+    /// When that rule was written a shrine was optional reward, and paying a crypt for one spent the
+    /// level 8 fight's budget early. [`SHRINES_BEFORE_THE_ANOMALY`] made four of them a
+    /// precondition, and the argument at the `CloseAnomaly` branch already says so: *the shrines are
+    /// not a reward to collect on the way, they are the preparation the fight needs.* Preparation we
+    /// are required to buy cannot also be refused for costing something.
+    ///
+    /// Live: the eastern shrines of the 2030Z run were revealed from the south and struck off the
+    /// candidate list while a forest stood between, then consecrated from the north twenty steps
+    /// later. The whole detour bought nothing — one step after the second shrine the run took a
+    /// level 6 forest fight anyway, to explore.
     #[test]
-    fn a_shrine_behind_a_crypt_is_not_worth_the_trip() {
+    fn a_shrine_behind_a_crypt_is_still_worth_the_trip_once_the_portal_is_open() {
         let mut m = WorldMap::new();
         m.fold(&dump("here", "camp", vec![node("l49", "Yokefleet — level 6 crypt")]));
-        m.fold(&dump("l49", "Yokefleet — level 6 crypt", vec![node("s1", "Faraway shrine")]));
+        m.fold(&dump("l49", "Yokefleet — level 6 crypt", vec![node("shrine2", "Faraway shrine")]));
         m.here = Some("here".into());
         m.hell = Some(0.1);
 
-        assert!(!m.reachable_without_a_fight("here", "s1"), "the only way through is the crypt");
-        assert_ne!(m.next_target().unwrap().reason, Goal::Shrine, "so it is not the plan");
+        // The route still costs a fight, and we go anyway. Both halves matter: a fixture that had
+        // quietly become fight-free would pass this for the wrong reason.
+        assert!(!m.reachable_without_a_fight("here", "shrine2"), "the only way through is the crypt");
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Shrine);
+        assert_eq!(plan.target, "shrine2");
+    }
 
-        // Clear the crypt and the same shrine is suddenly cheap: `completed` is what says whether a
-        // fight is still owed, here as everywhere else.
-        m.entry("l49").completed = true;
-        assert!(m.reachable_without_a_fight("here", "s1"));
-        assert_eq!(m.next_target().unwrap().target, "s1");
+    /// **Before the portal opens, level still blocks** — and that is a different rule, kept.
+    ///
+    /// #70 removed the *route* test, not the pre-anomaly one. `triggers_anomaly` exists because
+    /// arriving at a level 4+ node is what opens the portal (`world_evil.lua:15-18`), so a shrine
+    /// above level 3 is not a free errand while `hell == 0` — it is the trigger, and taking it ends
+    /// the phase it belongs to. The run of 2026-08-17 walked into `shrine7`, *Cottam Boscage — level
+    /// 9 forest*, at 52/52 exactly this way.
+    #[test]
+    fn before_the_portal_a_deep_shrine_is_still_refused() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("here", "camp", vec![node("shrine7", "Cottam Boscage — level 9 forest")]));
+        m.here = Some("here".into());
+        m.hell = Some(0.0);
+
+        assert_ne!(
+            m.next_target().map(|p| p.reason),
+            Some(Goal::Shrine),
+            "a level 9 shrine is the anomaly trigger, not a cheap errand"
+        );
     }
 
     /// "No route I can see" and "no route" are different claims, and only one of them is ours.
