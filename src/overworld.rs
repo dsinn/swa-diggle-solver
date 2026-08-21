@@ -3199,7 +3199,39 @@ impl WorldMap {
             .filter(|k| *k != from && self.has_unexplored_roads(k))
             .filter(|k| !self.abandoned.contains(*k))
             .filter_map(|k| self.places.get(k))
-            .min_by_key(|p| dist_or_far(dist, &p.key))
+            // **Somewhere we have not stood first, and only then somewhere we have.**
+            //
+            // The dev, 2026-08-21: *shouldn't the heart errand keep searching the frontier?* Yes,
+            // and re-nominating a node it has already stood on is how it stopped.
+            //
+            // `has_unexplored_roads` compares the game's declared `connections` against the
+            // neighbours we have seen named, and being *at* a node is what makes the game name them.
+            // So a node we have stood on whose gap is still open has a gap that visiting cannot
+            // close — most often a **secret** neighbour, which `verboseAdjacencyData` prints as
+            // `Hidden location` and never names until a tower reveals it (`locationIsVisible`,
+            // `overworldview.lua:554-556`). Probing it again buys nothing and the errand at the far
+            // end nominates the way back. Live 2026-08-21, `l11 Argham crossroads` against `l5
+            // Dalton Copse`, two full laps before the write-off broke it:
+            //
+            // ```text
+            //   6. l11 -> **l5**  (for l39, Explore)
+            //   7. l5  -> **l11** (for l11, Heart)
+            //   8. l11 -> **l5**  (for l39, Explore)
+            //   9. l5  -> **l11** (for l11, Heart)
+            //  10. `l11` is written off — stood on 2 times with nothing learned
+            // ```
+            //
+            // **A preference and not a filter**, which is the whole of the dev's earlier correction:
+            // *it should be the navigator's responsibility to probe and build the cache, not to
+            // assume from the cache.* Excluding visited nodes outright was tried and it broke
+            // `a_heart_behind_the_fog_is_probed_rather_than_written_off`, where the one candidate has
+            // been stood on and going anyway is right — there is nothing else to try, and a probe
+            // that refuses the only road left has stopped searching. Ranked, that fixture is
+            // unchanged and the bounce still ends: with two candidates the unvisited one wins.
+            //
+            // `visited` is set only by standing somewhere **this run**, so a resumed run probes
+            // afresh — the right side to err on, since the gap may have closed while we were away.
+            .min_by_key(|p| (p.visited, dist_or_far(dist, &p.key)))
     }
 
     /// Could [`WorldMap::next_hop`] actually set off toward `key`, over the edges we have recorded?
@@ -11940,6 +11972,61 @@ e	l4	l11
         let plan = m.next_target().expect("something to do");
         assert_eq!(plan.reason, Goal::Heart, "the walk is still the heart errand, and says so");
         assert_eq!(plan.target, "free", "the probe is the node with the road we have not tried");
+    }
+
+    /// **The probe keeps going outward rather than back to where it has stood.**
+    ///
+    /// The `l11 Argham crossroads` / `l5 Dalton Copse` bounce of 2026-08-21, in the smallest shape
+    /// that produces it. Standing on a node is what makes the game name its neighbours, so a gap
+    /// that survives a visit is one visiting cannot close — a secret neighbour, most often. The
+    /// probe kept nominating it, the errand at the far end nominated the way back, and it took two
+    /// full laps and a write-off to break.
+    #[test]
+    fn the_heart_probe_prefers_ground_it_has_not_stood_on() {
+        let build = || {
+            let mut m = WorldMap::new();
+            // Two ways out of the camp, both fight-free, both with a road we have not looked down.
+            // **`stood` is strictly nearer**, or the ranking proves nothing: a tie on distance is
+            // broken by iteration order, and `fresh` happens to sort first. The bounce is precisely
+            // the case where the node we have stood on is the *closest* one still declaring a road.
+            m.fold(&dump("here", "camp", vec![node("stood", "Argham crossroads")]));
+            m.fold(&dump(
+                "stood",
+                "Argham crossroads",
+                vec![node("here", "camp"), node("fresh", "Quiet Glade meadow")],
+            ));
+            m.here = Some("here".into());
+            m.hell = Some(0.1);
+            m.gold = 500;
+            // A village exists but no route to it is known, which is what sends the errand probing.
+            m.entry("far").heading = "Rowlston Covert village".into();
+            for k in ["stood", "fresh"] {
+                let n = m.entry(k).neighbours.len() as u32;
+                m.entry(k).connections = n + 1;
+            }
+            m
+        };
+
+        // `stood` is nearer by key order and has been walked; `fresh` has not.
+        let mut m = build();
+        m.entry("stood").visited = true;
+        let plan = m.next_target().expect("a plan");
+        assert_eq!(plan.reason, Goal::Heart, "the walk is still the heart errand");
+        assert_eq!(
+            plan.target, "fresh",
+            "a node we have already stood on has no more roads to give us"
+        );
+
+        // **And it is a preference, not a refusal.** With nothing else left, the visited node is
+        // still the only road there is — the dev's rule of 2026-08-15, that the navigator probes
+        // rather than concluding from an incomplete cache.
+        let mut m = build();
+        m.entry("stood").visited = true;
+        let n = m.entry("fresh").neighbours.len() as u32;
+        m.entry("fresh").connections = n;
+        let plan = m.next_target().expect("a plan");
+        assert_eq!(plan.reason, Goal::Heart);
+        assert_eq!(plan.target, "stood", "the only road left is worth taking even so");
     }
 
     /// Not a crypt, and still a fight — the four nodes the first rule waved through.
