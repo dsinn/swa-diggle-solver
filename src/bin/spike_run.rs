@@ -316,12 +316,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ever found two, nor a run that skipped the bank from one that had nothing to bank for. Both
     // numbers are free here and both decide where the first hop goes.
     r.log.push_str(&format!(
-        "shrines: {} known, {} consecrated (the portal wants {}); well-rested: {} stack(s) short
+        "shrines: {} known, {} consecrated (the portal wants {}); well-rested: {} banked, {} stack(s) short
 
 ",
         r.map.shrines_known(),
         r.map.consecrations(),
         diggle_solver::overworld::SHRINES_BEFORE_THE_ANOMALY,
+        r.map.well_rested(),
         r.map.stacks_short_ahead(),
     ));
 

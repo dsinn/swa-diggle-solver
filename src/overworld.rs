@@ -2039,6 +2039,18 @@ impl WorldMap {
         self.gold
     }
 
+    /// Well-Rested stacks banked, both flavours summed, as of the last save read.
+    ///
+    /// **Exposed to be logged**, and the 2030Z run is why. Every rest that run printed
+    /// `0 stack(s) short` while the startup line printed `16 stack(s) short` — both from
+    /// [`WorldMap::stacks_short_ahead`], whose only other input is a level 8 node that was on the map
+    /// the whole time and never completed. One of the two readings is wrong and the log cannot say
+    /// which, because the bank itself was never printed. A shortfall is a *derived* number; printing
+    /// it without its operand is what made a contradiction unreadable for a whole run.
+    pub fn well_rested(&self) -> i64 {
+        self.well_rested
+    }
+
     /// Cleared once health is back up.
     pub fn rested(&mut self, now: crate::rest::Health) {
         if now.is_full() {
