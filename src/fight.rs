@@ -203,6 +203,13 @@ pub enum Outcome {
     /// board it was handed, and completely beside the point. The board had collapsed to a single
     /// tile because the player was dying (`columns = {0,0,1,0,0}` in the game's own dump).
     Died { turns: usize },
+    /// The dev asked the run to stop, via [`crate::config::STOP_FILE`], mid-fight.
+    ///
+    /// Not a failure and not a win — its own variant because reporting it as either would be a lie
+    /// in the log, and this project has been burned by outcomes that read as something they were
+    /// not. The fight is left exactly where it stands; `combatSaveData` persists and a later run
+    /// rejoins it, which 1519Z did on its first line.
+    Stopped { turns: usize },
 }
 
 impl Outcome {
@@ -216,6 +223,15 @@ impl Outcome {
     /// not-cleared path that assumes another attempt is worth making. After death it is not.
     pub fn fatal(&self) -> bool {
         matches!(self, Outcome::Died { .. })
+    }
+
+    /// Did this fight end because someone asked the run to stop?
+    ///
+    /// A predicate rather than a match arm at each caller, for the same reason [`Outcome::fatal`]
+    /// is one: three call sites branch on these and all three would otherwise fall into a catch-all
+    /// that reports a deliberate abort as a fight that went wrong.
+    pub fn stop_requested(&self) -> bool {
+        matches!(self, Outcome::Stopped { .. })
     }
 }
 
@@ -283,6 +299,18 @@ impl Fight<'_> {
         let began = feed.mark();
 
         while Instant::now() < deadline && turns < MAX_TURNS {
+            // **The abort, at the top, before anything is read or pressed.**
+            //
+            // This loop is given up to 400 s at one of its call sites, so without a check here a
+            // stop request sat unanswered for minutes while the run went on holding the mouse and
+            // keyboard. See [`crate::config::stop_requested`], which deliberately does not consume
+            // the request — `navigate::drive` deletes the file and ends the run, in one place.
+            if crate::config::stop_requested() {
+                log.push_str(&format!(
+                    "  stop requested after {turns} turns — leaving the fight as it stands\n"
+                ));
+                return Ok(Outcome::Stopped { turns });
+            }
             feed.pump();
             // Before anything is read from the board, because after death the board is still there
             // and still parses — it just no longer means anything. A live run played three more
@@ -1677,5 +1705,37 @@ mod tests {
         // turn a diagnosable stop into a hang.
         assert_eq!(recover_from(SELECT_ATTEMPTS, true), Recovery::Stop);
         assert_eq!(recover_from(SELECT_ATTEMPTS + 1, true), Recovery::Stop);
+    }
+
+    /// **A deliberate abort must not read as a fight that went wrong**, and the three call sites
+    /// that branch on these predicates all end with a catch-all that would make it one.
+    ///
+    /// Exhaustive over every variant on purpose: adding a case to [`Outcome`] and forgetting to
+    /// classify it is the mistake this guards, and a spot-check would not catch it.
+    #[test]
+    fn only_a_stop_reads_as_a_stop_and_it_is_neither_a_win_nor_a_death() {
+        let stopped = Outcome::Stopped { turns: 7 };
+        assert!(stopped.stop_requested());
+        assert!(!stopped.cleared(), "an abort is not a win");
+        assert!(!stopped.fatal(), "an abort leaves a save we can come back to");
+
+        let others = [
+            Outcome::Cleared { turns: 1, reward: None },
+            Outcome::NoPlayableWord { turns: 1, board: "X".into() },
+            Outcome::NotRealizable { turns: 1, word: "X".into() },
+            Outcome::SelectionFailed { turns: 1, detail: String::new() },
+            Outcome::BoardNeverSettled { turns: 1 },
+            Outcome::FinishRefused { turns: 1 },
+            Outcome::Stalled { turns: 1, state: String::new() },
+            Outcome::Exhausted { turns: 1 },
+            Outcome::ClearedWithoutReward { turns: 1 },
+            Outcome::Died { turns: 1 },
+        ];
+        for o in &others {
+            assert!(!o.stop_requested(), "{o:?} is not an abort");
+        }
+        // The signal was there: without this the loop above could be empty and still pass.
+        assert!(others.iter().any(Outcome::cleared), "a win is in the sample");
+        assert!(others.iter().any(Outcome::fatal), "a death is in the sample");
     }
 }

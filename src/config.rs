@@ -1,6 +1,48 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+/// The file that ends a run early, in the working directory.
+///
+/// The dev's abort, and the only one that works while a run holds the mouse and keyboard: a live run
+/// takes both, so the alternative to a file on disk is fighting the run for its own input devices.
+pub const STOP_FILE: &str = ".diggle-stop";
+
+/// Whether someone has asked the run to stop — **without consuming the request**.
+///
+/// Lives here rather than beside the driver so that the long subsystems can consult it without
+/// depending on the navigator. Consuming it (deleting the file, ending the run) stays in exactly one
+/// place, `navigate::drive`'s top-of-loop, so two readers cannot each swallow half a request.
+///
+/// ## Why the subsystems have to ask at all
+///
+/// It used to be checked once per navigator step, and a single step can hold the mouse for minutes:
+/// a fight is given `deadline.min(now + 400s)` at one of its three call sites, and an inn will press
+/// `Rest` up to `MAX_PRESSES` times at up to `REST_TRIES * REST_WAIT` each. So the request was
+/// honoured *eventually* — after up to about seven minutes of a run the dev had already asked to
+/// stop, still holding their input devices. That is not what an abort is for.
+///
+/// Stopping inside a fight is safe and recoverable: `combatSaveData` persists, and a later run
+/// rejoins a fight in progress — 1519Z opened on exactly that (`0. resuming a fight already in
+/// progress`).
+///
+/// **Still checked only per step:** the shrine word screen, whose own bound is `max_guesses`
+/// attempts at `BEAM_RETURN` (12 s) each. Shorter than either of the above, and interrupting a word
+/// mid-guess risks reading as the shrine *failing*, which ends the run for a different reason
+/// (#55). Left alone deliberately.
+pub fn stop_requested() -> bool {
+    stop_requested_in(std::path::Path::new("."))
+}
+
+/// [`stop_requested`] against a named directory, so the primitive can be tested without creating
+/// the real abort file in the repo root.
+///
+/// That is not fussiness: a test that writes `.diggle-stop` beside a live run would end it, and a
+/// test that deletes one would swallow an abort the dev had just asked for. The one-argument form
+/// is the contract everything uses; this exists for the test.
+pub fn stop_requested_in(dir: &std::path::Path) -> bool {
+    dir.join(STOP_FILE).exists()
+}
+
 /// `Default` is derived deliberately: later tasks add fields, and test helpers
 /// construct Config with `..Default::default()` so they don't break each time.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -136,5 +178,37 @@ mod tests {
         )
         .expect("parses");
         assert!(cfg.debug_click_frames);
+    }
+
+    /// The abort's whole contract: a file named exactly this, in the directory asked about.
+    #[test]
+    fn the_stop_file_is_seen_when_it_is_there_and_not_when_it_is_not() {
+        let dir = std::env::temp_dir().join(format!("diggle-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        // The negative first, so a directory that always answers `true` cannot pass this.
+        assert!(!stop_requested_in(&dir), "nothing has been asked for yet");
+
+        std::fs::write(dir.join(STOP_FILE), b"").expect("temp file");
+        assert!(stop_requested_in(&dir), "the dev's abort must be seen");
+
+        // **Reading must not consume.** Two subsystems and the driver all ask; if any of them
+        // cleared it, the others would never see the request and the run would carry on.
+        assert!(stop_requested_in(&dir), "asking twice must give the same answer");
+
+        // A near-miss must not fire. The name is the whole interface and a typo is silent.
+        std::fs::remove_file(dir.join(STOP_FILE)).expect("remove");
+        std::fs::write(dir.join("diggle-stop"), b"").expect("temp file");
+        assert!(!stop_requested_in(&dir), "the leading dot is part of the name");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The name is documented in `SETUP.md` and printed by the run's own header, so it is an
+    /// interface rather than an implementation detail.
+    #[test]
+    fn the_stop_file_is_named_what_the_docs_say() {
+        assert_eq!(STOP_FILE, ".diggle-stop");
     }
 }

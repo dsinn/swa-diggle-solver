@@ -2029,6 +2029,17 @@ impl Run<'_> {
         // serve. Distinct from `done == 0`, which is also what a broken visit looks like.
         let mut nothing_to_do = false;
         while done < innplay::MAX_PRESSES {
+            // **The abort, before another night is bought.** Twenty presses at up to
+            // `REST_TRIES * REST_WAIT` each is minutes of a run the dev has already asked to stop.
+            // Breaking rather than returning a new error: what is left of the visit is leaving the
+            // inn, which the code below does anyway, and the driver's own check ends the run on the
+            // next iteration. See [`crate::config::stop_requested`].
+            if crate::config::stop_requested() {
+                self.log.push_str(&format!(
+                    "  rest: stop requested after {done} press(es) — leaving the inn\n"
+                ));
+                break;
+            }
             // Press `Rest` until the screen says it opened. See [`innplay::REST_TRIES`] for why one
             // press is not enough: the inn announces itself from `onActive`, before it can take a
             // click, and a run lost an inn to that and walked to the next village at 7/20.
@@ -3682,6 +3693,8 @@ pub fn drive(
             // run that cannot rejoin says so rather than wandering onto the map path and failing to
             // find a map that was never there.
             Ok(o) if o.fatal() => return Stop::Died(format!("resumed: {o:?}")),
+            // Before the catch-all, or a deliberate abort reports as a fight that went wrong.
+            Ok(o) if o.stop_requested() => return Stop::Requested,
             Ok(other) => return Stop::Fought(format!("resumed: {other:?}")),
             Err(e) => return Stop::Failed(format!("could not resume the fight: {e}")),
         }
@@ -3702,7 +3715,7 @@ pub fn drive(
         // Checked here, at the top, and not partway down where it used to sit: with no step cap
         // above it, this and the deadline are the only two ways a run ends that are not the run's
         // own decision, and a `continue` from a screen handler must not be able to skip either.
-        if Path::new(STOP_FILE).exists() {
+        if crate::config::stop_requested() {
             let _ = std::fs::remove_file(STOP_FILE);
             r.log.push_str(&format!("{step}. stop requested — ending cleanly\n"));
             return Stop::Requested;
@@ -3864,6 +3877,7 @@ pub fn drive(
                 // Reported as a fight that went wrong, not as a map failure. The whole point of this
                 // branch is that "no pan dump after locate-me" was never the truth about this state.
                 Ok(o) if o.fatal() => return Stop::Died(format!("{o:?}")),
+                Ok(o) if o.stop_requested() => return Stop::Requested,
                 Ok(other) => return Stop::Fought(format!("{other:?}")),
                 Err(e) => return Stop::Failed(format!("could not play the fight out: {e}")),
             }
@@ -4144,6 +4158,7 @@ pub fn drive(
                 Ok(o) if o.cleared() => r.log.push_str(&format!("  {o:?}
 ")),
                 Ok(o) if o.fatal() => return Stop::Died(format!("{o:?}")),
+                Ok(o) if o.stop_requested() => return Stop::Requested,
                 Ok(other) => return Stop::Fought(format!("{other:?}")),
                 Err(e) => return Stop::Failed(e.to_string()),
             }
@@ -6553,6 +6568,32 @@ mod tests {
         assert_eq!(
             crate::win::window::button_center(&affirm::SHOW_AREA_BUTTONS, 1920, 1080),
             SHOW_AREA_BUTTONS
+        );
+    }
+
+    /// **Every fight the driver starts must be able to end in an abort**, and the arm that lets it
+    /// is one line that a fourth call site would be written without.
+    ///
+    /// A source-reading test, like `act`'s search-box check, because the property is about the
+    /// shape of the code rather than about a value: the three `match` blocks all end in a catch-all
+    /// that turns any unhandled outcome into `Stop::Fought`, so a missing arm does not fail to
+    /// compile — it reports the dev's own abort as a fight that went wrong. "A rule that is only
+    /// checked on one of two paths is a rule with a hole in it" is this file's own phrasing.
+    #[test]
+    fn every_fight_the_driver_starts_can_be_aborted() {
+        // Only the shipping half. Counting the whole file would count this test's own string
+        // literals, which makes the two totals agree for a reason that has nothing to do with the
+        // driver.
+        let src = include_str!("navigate.rs");
+        let src = src.split_once("
+#[cfg(test)]").map(|(before, _)| before).unwrap_or(src);
+        let starts = src.matches("fight.run(").count();
+        let arms = src.matches("o.stop_requested() => return Stop::Requested").count();
+        assert!(starts >= 3, "expected the driver's fight call sites, found {starts}");
+        assert_eq!(
+            arms, starts,
+            "{starts} fight call sites but {arms} abort arms — one of them reports a stop as a \
+             fight that went wrong"
         );
     }
 }
