@@ -2901,28 +2901,6 @@ impl WorldMap {
             .unwrap_or(0)
     }
 
-    /// **Are we standing on the node we set out for, with its fight still owed?**
-    ///
-    /// The one case where the next action is certain before anything is read: a fixed-coordinate
-    /// press on the area slot. `committed_to` is the target the last hop was taking us to and
-    /// `here` is where the arrival dump says we ended up, so both halves are already known when a
-    /// step begins — no camera work is required to establish either.
-    ///
-    /// The dev, 2026-08-20: *re-centering when you intend to hop to another node is correct. I'm
-    /// talking about specifically when we've already decided to enter the node.* This is that
-    /// distinction, and it is deliberately narrow: it says nothing about a step that will click a
-    /// **node**, where the positions a locate-me refreshes are the whole point.
-    ///
-    /// Combat only. Entering is one press for a fight and something longer for a shrine or a shop,
-    /// and only the fight is a single press on a slot we already read a template for.
-    pub fn standing_on_the_fight_we_came_for(&self, committed_to: Option<&str>) -> bool {
-        let Some(here) = self.here.as_deref() else { return false };
-        if committed_to != Some(here) {
-            return false;
-        }
-        self.places.get(here).is_some_and(|p| p.has_combat() && !p.completed && p.parent.is_none())
-    }
-
     /// Is there still a heart on a shelf somewhere we have not written off?
     ///
     /// Mirrors the filter in [`WorldMap::plan`]'s heart branch, and must keep mirroring it: this is
@@ -6445,45 +6423,6 @@ mod tests {
         // **The roster is not the gate.** `consecrations` counts what has been finished, and knowing
         // seven names finishes none of them.
         assert_eq!(m.consecrations(), 0);
-    }
-
-    /// **Standing on the fight we came for** — the one step whose next action is known before
-    /// anything is read, and so the one that need not re-centre first.
-    ///
-    /// The dev, 2026-08-20: *re-centering when you intend to hop to another node is correct. I'm
-    /// talking about specifically when we've already decided to enter the node.*
-    #[test]
-    fn the_fight_we_walked_to_is_known_before_the_camera_is_asked() {
-        let mut m = WorldMap::new();
-        m.fold(&dump("here", "camp", vec![node("l4", "Riccall — level 6 crypt")]));
-        m.here = Some("l4".into());
-        m.entry("l4").heading = "Riccall — level 6 crypt".into();
-
-        assert!(
-            m.standing_on_the_fight_we_came_for(Some("l4")),
-            "we set out for it, we are on it, and the fight is still owed"
-        );
-
-        // **Only the node we chose.** Passing through a fight on the way somewhere else is a
-        // different decision, and `must_fight_here` has its own reasons for taking it — none of
-        // which are known this early.
-        assert!(!m.standing_on_the_fight_we_came_for(Some("l7")), "committed elsewhere");
-        assert!(!m.standing_on_the_fight_we_came_for(None), "committed to nothing");
-
-        // A fight already won is not one to enter.
-        m.entry("l4").completed = true;
-        assert!(!m.standing_on_the_fight_we_came_for(Some("l4")), "nothing left to fight");
-
-        // Nor is a node with no fight on it at all — a village we walked to for a bed still wants
-        // the camera, because what happens there is not one press on the area slot.
-        let mut m = WorldMap::new();
-        m.fold(&dump("here", "camp", vec![node("l11", "Rowlston Covert village")]));
-        m.here = Some("l11".into());
-        assert!(!m.standing_on_the_fight_we_came_for(Some("l11")), "a village is not a press");
-
-        // And nowhere at all, which is the state before the first dump lands.
-        let blank = WorldMap::new();
-        assert!(!blank.standing_on_the_fight_we_came_for(Some("l4")), "we are not anywhere yet");
     }
 
     /// Knowing the roster does not let the anomaly through the gate.
