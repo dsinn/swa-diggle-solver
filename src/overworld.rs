@@ -1249,21 +1249,6 @@ pub struct WorldMap {
     /// — and re-entering a subworld must invalidate it, since `lostOrientation` re-rolls the
     /// interior (`forest.lua:483-490`).
     probing_toward: Option<(String, String)>,
-    /// `(container, node)` — where the last crossing step in this subworld set off **from**.
-    ///
-    /// The one-step memory of task #57, and it exists because the two crossing arms each carry a
-    /// convergence argument that constrains only itself. [`Crossing::Steer`] has a monotonic ceiling
-    /// on the gap to the door; [`Crossing::Probe`] holds its frontier target in
-    /// [`WorldMap::probing_toward`]. **Neither device sees the other arm**, and alternating them
-    /// defeats both: the frontier walk steps *away* from the door to somewhere worth learning, and
-    /// from there the steer reads the node we just left as an improvement and goes back.
-    ///
-    /// Live, the 2030Z run: `l63_plaza` ↔ `l63xrd60x-183`, three clean laps inside Upton Braken,
-    /// with `l30` and `l53` showing the same alternation the same run.
-    ///
-    /// Keyed by container for the same reason `probing_toward` is: leaving invalidates it, and
-    /// re-entering must, since `lostOrientation` re-rolls the interior.
-    stepped_from: Option<(String, String)>,
     /// **Well-Rested stacks banked**, summed across both flavours.
     ///
     /// A consumable, not an aura: one is spent per kill that heals (`rpgview.lua:1204-1209`), and
@@ -1353,14 +1338,6 @@ pub struct WorldMap {
     /// Keyed for exits by the synthesised `{parent}_path_to_{to_key}`, so a door and an ordinary node
     /// are asked for by the same name.
     frame: BTreeMap<String, (f64, f64)>,
-    /// `(door, squared distance)` for the last [`Crossing::Steer`] — the measure the descent has to
-    /// keep beating.
-    ///
-    /// This is what makes steering a *monotone measure* rather than a ranking, and the distinction is
-    /// the one `docs/superpowers/notes/navigation-loops.md` says every cycle in this project has come
-    /// down to. Cleared with the crossing itself, since a number measured against one door says
-    /// nothing about another.
-    steered_gap: Option<(String, f64)>,
 }
 
 /// Where to head, and why. The reason is carried so a route can be explained rather than just taken.
@@ -1568,14 +1545,6 @@ pub enum Crossing {
     /// because `Step` and `Probe` already log identically and a third silent case would make an
     /// old log unreadable.
     Seek { to: String },
-    /// No route to the destination, but the last dump printed where it *is* — so step to whichever
-    /// neighbour that dump puts closer to it.
-    ///
-    /// The middle ground between [`Crossing::Step`] and [`Crossing::Probe`], and it exists because
-    /// a door's key arrives long after its position does. Its own variant for the reason `Seek` is:
-    /// three decision procedures that print one line make a log that cannot be read, which cost the
-    /// crossing of `l2` a whole run's diagnosis.
-    Steer { to: String, toward: String },
     /// Standing on the exit road: leave for this overworld node.
     ///
     /// There was a `Retreat` variant here — hurt, the way onward is a fight, so go back the way we
@@ -2498,11 +2467,9 @@ impl WorldMap {
             // exists because the interior can re-roll — so a commitment made on the last visit is
             // worth nothing and holding it would be blind rather than bold.
             self.crossing_to = None;
-            self.steered_gap = None;
         } else if a.subworld.is_none() {
             self.entered_from = None;
             self.crossing_to = None;
-            self.steered_gap = None;
         }
         self.here = Some(a.here_key.clone());
 
@@ -2665,47 +2632,20 @@ impl WorldMap {
         // not give us about a door, and the one thing everything else asks for it by.
         // **Roll the steering measure forward before the old frame is thrown away.**
         //
-        // The node we have just arrived at was a *neighbour* in the frame about to be discarded, and
-        // that reading is the only one we will ever get of where we now stand: a dump prints its
-        // neighbours' positions and never the player's own. Taken here, "how far from the door am I"
-        // is answerable exactly once per move, which is exactly as often as it changes.
+        // **A `steered_gap` was maintained here**, and #57 removed it with the arm that read it.
         //
-        // A pan produces a dump at the same node, whose `here_key` is not in the previous frame
-        // either — so this quietly does nothing and the measure holds, which is what we want.
-        if let (Some((container, _)), Some((to, _))) = (a.subworld.as_ref(), self.crossing_to.as_ref())
-        {
-            let door_key = exit_node_key(container, to);
-            if let (Some(d), Some(h)) = (self.frame.get(&door_key), self.frame.get(&a.here_key)) {
-                let gap = (h.0 - d.0).powi(2) + (h.1 - d.1).powi(2);
-                // **A high-water mark, not a last reading.** The nearest we have *ever* been to this
-                // door on this crossing, which is the difference between a measure and a memory of
-                // the last step.
-                //
-                // Written as "wherever we last stood", the ceiling loosened whenever something other
-                // than a steer moved us — and the frontier walk moves us all the time, because a
-                // steer that finds no improvement yields to it by design. That is a laundering
-                // machine: steer forward onto the near node, fail to steer from there, walk *back*
-                // to the far node for a frontier, and the arrival raises the ceiling to the far
-                // node's distance, so the same forward steer is "an improvement" again. Every step
-                // is individually justified and the pair repeats for ever.
-                //
-                // Live 2026-08-15 in `l40`: `steering ... via l40sub24`, then
-                // `l40_path_to_l36 is not on any route we know — probing ... via l40sub25`,
-                // alternating fifteen times. The dev put it as the invariant this restores: a step
-                // must either close on a destination or reach the frontier, and after the first lap
-                // neither of those nodes was doing either.
-                //
-                // Taking the minimum makes the quantity monotone across the *whole* crossing rather
-                // than between consecutive steers, so a strict decrease per steer can no longer be
-                // undone by anything else that moves us. `fold` clears it on entering or leaving a
-                // subworld, which is where a crossing genuinely restarts.
-                let keep = match self.steered_gap.take() {
-                    Some((k, g)) if k == door_key => g.min(gap),
-                    _ => gap,
-                };
-                self.steered_gap = Some((door_key, keep));
-            }
-        }
+        // It was a high-water mark on the squared distance to the door — the nearest we had ever
+        // been on this crossing — and it was the steer's guarantee that each step strictly improved
+        // on the last. Taken here because the node we have just arrived at was a *neighbour* in the
+        // frame about to be discarded, and that reading is the only one we ever get of where we now
+        // stand: a dump prints its neighbours' positions and never the player's own.
+        //
+        // The measure was sound. What defeated it was that the frontier walk also moves us, and the
+        // two arms did not share a device — see the note where the steer used to be. With one
+        // ranking there is nothing to ratchet: `doorward` is re-read from the current frame every
+        // step, and the walk cannot cycle because `probing_toward` holds the target and
+        // `first_step_toward` routes to it.
+
         self.frame.clear();
         for n in &a.nodes {
             self.frame.insert(n.key.clone(), (n.x, n.y));
@@ -5068,22 +5008,6 @@ impl WorldMap {
         let parent = self.inside()?.to_string();
         let here = self.here.as_deref()?.to_string();
 
-        // **The one-step memory** — [`WorldMap::stepped_from`], task #57.
-        //
-        // Read before anything decides, and rewritten immediately, so every arm below sets off from
-        // a `here` the next call will know we left. Recorded even when no crossing is returned:
-        // the fact we are standing here is what the next step needs, not whether this one succeeded.
-        //
-        // Discarded when it names the node we are standing on, which happens whenever this is asked
-        // twice without a move in between — a retry is not a step, and treating it as one would rule
-        // out the only neighbour we had.
-        let just_left = self
-            .stepped_from
-            .as_ref()
-            .filter(|(c, _)| c.as_str() == parent.as_str())
-            .map(|(_, k)| k.clone())
-            .filter(|k| k.as_str() != here.as_str());
-        self.stepped_from = Some((parent.clone(), here.clone()));
 
         // Where inside this subworld are we trying to get to?
         //
@@ -5295,141 +5219,31 @@ impl WorldMap {
                 }).unwrap_or(true)
         };
 
-        // **We cannot route there, but we can see where it is.**
+        // **The steer used to be here, and #57 folded it into the ranking below.**
         //
-        // A dump's exits section prints a door's position and its destination heading and *not its
-        // key* (`overworldview.lua:1041-1047`). We synthesise the key ourselves, but the road out
-        // only becomes a node with edges once some dump names it as a neighbour — so until we are
-        // standing next to it, `first_step_toward` above has nothing to reach for and every crossing
-        // is the frontier walk below.
+        // It was a second arm: no route to the door, but the last dump printed where it *is*, so
+        // step to whichever neighbour that dump puts closer. It earned its place — six of the seven
+        // crossings in the 2030Z run ended with a steer as the last decision before the door was
+        // named, and a crossing ends by the door being *named*, not walked to.
         //
-        // What that costs, measured: crossing `l2` on 2026-08-09 the run explored essentially the
-        // whole village, 22 of its 62 steps, and `l2_path_to_l1` appears in **two lines of the entire
-        // raw log** — both at the second-to-last step. The door's coordinates were in every dump from
-        // the moment we walked in.
+        // It could not stay as an arm. It carried its own convergence device (`steered_gap`, a
+        // high-water mark that only fell) and the frontier walk carries another (`probing_toward`, a
+        // held target), and **neither device saw the other arm**. Alternating them cancelled both:
+        // the frontier walk steps away from the door toward whatever teaches most, and from there
+        // the steer read the node we had just left as an improvement and went back. `l63_plaza` ↔
+        // `l63xrd60x-183`, three clean laps inside Upton Braken, with `l30` and `l39` doing the same
+        // thing the same run.
         //
-        // So: descend on the straight-line distance to it. Both readings come from
-        // [`WorldMap::placed_now`], which is one dump's own frame, so no registration is involved and
-        // the subworld zoom caveat does not apply — see [`WorldMap::frame`].
+        // Underneath that they disagreed about what was even a candidate. The steer's only filter
+        // was `usable` — no `is_frontier`, no `visited`, no `nothing_left_to_reveal` — so a node we
+        // had stood on and fully named scored exactly as well as one we had never seen. The frontier
+        // walk had already retired `l63_plaza` under `nothing_left_to_reveal`; the steer kept
+        // choosing it because it was the nearest neighbour to the door.
         //
-        // **Strictly closer than the last steer, or nothing.** A potential that strictly decreases
-        // every step cannot cycle, which `docs/superpowers/notes/navigation-loops.md` says is the
-        // property every navigation bug here has lacked — and "nearest neighbour to the door", taken
-        // on its own, is a ranking rather than a measure, so it can bounce between two nodes for
-        // ever exactly like `l9sub2` <-> `l9_plaza` did.
-        //
-        // ## Measuring the descent without ever knowing where we stand
-        //
-        // A dump prints its *neighbours'* positions and never the player's own, so "am I closer than
-        // I was?" cannot be asked directly. What makes it answerable anyway: a distance between two
-        // points **printed by the same dump** is unaffected by the pan, because a pan is a
-        // translation and both points move together. So the door-distance of the node we stepped
-        // onto, measured while it was still a neighbour, is comparable with the door-distance of its
-        // own neighbours measured one dump later. [`WorldMap::steered_gap`] holds that number, and
-        // each steer must beat it.
-        //
-        // The assumption this rests on is **zoom**, not offset: a zoom change rescales every
-        // distance and would make two dumps incomparable. That degrades safely — a comparison that
-        // wrongly fails simply yields to the frontier walk below, which is where we were before this
-        // existed. It never sends us the wrong way.
-        //
-        // When no neighbour improves — a pocket pointing the wrong way, or a wall between us and the
-        // door — this yields rather than settling for sideways. Straight-line distance knows nothing
-        // of walls, so getting stuck is expected rather than exceptional, and the frontier walk is
-        // what then goes and learns something.
-        //
-        // Paved still outranks near, as everywhere else in this function: `forest.lua` strings the
-        // road from entrance to exit, so a road heading roughly doorward beats brush heading exactly
-        // doorward. Squared distances throughout — they order the same as the distances, and no
-        // square root is taken.
-        //
-        // **No measure, no steer.** The ceiling arrives with the first move of a crossing — see where
-        // `fold` rolls it forward — so this sits out the very first dump inside a subworld and the
-        // frontier walk takes that step. One step, and it buys the guarantee: every steer is a strict
-        // improvement on the last, with no unmeasured first move to argue about. It also means a
-        // fixture carrying no geometry at all cannot accidentally steer.
-        let ceiling = self
-            .steered_gap
-            .as_ref()
-            .filter(|(k, _)| Some(k.as_str()) == dest.as_deref())
-            .map(|(_, g)| *g);
-        if let (Some(door), Some(ceiling)) =
-            (dest.as_deref().and_then(|d| self.placed_now(d)), ceiling)
-        {
-            let gap = |p: (f64, f64)| (p.0 - door.0).powi(2) + (p.1 - door.1).powi(2);
-            let paved = |k: &String| self.places.get(k).map(|p| p.is_paved()).unwrap_or(false);
-            // **The road wins before distance is consulted, not after.**
-            //
-            // The dev's rule for the MVP: always prefer paved. The old ordering had `paved` as the
-            // first sort key and looked like it obeyed that, but the ceiling test ran *first* and
-            // struck candidates out before any of them were compared — so paved outranked near only
-            // among neighbours that had already survived on distance, and a road eliminated there
-            // never reached the ranking at all.
-            //
-            // Live 2026-08-15 at `l40sub25`, with the `l36` door printed at (233, 105):
-            //
-            // ```text
-            //   l40sub24  grave       (802,  65)   570   brush   <- taken
-            //   l40xrd…   forest      (931,  97)   698   brush
-            //   l40_path… road        (960, 539)   846   paved
-            //   l40sub17  road       (1102, 125)   869   paved
-            // ```
-            //
-            // The road bends north-east before it turns for a door that lies west, so both paved
-            // neighbours were further from the door than we already stood, both were struck out, and
-            // the grave was the only survivor. Nothing chose brush over road; the road was gone
-            // before the choice.
-            //
-            // So the filter narrows to paved whenever any paved neighbour is on offer. A steer that
-            // then finds no improvement yields to the frontier walk below, which is a paved-first
-            // breadth-first search — the road, followed properly, instead of a shortcut across the
-            // graves toward where the door happens to be printed.
-            let any_paved = place.neighbours.iter().filter(|n| usable(n)).any(paved);
-            let mut best: Option<(bool, f64, &String)> = None;
-            for n in place.neighbours.iter().filter(|n| usable(n)) {
-                let brush = !paved(n);
-                if any_paved && brush {
-                    continue;
-                }
-                // **Not straight back the way we came** — the memory, and it is a refusal rather
-                // than a preference because the alternative is not a stall. A steer left with no
-                // candidate hands down to the frontier walk, which has a route and a held target;
-                // that arm is allowed to pass back through a node, because a route sometimes must.
-                // The steer is the arm that picks by straight-line guess with no route at all, so it
-                // is the one that has to remember.
-                if Some(n) == just_left.as_ref() {
-                    continue;
-                }
-                let Some(at) = self.placed_now(n) else { continue };
-                let d = gap(at);
-                if d >= ceiling {
-                    continue;
-                }
-                // `(brush, distance, key)` ascending, spelled out because an `f64` keeps the tuple
-                // from being `Ord`.
-                let better = match best {
-                    None => true,
-                    Some((b_brush, b_gap, b_key)) => match brush.cmp(&b_brush) {
-                        std::cmp::Ordering::Less => true,
-                        std::cmp::Ordering::Greater => false,
-                        std::cmp::Ordering::Equal => match d.total_cmp(&b_gap) {
-                            std::cmp::Ordering::Less => true,
-                            std::cmp::Ordering::Greater => false,
-                            std::cmp::Ordering::Equal => n < b_key,
-                        },
-                    },
-                };
-                if better {
-                    best = Some((brush, d, n));
-                }
-            }
-            // Deliberately does NOT write the measure. `fold` is its only writer, on arrival, from
-            // the frame that actually saw us get there — so a step the driver fails to take cannot
-            // tighten a ceiling we never passed.
-            if let Some((_, _, to)) = best {
-                return Some(Crossing::Steer { to: to.clone(), toward: dest? });
-            }
-        }
+        // So the aim is now a term in the one ranking (`doorward`, below), where a retired node is
+        // ineligible for free rather than by a memory. What is kept: the door's printed position as
+        // the thing to head for, and paved before near. What is gone: a second procedure that could
+        // disagree with the first.
 
         // **Head for the nearest place that can still teach us something, by a route.**
         //
@@ -9425,12 +9239,21 @@ mod tests {
         assert!(m.first_step_toward("l2sub13", "l2_path_to_l1", false).is_none(),
             "the door has no edges, which is the whole predicament");
 
+        // **The aim survived #57 even though the arm did not.** This asserted a `Crossing::Steer`
+        // until then; the door's printed position is now the `doorward` term in the frontier
+        // ranking, so the same fixture picks the same node for the same reason — and picks it from
+        // among nodes still worth visiting, which the steer never checked.
+        //
+        // All three candidates are one hop away and none is paved, so `!is_paved` and `hops` tie and
+        // `doorward` decides: `l2sub22` at (1300, 100) is much the nearest to a door at (1479, -130).
+        // `l2sub12` won on the alphabet under the old key, which is what made this fixture worth
+        // keeping.
         match m.cross_toward(&[door]) {
-            Some(Crossing::Steer { to, toward }) => {
+            Some(Crossing::Probe { to, toward }) => {
                 assert_eq!(toward, "l2_path_to_l1");
                 assert_eq!(to, "l2sub22", "toward the door; `l2sub12` is nearer the front of the alphabet");
             }
-            other => panic!("expected a steer toward the door, got {other:?}"),
+            other => panic!("expected the walk to head doorward, got {other:?}"),
         }
     }
 
@@ -9476,27 +9299,31 @@ mod tests {
             vec![at("l63_plaza", 1400.0, -100.0), at("l63sub3", 260.0, 940.0)],
             vec![door.clone()]));
 
-        match m.cross_toward(&[door]) {
-            Some(Crossing::Steer { to, .. }) => {
-                assert_ne!(to, "l63_plaza", "that is the node we were just standing on");
-            }
-            // Refusing the only improving neighbour leaves the steer with nothing, and handing back
-            // to the frontier walk is the right answer rather than a miss — it is the arm that has a
-            // route and a held target.
-            other => assert!(
-                matches!(other, Some(Crossing::Probe { .. }) | Some(Crossing::Seek { .. })),
-                "expected the frontier walk to take over, got {other:?}"
-            ),
-        }
+        // **And there is now only one arm to answer.** Before #57 this had to accept either a steer
+        // that had learned not to go back, or a hand-down to the frontier walk. With the steer folded
+        // into the ranking there is nothing that *can* nominate the plaza: it has been stood on and
+        // its neighbours named, so `nothing_left_to_reveal` retires it, and being the nearest thing
+        // to the door no longer buys it a second look.
+        let step = m.cross_toward(&[door]).and_then(|c| match c {
+            Crossing::Step { to, .. } | Crossing::Probe { to, .. } | Crossing::Seek { to } => Some(to),
+            _ => None,
+        });
+        assert_ne!(step.as_deref(), Some("l63_plaza"), "that is the node we were just standing on");
     }
 
-    /// A steer has to beat the last one, or a crossing could walk two nodes for ever.
+    /// **A pocket pointing the wrong way is walked out of, not sat in.**
     ///
-    /// The property that makes this a *measure* and not a ranking. Every navigation cycle in this
-    /// project has been two nodes that each preferred the other, and a preference cannot rule that
-    /// out however sensible each half looks — `l9sub2` <-> `l9_plaza`, twenty laps.
+    /// Straight-line distance knows nothing of walls, so a crossing routinely reaches ground where
+    /// every way on is *further* from the door than where it stands. Before #57 that was the steer
+    /// declining and handing to the frontier walk; now it is one ranking, and the property to hold is
+    /// the same — the crossing keeps moving, toward whatever is still worth learning, rather than
+    /// stalling because nothing improves.
+    ///
+    /// The name and shape are kept from `a_steer_that_does_not_gain_ground_yields_to_exploring`,
+    /// because the fixture is a real one: `l2` on 2026-08-09, the village that cost 22 of a run's 62
+    /// steps.
     #[test]
-    fn a_steer_that_does_not_gain_ground_yields_to_exploring() {
+    fn a_pocket_pointing_away_from_the_door_is_still_walked_out_of() {
         let door = Exit {
             x: 1479.0, y: -130.0,
             to_key: "l1".into(), to_heading: "Cowlam — level 7 crypt".into(),
@@ -9514,8 +9341,8 @@ mod tests {
             vec![at("l2sub12", 200.0, 900.0), at("l2sub9", 150.0, 1000.0)],
             vec![door.clone()]));
         match m.cross_toward(&[door]) {
-            Some(Crossing::Probe { .. }) => {}
-            other => panic!("expected exploring rather than a sideways steer, got {other:?}"),
+            Some(Crossing::Probe { .. }) | Some(Crossing::Seek { .. }) => {}
+            other => panic!("expected the walk to carry on rather than stall, got {other:?}"),
         }
     }
 
@@ -11500,7 +11327,7 @@ e	l4	l11
     /// grave excluded for being brush, the steer declines — and the frontier walk below, which is
     /// itself paved-first, goes up the road toward the part of it we have not seen.
     #[test]
-    fn the_steer_will_not_leave_the_road_for_a_shortcut() {
+    fn the_crossing_will_not_leave_the_road_for_a_shortcut() {
         let node_at = |k: &str, h: &str, x: f64, y: f64| Node {
             key: k.into(),
             heading: h.into(),
@@ -11533,7 +11360,6 @@ e	l4	l11
                 node_at("l40sub17", "Fosholme Growth road", 1102.0, 125.0),
             ],
             vec![door.clone()]));
-        m.steered_gap = Some(("l40_path_to_l36".into(), 600.0 * 600.0));
         // The fixture has to be the one that used to fail: the grave genuinely is nearer the door.
         let to_door = |k: &str| {
             let (x, y) = m.placed_now(k).expect("placed");
@@ -11543,10 +11369,7 @@ e	l4	l11
         assert!(to_door("l40sub24") < to_door("l40sub17"), "the shortcut is the shorter line");
 
         let step = m.cross_toward(&[door]).and_then(|c| match c {
-            Crossing::Step { to, .. }
-            | Crossing::Steer { to, .. }
-            | Crossing::Probe { to, .. }
-            | Crossing::Seek { to } => Some(to),
+            Crossing::Step { to, .. } | Crossing::Probe { to, .. } | Crossing::Seek { to } => Some(to),
             _ => None,
         });
         assert_eq!(
@@ -11556,35 +11379,64 @@ e	l4	l11
         );
     }
 
-    /// The steer's ceiling is the nearest we have ever been, not wherever we last stood.
+    /// Walking away from the door does not re-open the ground in front of it. **The `l40` cycle,
+    /// now prevented structurally rather than by a measure.**
     ///
-    /// The `l40` cycle in one assertion. Walking *away* from the door — which the frontier walk does
-    /// routinely, since a steer that cannot improve yields to it — must not licence the same forward
-    /// steer a second time. Without the minimum, every retreat re-opened the ground in front of it.
+    /// This asserted a high-water mark until #57: the steer's ceiling was the nearest we had *ever*
+    /// been on a crossing, not wherever we last stood, because the frontier walk moves us away
+    /// routinely and a ceiling that followed us out re-licensed the same forward steer every time.
+    ///
+    /// The measure is gone with the arm that read it, and the property it protected now falls out of
+    /// the candidate filter instead. A node we have stood on and fully named satisfies
+    /// `nothing_left_to_reveal` — `neighbours.len() >= connections` — and the frontier walk excludes
+    /// it. There is nothing to re-open, because it stopped being a destination the moment it ran out
+    /// of things to teach. That is the same fact that made the steer keep choosing `l63_plaza` in the
+    /// 2030Z run: the steer had no such filter and the walk always did.
     #[test]
     fn walking_away_from_the_door_does_not_reopen_the_ground_in_front_of_it() {
         let mut m = WorldMap::new();
-        let door = "l40_path_to_l36";
-        let near = |k: &str, x: f64| Node { key: k.into(), heading: "Fosholme Growth road".into(), x, y: 0.0, connections: 2 };
+        let door = crate::observe::adjacency::Exit {
+            x: 0.0, y: 0.0, to_key: "l36".into(), to_heading: "Wawne crypt".into(),
+        };
+        let near = |k: &str, x: f64, conn: u32| Node {
+            key: k.into(), heading: "Fosholme Growth road".into(), x, y: 0.0, connections: conn,
+        };
 
-        // Walk in first: entering a subworld clears any commitment, so the crossing has to be
-        // declared after we are inside it rather than before.
-        m.fold(&inside_dump("l40", "l40sub17", "Fosholme Growth road", vec![near("l40sub24", 100.0)], vec![]));
+        // In along the road. `l40sub24` is two-way and both its roads get named, so once we have
+        // stood on it there is nothing left there.
+        m.fold(&inside_dump("l40", "l40sub17", "Fosholme Growth road",
+            vec![near("l40sub24", 100.0, 2)], vec![door.clone()]));
         m.crossing_to = Some(("l36".into(), Goal::Explore));
-        // Arriving on the near node, 100 from the door.
-        m.frame.insert(door.into(), (0.0, 0.0));
-        m.frame.insert("l40sub24".into(), (100.0, 0.0));
-        m.fold(&inside_dump("l40", "l40sub24", "Fosholme Growth grave", vec![near("l40sub25", 300.0)], vec![]));
-        assert_eq!(m.steered_gap.as_ref().map(|(_, g)| *g), Some(10_000.0), "100 squared");
+        m.fold(&inside_dump("l40", "l40sub24", "Fosholme Growth road",
+            vec![near("l40sub17", 500.0, 3), near("l40sub25", 300.0, 3)], vec![door.clone()]));
+        assert!(
+            m.get("l40sub24").unwrap().nothing_left_to_reveal(),
+            "the premise: two declared roads and both named"
+        );
 
-        // Then walking back out to the far node, 300 away. The measure must not follow us out.
-        m.frame.insert(door.into(), (0.0, 0.0));
-        m.frame.insert("l40sub25".into(), (300.0, 0.0));
-        m.fold(&inside_dump("l40", "l40sub25", "Fosholme Growth road", vec![near("l40sub24", 100.0)], vec![]));
+        // Out to the far node, which has a road onward we have never walked. `l40sub24` sits between
+        // us and the door and is much the nearest thing to it — exactly the shape that used to
+        // re-open — while `l40sub30` is further from the door and still has something to give.
+        m.fold(&inside_dump("l40", "l40sub25", "Fosholme Growth road",
+            vec![near("l40sub24", 100.0, 2), near("l40sub30", 900.0, 3)], vec![door.clone()]));
+        let step = m.cross_toward(&[door]).and_then(|c| match c {
+            Crossing::Step { to, .. } | Crossing::Probe { to, .. } | Crossing::Seek { to } => Some(to),
+            _ => None,
+        });
         assert_eq!(
-            m.steered_gap.as_ref().map(|(_, g)| *g),
-            Some(10_000.0),
-            "still the nearest we have ever been, which is what makes the steer monotone"
+            step.as_deref(),
+            Some("l40sub30"),
+            "the retired node is nearer the door and is not a destination; the live one is"
+        );
+
+        // **And the distinction the first draft of this test missed.** The walk returns a *step*
+        // along a route to a target, so a retired node can still be crossed as a waypoint — that is
+        // the arm being allowed a real route, and it is why the memory that #57 deleted belonged on
+        // the steer rather than here. What must not happen is `l40sub24` being the *target*.
+        assert_ne!(
+            m.probing_toward.as_ref().map(|(_, k)| k.as_str()),
+            Some("l40sub24"),
+            "nothing left to teach means it is not somewhere we set off for"
         );
     }
 

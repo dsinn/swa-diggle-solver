@@ -380,10 +380,15 @@ const LOOP_GIVE_UP: usize = 4;
 ///   at l4sub23  ->  Crossing::Probe  ->  l4sub14      (no route to the door from here)
 /// ```
 ///
-/// **Two different rules, each correct, pointing at each other.** The steer leg is already
-/// protected: `steered_gap` is a high-water mark that only ever falls, so a steer cannot be
-/// re-earned by walking backwards — that was the `l40` fix of 2026-08-15. It says nothing about the
-/// *other* leg, and the frontier walk is what keeps electing `l4sub14`.
+/// **Two different rules, each correct, pointing at each other.** The steer leg was protected by
+/// `steered_gap`, a high-water mark that only ever fell, so a steer could not be re-earned by
+/// walking backwards — the `l40` fix of 2026-08-15. It said nothing about the *other* leg, and the
+/// frontier walk is what keeps electing `l4sub14`.
+///
+/// **Both the arm and its measure are gone as of #57 (2026-08-21)**, folded into one ranking with a
+/// `doorward` term, so the trace above can no longer be produced — a single procedure has no other
+/// leg to point at. This entry is left as written because the *second* failure it describes is
+/// untouched by that and is what this constant is for.
 ///
 /// It elects it forever because `Place::is_frontier` is `!visited || hidden > 0`, and **standing on
 /// a node does not lower `hidden`** when the game goes on withholding a neighbour. So a node can be
@@ -4922,7 +4927,7 @@ pub fn drive(
             // `choose_exit` genuinely preferring `l1`.
             //
             // **The log could not tell them apart**, because `door_note` was printed only in the
-            // `Step` arm — and `Steer`, `Probe` and `Seek` are the three arms a loop actually runs
+            // `Step` arm — and `Probe` and `Seek` are the two arms a loop actually runs
             // in. One line, before the branch, so the next run answers it instead of the run after
             // that.
             //
@@ -5062,18 +5067,6 @@ pub fn drive(
                 Crossing::Probe { to, toward } => match fresh.nodes.iter().find(|n| &n.key == to) {
                     Some(n) => (
                         format!("`{toward}` is not on any route we know — probing `{container}` via `{to}`"),
-                        (n.x, n.y),
-                    ),
-                    None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
-                },
-                // No route, but the dump on screen right now says which way the door lies. Its own
-                // line for the same reason `Explore` got one: it is a third decision procedure, and
-                // one that will be wrong in a way the others are not — straight-line distance knows
-                // nothing about walls, so a steer that repeats without arriving is the signature to
-                // look for.
-                Crossing::Steer { to, toward } => match fresh.nodes.iter().find(|n| &n.key == to) {
-                    Some(n) => (
-                        format!("steering `{container}` toward where `{toward}` is printed, via `{to}`"),
                         (n.x, n.y),
                     ),
                     None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
