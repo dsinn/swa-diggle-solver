@@ -2875,6 +2875,61 @@ impl WorldMap {
             .unwrap_or(0)
     }
 
+    /// Is there still a heart on a shelf somewhere we have not written off?
+    ///
+    /// Mirrors the filter in [`WorldMap::plan`]'s heart branch, and must keep mirroring it: this is
+    /// what reserves the gold that branch will want, so a disagreement would hoard for an errand
+    /// that can never fire. The standing assumption is the dev's — every village's general store
+    /// starts with one — so the interesting state is which no longer do.
+    fn a_heart_is_still_for_sale(&self) -> bool {
+        self.places.values().any(|p| {
+            p.stocks_a_heart()
+                && !p.avoid
+                && !self.heart_bought.contains(&p.key)
+                && !self.abandoned.contains(&p.key)
+        })
+    }
+
+    /// **Gold that banking may not touch.**
+    ///
+    /// The dev's ruling, 2026-08-20: *hearts have priority over the Well-Rested stacks.* Both are
+    /// preparation bought with the same purse, and left to compete a sixteen-stack bank at ten gold
+    /// a stack empties a hundred-gold heart's budget on the way past — which trades four **maximum**
+    /// health, permanent for the rest of the run, for a bank that a single fight spends.
+    ///
+    /// [`HEART_FLOOR`] rather than [`HEART_COST`], because that is the bar the heart errand itself
+    /// nominates on: the price *plus a night's bed*, which the dev raised it to on 2026-08-15 after
+    /// watching the errand spend a run down to nothing. Reserving less would leave a purse that can
+    /// buy the heart and not survive it.
+    ///
+    /// Zero once no heart is left to buy — hoarding for an errand that cannot fire is just a run
+    /// that never banks.
+    ///
+    /// **Health is not subject to this.** `wants_rest` keeps its own plain [`crate::rest::INN_COST`]
+    /// gate in [`WorldMap::wants_a_bed`]: the ruling ranks two kinds of *preparation*, and being
+    /// hurt outranks both.
+    fn heart_reserve(&self) -> i64 {
+        match self.a_heart_is_still_for_sale() {
+            true => HEART_FLOOR,
+            false => 0,
+        }
+    }
+
+    /// **How many stacks to actually buy**, after the heart's reserve is taken out of the purse.
+    ///
+    /// [`WorldMap::stacks_short_ahead`] is how deep the want is; this is how much of it the purse
+    /// may serve. Everything that spends on stacks asks *this* one — the planner deciding whether
+    /// the trip is worth making, and the inn deciding how many times to press — so a run cannot set
+    /// off for stacks it will then refuse to pay for.
+    ///
+    /// The dev's original floor survives inside it: with no heart left to reserve for, this is
+    /// positive exactly when the purse holds [`crate::rest::INN_COST`], which is the inn's own gate
+    /// and the point below which the requirement is unmeetable rather than merely unmet.
+    pub fn stacks_to_buy(&self) -> i64 {
+        let spendable = (self.gold - self.heart_reserve()).max(0);
+        self.stacks_short_ahead().min(spendable / crate::rest::INN_COST)
+    }
+
     /// **Is a bed wanted at all**, for either of the two reasons there are?
     ///
     /// [`WorldMap::wants_rest`] is damage already taken; [`WorldMap::stacks_short_ahead`] is damage
@@ -2887,11 +2942,15 @@ impl WorldMap {
     /// The gold gate is left where it already was in each caller: both of them check it, and both
     /// check it against the same [`crate::rest::INN_COST`].
     pub fn wants_a_bed(&self) -> bool {
-        self.wants_rest || self.stacks_short_ahead() > 0
+        self.wants_rest || self.stacks_to_buy() > 0
     }
 
     fn bank_first(&self, plan: Plan) -> Plan {
-        if self.stacks_short_for(&plan.target) == 0 || !crate::rest::can_bank_a_stack(self.gold) {
+        // **Both questions, and they are not the same one.** `stacks_short_for` asks whether the
+        // place we are walking to is a fight worth banking for; `stacks_to_buy` asks whether the
+        // purse may serve it once the heart's reserve is out. A trip taken on the first alone would
+        // arrive at an inn that then declined to press.
+        if self.stacks_short_for(&plan.target) == 0 || self.stacks_to_buy() == 0 {
             return plan;
         }
         let here = self.here.as_deref().unwrap_or("");
@@ -6086,11 +6145,13 @@ mod tests {
             ));
             m.here = Some("here".into());
             m.hell = Some(0.1);
-            // **Under `HEART_FLOOR` on purpose.** With the price of a heart in hand that errand
-            // outranks the portal and heads for this very village anyway — see the last assertion
-            // below, which pins that rather than leaving it to chance. Here the question is what
-            // the *portal* does to the plan, so the purse is kept just under it.
             m.gold = HEART_FLOOR - 1;
+            // **The shelf is bare, and that is what isolates this test.** A village with a heart
+            // still on it does two things at once: `Goal::Heart` outranks the portal, and the
+            // heart's reserve stops the bank spending. Both are the dev's ruling of 2026-08-20 and
+            // both are pinned in `the_heart_outranks_the_bank_for_the_same_purse`. Here the
+            // question is what the *portal* does to the plan, so the heart is taken off the board.
+            m.bought_the_heart("l11");
             ready_for_the_anomaly(&mut m);
             m
         };
@@ -6120,17 +6181,65 @@ mod tests {
         m.well_rested = 11;
         assert_eq!(m.stacks_short_ahead(), 5);
         assert_eq!(m.next_target().unwrap().reason, Goal::StockUp);
+    }
 
-        // **And with the price of a heart, the heart wins the ordering — which costs nothing.**
-        //
-        // Worth pinning rather than discovering later: `Goal::Heart` outranks the portal and walks
-        // to the same village, and `wants_a_bed` is true the whole way, so the bed is taken there
-        // regardless of which errand's name is on the trip. The two rules do not fight.
-        let mut m = build();
-        m.gold = HEART_FLOOR;
-        assert_eq!(m.next_target().unwrap().reason, Goal::Heart);
-        assert_eq!(m.next_target().unwrap().target, "l11", "the same village either way");
-        assert!(m.wants_a_bed(), "and the bank is still short when we get there");
+    /// **Hearts outrank the bank, because they share one purse.** The dev's ruling, 2026-08-20.
+    ///
+    /// Four maximum health is permanent for the rest of the run; a bank of stacks is spent by one
+    /// fight. Left to compete, sixteen stacks at ten gold apiece walk a hundred-gold heart's budget
+    /// out of the purse on the way past, and nothing in the ordering noticed — which is the open
+    /// question this closes.
+    #[test]
+    fn the_heart_outranks_the_bank_for_the_same_purse() {
+        let build = |gold: i64| {
+            let mut m = WorldMap::new();
+            m.fold(&dump(
+                "here",
+                "camp",
+                vec![
+                    node("rift", "The Rift — level 8 anomaly"),
+                    node("l11", "Rowlston Covert village"),
+                ],
+            ));
+            m.here = Some("here".into());
+            m.hell = Some(0.1);
+            m.gold = gold;
+            ready_for_the_anomaly(&mut m);
+            m
+        };
+
+        // The purse from the live save on 2026-08-20: plenty for both, so both happen — and the
+        // heart goes first because it outranks on the ladder.
+        let m = build(465);
+        assert_eq!(m.stacks_short_ahead(), 16, "the want is unchanged by the reserve");
+        assert_eq!(m.stacks_to_buy(), 16, "and 465 less the reserve still covers all of it");
+        assert_eq!(m.next_target().unwrap().reason, Goal::Heart, "the heart is the errand");
+
+        // **The case the ruling is about.** Enough for a heart and a bed, and not a coin more: every
+        // stack bought here is a heart not bought.
+        let m = build(HEART_FLOOR);
+        assert_eq!(m.stacks_short_ahead(), 16, "still wanted");
+        assert_eq!(m.stacks_to_buy(), 0, "and not one of them may be paid for");
+        assert!(!m.wants_a_bed(), "so the inn is not an errand while the shelf is stocked");
+
+        // Ten over the reserve buys exactly one stack, and no more.
+        let m = build(HEART_FLOOR + crate::rest::INN_COST);
+        assert_eq!(m.stacks_to_buy(), 1);
+
+        // **The reserve is the heart's, so it lifts when the heart is gone.** The same purse that
+        // could buy nothing above now buys eleven.
+        let mut m = build(HEART_FLOOR);
+        m.bought_the_heart("l11");
+        assert_eq!(m.stacks_to_buy(), 11, "110 gold is eleven rests once nothing is being saved for");
+        assert!(m.wants_a_bed());
+
+        // **Being hurt is not subject to any of this.** The ruling ranks two kinds of preparation;
+        // a wound outranks both, and `wants_rest` keeps its own plain ten-gold gate.
+        let mut m = build(HEART_FLOOR);
+        assert!(!m.wants_a_bed(), "the control: nothing wants a bed at this purse yet");
+        m.note_health_level(crate::rest::Health { current: 1, max: 52 });
+        assert!(m.wants_rest(), "the fixture must really be hurt");
+        assert!(m.wants_a_bed(), "and a hurt run still goes to bed with the heart unbought");
     }
 
     /// A forest does not hold the run at an inn, however deep it is.

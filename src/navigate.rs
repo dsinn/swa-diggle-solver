@@ -1828,7 +1828,9 @@ impl Run<'_> {
             // **Two reasons to press, and the inn cannot tell them apart.** The block on screen
             // answers the health half; the bank half is ours, and comes from the errand the run
             // is actually on — see [`crate::overworld::WorldMap::stacks_short_ahead`].
-            let banking = self.map.stacks_short_ahead();
+            // `stacks_to_buy`, not `stacks_short_ahead`: the second is the size of the want,
+            // the first is what the purse may serve once the heart's reserve is out of it.
+            let banking = self.map.stacks_to_buy();
             let presses =
                 innplay::presses_needed(&data, gold, banking).min(innplay::MAX_PRESSES - done);
             self.log.push_str(&format!(
