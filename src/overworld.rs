@@ -948,6 +948,113 @@ impl Frame {
     pub fn is_sound(&self) -> bool {
         self.disagreement <= FRAME_TOLERANCE
     }
+
+    /// The fit a dump gets when it **defines** a frame rather than joining one: its own numbers,
+    /// unshifted.
+    ///
+    /// `scale_measured` is true because "one screen pixel at this zoom" is exactly what the frame's
+    /// units now mean — there is nothing to measure it against and nothing to get wrong. `anchors`
+    /// is zero, which is what stops anything being *aimed* from it: see [`WorldMap::screen_position`]
+    /// and [`WorldMap::inside_screen_position`], both of which demand two.
+    pub const fn defining() -> Self {
+        Frame { scale: 1.0, dx: 0.0, dy: 0.0, anchors: 0, scale_measured: true, disagreement: 0.0 }
+    }
+}
+
+/// Fits `world = drawn * scale + offset` to nodes whose position we already know.
+///
+/// The arithmetic behind [`WorldMap::registration`], lifted out whole so that the interior of a
+/// subworld can use it too ([`WorldMap::inside_registration`]). The two differ in *which* positions
+/// they anchor against and in nothing else, and keeping one fitter means a bug found in one is
+/// fixed in both — which matters here, because every line of it was written by a run that ended.
+///
+/// `inherited` is the scale to use when this dump cannot measure its own; `None` there means the
+/// zoom has moved and nothing has re-measured, which is the one state in which fitting anyway would
+/// write a wrong scale into a frame permanently. Answering `None` is the whole point of it.
+///
+/// Callers pass a non-empty `anchors`; an empty one is a *defining* dump and is the caller's
+/// business, since only the caller knows whether its frame has been defined yet.
+fn fit_frame(anchors: &[((f64, f64), (f64, f64))], inherited: Option<f64>) -> Option<Frame> {
+    // The widest baseline on screen, which is the best-conditioned pair for a scale.
+    let mut best: Option<(f64, usize, usize)> = None;
+    for i in 0..anchors.len() {
+        for j in (i + 1)..anchors.len() {
+            let (_, (ax, ay)) = anchors[i];
+            let (_, (bx, by)) = anchors[j];
+            let d = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
+            if best.map(|(bd, _, _)| d > bd).unwrap_or(true) {
+                best = Some((d, i, j));
+            }
+        }
+    }
+    // A baseline of a few pixels cannot measure a ratio; treat it as one anchor rather than
+    // trusting it. Nodes are drawn tens of pixels apart at any usable zoom.
+    let (scale, scale_measured) = match best.filter(|(d, _, _)| *d > 8.0) {
+        Some((drawn, i, j)) => {
+            let ((wax, way), _) = anchors[i];
+            let ((wbx, wby), _) = anchors[j];
+            (((wbx - wax).powi(2) + (wby - way).powi(2)).sqrt() / drawn, true)
+        }
+        // Not measurable here, so fall back on the last dump that could measure it.
+        None => (inherited?, false),
+    };
+    let ((wx, wy), (sx, sy)) = *anchors.first()?;
+    let (dx, dy) = (wx - sx * scale, wy - sy * scale);
+    // Where the fit puts each anchor, against where the frame already has it. Zero for one
+    // anchor, which is the one the offset came from. See [`Frame::disagreement`].
+    let disagreement = anchors
+        .iter()
+        .map(|((wx, wy), (sx, sy))| {
+            ((sx * scale + dx - wx).powi(2) + (sy * scale + dy - wy).powi(2)).sqrt()
+        })
+        .fold(0.0f64, f64::max);
+    Some(Frame { scale, dx, dy, anchors: anchors.len(), scale_measured, disagreement })
+}
+
+/// Where the inside of the subworld we are standing in is drawn, for **this visit only**.
+///
+/// ## Why the surface frame cannot do this job
+///
+/// [`WorldMap::registration`] refuses subworld dumps outright, and correctly: interior coordinates
+/// are not in the surface frame and never can be. So [`Place::pos`] is empty for every subnode, and
+/// a far hop that stops on an ordinary interior node has nothing to click — which is #57, and which
+/// cost the run of 2026-08-21 four separate presses to reach an inn three nodes inside Enthorpe.
+///
+/// A dump prints positions for **adjacent connections** and for **subworld exits at any distance**
+/// (`overworldview.lua:1030-1047`), so the doors were already reachable in one press and the rooms
+/// were not.
+///
+/// ## Per visit, because that is exactly how long an interior layout lasts
+///
+/// `lostOrientation` re-rolls every interior coordinate — two reflections and a transpose,
+/// `forest.lua:483-490` — and `overworldview.lua:1613` re-runs it from `loadLight`, which is every
+/// reload rather than merely every re-entry. [`crate::subworld::Rules::positions_survive_reentry`]
+/// is false for that reason and this obeys it: [`WorldMap::fold`] throws the whole thing away the
+/// moment a dump names a different container, or none.
+///
+/// That is the rule, and the *guard* is separate and stronger: a re-roll is a reflection, which is
+/// not a similarity, so a fit against stale positions disagrees with itself and
+/// [`Frame::is_sound`] refuses it. Nothing is placed and nothing is aimed. Two independent
+/// protections on a rule the map has been wrong about before.
+///
+/// ## What anchors it
+///
+/// A dump never prints the player's own position, so consecutive interior dumps often share no
+/// *node* at all: standing at A we learn A's neighbours, and standing at B we learn B's, and B
+/// itself was placed while A's dump was on screen. What carries the frame across is the **exits**,
+/// which print at any distance and therefore appear in every dump of an uncorrupted interior. They
+/// are ordinary road nodes in the same coordinates as everything else here.
+#[derive(Debug, Default, Clone)]
+pub struct InsideFrame {
+    /// The container this frame belongs to. `None` on the surface, and a mismatch is what discards
+    /// it — see [`WorldMap::fold`].
+    container: Option<String>,
+    /// Interior nodes and doors, by key, in the frame the visit's first dump defined.
+    pos: BTreeMap<String, (f64, f64)>,
+    /// This frame's units in screen pixels, as last measured. The interior twin of
+    /// [`WorldMap::screen_scale`], and separate from it because the two frames were defined at
+    /// different moments and so need not be at the same zoom.
+    scale: Option<f64>,
 }
 
 /// What one unit of the world frame is worth in screen pixels right now.
@@ -1041,6 +1148,12 @@ pub struct WorldMap {
     /// What the frame's units are worth in screen pixels, as last measured. See [`ScreenScale`] and
     /// [`WorldMap::registration`], which is the only thing that writes it.
     screen_scale: ScreenScale,
+    /// The inside of the subworld we are standing in, for this visit. See [`InsideFrame`].
+    ///
+    /// Deliberately **not** in the cache: an interior layout does not survive leaving
+    /// ([`crate::subworld::Rules::positions_survive_reentry`]), so a restored one could only be
+    /// wrong.
+    inside_frame: InsideFrame,
     /// Where the last dump said we were.
     here: Option<String>,
     /// `areaFlags.hell` — zero means the anomaly has not opened and the trigger is still live.
@@ -2088,53 +2201,75 @@ impl WorldMap {
             // Nothing placed yet anywhere: this dump *defines* the frame, so its own numbers are the
             // frame. Only ever taken once per run.
             return match self.places.values().any(|p| p.pos.is_some()) {
-                false => Some(Frame {
-                    scale: 1.0,
-                    dx: 0.0,
-                    dy: 0.0,
-                    anchors: 0,
-                    scale_measured: true,
-                    disagreement: 0.0,
-                }),
+                false => Some(Frame::defining()),
                 true => None,
             };
         }
-        // The widest baseline on screen, which is the best-conditioned pair for a scale.
-        let mut best: Option<(f64, usize, usize)> = None;
-        for i in 0..anchors.len() {
-            for j in (i + 1)..anchors.len() {
-                let (_, (ax, ay)) = anchors[i];
-                let (_, (bx, by)) = anchors[j];
-                let d = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
-                if best.map(|(bd, _, _)| d > bd).unwrap_or(true) {
-                    best = Some((d, i, j));
-                }
+        // `None` when the scale is not measurable here and nothing has measured it since a zoom —
+        // the one state in which placing would write a wrong scale into the frame for ever, so this
+        // dump does nothing at all. See [`fit_frame`], which the interior shares.
+        fit_frame(&anchors, self.screen_scale.0)
+    }
+
+    /// Everything in an interior dump that the visit's frame has already placed.
+    ///
+    /// Nodes **and** doors, and the doors are the load-bearing half: the exits section prints at any
+    /// distance (`overworldview.lua:1040-1047`), so it is the one part of a dump guaranteed to
+    /// overlap with the last one. Adjacent connections need not overlap at all — see
+    /// [`InsideFrame`].
+    fn inside_anchors(&self, a: &Adjacency) -> Vec<((f64, f64), (f64, f64))> {
+        let Some((container, _)) = a.subworld.as_ref() else { return Vec::new() };
+        let mut out = Vec::new();
+        for n in &a.nodes {
+            if let Some(&w) = self.inside_frame.pos.get(&n.key) {
+                out.push((w, (n.x, n.y)));
             }
         }
-        // A baseline of a few pixels cannot measure a ratio; treat it as one anchor rather than
-        // trusting it. Nodes are drawn tens of pixels apart at any usable zoom.
-        let (scale, scale_measured) = match best.filter(|(d, _, _)| *d > 8.0) {
-            Some((drawn, i, j)) => {
-                let ((wax, way), _) = anchors[i];
-                let ((wbx, wby), _) = anchors[j];
-                (((wbx - wax).powi(2) + (wby - way).powi(2)).sqrt() / drawn, true)
+        for e in &a.exits {
+            if let Some(&w) = self.inside_frame.pos.get(&exit_node_key(container, &e.to_key)) {
+                out.push((w, (e.x, e.y)));
             }
-            // Not measurable here, so fall back on the last dump that could measure it. `None` means
-            // we have zoomed since and nothing has re-measured — the one state in which a placement
-            // would write a wrong scale into the frame for ever, so this dump does nothing at all.
-            None => (self.screen_scale.0?, false),
-        };
-        let ((wx, wy), (sx, sy)) = anchors[0];
-        let (dx, dy) = (wx - sx * scale, wy - sy * scale);
-        // Where the fit puts each anchor, against where the frame already has it. Zero for one
-        // anchor, which is the one the offset came from. See [`Frame::disagreement`].
-        let disagreement = anchors
-            .iter()
-            .map(|((wx, wy), (sx, sy))| {
-                ((sx * scale + dx - wx).powi(2) + (sy * scale + dy - wy).powi(2)).sqrt()
-            })
-            .fold(0.0f64, f64::max);
-        Some(Frame { scale, dx, dy, anchors: anchors.len(), scale_measured, disagreement })
+        }
+        out
+    }
+
+    /// Where this interior dump's coordinates sit relative to the visit's frame, if we can tell.
+    ///
+    /// The interior twin of [`WorldMap::registration`]; see [`InsideFrame`] for what makes the two
+    /// separate rather than one function with a flag. Answers `None` for a surface dump, for a
+    /// container that is not the one the frame was built for — [`WorldMap::fold`] resets it before
+    /// asking, so that case is a caller mistake rather than a state — and for a dump that shares
+    /// nothing with a frame that has already been defined.
+    fn inside_registration(&self, a: &Adjacency) -> Option<Frame> {
+        let (container, _) = a.subworld.as_ref()?;
+        if self.inside_frame.container.as_deref() != Some(container.as_str()) {
+            return None;
+        }
+        let anchors = self.inside_anchors(a);
+        if anchors.is_empty() {
+            // The first dump of a visit *defines* the frame. A later one that shares nothing with it
+            // cannot be joined to it, and inventing a second origin is how a frame becomes two.
+            return match self.inside_frame.pos.is_empty() {
+                true => Some(Frame::defining()),
+                false => None,
+            };
+        }
+        fit_frame(&anchors, self.inside_frame.scale)
+    }
+
+    /// Where an interior node we have already placed would be **drawn right now**, given this dump.
+    ///
+    /// The interior counterpart of [`WorldMap::screen_position`], and #57's whole payoff: a far hop
+    /// that stops on an ordinary room rather than on a door now has somewhere to click. See
+    /// [`InsideFrame`] for the lifetime of the answer, which is one visit.
+    ///
+    /// Two anchors are demanded before anything may be aimed at, exactly as on the surface — one
+    /// anchor fixes an offset without ever testing it, and a click is spent whether or not the test
+    /// would have passed.
+    pub fn inside_screen_position(&self, a: &Adjacency, key: &str) -> Option<(f64, f64)> {
+        let f = self.inside_registration(a).filter(|f| f.anchors >= 2 && f.is_sound())?;
+        let (wx, wy) = self.inside_frame.pos.get(key).copied()?;
+        Some(((wx - f.dx) / f.scale, (wy - f.dy) / f.scale))
     }
 
     /// Records that we have moved the zoom, so nothing is placed until a dump measures the new scale.
@@ -2149,6 +2284,11 @@ impl WorldMap {
     /// new scale immediately. This covers the case where it carries one.
     pub fn zoom_changed(&mut self) {
         self.screen_scale = ScreenScale(None);
+        // The interior frame is a second frame with a second scale, and the zoom is shared between
+        // them — `zoomMult` is one module local (`overworldview.lua:1033`). Forgetting this half
+        // would reproduce the 1752Z fault one level down, where it would be harder to see: an
+        // interior frame lives for one visit, so the corrupted one dies before anyone reads a log.
+        self.inside_frame.scale = None;
     }
 
     /// How far this dump disagrees with the frame, when it disagrees enough to stop us placing.
@@ -2296,6 +2436,22 @@ impl WorldMap {
             here.in_lost_woods |= lost_woods;
         }
 
+        // **A different container, or none, is a different world.** The interior frame lasts one
+        // visit and this is the line that ends it — see [`InsideFrame`] for why a remembered
+        // interior layout is worth nothing. Done before the registration below, so that the fit is
+        // always asked of a frame that belongs to where we are standing.
+        //
+        // Leaving and coming straight back is covered by the same test, because leaving prints a
+        // surface dump and a surface dump has no container at all.
+        match a.subworld.as_ref().map(|(k, _)| k.as_str()) {
+            Some(c) if self.inside_frame.container.as_deref() == Some(c) => {}
+            Some(c) => {
+                self.inside_frame =
+                    InsideFrame { container: Some(c.to_string()), pos: BTreeMap::new(), scale: Some(1.0) }
+            }
+            None => self.inside_frame = InsideFrame::default(),
+        }
+
         // Where this dump's coordinates sit relative to the frame we are building. `None` means we
         // cannot place anything from it — see [`WorldMap::registration`].
         //
@@ -2305,6 +2461,14 @@ impl WorldMap {
         // **Only a dump that measured the scale may update it.** Everything else inherits.
         if let Some(f) = shift.filter(|f| f.scale_measured) {
             self.screen_scale = ScreenScale(Some(f.scale));
+        }
+        // The same two steps for the interior, against the interior's own frame and its own scale.
+        // `is_sound` is doing more work here than it does above: an interior that has been re-rolled
+        // under us reads as a reflection, and a reflection is not a similarity, so the fit disagrees
+        // with itself and nothing is placed.
+        let inside_shift = self.inside_registration(a).filter(Frame::is_sound);
+        if let Some(f) = inside_shift.filter(|f| f.scale_measured) {
+            self.inside_frame.scale = Some(f.scale);
         }
 
         for n in &a.nodes {
@@ -2354,6 +2518,26 @@ impl WorldMap {
                         }
                 place.neighbours.insert(container.clone());
                 self.entry(container).neighbours.insert(e.to_key.clone());
+            }
+        }
+
+        // **The interior's own positions**, which no other frame can hold. See [`InsideFrame`].
+        //
+        // Doors go in beside rooms and under the same synthesised key, because a far hop can end on
+        // either and the caller should not have to know which it got. First fix wins, as on the
+        // surface: within one visit an interior node does not move, so a second reading can only
+        // agree or be evidence that the frame is broken — and disagreement is measured above rather
+        // than averaged away here.
+        if let (Some((container, _)), Some(f)) = (a.subworld.as_ref(), inside_shift) {
+            let place = |x: f64, y: f64| (x * f.scale + f.dx, y * f.scale + f.dy);
+            for n in &a.nodes {
+                self.inside_frame.pos.entry(n.key.clone()).or_insert_with(|| place(n.x, n.y));
+            }
+            for e in &a.exits {
+                self.inside_frame
+                    .pos
+                    .entry(exit_node_key(container, &e.to_key))
+                    .or_insert_with(|| place(e.x, e.y));
             }
         }
 
@@ -9414,6 +9598,239 @@ mod tests {
 
         // A node the frame has never placed cannot be invented.
         assert_eq!(m.screen_position(&now, "never-seen"), None);
+    }
+
+    /// Enthorpe, laid out on one line: two doors and three rooms between them.
+    ///
+    /// The village of 2026-08-21, at the size that fits in a test. Everything is uncorrupted and
+    /// complete, which is what the run found and what makes a fast hop legal at all
+    /// ([`WorldMap::far_hop_inside`]).
+    ///
+    /// ```text
+    ///   world x:  500        600        700        800        900
+    ///             l7 door    sub1       sub2       sub3(inn)  l1 door
+    /// ```
+    ///
+    /// The camera pans left between dumps, which is the whole difficulty: every number the game
+    /// prints is `xoffset + posX*zoomMult` (`overworldview.lua:1033`), so no two dumps agree about
+    /// where anything is until something registers them against each other.
+    fn enthorpe() -> WorldMap {
+        let door = |to: &str, x: f64| Exit {
+            x,
+            y: 500.0,
+            to_key: to.into(),
+            to_heading: format!("Somewhere {to} crossroads"),
+        };
+        let room = |key: &str, heading: &str, x: f64| Node {
+            key: key.into(),
+            heading: heading.into(),
+            x,
+            y: 500.0,
+            connections: 2,
+        };
+        // The doors as this dump draws them, given how far the camera has slid.
+        let doors = |pan: f64| vec![door("l7", 500.0 - pan), door("l1", 900.0 - pan)];
+
+        let mut m = WorldMap::new();
+        // Walking in. Nothing is placed yet, so this dump *defines* the frame and its own numbers
+        // are the frame's — which is why the world coordinates above are the ones it printed.
+        m.fold(&inside_dump(
+            "l32",
+            "l32_path_to_l7",
+            "road",
+            vec![room("l32sub1", "Enthorpe house", 600.0)],
+            doors(0.0),
+        ));
+        // One room in, camera 100 left. Three anchors: the door we are standing on, and both doors
+        // from the exits section — which print at any distance and are what carry the frame.
+        m.fold(&inside_dump(
+            "l32",
+            "l32sub1",
+            "Enthorpe house",
+            vec![room("l32_path_to_l7", "Somewhere l7 crossroads", 400.0), room("l32sub2", "Enthorpe house", 600.0)],
+            doors(100.0),
+        ));
+        // And another. This is the dump that learns where the inn is.
+        m.fold(&inside_dump(
+            "l32",
+            "l32sub2",
+            "Enthorpe house",
+            vec![room("l32sub1", "Enthorpe house", 400.0), room("l32sub3", "Enthorpe inn", 600.0)],
+            doors(200.0),
+        ));
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = { hell = 0.1 }, completedAreas = {
+                     l32sub1 = true, l32sub2 = true, l32sub3 = true, l32_path_to_l7 = true } } }",
+            )
+            .unwrap(),
+        );
+        m
+    }
+
+    /// **The rooms of a village, not only its doors** — #57, and the interior half of the test above.
+    ///
+    /// Enthorpe on 2026-08-21: four separate presses to reach an inn three nodes inside a village
+    /// whose interior was complete and uncorrupted. [`WorldMap::far_hop_inside`] named the inn
+    /// correctly every time and the driver threw the answer away, because a dump prints positions
+    /// for **adjacent connections** and for **subworld exits** (`overworldview.lua:1030-1047`) and
+    /// an inn two rooms in is neither. The doors were already reachable in one press; the rooms
+    /// were not.
+    ///
+    /// So both halves are asserted here, because the bug lived precisely in the join: the hop was
+    /// computed and there was nowhere to click.
+    #[test]
+    fn a_far_hop_inside_a_village_can_aim_at_a_room_the_dump_does_not_name() {
+        let mut m = enthorpe();
+
+        // Back at `l32sub1` with the camera 50 left of where the frame was defined. The inn is two
+        // hops on and this dump does not mention it.
+        let now = inside_dump(
+            "l32",
+            "l32sub1",
+            "Enthorpe house",
+            vec![
+                Node { key: "l32_path_to_l7".into(), heading: "Somewhere l7 crossroads".into(), x: 450.0, y: 500.0, connections: 2 },
+                Node { key: "l32sub2".into(), heading: "Enthorpe house".into(), x: 650.0, y: 500.0, connections: 2 },
+            ],
+            vec![
+                Exit { x: 450.0, y: 500.0, to_key: "l7".into(), to_heading: "Somewhere l7 crossroads".into() },
+                Exit { x: 850.0, y: 500.0, to_key: "l1".into(), to_heading: "Somewhere l1 crossroads".into() },
+            ],
+        );
+        m.fold(&now);
+        assert!(!now.nodes.iter().any(|n| n.key == "l32sub3"), "the fixture must not name the inn");
+
+        // **Half one: the hop is legal and worth taking.** Two rooms on, so not an ordinary step.
+        assert_eq!(
+            m.far_hop_inside("l32sub1", "l32sub3").as_deref(),
+            Some("l32sub3"),
+            "the whole interior is clear, so the game would walk us there in one press"
+        );
+
+        // **Half two: it is now somewhere we can click.** The frame has the inn at world 800 and
+        // this dump is panned 50 left of the frame, so it is drawn at 750.
+        assert_eq!(m.inside_screen_position(&now, "l32sub3"), Some((750.0, 500.0)));
+        // The anchors themselves draw where the dump says they do, which is the fit's own control.
+        assert_eq!(m.inside_screen_position(&now, "l32sub2"), Some((650.0, 500.0)));
+        assert_eq!(m.inside_screen_position(&now, "l32_path_to_l1"), Some((850.0, 500.0)));
+
+        // A room nobody has ever been next to cannot be invented, however good the fit is.
+        assert_eq!(m.inside_screen_position(&now, "l32sub9"), None);
+
+        // **One anchor is not enough to aim with**, exactly as on the surface: the scale would have
+        // to be assumed, and assuming it is what aimed a click at (463, 841) on 2026-08-16.
+        let thin = inside_dump(
+            "l32",
+            "l32sub1",
+            "Enthorpe house",
+            Vec::new(),
+            vec![Exit { x: 450.0, y: 500.0, to_key: "l7".into(), to_heading: "h".into() }],
+        );
+        assert_eq!(m.inside_screen_position(&thin, "l32sub3"), None);
+    }
+
+    /// **The interior frame lasts one visit, and leaving is what ends it.**
+    ///
+    /// `lostOrientation` re-rolls every interior coordinate (`forest.lua:483-490`) and
+    /// `overworldview.lua:1613` re-runs it from `loadLight`, which is why
+    /// [`crate::subworld::Rules::positions_survive_reentry`] is false everywhere. A village does not
+    /// carry the flag, and the frame is still thrown away — being right about which generators
+    /// re-roll is not a bet worth taking for the sake of a press.
+    ///
+    /// Leaving prints a surface dump, and a surface dump has no container, which is the test.
+    #[test]
+    fn the_interior_frame_does_not_survive_leaving_the_village() {
+        let mut m = enthorpe();
+        let inside = inside_dump(
+            "l32",
+            "l32sub1",
+            "Enthorpe house",
+            Vec::new(),
+            vec![
+                Exit { x: 450.0, y: 500.0, to_key: "l7".into(), to_heading: "h".into() },
+                Exit { x: 850.0, y: 500.0, to_key: "l1".into(), to_heading: "h".into() },
+            ],
+        );
+        // The positive control: while we are still inside, that dump does place the inn.
+        assert_eq!(m.inside_screen_position(&inside, "l32sub3"), Some((750.0, 500.0)));
+
+        // Out onto the surface, then straight back in by the same door.
+        m.fold(&dump("l7", "Somewhere l7 crossroads", vec![node("l32", "Enthorpe village")]));
+        m.fold(&inside_dump(
+            "l32",
+            "l32_path_to_l7",
+            "road",
+            vec![node("l32sub1", "Enthorpe house")],
+            vec![
+                Exit { x: 500.0, y: 500.0, to_key: "l7".into(), to_heading: "h".into() },
+                Exit { x: 900.0, y: 500.0, to_key: "l1".into(), to_heading: "h".into() },
+            ],
+        ));
+        assert_eq!(
+            m.inside_screen_position(&inside, "l32sub3"),
+            None,
+            "the visit ended, so where the inn was drawn last time is not evidence"
+        );
+        // And the edges are untouched, which is the property the whole map rests on —
+        // `lostOrientation` moves positions and nothing else.
+        assert_eq!(m.far_hop_inside("l32sub1", "l32sub3").as_deref(), Some("l32sub3"));
+    }
+
+    /// **A re-rolled interior disagrees with itself, and disagreement refuses the fit.**
+    ///
+    /// The second guard, independent of the first. `lostOrientation` applies one of the square's
+    /// eight orientations — `loc.posX, loc.posY = loc.posX*x, loc.posY*y` and an optional transpose
+    /// (`forest.lua:483-490`) — and a reflection is not a similarity, so no `world = drawn*scale +
+    /// offset` can satisfy two anchors that have been through one. [`Frame::disagreement`] measures
+    /// exactly that, and [`Frame::is_sound`] is what stops it being written into the frame.
+    ///
+    /// This is the difference between the interior frame and the surface one that ended the run of
+    /// 2026-08-16 1752Z: there, a bad fit placed nodes and every later fit inherited the damage.
+    #[test]
+    fn a_re_rolled_interior_is_refused_rather_than_aimed_at() {
+        let mut m = enthorpe();
+        // The same two doors, transposed: 400 apart in y where the frame has them 400 apart in x.
+        // The scale still measures as 1 and the offset still fits the first anchor exactly — which
+        // is why two anchors are needed to see it at all.
+        let rerolled = inside_dump(
+            "l32",
+            "l32sub1",
+            "Enthorpe house",
+            vec![Node { key: "l32sub4".into(), heading: "Enthorpe house".into(), x: 500.0, y: 700.0, connections: 2 }],
+            vec![
+                Exit { x: 500.0, y: 500.0, to_key: "l7".into(), to_heading: "h".into() },
+                Exit { x: 500.0, y: 900.0, to_key: "l1".into(), to_heading: "h".into() },
+            ],
+        );
+        assert_eq!(
+            m.inside_screen_position(&rerolled, "l32sub3"),
+            None,
+            "a fit that cannot place its own anchors may not place anything else"
+        );
+        m.fold(&rerolled);
+        assert!(
+            m.inside_screen_position(&rerolled, "l32sub4").is_none(),
+            "and nothing from a refused dump is written into the frame"
+        );
+
+        // **The positive control.** Untransposed — the doors 400 apart in x, as the frame has them —
+        // the very same dump does place its new room, so the refusal above is the reflection and not
+        // the fixture.
+        let mut ok = enthorpe();
+        let straight = inside_dump(
+            "l32",
+            "l32sub1",
+            "Enthorpe house",
+            vec![Node { key: "l32sub4".into(), heading: "Enthorpe house".into(), x: 700.0, y: 500.0, connections: 2 }],
+            vec![
+                Exit { x: 500.0, y: 500.0, to_key: "l7".into(), to_heading: "h".into() },
+                Exit { x: 900.0, y: 500.0, to_key: "l1".into(), to_heading: "h".into() },
+            ],
+        );
+        ok.fold(&straight);
+        assert_eq!(ok.inside_screen_position(&straight, "l32sub4"), Some((700.0, 500.0)));
+        assert_eq!(ok.inside_screen_position(&straight, "l32sub3"), Some((800.0, 500.0)));
     }
 
     /// The scale is remembered, not assumed — which is what ended the run of 2026-08-16 1752Z.

@@ -4773,29 +4773,57 @@ pub fn drive(
             // off-screen: one live dump put two of them at (2153, -3) and (1958, 1654). Off the map
             // we can click, the far hop is declined and the ordinary adjacent step stands.
             //
-            // A chain that stops **short** of the door — on an ordinary interior node — is declined
-            // in silence, because that is a node no dump gives us a position for and there is
-            // nothing to aim at. Reaching those needs a per-subworld frame, which is a real piece of
-            // work and is written up in #21 rather than half-done here.
-            let far_inside: Option<(String, (f64, f64))> = match &mv {
-                Crossing::Step { toward, .. } => r.map.far_hop_inside(&here, toward).and_then(|f| {
-                    let want = f.strip_prefix(&format!("{container}_path_to_"))?.to_string();
-                    let e = fresh.exits.iter().find(|e| e.to_key == want)?;
-                    let (cw, ch) = r.win.client_size().ok()?;
-                    match crate::observe::hud::is_map_point(e.x as i32, e.y as i32, cw, ch) {
-                        true => Some((f, (e.x, e.y))),
-                        false => {
-                            r.log.push_str(&format!(
-                                "  `{f}` is one press away but its road is drawn at \
-                                 ({:.0}, {:.0}), off the map we can click — hopping instead\n",
-                                e.x, e.y
-                            ));
-                            None
-                        }
-                    }
-                }),
+            // ## A chain that stops short of the door, which used to be given up on
+            //
+            // The paragraph here said that an ordinary interior node "is declined in silence,
+            // because that is a node no dump gives us a position for and there is nothing to aim
+            // at". True of a dump, and not true of a **visit**: the exits print at any distance and
+            // therefore register every interior dump against the last one, so an interior frame
+            // assembles across a crossing exactly as the surface frame assembles across a run. That
+            // is [`crate::overworld::InsideFrame`], and the door case below is now its first branch
+            // rather than its only one.
+            //
+            // What it cost to leave undone, measured: Enthorpe on 2026-08-21, four presses to reach
+            // an inn three nodes inside a village whose interior was complete and uncorrupted. The
+            // hop was computed correctly every time and thrown away for want of a coordinate.
+            //
+            // **The door is still tried first**, and not merely for tidiness. Its position is
+            // printed by the dump in front of us; the frame's is inferred from two anchors and a
+            // fitted scale. When both can answer, the one that cannot be wrong wins.
+            let far_key = match &mv {
+                Crossing::Step { toward, .. } => r.map.far_hop_inside(&here, toward),
                 _ => None,
             };
+            let far_inside: Option<(String, (f64, f64))> = far_key.and_then(|f| {
+                let drawn = f
+                    .strip_prefix(&format!("{container}_path_to_"))
+                    .and_then(|want| fresh.exits.iter().find(|e| e.to_key == want))
+                    .map(|e| ((e.x, e.y), "its road is drawn at"))
+                    .or_else(|| {
+                        r.map
+                            .inside_screen_position(&fresh, &f)
+                            .map(|p| (p, "this visit's frame puts it at"))
+                    });
+                // Nothing on screen and nothing in the frame. An unregistered dump or a room we have
+                // never been adjacent to, and either way the ordinary single step stands.
+                let Some(((x, y), how)) = drawn else {
+                    r.log.push_str(&format!(
+                        "  `{f}` is one press away and nothing places it — hopping instead\n"
+                    ));
+                    return None;
+                };
+                let (cw, ch) = r.win.client_size().ok()?;
+                match crate::observe::hud::is_map_point(x as i32, y as i32, cw, ch) {
+                    true => Some((f, (x, y))),
+                    false => {
+                        r.log.push_str(&format!(
+                            "  `{f}` is one press away but {how} \
+                             ({x:.0}, {y:.0}), off the map we can click — hopping instead\n"
+                        ));
+                        None
+                    }
+                }
+            });
             let (what, at) = match &mv {
                 Crossing::Leave { to } => {
                     match fresh.exits.iter().find(|e| &e.to_key == to) {
@@ -4818,7 +4846,8 @@ pub fn drive(
                     (
                         format!(
                             "crossing `{container}` toward `{toward}` — `{far}` is travellable in \
-                             one press, so not via `{to}` hop by hop"
+                             one press at ({:.0}, {:.0}), so not via `{to}` hop by hop",
+                            n.0, n.1
                         ),
                         *n,
                     )
