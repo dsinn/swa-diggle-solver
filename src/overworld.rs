@@ -146,8 +146,24 @@ pub struct Place {
     pub looted: u32,
     /// A lost woods we have already been swallowed by, and will not enter again.
     ///
-    /// Set from the `lost_woods_known_*` save flags — see [`crate::subworld::LOST_WOODS_KNOWN`].
     /// Routing treats these as walls and only passes through one if there is no other way at all.
+    ///
+    /// Two channels write it, and they say the same thing at different times:
+    ///
+    /// - the `lost_woods_known_*` save flags ([`crate::subworld::LOST_WOODS_KNOWN`]), read by
+    ///   [`WorldMap::apply_save`];
+    /// - the mist event, read off the console by [`WorldMap::mark_lost_woods`] the moment it is
+    ///   answered. `mainSaveData` is written on screen **exit**, so the flag the game sets in the
+    ///   same `onSelect` does not reach us until we have already crossed the woods.
+    ///
+    /// **The heading is deliberately not a third channel**, though it is tempting: `getTypeName`
+    /// starts printing `lost woods` from the instant the flag is set (see [`Place::in_lost_woods`]),
+    /// which is exactly when we would like to know. But `corrupt_lost_woods` prints the same words
+    /// unconditionally (`lost_woods.lua:41`) with `thickFog` and `lostOrientation` both **false**
+    /// (`:44-47`) — an ordinary forest as far as we are concerned — and the flag that separates them
+    /// is `corrupted`, which comes from the save we are trying not to wait for. Walling off a node
+    /// is permanent and never re-examined, so it takes a signal that cannot mean two things. The
+    /// event is one; the heading is not.
     pub avoid: bool,
     /// This node is **inside a lost woods**, where the generator disguises its own roads.
     ///
@@ -2282,6 +2298,28 @@ impl WorldMap {
     /// It is belt and braces beside the remembered scale rather than the fix itself: replaying the
     /// 1752Z run, the re-centring dump straight after the zoom carried four anchors and measured the
     /// new scale immediately. This covers the case where it carries one.
+    /// Records a lost woods from the console, at the moment the mist event is answered.
+    ///
+    /// The event's `Continue` sets `lost_woods_known_<key>` and enters the subworld in one
+    /// `onSelect` (`overworld/events/arrived/lost_woods.lua:23-27`), so the game knows immediately.
+    /// We would not, until a save was written and read — and `mainSaveData` is written on screen
+    /// exit, which for a crossing means after the whole woods has been walked. The run of
+    /// 2026-08-21 spent 69 steps inside `e3` with the flag sitting unread in memory.
+    ///
+    /// Sets [`Place::in_lost_woods`] as well as [`Place::avoid`], which is not the same fact twice:
+    /// `avoid` keeps us from coming back, and `in_lost_woods` is what
+    /// [`WorldMap::far_hop_inside`] reads to refuse a fast hop through fog. [`WorldMap::fold`] would
+    /// set the second one dump later, off the container's heading; setting it here means the first
+    /// step inside is covered too.
+    ///
+    /// Idempotent, and safe to call for a woods already known — which is the state after any restart
+    /// that read the save.
+    pub fn mark_lost_woods(&mut self, key: &str) {
+        let p = self.entry(key);
+        p.in_lost_woods = true;
+        p.avoid = true;
+    }
+
     pub fn zoom_changed(&mut self) {
         self.screen_scale = ScreenScale(None);
         // The interior frame is a second frame with a second scale, and the zoom is shared between
@@ -7903,6 +7941,56 @@ mod tests {
         m.entry("woods").avoid = true;
         let plan = m.next_target().unwrap();
         assert_eq!(plan.target, "a", "exploring INTO a known lost woods is never the plan");
+    }
+
+    /// **The console says it first, and the save only confirms it hours later.**
+    ///
+    /// The mist event writes `lost_woods_known_<key>` and enters the subworld in one `onSelect`
+    /// (`overworld/events/arrived/lost_woods.lua:23-27`), but `mainSaveData` is written on screen
+    /// **exit** — so for a crossing the flag does not reach us until the whole woods has been
+    /// walked. `e3` on 2026-08-21 was 69 steps of that.
+    ///
+    /// The end state has to be identical to the one the save produces, which is what this pins:
+    /// the same node, the same wall, from either channel.
+    #[test]
+    fn a_lost_woods_named_by_the_event_walls_off_exactly_as_the_save_would() {
+        // The short way through the woods, before either channel has said anything.
+        let mut m = two_routes();
+        assert_eq!(m.next_hop().unwrap().step, "woods", "the premise: the woods is the short way");
+
+        m.mark_lost_woods("woods");
+        let hop = m.next_hop().unwrap();
+        assert_eq!(hop.step, "a", "the long way round, from the console alone");
+        assert_eq!(hop.plan.target, "goal", "and the goal is untouched");
+
+        // **Both flags, and they are not the same fact.** `avoid` keeps us out; `in_lost_woods` is
+        // what `far_hop_inside` reads to refuse a fast hop through fog, and it has to be true from
+        // the first dump inside rather than the second.
+        let p = m.get("woods").expect("the woods is on the map");
+        assert!(p.avoid, "a wall for routing");
+        // `in_lost_woods` is the flag `far_hop_inside` refuses on — pinned against a map that is
+        // actually standing inside one by `a_forest_crosses_in_one_press_but_a_lost_woods_does_not`,
+        // which is where that link belongs. Asserting it from out here would only re-measure
+        // `clear_air` returning `None` because we are on the surface.
+        assert!(p.in_lost_woods, "and fog for the fast hop");
+
+        // The save channel, on an untouched copy of the same map, must reach the same place.
+        let mut by_save = two_routes();
+        by_save.apply_save(
+            &crate::game::save::parse(
+                r#"return { overworld = { areaFlags = { hell = 0, lost_woods_known_woods = 1 } } }"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            by_save.next_hop().unwrap().step,
+            "a",
+            "the save gets to the same answer, only later"
+        );
+
+        // Idempotent, which is the state after any restart that read the save.
+        m.mark_lost_woods("woods");
+        assert_eq!(m.next_hop().unwrap().step, "a");
     }
 
     #[test]

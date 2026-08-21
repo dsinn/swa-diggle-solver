@@ -171,6 +171,33 @@ pub fn lost_woods_key(flag: &str) -> Option<&str> {
     flag.strip_prefix(LOST_WOODS_KNOWN).filter(|k| !k.is_empty())
 }
 
+/// The title the mist event prints, and the one unambiguous announcement a lost woods makes.
+///
+/// `overworld/events/arrived/lost_woods.lua:17`, under a `requireCheck` that is worth reading in
+/// full because it is what makes this proof rather than evidence (`:11-15`):
+///
+/// ```lua
+/// return location.type=='lost_woods'
+/// and location.typeData.subworld=='forest'
+/// and not overworldview.areaFlag('lost_woods_known_'..location.key)
+/// and utils.node_has_no_secrets(location)
+/// ```
+///
+/// So the event fires **only** on the genuine article and **only** the first time. It cannot be
+/// `corrupt_lost_woods`, whose `type` is different and whose flags are all false — which is the
+/// confusable that stops the *heading* being usable for the same purpose. See
+/// [`crate::overworld::Place::avoid`].
+///
+/// The single `Continue` writes `lost_woods_known_<key>` and calls `enterSubworld` in the same
+/// `onSelect` (`:23-27`), so the game knows at that instant and we do not until a save is written —
+/// `mainSaveData` lands on screen *exit*. Reading it here closes that gap.
+pub const MIST_EVENT: &str = "Lost in the mists!";
+
+/// Is this event title the mist event? See [`MIST_EVENT`].
+pub fn is_the_mist_event(title: &str) -> bool {
+    title.trim() == MIST_EVENT
+}
+
 /// Does arriving at a node with this parent and level open the anomaly?
 ///
 /// The level test is `> 3`, not `== 4` — `overworld/events/arrived/world_evil.lua:18` reads
@@ -204,6 +231,37 @@ mod tests {
         // Inside, because the layout is re-rolled; outside, because panning moves everything.
         assert!(!Rules::inside().positions_survive_reentry);
         assert!(!Rules::surface().positions_survive_reentry);
+    }
+
+    /// The mist event's title, matched against the console text a run actually printed.
+    ///
+    /// Not against the string constant — that would be comparing a literal with itself. This parses
+    /// the real dialogue through [`crate::observe::event::parse_events`], which is the path the
+    /// navigator uses, so a change to either the parser or the game's wording fails here.
+    #[test]
+    fn the_mist_event_is_recognised_from_the_console_text() {
+        let printed = r#"Event:  Lost in the mists!
+While travelling the misty road into Bainton Clump you suddenly become aware that you've lost track of the path.
+Choices = {
+    {
+        text = "Continue",
+        posX = 960,
+        posY = 745,
+    },
+}
+"#;
+        let lines: Vec<String> = printed.lines().map(str::to_string).collect();
+        let ev = crate::observe::event::parse_events(&lines).pop().expect("one event");
+        assert!(is_the_mist_event(&ev.title), "title was {:?}", ev.title);
+        // One choice, and it is the one that writes the flag and enters the subworld
+        // (`overworld/events/arrived/lost_woods.lua:22-27`). There is no declining it, which is why
+        // recording the node is the whole of what we can do about it.
+        assert_eq!(ev.choices.len(), 1);
+
+        // **And nothing else is it.** A forest event that is not the mists must not wall off a node.
+        assert!(!is_the_mist_event("Stump in the road"));
+        assert!(!is_the_mist_event("Lost in the mists"), "the exclamation mark is part of it");
+        assert!(!is_the_mist_event(""));
     }
 
     #[test]

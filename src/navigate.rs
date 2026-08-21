@@ -2844,6 +2844,69 @@ impl Run<'_> {
     /// Scans the whole feed rather than a window. See [`Run::answered_event`] for why the window was
     /// wrong; the short version is that the event announces itself while we are busy dismissing the
     /// text screen in front of it, so any window opened afterwards is already too late.
+    /// Writes down which forest just swallowed us, while the mist dialogue is still on screen.
+    ///
+    /// The dev, 2026-08-21: *Diggle does not know how to recognize that they've entered the lost
+    /// woods.* Half of that was the camera, fixed in `c377a63`. This is the other half: the fact
+    /// itself reached us only through `lost_woods_known_*` in a save that
+    /// [`crate::game::save`] cannot read until the screen it belongs to has been left — so the run
+    /// crossed the whole of `e3`, 69 steps, with the answer already written in the game's memory.
+    ///
+    /// ## Why `here` is the right key, from the source rather than from a guess
+    ///
+    /// `core.arriveAt` assigns `overworldData.playerLocation = locationName` **before** it raises
+    /// the arrival event, and prints the dump **after** it, tagged `Arrived at location with event`
+    /// (`overworldview.lua:1420-1444`). So the freshest dump at the moment this dialogue is up is
+    /// the arrival that raised it, and its `here_key` is the node the event's `requireCheck` ran
+    /// against.
+    ///
+    /// It is not `committed_to`, which was the obvious candidate and is wrong: a fast hop fires
+    /// `arriveAt` at every node on the path (`:1210-1216`), so the woods can be somewhere we were
+    /// only walking through.
+    ///
+    /// ## Three things are checked before anything permanent is written
+    ///
+    /// [`crate::overworld::Place::avoid`] is a routing wall that is never re-examined, so a wrong
+    /// key here costs a road for the rest of the run. The dump must be an **arrival with an event**,
+    /// it must be on the **surface** — `world_evil` and the mist event both require
+    /// `not location.parentNode` — and the node must read as a **forest**, since `getTypeName`
+    /// prints `forest` right up until the flag this event is about to set
+    /// (`lost_woods.lua:29`). Failing any of them logs and writes nothing; [`WorldMap::fold`] still
+    /// learns `in_lost_woods` from the container's heading one dump later, and the save still
+    /// arrives eventually. This is an accelerator, and it declines rather than guesses.
+    fn record_a_lost_woods(&mut self) {
+        let Some(a) = self.latest.clone() else {
+            self.log.push_str("  the mists, but no dump to say where — leaving it to the save\n");
+            return;
+        };
+        let key = a.here_key.clone();
+        let forest = self
+            .map
+            .get(&key)
+            .map(|p| p.type_is("forest") || p.type_is("lost woods"))
+            .unwrap_or(false);
+        if !a.reason.contains("event") || a.subworld.is_some() || !forest {
+            self.log.push_str(&format!(
+                "  the mists at `{key}`, but the dump does not corroborate it (`{}`, {}, {}) — \
+                 leaving it to the save\n",
+                a.reason,
+                match a.subworld.is_some() {
+                    true => "inside a subworld",
+                    false => "on the surface",
+                },
+                match forest {
+                    true => "a forest",
+                    false => "not a forest",
+                },
+            ));
+            return;
+        }
+        self.map.mark_lost_woods(&key);
+        self.log.push_str(&format!(
+            "  **`{key}` is a lost woods** — recorded now rather than when the save catches up\n"
+        ));
+    }
+
     fn handle_event(&mut self) -> Option<String> {
         let at = self.feed.lines().iter().rposition(|l| l.starts_with("Event:"))?;
         if self.answered_event == Some(at) {
@@ -2859,6 +2922,11 @@ impl Run<'_> {
         }
         self.log.push_str(&format!("  event **{}**: {:?}\n", ev.title,
             ev.choices.iter().map(|c| c.text.clone()).collect::<Vec<_>>()));
+        // **The one moment the console names a lost woods**, taken before the answer rather than
+        // after. See [`Run::record_a_lost_woods`].
+        if crate::subworld::is_the_mist_event(&ev.title) {
+            self.record_a_lost_woods();
+        }
         // Read straight from the save rather than plumbed in, because `handle_event` is called from
         // three places and only one of them is holding a health reading. A pure load: deliberately
         // not `apply_save`, which would fold the save into the map as a side effect of answering a
