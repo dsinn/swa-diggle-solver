@@ -2035,6 +2035,20 @@ impl WorldMap {
         self.well_rested
     }
 
+    /// The frontier node the crossing is currently walking to, if it holds one.
+    ///
+    /// **Exposed to be logged**, and #57 is why it became necessary. While there were two crossing
+    /// arms, the alternation itself was the diagnosis — the 2030Z run's faults were all found by
+    /// watching `probing`/`steering` swap in the log. With one arm the steps read as a coherent walk
+    /// whether or not they are going anywhere sensible, so the thing worth printing is no longer
+    /// *which rule chose this step* but **where the walk thinks it is going**.
+    ///
+    /// The step is already logged and is not the same thing: a step is one hop along a route to this,
+    /// and a route may cross ground the target itself was never a candidate on.
+    pub fn frontier_target(&self) -> Option<&str> {
+        self.probing_toward.as_ref().map(|(_, k)| k.as_str())
+    }
+
     /// Cleared once health is back up.
     pub fn rested(&mut self, now: crate::rest::Health) {
         if now.is_full() {

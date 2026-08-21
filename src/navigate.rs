@@ -764,6 +764,20 @@ pub fn precheck(screen: Screen) -> Option<Stop> {
     }
 }
 
+/// `, for frontier X` when the crossing holds one, and nothing when it does not.
+///
+/// A suffix rather than its own line, because it qualifies the step being logged rather than
+/// standing alone — and because a crossing prints one line per step and that is worth keeping.
+/// Empty on the step that *chooses* a target, since the choice is recorded by the arrival that
+/// follows; what this catches is the third and fourth step of a walk that is going somewhere
+/// nobody would have picked.
+fn aiming_at(r: &Run) -> String {
+    match r.map.frontier_target() {
+        Some(f) => format!(", for frontier `{f}`"),
+        None => String::new(),
+    }
+}
+
 pub struct Run<'a> {
     pub win: &'a GameWindow,
     pub keys: PostMessageInput,
@@ -5064,9 +5078,18 @@ pub fn drive(
                 // `l2_path_to_l1` was not a node in our graph until a dump finally named it as a
                 // neighbour — at the second-to-last step. The run explored the whole village because
                 // routing to the door was not something it could do, and the log said otherwise.
+                //
+                // **And the frontier it is aiming at, since #57.** With two arms, the alternation
+                // was the diagnosis; with one, a walk reads as coherent whether or not it is going
+                // anywhere sensible, and the step alone cannot say. `via` is one hop; `for` is the
+                // node the walk holds and will keep walking to until it arrives or it stops being
+                // worth arriving at.
                 Crossing::Probe { to, toward } => match fresh.nodes.iter().find(|n| &n.key == to) {
                     Some(n) => (
-                        format!("`{toward}` is not on any route we know — probing `{container}` via `{to}`"),
+                        format!(
+                            "`{toward}` is not on any route we know — probing `{container}` via `{to}`{}",
+                            aiming_at(r)
+                        ),
                         (n.x, n.y),
                     ),
                     None => return Stop::Failed(format!("{to} is not adjacent on screen from {here}")),
@@ -5081,8 +5104,13 @@ pub fn drive(
                 Crossing::Seek { to } => match fresh.nodes.iter().find(|n| &n.key == to) {
                     Some(n) => (
                         match r.map.seeking_an_inn(&container) {
-                            true => format!("searching `{container}` for its inn via `{to}`"),
-                            false => format!("no way out of `{container}` in sight — probing via `{to}`"),
+                            true => format!(
+                                "searching `{container}` for its inn via `{to}`{}", aiming_at(r)
+                            ),
+                            false => format!(
+                                "no way out of `{container}` in sight — probing via `{to}`{}",
+                                aiming_at(r)
+                            ),
                         },
                         (n.x, n.y),
                     ),
