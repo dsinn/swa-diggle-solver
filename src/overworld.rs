@@ -5607,11 +5607,26 @@ impl WorldMap {
     /// run. Pre-anomaly, `worth_a_trip` reduces to `!p.used`, and both of the `!anomaly_open ||`
     /// clauses pass trivially. That leaves: a shrine, not avoided, not abandoned, **not used**.
     ///
-    /// - **Pre-anomaly only.** `Consecrate` is drawn only while `hell ~= 0` (`shrine.lua:92-95`), so
-    ///   before the portal opens there is nothing here but the prayer — which is the dev's "leave the
-    ///   Consecration for later" made mechanical rather than remembered. After it opens, an interior
-    ///   shrine is governed by [`WorldMap::worth_consecrating_here`] on arrival, which is the
-    ///   "consecrate it if we are walking through anyway" rule and deliberately not a reason to stop.
+    /// - **Open or shut, because a minor shrine owes a prayer either way.** Task #71, and this
+    ///   condition was the opposite until 2026-08-21. It read *pre-anomaly only*, on the argument
+    ///   that `Consecrate` is drawn only while `hell ~= 0` (`shrine.lua:92-95`), so once the portal
+    ///   opens an interior shrine is governed by [`WorldMap::worth_consecrating_here`] on arrival —
+    ///   *consecrate it if we are walking through anyway*, never a reason to stop.
+    ///
+    ///   **That handed off to a rule about consecration, and a minor shrine's payload is the
+    ///   prayer.** `showPrayButton` leads with `not shrineLocation.majorShrine`
+    ///   (`shrine.lua:97-102`), which short-circuits the entire `hell` clause: the prayer is
+    ///   available on identical terms before and after the portal opens. And
+    ///   `worth_consecrating_here` returns false outright for anything that fails
+    ///   [`Place::can_be_consecrated`], which every minor shrine does — so the handoff was to a
+    ///   handler that declines. The dev, 2026-08-21, watching the 2030Z run cross `l53` in three
+    ///   hops without touching the shrine in it: *at Beeford Hedge, the minor shrine should've been
+    ///   an errand.*
+    ///
+    ///   Nothing about the pairing with `pick_shrine` is broken by this. The surface rule stopped
+    ///   pricing the route on the same day (#70), so the two moved in the same direction; and the
+    ///   cost argument behind the surface filters never applied here anyway, because the toll on a
+    ///   node inside a container we are already crossing is a hop, not a fight.
     /// - **`!used`, not `!completed`.** `<key>_used` is what the game sets when a prayer lands, and
     ///   `completed` is about the fight. A shrine with no fight is `completed` on arrival
     ///   (`e799771`), so asking that would skip every peaceful shrine there is.
@@ -5625,9 +5640,6 @@ impl WorldMap {
     /// comes before the pre-anomaly shrine pick. Nearest first, ties broken by key, because a
     /// `places` hash map would otherwise choose differently on different runs from the same state.
     fn shrine_inside(&self, container: &str) -> Option<&Place> {
-        if self.anomaly_is_open().unwrap_or(false) {
-            return None;
-        }
         let dist = self.here.as_deref().map(|h| self.distances(h)).unwrap_or_default();
         self.places
             .values()
@@ -10091,10 +10103,24 @@ mod tests {
         given_up.abandon("shrine1sub2");
         assert_eq!(given_up.errand_inside("shrine1"), None);
 
-        // With the portal open there is no prayer left to make the trip for: consecrating is the
-        // only thing on offer, and that is `worth_consecrating_here` on arrival — something we do
-        // walking through, never a reason to stop. The dev: leave the Consecration for later.
-        assert_eq!(forest("hell = 0.1").errand_inside("shrine1"), None);
+        // **With the portal open it is still an errand.** Task #71, the dev 2026-08-21: *at Beeford
+        // Hedge, the minor shrine should've been an errand.*
+        //
+        // This asserted `None` until then, on the reading that *consecrating is the only thing on
+        // offer once `hell ~= 0`, and that is `worth_consecrating_here` on arrival*. The first half
+        // is true of a major shrine and false of this one. `showPrayButton` leads with
+        // `not shrineLocation.majorShrine` (`shrine.lua:97-102`), which short-circuits the whole
+        // `hell` clause — so a minor shrine's prayer is available on identical terms before and
+        // after the portal opens. Nothing about it changes, and the errand was switching off anyway.
+        assert_eq!(
+            forest("hell = 0.1").errand_inside("shrine1").map(|p| p.key.as_str()),
+            Some("shrine1sub2"),
+            "a minor shrine owes a prayer whether the portal is open or shut"
+        );
+
+        // And the prayer is what it is for, so a used one is still nothing to stop at — the same
+        // clause as above, now carrying the open-portal case too.
+        assert_eq!(forest("hell = 0.1, shrine1sub2_used = 1").errand_inside("shrine1"), None);
     }
 
     /// #26: what is left to loot in a village the demons have taken.
