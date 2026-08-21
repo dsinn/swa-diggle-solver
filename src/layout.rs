@@ -46,6 +46,28 @@ pub fn board_size(g: &Geometry) -> (f64, f64) {
 }
 
 /// `min(w/1920, h/1080)`, the default `scaleType` (`utils/input.lua:13`).
+///
+/// ## It is the only rule anything we read obeys — checked, 2026-08-21
+///
+/// `input.getScale` has five branches (`'height'`, `'width'`, `'static'`, `'max'`, and this
+/// fall-through), and #65 was filed on the worry that the screens we read might be spread across
+/// them. They are not. The whole game sets a non-default `scaleType` in exactly three places, none
+/// of them interactive: `rpg/parallax.lua:259` (`'width'`) and `:264` (`'max'`) are the combat
+/// background scenery, and `stats.lua:149` (`'height'`) is the `stats-big.png` frame behind each
+/// stat card. `player.lua:334` sets it back to `nil`.
+///
+/// The stats page is the one screen where that could have mattered, and the only thing we read on
+/// it is [`crate::act::STATS_BACK`] at (1756, 0) — a `small` button in the corner, nowhere near
+/// that frame. So no template region we match spans two scale rules.
+///
+/// **And the shrine grid is the same rule, not a separate one.** `shrineview.lua:146` calls
+/// `buildDrawDataTable(width, height, 0.5, 0.35)` with no `scaleType`, and that builds
+/// `newTransform(ww*x1, wh*y1, rot, compScale, compScale, -width*((x2 or 0)-0.5), …)`
+/// (`main.lua:246-269`) — the `x = w * ss_x + s * bw * os_x` form that
+/// [`crate::win::window::button_center`] already implements, with different multipliers. Grid,
+/// buttons and combat board are three instances of one rule.
+///
+/// That is why milestone 2 (#65) is a parameterisation rather than a redesign.
 pub fn scale(client_w: i32, client_h: i32) -> f64 {
     (client_w as f64 / 1920.0).min(client_h as f64 / 1080.0)
 }
@@ -118,11 +140,16 @@ pub const CALIBRATED: (i32, i32) = (1920, 1080);
 /// **Why this exists at all.** On 2026-08-18 a run launched outside a working session opened at
 /// 1536×960 and spent thirty seconds failing to recognise a start menu that was drawn perfectly
 /// well; `identify` said `Unknown` and the loudest fingerprint scored 0.71. Nothing was wrong
-/// except the size. The cause is not ours — `main.lua:49-64` computes a window size only when
-/// `userConfig.window.width`/`.height` are set, and `utils/defaultconfig.lua:32-34` sets neither,
-/// so **with no `userConfig` the game opens fullscreen at the desktop size**; `checkpoint::clear`
-/// deletes that file and nothing here may write it back
-/// (`docs/superpowers/plans/2026-07-25-diggle-solver-milestone-1.md:48`).
+/// except the size. The cause is not ours: `utils/defaultconfig.lua:32-34` defaults
+/// `window.fullscreen` to **true** and carries no dimensions, so **with no `userConfig` the game
+/// opens fullscreen at the desktop size**. `checkpoint::clear` deletes that file and nothing here
+/// may write it back (`docs/superpowers/plans/2026-07-25-diggle-solver-milestone-1.md:48`).
+///
+/// The *windowed* size, for when the dev turns fullscreen off, is its own rule and worth stating
+/// exactly because it is easy to get backwards: `main.lua:49-64` computes one precisely **when**
+/// `userConfig.window.width`/`.height` are unset, and gives 90% of the desktop if
+/// `1920>=width or 1080>=height`, otherwise exactly 1920×1080. Note the `>=` — a desktop of
+/// exactly 1920×1080 takes the 90% branch and opens at 1728×972.
 ///
 /// So the size is the dev's to set, once, by hand — and the only thing we can usefully do is say
 /// so in one line instead of burning thirty seconds and photographing a menu that was fine.
