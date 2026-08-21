@@ -4884,9 +4884,10 @@ impl WorldMap {
         //   errand, and the doorway we came in by is usually the nearest thing to walk to;
         // - **the road out**, which is every other case.
         // **What we came in for**, which is task #18 done rather than approached: see
-        // [`WorldMap::errand_inside`]. Three stops now share this path — the general store, the inn
-        // and an unopened chest — and they share it because *reaching* them is identical. What
-        // happens on arrival is the driver's business and differs for each.
+        // [`WorldMap::errand_inside`]. The general store, the inn, an unopened chest and an unprayed
+        // shrine all share this path, because *reaching* them is identical. What happens on arrival
+        // is the driver's business and differs for each — see `errand_inside` for which of them
+        // reach `Crossing::Arrive` and which are answered elsewhere.
         // **A shelf we can see outranks the bed; a shelf we cannot does not.**
         //
         // The dev, 2026-08-16: *once we are in a settlement with that goal, buy as many healthBuffs
@@ -5537,12 +5538,20 @@ impl WorldMap {
     ///    larger bar — resting first wastes part of the purchase (`items/ephemeral.lua:4-9`, and
     ///    the full argument is at the call site);
     /// 2. **the inn**, which is where a hurt run is trying to get to;
-    /// 3. **an unopened chest**, which is loot rather than preparation and is therefore last.
+    /// 3. **an unopened chest**, which is loot rather than preparation;
+    /// 4. **an unprayed shrine**, added 2026-08-17 on the dev's rule that a pre-anomaly shrine is an
+    ///    errand wherever it sits — see [`WorldMap::shrine_inside`] for the run that walked past
+    ///    `shrine1` because the goal was satisfied by standing on the forest holding it.
     ///
-    /// Each of the three gates itself on whether we actually want it — see [`WorldMap::store_inside`],
-    /// [`WorldMap::inn_inside`] and [`WorldMap::chest_inside`] — so this is an ordering, not a
-    /// policy. `None` means nothing in here is worth a stop, which is what makes a crossing a
-    /// crossing.
+    /// Each gates itself on whether we actually want it — [`WorldMap::store_inside`],
+    /// [`WorldMap::inn_inside`], [`WorldMap::chest_inside`], [`WorldMap::shrine_inside`] — so this
+    /// is an ordering, not a policy. `None` means nothing in here is worth a stop, which is what
+    /// makes a crossing a crossing.
+    ///
+    /// **Only the first two reach [`Crossing::Arrive`]**, and that is not an oversight. A chest is
+    /// incomplete with a combat heading, so `blocks_departure` sends it to [`Crossing::Fight`] and
+    /// the area press opens it; a shrine is picked up by the driver's own shrine branch, which runs
+    /// before the crossing block. Anything added here has to answer that question for itself.
     fn errand_inside(&self, container: &str) -> Option<&Place> {
         self.store_inside(container)
             .or_else(|| self.inn_inside(container))
