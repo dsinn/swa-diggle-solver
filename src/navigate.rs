@@ -5401,15 +5401,25 @@ pub fn drive(
             // for making a *detour*. Standing in the doorway is not a detour, and ten gold for six
             // health before the next fight is the cheapest trade on the board.
             let top_up = r.map.top_up_at(&p.key);
-            let rest_here = p.is_settlement()
-                && (!p.corrupted || p.completed)
+            // **The bed and the shelf ask different questions of the same place** — task #75.
+            //
+            // `is_settlement` is `village || town`, the two nouns that can carry a `healthBuff`, and
+            // that is the right bar for a heart. It is the wrong bar for a bed: `store_inn` is in
+            // every settlement's roster (`overworld/generators/village.lua:684-685`), hamlets
+            // included, so asking it here shut a hamlet's inn to a hurt run standing in its doorway.
+            //
+            // Kept as one `rest_here` because the block below it is one decision — whether to enter
+            // — but the two reasons to enter no longer share a premise they never both had.
+            let open_for_business = (!p.corrupted || p.completed)
                 // Under attack or lost, every building in the village answers `Enter` with an empty
                 // room or a `Loot` button — see [`crate::overworld::Place::trades`]. Entering to
                 // rest or shop is then a walk across a subworld for nothing.
-                && p.trades()
-                && ((r.map.wants_rest() && r.map.gold() >= crate::rest::INN_COST)
-                    || top_up
-                    || (r.map.wants_a_heart() && !r.map.heart_is_spent(&p.key)));
+                && p.trades();
+            let for_a_bed = p.has_an_inn()
+                && ((r.map.wants_rest() && r.map.gold() >= crate::rest::INN_COST) || top_up);
+            let for_a_heart =
+                p.is_settlement() && r.map.wants_a_heart() && !r.map.heart_is_spent(&p.key);
+            let rest_here = open_for_business && (for_a_bed || for_a_heart);
             if p.subworld_container || rest_here {
                 let heading_for = r.map.next_hop().map(|h| h.plan.target);
                 let stuck_here =

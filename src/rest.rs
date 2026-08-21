@@ -215,7 +215,17 @@ pub fn site(heading: &str) -> Option<Site> {
     let h = heading.trim_end();
     if h.ends_with("campfire") {
         Some(Site::Campfire)
-    } else if h.ends_with("village") || h.ends_with("inn") {
+    // **All three settlement nouns, not just `village`** — task #75.
+    //
+    // `store_inn` is placed unconditionally in the subnode roster
+    // (`overworld/generators/village.lua:684-685`), *before* the `specialStock.gearSlotsBuff`
+    // branch that gives a town its extra houses and chapel. One generator, three names; the noun
+    // describes the shelf and never the buildings (`overworld/locations/village.lua:6-14`).
+    //
+    // So `town` and `hamlet` were invisible to the rest planner, however hurt the run and however
+    // near it stood — and no log would say so, because a place that never enters the ranking cannot
+    // be reported as having lost it. Found by a regression control in #72 rather than by a run.
+    } else if h.ends_with("village") || h.ends_with("town") || h.ends_with("hamlet") || h.ends_with("inn") {
         Some(Site::Inn)
     } else {
         None
@@ -287,6 +297,40 @@ mod tests {
 
     fn hp(current: i64, max: i64) -> Health {
         Health { current, max }
+    }
+
+    /// **All three settlement nouns carry a bed.** Task #75.
+    ///
+    /// `site` knew `village` and not `town` or `hamlet`, so no town was ever a rest destination
+    /// however hurt the run or however near it stood. The source settles it: the subnode roster at
+    /// `overworld/generators/village.lua:684-685` places `store_inn` unconditionally, *before* the
+    /// `specialStock.gearSlotsBuff` branch that gives a town its extra houses and chapel. One
+    /// generator, three names.
+    ///
+    /// The names come from the stock alone (`overworld/locations/village.lua:6-14`):
+    ///
+    /// ```lua
+    /// local gearB, healthB = self.specialStock.gearSlotsBuff, self.specialStock.healthBuff
+    /// if gearB then return 'town'
+    /// elseif not gearB and not healthB then return 'hamlet' end
+    /// return 'village'
+    /// ```
+    ///
+    /// So the noun describes the shelf, never the buildings — which is exactly the mistake this
+    /// makes, and the same one recorded at `navigate.rs`'s `rest_here` for the `l28 ↔ l27` bounce.
+    #[test]
+    fn every_settlement_noun_has_a_bed() {
+        for h in ["Rowlston Covert village", "Enholmes town", "Fordon hamlet"] {
+            assert_eq!(site(h), Some(Site::Inn), "`{h}` has a `store_inn` like every other");
+        }
+        // The subnode itself, and the other kind of bed.
+        assert_eq!(site("The Weary Traveller inn"), Some(Site::Inn));
+        assert_eq!(site("Emswell campfire"), Some(Site::Campfire));
+
+        // And nothing else is a bed. A forest is where the run gets hurt, not where it recovers.
+        for h in ["Bursall Hedge — level 2 forest", "Yokefleet — level 6 crypt", "Firby crossroads"] {
+            assert_eq!(site(h), None, "`{h}` is not somewhere to sleep");
+        }
     }
     /// The dev's rule in the two numbers it will actually be asked for.
     #[test]

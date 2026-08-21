@@ -640,6 +640,33 @@ impl Place {
         self.type_is("village") || self.type_is("town")
     }
 
+    /// **Somewhere with a bed** — which is all three settlement nouns, task #75.
+    ///
+    /// Distinct from [`Place::is_settlement`], and the distinction is the whole of #75.
+    /// `is_settlement` is a **heart** question and answers `village || town`, because those are the
+    /// two nouns that can carry a `healthBuff`. A bed is a different question, and the game answers
+    /// it the same way for every settlement it generates:
+    ///
+    /// ```lua
+    /// for i, ttype in ipairs{
+    ///     (parentNode.subnodeCount<10 and 'store_market_stall' or 'store_general'),
+    ///     'store_inn', 'house', 'house', 'house', 'house', 'house', 'shop_apothecary'
+    /// } do
+    /// ```
+    /// (`overworld/generators/village.lua:684-685`) — unconditional, and *above* the
+    /// `specialStock.gearSlotsBuff` branch that adds a town's extra houses and chapel.
+    ///
+    /// The nouns come from the stock alone (`overworld/locations/village.lua:6-14`): `gearSlotsBuff`
+    /// makes a town, neither buff makes a hamlet, otherwise a village. `world.lua:520-529` hands out
+    /// the two buffs in **separate passes over the same list**, so they are independent — which is
+    /// why a town tells us nothing about its heart, and why no noun tells us anything about its inn.
+    ///
+    /// So: a hamlet has a bed and never a heart, a village has both, and a town has a bed and
+    /// *might* have a heart.
+    pub fn has_an_inn(&self) -> bool {
+        self.is_settlement() || self.type_is("hamlet")
+    }
+
     pub fn is_general_store(&self) -> bool {
         self.type_is("general store")
     }
@@ -3212,7 +3239,7 @@ impl WorldMap {
             return false;
         }
         self.places.get(here).is_some_and(|p| {
-            p.parent.is_none() && ((p.has_combat() && !p.completed) || p.is_settlement())
+            p.parent.is_none() && ((p.has_combat() && !p.completed) || p.has_an_inn())
         })
     }
 
@@ -3741,7 +3768,7 @@ impl WorldMap {
             // A settlement under attack or lost has no bed — see [`Place::trades`]. Campfires
             // are unaffected by it and excluded elsewhere entirely
             // (`rest::CAMPFIRE_REST_IS_BUILT`).
-            .filter(|p| !p.is_settlement() || p.trades())
+            .filter(|p| !p.has_an_inn() || p.trades())
             .filter_map(|p| crate::rest::site(&p.heading).map(|s| (p, s)))
             .filter(|(p, s)| crate::rest::can_rest_at(*s, self.gold, self.fuel, !p.used))
             .collect();
@@ -5655,7 +5682,7 @@ impl WorldMap {
     /// `false` when health has never been read: an unknown reading is not evidence of a wound, and
     /// the errand costs a subworld crossing.
     pub fn top_up_at(&mut self, key: &str) -> bool {
-        let settlement = self.places.get(key).map(|p| p.is_settlement()).unwrap_or(false);
+        let settlement = self.places.get(key).map(|p| p.has_an_inn()).unwrap_or(false);
         let hurt = self.health.map(|h| !h.is_full()).unwrap_or(false);
         if !(settlement && hurt && self.gold >= crate::rest::INN_COST) {
             return false;
@@ -5861,7 +5888,7 @@ impl WorldMap {
         if !self.wants_a_bed() || self.gold < crate::rest::INN_COST {
             return false;
         }
-        if !self.places.get(container).map(|p| p.is_settlement() && p.trades()).unwrap_or(false) {
+        if !self.places.get(container).map(|p| p.has_an_inn() && p.trades()).unwrap_or(false) {
             return false;
         }
         !self
@@ -10933,6 +10960,60 @@ mod tests {
         // still not a *fight*, which is a separate axis and not this predicate's business.
         assert!(!hamlet.is_settlement());
         assert!(!forest.is_settlement());
+    }
+
+    /// **A bed at every settlement noun; a heart at only two of them.** Task #75.
+    ///
+    /// The two questions were one predicate, and `is_settlement` — `village || town` — was answering
+    /// both. It is the heart's bar and it is right for that: `healthBuff` is what makes a village a
+    /// village, and a hamlet is defined by having neither buff
+    /// (`overworld/locations/village.lua:6-14`). It is the wrong bar for a bed, because `store_inn`
+    /// is unconditional in every settlement's roster (`overworld/generators/village.lua:684-685`).
+    ///
+    /// A town has a bed and *may* have a heart — `world.lua:520-529` hands out `gearSlotsBuff` and
+    /// `healthBuff` in separate passes over the same list, so `getTypeName` returning `town` on the
+    /// first tells us nothing about the second. Targeting one for a heart is therefore a gamble the
+    /// planner takes knowingly; targeting one for a bed is not a gamble at all.
+    #[test]
+    fn a_hamlet_has_a_bed_and_never_a_heart() {
+        let hurt_beside = |heading: &str| {
+            let mut m = WorldMap::new();
+            m.fold(&dump("here", "camp", vec![node("l27", heading)]));
+            m.here = Some("here".into());
+            m.gold = 500;
+            m.hell = Some(0.1);
+            ready_for_the_anomaly(&mut m);
+            m.note_health_level(crate::rest::Health { current: 4, max: 20 });
+            m
+        };
+
+        for heading in ["Rowlston Covert village", "Enholmes town", "Fordon hamlet"] {
+            let m = hurt_beside(heading);
+            let plan = m.next_target().unwrap_or_else(|| panic!("no plan beside `{heading}`"));
+            assert_eq!(plan.reason, Goal::Rest, "`{heading}` has an inn like every settlement");
+            assert_eq!(plan.target, "l27");
+        }
+
+        // The heart is the other question, and the hamlet is where the two part company.
+        let heart_beside = |heading: &str| {
+            let mut m = WorldMap::new();
+            m.fold(&dump("here", "camp", vec![node("l27", heading)]));
+            m.here = Some("here".into());
+            m.gold = 500;
+            m.hell = Some(0.1);
+            ready_for_the_anomaly(&mut m);
+            m
+        };
+        for heading in ["Rowlston Covert village", "Enholmes town"] {
+            assert!(heart_beside(heading).get("l27").unwrap().stocks_a_heart(), "{heading}");
+        }
+        let m = heart_beside("Fordon hamlet");
+        assert!(!m.get("l27").unwrap().stocks_a_heart(), "a hamlet has neither buff, so no heart");
+        assert_ne!(
+            m.next_target().map(|p| p.reason),
+            Some(Goal::Heart),
+            "and it is never worth the walk for one"
+        );
     }
 
     /// Standing at a settlement, short of full, with the price in pocket: rest.
