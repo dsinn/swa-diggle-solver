@@ -897,3 +897,343 @@ impl Place {
             && self.neighbours.len() as u32 >= self.connections
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::overworld::fixtures::*;
+    use crate::overworld::WorldMap;
+
+    /// **What counts as a fight we take on purpose**, which is the dev's forest correction.
+    #[test]
+    fn a_forest_is_crossed_and_a_crypt_is_fought() {
+        let at = |heading: &str| Place { heading: heading.into(), ..Default::default() };
+
+        assert_eq!(at("Riccall — level 6 crypt").deliberate_fight_level(), Some(6));
+        assert_eq!(at("The Rift — level 8 anomaly").deliberate_fight_level(), Some(8));
+
+        // The dev, 2026-08-20: *forests have significantly shorter combat nodes on the path, and we
+        // don't currently have any code for deliberately clearing spider nests.* `shrine7`, the
+        // level 9 forest a run walked into on 2026-08-17, is the live example — deep, and never a
+        // fight we chose.
+        assert_eq!(at("Cottam Boscage — level 9 forest").deliberate_fight_level(), None);
+        assert_eq!(at("Bursall Hedge — level 3 spider forest").deliberate_fight_level(), None);
+        assert_eq!(at("Rowlston Covert village").deliberate_fight_level(), None);
+
+        // A cleared crypt is not a fight at all any more.
+        let done =
+            Place { heading: "Riccall — level 6 crypt".into(), completed: true, ..Default::default() };
+        assert_eq!(done.deliberate_fight_level(), None);
+    }
+
+    /// A corrupted shrine, including the one whose heading a restart threw away.
+    #[test]
+    fn a_corrupted_shrine_with_no_heading_is_assumed_to_be_level_seven() {
+        let seen = Place {
+            key: "shrine1".into(),
+            heading: "Gripthorpe Brush — level 6 shrine".into(),
+            corrupted: true,
+            ..Default::default()
+        };
+        assert_eq!(seen.deliberate_fight_level(), Some(6), "a heading we have beats any assumption");
+
+        // The state a resumed run actually holds: flags survive, the heading does not. This is the
+        // absence recorded at `Place::is_shrine`, which cost two runs on 2026-08-14.
+        let remembered = Place { key: "shrine1".into(), corrupted: true, ..Default::default() };
+        assert_eq!(remembered.heading, "", "the fixture must really be unheaded");
+        assert_eq!(remembered.level(), None, "so nothing can read a level off it");
+        assert_eq!(
+            remembered.deliberate_fight_level(),
+            Some(crate::rest::ASSUMED_SHRINE_LEVEL),
+            "the dev's instruction: assume level 7"
+        );
+
+        // **Corruption is the whole clause.** A clean shrine costs no fight, which is why it is the
+        // cheap preparation that outranks the portal.
+        let clean = Place { key: "shrine1".into(), ..Default::default() };
+        assert_eq!(clean.deliberate_fight_level(), None);
+    }
+
+    /// A woodland shrine is a shrine that can never be consecrated, and the run must not go back for
+    /// one.
+    ///
+    /// Pinned because the rule lives in the *game*, three files from anything we control, and
+    /// nothing else here would notice it changing: `showConsecrateButton` needs
+    /// `shrineLocation.majorShrine` (`shrine.lua:93-96`), which a `shrine_woodland` never has and
+    /// never gets by promotion (`:420-427`).
+    ///
+    /// The plaza is the case that makes this more than a prefix test. It is a subworld node, so it
+    /// has no `majorShrine` of its own, and it is consecratable anyway — its type is plain `'shrine'`
+    /// (`generators/forest.lua:638-640`) so `setShrineLocation` hands the flag to its parent. Get
+    /// this arm wrong in the safe-looking direction and the run stops walking back for consecrations
+    /// it *can* claim.
+    #[test]
+    fn a_woodland_shrine_can_never_be_consecrated_but_a_plaza_can() {
+        let consecratable = |key: &str, heading: &str| {
+            let mut p = Place::default();
+            p.key = key.into();
+            p.heading = heading.into();
+            assert!(p.is_shrine(), "`{key}` has to be a shrine at all for this to mean anything");
+            p.can_be_consecrated()
+        };
+        assert!(consecratable("shrine1", "Gripthorpe Brush shrine"), "the overworld node itself");
+        assert!(consecratable("shrine1_plaza", "Gripthorpe Brush shrine"), "promoted to its parent");
+        assert!(
+            !consecratable("shrine1sub1", "Gripthorpe Brush woodland shrine"),
+            "a woodland shrine inside a shrine's own forest — the one the run of 2026-08-17 stopped at"
+        );
+        assert!(
+            !consecratable("l4sub24", "Bainton Clump woodland shrine"),
+            "and the same node type in an ordinary forest, which is where most of them are"
+        );
+
+        // The heading is what `is_shrine` leans on, and it is the field that goes missing when a
+        // place is rebuilt from save flags alone. The key still has to carry the answer.
+        let mut unheaded = Place::default();
+        unheaded.key = "shrine1sub1".into();
+        assert!(
+            !unheaded.can_be_consecrated(),
+            "an unheaded woodland shrine must not read as consecratable"
+        );
+        let mut rebuilt = Place::default();
+        rebuilt.key = "shrine2".into();
+        assert!(rebuilt.can_be_consecrated(), "and an unheaded major shrine must still read as one");
+    }
+
+    /// The heading alone answers "does arriving cost a fight", because the game builds it that way.
+    #[test]
+    fn a_missing_level_in_a_heading_is_the_games_own_all_clear() {
+        let free = |heading: &str| Place { heading: heading.into(), ..Default::default() };
+        // `AreaHeading` omits the level exactly when `locationHasCombat` is false
+        // (`overworldview.lua:383-392`). Real headings, and the two that matter most:
+        assert_eq!(free("Gembling shrine").arrival(), Arrival::Free, "uncorrupted shrine");
+        assert_eq!(free("Wetwang wizards' tower").arrival(), Arrival::Free, "competeOnVisit = true");
+        assert_eq!(free("Cottam campfire").arrival(), Arrival::Free);
+        assert_eq!(free("Ulrome village").arrival(), Arrival::Free);
+        // And carries it exactly when a fight is owed.
+        assert_eq!(
+            free("Burtonfields — level 6 crypt").arrival(),
+            Arrival::Fight { level: 6 },
+            "the node the last live run walked onto at 1/20"
+        );
+        assert_eq!(free("Bainton Coppice — level 5 forest").arrival(), Arrival::Fight { level: 5 });
+    }
+
+    #[test]
+    fn a_place_we_have_never_seen_a_heading_for_is_not_safe() {
+        // The trap this was written to close. Eleven of the twenty-two places in the last live run's
+        // map were `(unheaded)` -- known by key from `completedAreas` or an `areaFlags` suffix, never
+        // seen in a dump. An empty heading has no `— level N` in it, so a plain boolean test read
+        // every one of them as free to walk onto.
+        let unseen = Place { key: "l1".into(), ..Default::default() };
+        assert_eq!(unseen.arrival(), Arrival::Unknown);
+        assert!(!unseen.arrival().is_free(), "unseen is not safe");
+        // And it is eligible to be chosen, which is what makes the distinction matter rather than
+        // being pedantry: never visited, so it counts as a frontier.
+        assert!(unseen.is_frontier());
+
+        // Completion is checked first, so a cleared node is free even if its heading is stale or
+        // was never read -- mirroring `locationHasCombat`'s own short-circuit (`:306-308`).
+        let done = Place { completed: true, ..unseen.clone() };
+        assert_eq!(done.arrival(), Arrival::Free);
+    }
+
+    #[test]
+    fn the_two_danger_questions_are_independent() {
+        // The conflation that caused the bug, stated as a table. A crypt cannot trap anyone -- it is
+        // not a subworld -- but it always fights. An unvisited forest may trap us and may not fight.
+        let crypt = Place {
+            heading: "Burtonfields — level 6 crypt".into(),
+            visited: true,
+            ..Default::default()
+        };
+        assert!(!crypt.hostile_to_enter(), "nothing to be held inside");
+        assert!(!crypt.arrival().is_free(), "but a fight is compulsory");
+
+        let forest =
+            Place { heading: "Bainton Coppice — level 5 forest".into(), ..Default::default() };
+        assert!(forest.hostile_to_enter(), "might be one of the three bandit camps");
+        assert!(!forest.arrival().is_free());
+
+        let shrine = Place { heading: "Gembling shrine".into(), ..Default::default() };
+        assert!(!shrine.hostile_to_enter());
+        assert!(shrine.arrival().is_free(), "free on both axes: somewhere a hurt run can go");
+    }
+
+    #[test]
+    fn a_forest_outranks_a_crypt_when_everything_costs_a_fight() {
+        // The dev's ranking, and the one place it changes an outcome. Both are level 6, so the old
+        // level-only sort split them by key -- `c1` before `f1`, the wrong way round.
+        let crypt = Place { key: "c1".into(), heading: "Yokefleet — level 6 crypt".into(), ..Default::default() };
+        let forest = Place { key: "f1".into(), heading: "Asselby Bush — level 6 forest".into(), ..Default::default() };
+        assert!(forest.risk() < crypt.risk());
+
+        // The full order, safest first. `Unseen` sits below the known fights because being unable to
+        // show something is safe is worse than knowing its price.
+        assert!(Risk::Free < Risk::Forest);
+        assert!(Risk::Fight < Risk::Unseen);
+        assert!(Risk::Unseen < Risk::Corrupt);
+
+        // Corruption is read ahead of the heading, because it rewrites the level upward without
+        // touching the type name (`world.lua:499-502`).
+        let corrupt_forest = Place { corrupted: true, ..forest.clone() };
+        assert_eq!(corrupt_forest.risk(), Risk::Corrupt, "still says 'forest'; is not one any more");
+        // Cleared is free on every axis, corruption included.
+        assert_eq!(Place { completed: true, ..corrupt_forest }.risk(), Risk::Free);
+    }
+
+    /// An unvisited **forest** is hostile, because a bandit camp is one until you stand in it
+    /// (`overworld/generators/world.lua:466-475`). An unvisited village is not — `banditos` maps
+    /// only `pine_forest` and `oak_forest`, and treating every container as hostile would block
+    /// resting at the first quiet village we find.
+    #[test]
+    fn an_unvisited_forest_is_hostile_but_an_unvisited_village_is_not() {
+        let forest = Place {
+            key: "f1".into(),
+            heading: "Bainton Clump — level 1 forest".into(),
+            ..Default::default()
+        };
+        assert!(forest.hostile_to_enter(), "could be a bandit camp; nothing outside it says so");
+
+        let village = Place {
+            key: "v1".into(),
+            heading: "Ulrome — level 6 village".into(),
+            ..Default::default()
+        };
+        assert!(!village.hostile_to_enter(), "somewhere to REST, which is the whole point");
+
+        let visited = Place { visited: true, ..forest.clone() };
+        assert!(!visited.hostile_to_enter(), "we have stood in it and come back out");
+
+        let cleared = Place { completed: true, corrupted: true, ..forest.clone() };
+        assert!(!cleared.hostile_to_enter(), "corruption fought off is corruption gone");
+    }
+
+    /// The container's type name is re-read on every dump, because the game re-evaluates it.
+    ///
+    /// `getTypeName` (`lost_woods.lua:29`) returns `'forest'` until `lost_woods_known_<key>` is set
+    /// and `'lost woods'` after, so the two headings are the same place at different times. Keeping
+    /// the first one meant the run never learned where it was — the report it printed on the way out
+    /// still called `e1` a forest.
+    #[test]
+    fn walking_into_a_lost_woods_updates_what_we_call_it() {
+        let m = a_lost_woods();
+        let e1 = m.get("e1").expect("container");
+        assert!(e1.type_is("lost woods"), "the fresher heading wins, got {:?}", e1.heading);
+        assert!(e1.in_lost_woods);
+        for k in ["e1_plaza", "e1sub1", "e1sub2", "e1sub3"] {
+            assert!(m.get(k).unwrap().in_lost_woods, "{k} is inside it");
+        }
+    }
+
+    /// A disguised road must not be read as a possible bandit camp.
+    ///
+    /// `e1sub2` prints `forest` because the generator renamed it, not because anything is hiding in
+    /// it. Left alone, every unvisited node in the woods owes a fight on the `hostile_to_enter` axis
+    /// and a hurt run has nowhere it is willing to step.
+    #[test]
+    fn the_lost_woods_interior_is_not_a_bandit_camp() {
+        let m = a_lost_woods();
+        let disguised = m.get("e1sub2").unwrap();
+        assert!(disguised.type_is("forest"), "this is what the dump says");
+        assert!(!disguised.hostile_to_enter(), "renamed road, not a camp");
+
+        // And the rule it is exempted from still holds everywhere else: `l12`'s neighbour `e1` is a
+        // surface forest we have not entered, which is exactly the gamble the rule prices.
+        let mut surface = WorldMap::new();
+        surface.fold(&dump("l12", "Standing — level 2 crypt",
+            vec![node("e1", "Howden Timberland — level 2 forest")]));
+        assert!(surface.get("e1").unwrap().hostile_to_enter(), "an unentered forest still might be");
+    }
+
+    /// **A chest at a dead end is still worth the two steps.** Task #16.
+    ///
+    /// The leaf rule is right for exploring and wrong for loot: a leaf's only neighbour is the one
+    /// you arrive from, so it reveals nothing — but "nothing to reveal" is not "nothing to gain",
+    /// and a chest sits at a leaf often enough. The task named this exception when the rule was
+    /// written; this is it landing.
+    ///
+    /// Only while unopened, which is the other half. `getAreaButtons` offers `Open` on an incomplete
+    /// chest and nothing at all once it is done (`overworld/generators/forest.lua:186-188`), so an
+    /// emptied chest really is a leaf with nothing behind it — and walking back to it is exactly the
+    /// bounce the leaf rule exists to prevent.
+    #[test]
+    fn an_unopened_chest_is_worth_a_detour_that_reveals_nothing() {
+        let leaf = |heading: &str, done: bool| {
+            let mut p = Place { heading: heading.into(), ..Place::default() };
+            p.connections = 1;
+            p.neighbours.insert("here".into());
+            p.completed = done;
+            p
+        };
+
+        // The control: an ordinary leaf is still skipped, or this proves only that the rule is gone.
+        assert!(
+            leaf("Fangfoss grave", false).nothing_left_to_reveal(),
+            "an ordinary dead end reveals nothing and is not a destination"
+        );
+        assert!(
+            !leaf("Riccall chest", false).nothing_left_to_reveal(),
+            "an unopened chest is worth the two steps whatever it reveals"
+        );
+        assert!(
+            leaf("Riccall chest", true).nothing_left_to_reveal(),
+            "and an emptied one is a leaf again — walking back is the bounce this prevents"
+        );
+    }
+
+    /// A town is a settlement, and both halves of the program have to agree about that.
+    ///
+    /// The `l28 <-> l27` bounce of 2026-08-15, in the smallest form that reproduces it. The planner
+    /// chose `l28 Enholmes town` because [`Place::stocks_a_heart`] counts towns; the driver's arrival
+    /// gate asked `type_is("village")` and declined; the planner re-picked the settlement beyond it;
+    /// and the run walked back and forth fourteen times until it was stopped by hand.
+    ///
+    /// This pins the predicate the two now share. The driver's own gate cannot be reached from a
+    /// test — it needs a live game — so what is pinned here is that there is one question rather
+    /// than two, which is the part that was wrong.
+    #[test]
+    fn a_town_is_a_settlement_everywhere_that_asks() {
+        let town = Place { heading: "Enholmes town".into(), ..Default::default() };
+        let village = Place { heading: "Rowlston Covert village".into(), ..Default::default() };
+        let hamlet = Place { heading: "Wetwang hamlet".into(), ..Default::default() };
+        let forest = Place { heading: "Bursall Hedge — level 2 forest".into(), ..Default::default() };
+        for p in [&town, &village] {
+            assert!(p.is_settlement(), "{} is somewhere to walk into", p.heading);
+            assert_eq!(p.stocks_a_heart(), p.is_settlement(), "one question, not two");
+        }
+        // A hamlet has neither buff (`village.lua:5-14`), so it is not a heart destination. It is
+        // still not a *fight*, which is a separate axis and not this predicate's business.
+        assert!(!hamlet.is_settlement());
+        assert!(!forest.is_settlement());
+    }
+
+    #[test]
+    fn a_shrine_known_only_from_the_save_is_still_a_shrine() {
+        // The state both runs of 2026-08-14 held: `shrine1` cleared and corrupted in an earlier run,
+        // rebuilt this run from save flags alone, and so unheaded. `type_is` reads the heading, and
+        // an empty heading ends with nothing — so the free consecration was invisible.
+        let mut m = WorldMap::new();
+        let mut d = dump("here", "camp", vec![node("l2", "Quiet Glade meadow")]);
+        d.hidden = 1;
+        m.fold(&d);
+        m.hell = Some(0.1);
+        {
+            let p = m.entry("shrine1");
+            p.corrupted = true;
+            p.completed = true;
+        }
+        assert_eq!(m.entry("shrine1").heading, "", "the premise: nothing has seen it this run");
+        assert!(m.entry("shrine1").is_shrine(), "the game reads the key, not the heading");
+        assert!(m.worth_consecrating_here("shrine1"));
+
+        // A node *inside* a shrine's subworld is not the shrine. Targeting one would send the
+        // planner at a place whose parent is where it wanted to be.
+        assert!(!m.entry("shrine1sub7").is_shrine());
+        // And the heading still speaks when it is there — this widens the test, it does not move it.
+        assert!(m.entry("l40").is_shrine() == false);
+        let seen = m.entry("q1");
+        seen.heading = "Foggathorpe shrine".into();
+        assert!(seen.is_shrine(), "an unkeyed shrine is still named by its heading");
+    }
+}
