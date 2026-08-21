@@ -1180,7 +1180,18 @@ pub struct WorldMap {
     hell: Option<f64>,
     /// Set when a node cost us [`crate::rest::REST_THRESHOLD`] or more health, cleared once we are
     /// topped up. Held on the map because the decision is "where to go next", which is its job.
+    ///
+    /// **This one means "worth a trip" and nothing else.** For "there is a bed right here and we are
+    /// scratched", see [`WorldMap::top_up`] — the two were one flag until 2026-08-21 and #72.
     wants_rest: bool,
+    /// Set by [`WorldMap::top_up_at`]: a bed is under our feet and we are short of full.
+    ///
+    /// Kept apart from [`WorldMap::wants_rest`] because the two answer different questions and the
+    /// bars are deliberately different — any wound at all here, half health or a four-point drop
+    /// there. Sharing one field made the doorway rule a *detour* rule, which is the opposite of what
+    /// its own doc says it is for. Read only through [`WorldMap::wants_a_bed`], so the surface
+    /// planner's `Goal::Rest` branch cannot see it. Cleared wherever `wants_rest` is.
+    top_up: bool,
     /// `player.gold` — an inn will not serve us below [`crate::rest::INN_COST`].
     gold: i64,
     /// Campfire fuel carried, which makes a campfire usable even at a used area.
@@ -1983,6 +1994,7 @@ impl WorldMap {
             self.wants_rest = true;
         } else if now.is_full() {
             self.wants_rest = false;
+            self.top_up = false;
         }
     }
 
@@ -1995,6 +2007,7 @@ impl WorldMap {
     pub fn rested(&mut self, now: crate::rest::Health) {
         if now.is_full() {
             self.wants_rest = false;
+            self.top_up = false;
         }
     }
 
@@ -2019,6 +2032,7 @@ impl WorldMap {
     /// own `healthNeed = 0` is as authoritative as the flag and arrives a screen earlier.
     pub fn rest_errand_over(&mut self) {
         self.wants_rest = false;
+        self.top_up = false;
     }
 
     /// Has this shrine been consecrated, as the **save** reports it?
@@ -3218,7 +3232,7 @@ impl WorldMap {
     /// The gold gate is left where it already was in each caller: both of them check it, and both
     /// check it against the same [`crate::rest::INN_COST`].
     pub fn wants_a_bed(&self) -> bool {
-        self.wants_rest || self.stacks_to_buy() > 0
+        self.wants_rest || self.top_up || self.stacks_to_buy() > 0
     }
 
     fn bank_first(&self, plan: Plan) -> Plan {
@@ -5548,7 +5562,18 @@ impl WorldMap {
         if !(settlement && hurt && self.gold >= crate::rest::INN_COST) {
             return false;
         }
-        self.wants_rest = true;
+        // **[`WorldMap::top_up`], not `wants_rest`** — task #72, and the whole point of the split.
+        //
+        // This wrote `wants_rest` until 2026-08-21, which made the doorway rule a detour rule. Live
+        // in the 2030Z run: health 77/80, a three-point drop that neither `note_health`
+        // (needs four) nor `note_health_level` (needs half) can act on, and the plan came out
+        // `Rest -> l63` — a surface hop taken to heal three points for ten gold. The dev: *why did
+        // we rest at Treasured Balsa despite barely having any missing health?*
+        //
+        // It also fired for settlements the caller then refused: `navigate.rs` computes this
+        // *before* testing `trades()` and corruption, so a village under attack set the flag on the
+        // way past, the top-up was declined, and the detour outlived it.
+        self.top_up = true;
         true
     }
 
@@ -10715,11 +10740,45 @@ mod tests {
     fn passing_a_settlement_at_less_than_full_health_is_worth_a_bed() {
         let mut m = WorldMap::new();
         m.fold(&dump("here", "camp", vec![node("l28", "Enholmes town")]));
+        // **Set, and load-bearing.** Without it `next_target` has no origin, every branch below
+        // falls through to `Explore`, and the two assertions further down would both pass without
+        // testing anything. The control caught exactly that while this test was being written.
+        m.here = Some("here".into());
         m.gold = 50;
         m.health = Some(crate::rest::Health { current: 18, max: 20 });
         assert!(!m.wants_rest(), "two points down is nowhere near the detour bar");
         assert!(m.top_up_at("l28"), "but we are standing at the door");
-        assert!(m.wants_rest(), "and the errand machinery has to hear about it");
+
+        // **And it stays off the detour bar.** Task #72. This asserted `wants_rest()` until
+        // 2026-08-21, on the reasoning that the errand machinery had to hear about the decision —
+        // true, but it heard through the wrong channel. `wants_rest` is what the surface planner's
+        // `Goal::Rest` branch reads, so the doorway rule was minting detours: live at 77/80 the plan
+        // came out `Rest -> l63`, a surface hop to heal three points for ten gold.
+        assert!(!m.wants_rest(), "a scratch is not a reason to walk anywhere");
+        assert!(m.wants_a_bed(), "but it is a reason to use the bed we are standing on");
+        assert_ne!(
+            m.next_target().map(|p| p.reason),
+            Some(Goal::Rest),
+            "and no trip is planned for it"
+        );
+
+        // The control, and the half that must not regress: real damage still buys the detour.
+        //
+        // Against a **village**, not the town above. `rest::site` matches `village`, `inn` and
+        // `campfire` and does not know the word `town` — so no town is ever a rest site, which is
+        // task #75 and not this one. The control was silently green against the town until that
+        // turned up, which is the second thing it has caught here.
+        m.fold(&dump("here", "camp", vec![node("l27", "Rowlston Covert village")]));
+        m.note_health_level(crate::rest::Health { current: 4, max: 20 });
+        assert!(m.wants_rest());
+        let plan = m.next_target().unwrap();
+        assert_eq!(plan.reason, Goal::Rest, "a wound still walks");
+        assert_eq!(plan.target, "l27");
+
+        // Both are cleared by the same events, so a top-up cannot outlive the bed it was about.
+        m.rest_errand_over();
+        assert!(!m.wants_rest());
+        assert!(!m.wants_a_bed(), "the top-up flag is cleared alongside it, not left standing");
 
         // Full health buys nothing.
         let mut m = WorldMap::new();
