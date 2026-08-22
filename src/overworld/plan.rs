@@ -1106,6 +1106,9 @@ impl WorldMap {
         // Hoisted: it walks every place, and asking it once per candidate would make the shrine
         // branch quadratic in the size of the map for an answer that cannot change inside one pass.
         let corrupted_are_needed = anomaly_open && self.corrupted_shrines_are_needed();
+        // Hoisted for the same reason, and it is [`WorldMap::consecrations`] rather than a count of
+        // shrines: the bar is about what has been *banked*, not what is available to bank.
+        let bar_is_met = self.consecrations() >= SHRINES_BEFORE_THE_ANOMALY;
         let pick_shrine = || {
             let usable: Vec<&Place> = self
                 .places
@@ -1200,42 +1203,74 @@ impl WorldMap {
                         || !p.corrupted
                         || (corrupted_are_needed && p.can_be_consecrated())
                 })
-                // **The route's cost is NOT a filter, and that is task #70.**
+                // **A shrine has to be free, and free means the whole trip.** Task #93, and the
+                // dev's ruling of 2026-08-22 verbatim:
                 //
-                // There was a `reachable_without_a_fight` here, and it is gone. The dev, 2026-08-21:
-                // *shrines should never be blocked by level unless the anomaly has not yet opened.*
+                // > Shrine only if there is a known path that does not involve Combat (excluding a
+                // > crossroads that may involve a tree); this means avoiding at least unfinished
+                // > crypts and forests that we can't already travel through.
                 //
-                // It cannot stay, because it does not price anything — `may_be_a_fight` is
-                // `heading_has_combat || corrupted`, a **boolean**, so a level 1 forest disqualified
-                // a route exactly as hard as a level 9 crypt. The heading is where the level comes
-                // from at all (`AreaHeading` prints `— level N` only when `locationHasCombat`), so
-                // the number was parsed and then thrown away.
+                // Three clauses, and each one lands on a piece of machinery that already existed:
                 //
-                // Live, 1519Z, and measured rather than recalled — see
-                // [`tests::the_nearest_shrine_of_the_1519z_world_is_one_the_old_filter_refused`],
-                // which replays that run's own map cache. With the portal open from step 0 and
-                // seven shrines already known, the run's **first** shrine goal is step 68 of 178,
-                // and both shrines it took were ones it happened to be standing beside. `shrine5`
-                // — *Harswell Coppice, level 7 forest*, twelve hops out against the forty-two to
-                // the pair it took — was never a target at all, because this filter refused it.
-                // Put the filter back and the planner picks the shrine at forty-two: thirty extra
-                // hops, at the state the run was actually in.
+                // - *known* — [`Access::Free`] and not [`Access::Unknown`], which is exactly what
+                //   [`WorldMap::reachable_without_a_fight`] answers. A region that merely has roads
+                //   we have not looked down is not a path we know;
+                // - *does not involve Combat* — `!completed && may_be_a_fight()`, the game's own
+                //   `locationHasCombat` (`overworldview.lua:305-310`) as close as a heading can get
+                //   to it, and the reason `at least` in the ruling is a floor rather than a list:
+                //   crypts and forests are the examples, `heading_has_combat` is the rule;
+                // - *excluding a crossroads that may involve a tree* — see
+                //   [`Place::completes_on_visit`]. An interior crossroads may hold a tree with
+                //   enemies and is not on this graph at all; a surface one is `competeOnVisit = true`
+                //   and cannot be a fight, so the only thing that ever refused one was corruption,
+                //   and that clause is now gone from [`Place::may_be_a_fight`].
                 //
-                // The log carries **zero** `RouteTo(Shrine)` lines in those 178 steps, which is
-                // what pins it on this filter rather than on `ok`'s route test: a candidate that
-                // survived to `ok` and failed there would have said so.
+                // **The destination is not exempt**, which is the whole of the 2002Z run. It ended
+                // `Looping("l4 visited 4 times with no progress; last errand Shrine -> shrine7")`,
+                // standing on `l4` with `shrine1` **one hop away** — and `shrine1` is
+                // `Gripthorpe Brush — level 6 shrine`. The route to it is empty, so a rule about
+                // intermediate nodes could not have refused it and the run would loop exactly as it
+                // did. `l4` itself is `Bainton Clump — level 6 forest`: the shrines were on the far
+                // side of a fight in both directions, and the errand kept choosing them over the
+                // portal it had already opened three consecrations towards.
                 //
-                // **What replaced it is the gate, not nothing.** The 2026-08-15 rule this reverses
-                // was written when a shrine was optional reward, and paying a crypt for one spent the
-                // level 8 fight's budget early. [`SHRINES_BEFORE_THE_ANOMALY`] makes four of them a
-                // precondition — see the `CloseAnomaly` branch, which already argues that *the
-                // shrines are not a reward to collect on the way, they are the preparation the fight
-                // needs*. Preparation we are required to buy cannot also be refused for costing
-                // something.
+                // ## Only once the bar is met — **preparation is bought, a bonus is only taken**
                 //
-                // The pre-anomaly filter above is untouched and is a different rule: `triggers_anomaly`
-                // refuses a level 4+ shrine while `hell == 0` because arriving there is what *opens*
-                // the portal, which is not a question about cost at all.
+                // This is the one clause the dev did not spell out, and it is here because the
+                // literal reading breaks three of their earlier rulings that each have a run behind
+                // them. Written plainly so it is a one-line correction if that is the wrong call.
+                //
+                // Applied unconditionally, the filter takes out:
+                //
+                // - **#74**, 2026-08-21: *a corrupted shrine should become a target when it is the
+                //   last to satisfy the requirement.* A corrupted shrine is a fight by definition
+                //   (`locations/shrine.lua:37-44` reads `location.corrupt`), so a rule that refuses
+                //   fights refuses every one of them and the exception can never fire;
+                // - **the 2026-08-21 crypt ruling** — see
+                //   [`tests::a_shrine_behind_a_crypt_is_still_worth_the_trip_once_the_portal_is_open`];
+                // - **#70's measurement**, in the 1519Z world: refuse `shrine5` at twelve hops and
+                //   the planner takes the pair at forty-two, which is thirty extra hops.
+                //
+                // None of those is about the state the dev was watching. The 2002Z header reads
+                // `shrines: 7 known, 3 consecrated (the portal wants 3)` — **the bar was already
+                // met**, and the complaint was that a run holding its preparation kept shopping for
+                // more instead of spending it. So the split is the one this file already argues at
+                // the `CloseAnomaly` branch: *the shrines are not a reward to collect on the way,
+                // they are the preparation the fight needs*.
+                //
+                // Below the bar a shrine is preparation and [`SHRINES_BEFORE_THE_ANOMALY`] requires
+                // it, so cost is not a filter and every ruling above stands untouched. At or above
+                // the bar a shrine is a bonus, and a bonus that costs a fight is not a bonus — so
+                // the dev's rule applies in full, the candidates run out, and the branch **falls
+                // through** to the `CloseAnomaly` release below it. No new gate, no re-ordering, and
+                // the 2026-08-10 call that a reachable shrine outranks the portal is unchanged: it
+                // now says *reachable for free*, which is what it always meant.
+                //
+                // Inert with the portal shut, and not by accident: `showConsecrateButton`
+                // (`shrine.lua:93-96`) needs `hell ~= 0`, so `consecrations()` is zero until it
+                // opens and this reads false at the second call site the way `!anomaly_open` does
+                // for the filters above.
+                .filter(|p| !bar_is_met || self.reachable_without_a_fight(here, &p.key))
                 .filter(|p| ok(p))
                 .collect::<Vec<_>>();
             // **The order, when there is an order to choose** — see
@@ -2020,6 +2055,12 @@ mod tests {
 
         // **Generalised.** Plenty of clean shrines and the corrupted ones are never wanted: the bar
         // is met before they are reached, and `CloseAnomaly` takes over.
+        //
+        // Since 2026-08-22 this holds for two reasons rather than one — task #93's filter also
+        // applies at the bar, and a corrupted shrine is a fight — so read it as the corrupted
+        // filter's test only up to `consecrate`. The half above the bar is now over-determined,
+        // which is fine for a rule this file wants true, and a trap for anyone editing the
+        // corrupted filter and watching *this* line to tell them they broke it.
         let mut m = world(SHRINES_BEFORE_THE_ANOMALY, 3);
         consecrate(&mut m, SHRINES_BEFORE_THE_ANOMALY);
         m.entry("start").heading = "The Rift — level 8 anomaly".into();
@@ -2095,7 +2136,9 @@ mod tests {
         assert_eq!(hop.step, "l53", "through the forest, which is the fight we agreed to pay");
 
         // And with the bar met, the same map must stop offering it — the guard that keeps #74 from
-        // becoming the shrine-chase of 2026-08-15.
+        // becoming the shrine-chase of 2026-08-15. Over-determined since task #93, which refuses a
+        // fight-bought shrine above the bar for its own reason; the assertion is the same and what
+        // it proves is weaker, so the corrupted filter's own test is the one above, not this line.
         ready_for_the_anomaly(&mut m);
         assert!(!m.corrupted_shrines_are_needed());
         assert_ne!(
@@ -4002,7 +4045,116 @@ e	l4	l11
         assert_eq!(plan.target, "shrine1");
     }
 
-    /// A shrine behind a fight is still a destination **once the portal is open**. Task #70.
+    /// **The stop of the 2002Z run**, and the shape of task #93.
+    ///
+    /// The header read `shrines: 7 known, 3 consecrated (the portal wants 3)` with
+    /// `anomaly open Some(true)`, and every door line for the rest of it was a shrine. It ended
+    /// `Looping("l4 visited 4 times with no progress; last errand Shrine -> shrine7")`.
+    ///
+    /// **The geometry is why a rule about the route could not have saved it.** The run was standing
+    /// on `l4`, *Bainton Clump — level 6 forest*, and `shrine1` — *Gripthorpe Brush — level 6
+    /// shrine* — is **one hop** from it (`map-cache/world-0.txt`: `e shrine1 l4`). There are no
+    /// intermediate nodes to disqualify. The fight is the destination itself, so the filter has to
+    /// price the whole trip or it prices nothing here.
+    ///
+    /// Both halves are asserted, and the second is the one that keeps this honest: with the bar
+    /// short the same map still takes the shrine. That is what pins the refusal on the bar rather
+    /// than on the level 6 heading, which has not moved between the two.
+    #[test]
+    fn past_the_bar_a_shrine_that_is_itself_a_fight_loses_to_the_portal() {
+        let build = || {
+            let mut m = WorldMap::new();
+            m.fold(&dump(
+                "l4",
+                "Bainton Clump — level 6 forest",
+                vec![
+                    node("shrine1", "Gripthorpe Brush — level 6 shrine"),
+                    node("rift", "The Rift anomaly"),
+                ],
+            ));
+            m.here = Some("l4".into());
+            m.hell = Some(0.1);
+            m
+        };
+
+        // The premise, named so a fixture that drifts says which half stopped holding.
+        let m = build();
+        assert!(m.get("shrine1").is_some_and(|p| p.can_be_consecrated()), "a real shrine errand");
+        assert!(
+            !m.reachable_without_a_fight("l4", "shrine1"),
+            "arriving is the fight; the route to it is empty"
+        );
+
+        // **Under the bar it is still the errand.** Preparation is bought, so cost is not a filter —
+        // #70, #74 and the 2026-08-21 crypt ruling all live in this line.
+        let plan = m.next_target().expect("a plan");
+        assert_eq!((plan.reason, plan.target.as_str()), (Goal::Shrine, "shrine1"));
+
+        // **At the bar it is a bonus, and a bonus that costs a level 6 fight is not one.** The
+        // branch runs out of candidates and falls through on its own.
+        let mut m = build();
+        ready_for_the_anomaly(&mut m);
+        let plan = m.next_target().expect("a plan");
+        assert_ne!(plan.reason, Goal::Shrine, "this is the loop the 2002Z run died in");
+        assert_eq!(
+            (plan.reason, plan.target.as_str()),
+            (Goal::CloseAnomaly, "rift"),
+            "and the release below the shrine branch is what catches it"
+        );
+
+        // Take the fight away and the same banked run goes back for it, which is what stops this
+        // reading as "past the bar, shrines are over".
+        let mut m = build();
+        ready_for_the_anomaly(&mut m);
+        m.entry("shrine1").heading = "Gripthorpe Brush shrine".into();
+        let plan = m.next_target().expect("a plan");
+        assert_eq!((plan.reason, plan.target.as_str()), (Goal::Shrine, "shrine1"));
+    }
+
+    /// **A corrupted crossroads on the way is not a fight on the way.** The dev's parenthetical.
+    ///
+    /// > excluding a crossroads that may involve a tree
+    ///
+    /// [`Place::completes_on_visit`] is where the source argument lives. This is the planner half:
+    /// the only thing that ever made a surface crossroads refuse a route was corruption, so a
+    /// corrupted one standing between us and a free shrine is the case that has to move. The
+    /// control underneath swaps it for a corrupted village — the same flag, a type whose
+    /// `competeOnVisit` reads that flag — and the shrine goes away again.
+    #[test]
+    fn a_corrupted_crossroads_does_not_cost_us_the_shrine_behind_it() {
+        let build = |middle: &str| {
+            let mut m = WorldMap::new();
+            m.fold(&dump("here", "camp", vec![node("mid", middle)]));
+            m.fold(&dump("mid", middle, vec![node("shrine2", "Gransmoor shrine")]));
+            m.here = Some("here".into());
+            m.hell = Some(0.1);
+            m.entry("mid").corrupted = true;
+            ready_for_the_anomaly(&mut m);
+            m
+        };
+
+        let m = build("Trenwick crossroads");
+        assert!(!m.get("mid").unwrap().completed, "the premise: corruption took its completion");
+        assert!(m.reachable_without_a_fight("here", "shrine2"), "and gave it straight back");
+        let plan = m.next_target().expect("a plan");
+        assert_eq!((plan.reason, plan.target.as_str()), (Goal::Shrine, "shrine2"));
+
+        // The control: one word of the heading, and the same corruption is a fight again.
+        let m = build("Dalton Copse village");
+        assert!(!m.reachable_without_a_fight("here", "shrine2"));
+        assert_ne!(m.next_target().expect("a plan").reason, Goal::Shrine);
+    }
+
+    /// A shrine behind a fight is still a destination **while the bar is short**. Task #70.
+    ///
+    /// **The title said "once the portal is open" until 2026-08-22**, and that is no longer the
+    /// condition — see the filter in `pick_shrine` and
+    /// [`tests::past_the_bar_a_shrine_that_is_itself_a_fight_loses_to_the_portal`]. What survives
+    /// unchanged is the argument below, which was never about the portal: it is about a shrine
+    /// being preparation we are *required* to buy. Once [`SHRINES_BEFORE_THE_ANOMALY`] is banked it
+    /// stops being that, and the cost rule comes back.
+    ///
+    /// This fixture consecrates nothing, so it is the short-of-the-bar case throughout.
     ///
     /// This asserted the opposite until 2026-08-21, on the rule *go toward the anomaly unless there
     /// is an accessible shrine that does not require combat*. The dev reversed it after watching the
@@ -4569,6 +4721,14 @@ e	l4	l11
     /// `map-cache/world-0.txt` is rewritten by every run, and a fresh profile writes a different
     /// world entirely. Both are gitignored, so this skips where they are absent, as the log replays
     /// do.
+    ///
+    /// ## And the same world at the bar, added 2026-08-22
+    ///
+    /// The run had **nothing consecrated** at the step this replays, which is why #70's reading is
+    /// the one that governs it and why the assertions above are untouched by task #93. The tail of
+    /// this test banks [`SHRINES_BEFORE_THE_ANOMALY`] on the same map and asks again, because a real
+    /// world is worth more than a fixture for the half of the rule that is new — and because the
+    /// thirty hops are the price of that half, measured here rather than argued.
     #[test]
     fn the_nearest_shrine_of_the_1519z_world_is_one_the_old_filter_refused() {
         let Ok(text) = std::fs::read_to_string("map-cache/1519Z-world-0.txt") else {
@@ -4603,19 +4763,31 @@ e	l4	l11
 
         // **A route exists**, so the route test that is still in `ok` is not what refused it.
         assert!(d.contains_key("shrine5"));
-        // **And the filter that is gone did refuse it.** This is the removed predicate, spelled out:
-        // `.filter(|p| !anomaly_open || self.reachable_without_a_fight(here, &p.key))`.
+        // **And the fight filter does refuse it**, which is the predicate task #93 brought back:
+        // `.filter(|p| !bar_is_met || self.reachable_without_a_fight(here, &p.key))`.
         assert!(
             !m.reachable_without_a_fight("l50", "shrine5"),
-            "if this is fight-free the old filter kept it and #70 changed nothing here"
+            "if this is fight-free the filter never applied and neither #70 nor #93 is about it"
         );
 
-        // Today it is the target, from the same place the run spent on exploring.
+        // **Under the bar it is the target**, from the same place the run spent on exploring. This
+        // is #70, and the run had consecrated nothing, so this is the state it was actually in.
+        assert_eq!(m.consecrations(), 0, "the premise of #70's measurement");
         let plan = m.next_target().expect("a world with an open portal and shrines has a target");
         assert_eq!(
             (plan.reason, plan.target.as_str()),
             (Goal::Shrine, "shrine5"),
-            "the portal is open and the nearest shrine is 12 hops away"
+            "the portal is open, the bar is short, and the nearest shrine is 12 hops away"
         );
+
+        // **At the bar, the twelve-hop shrine is a fight and the forty-two-hop pair is not.** Task
+        // #93, against a real world — and the thirty hops between those two numbers are what the
+        // rule costs when it applies. `shrine3` and `shrine4` tie at 42 and the tie is broken the
+        // way `min_by_key` breaks it, so this asserts the distance rather than which of the pair.
+        ready_for_the_anomaly(&mut m);
+        let plan = m.next_target().expect("a target");
+        assert_eq!(plan.reason, Goal::Shrine, "free ones are left, so the branch does not fall through");
+        assert_ne!(plan.target, "shrine5", "twelve hops, and every one of them past a fight");
+        assert_eq!(d.get(plan.target.as_str()), Some(&42), "the pair the 1519Z run actually took");
     }
 }

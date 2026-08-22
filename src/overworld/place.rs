@@ -594,9 +594,74 @@ impl Place {
     /// detours across a whole cached world; the dev's correction is that the cache was never the
     /// thing making the safety claim.
     ///
+    /// **And corruption does not speak for a node that completes on visit** — task #93's
+    /// parenthetical, and the reason is the game's own definition of combat:
+    ///
+    /// ```lua
+    /// function core.locationHasCombat(location)
+    ///     if core.areaIsComplete(location.key) then
+    ///         return false
+    ///     end
+    ///     return not core.locationIsCompleteOnVisit(location)
+    /// end
+    /// ```
+    ///
+    /// `overworldview.lua:305-310`. Arriving costs a fight when the area is **incomplete** *and*
+    /// does **not** complete on visit — which is exactly `!completed && may_be_a_fight()` as the
+    /// callers spell it, with [`Place::completes_on_visit`] standing in for the second half.
+    ///
+    /// Corruption is `setAreaIncomplete` (`overworldview.lua:183-206`) and nothing more: it clears
+    /// `completedAreas[key]`, so it moves the *first* clause and leaves the second alone. On a type
+    /// that completes on visit the first clause was already the only thing holding the answer down,
+    /// and taking completion away gives it straight back on arrival. The `|| self.corrupted` here
+    /// was pessimism standing in for a save flag the heading cannot carry, and on those types it is
+    /// pessimism about nothing.
+    ///
     /// `completed` is checked by the caller, since it is what says whether a fight is still owed.
     pub fn may_be_a_fight(&self) -> bool {
-        heading_has_combat(&self.heading) || self.remembered_level().is_some() || self.corrupted
+        heading_has_combat(&self.heading)
+            || self.remembered_level().is_some()
+            || (self.corrupted && !self.completes_on_visit())
+    }
+
+    /// Does the game complete this node the moment we walk onto it, with no fight?
+    ///
+    /// `core.locationIsCompleteOnVisit` reads `typeData.competeOnVisit` (`overworldview.lua:288-291`
+    /// — the game's own spelling of "compete"), which is either a literal or a function of the
+    /// location. This is the **literal `true`** set, and only that set: six files under
+    /// `overworld/locations/`, each one a surface type.
+    ///
+    /// | file | `typeName` |
+    /// |---|---|
+    /// | `campfire.lua:19` | `campfire` |
+    /// | `capital.lua:61` | `city` |
+    /// | `crossroads.lua:6` | `crossroads` |
+    /// | `grave.lua:10` | `grave` |
+    /// | `out_road.lua:29` | `road` |
+    /// | `wizard_tower.lua:18` | `wizards' tower` |
+    ///
+    /// **The function forms are deliberately absent, and they are the ones corruption bites.** A
+    /// shrine's is `not (location.corrupt or shrineKarma>5)` (`locations/shrine.lua:37-44`) and a
+    /// village's is `not location.corrupt` (`locations/village.lua:63-70`) — both read the very flag
+    /// this exemption is about, so both stay a fight when corrupted, which is what they are.
+    ///
+    /// ## Surface only, and the parent gate is not caution — it is a different file
+    ///
+    /// The subworld generators reuse two of these nouns for their own subnode types and give them
+    /// `competeOnVisit = subnodeIsPeaceful`, a *function* that asks whether enemies are standing
+    /// there (`generators/forest.lua:13-15,103-131`). That is the dev's tree: an interior crossroads
+    /// may hold one. So `Bainton Clump crossroads` inside a forest is not this, and the caches prove
+    /// it can say so out loud — `Bainton Clump — level 6 road` and `Bainton Clump — level 6
+    /// crossroads` are both real headings, with the level a surface one can never print.
+    ///
+    /// [`Place::type_is`] matches the heading's tail, so without the gate `Gripthorpe Brush road`
+    /// would read as an out_road. Every `competeOnVisit = true` file lives in `overworld/locations/`
+    /// and every function form lives in `overworld/generators/`, so "has no parent" separates them
+    /// on the same line the source does.
+    pub fn completes_on_visit(&self) -> bool {
+        const PEACEFUL: &[&str] =
+            &["campfire", "city", "crossroads", "grave", "road", "wizards' tower"];
+        self.parent.is_none() && PEACEFUL.iter().any(|t| self.type_is(t))
     }
 
     /// Does this settlement's general store stock a `Heart`? **The heading says so outright.**
@@ -1443,5 +1508,61 @@ mod tests {
         let seen = m.entry("q1");
         seen.heading = "Foggathorpe shrine".into();
         assert!(seen.is_shrine(), "an unkeyed shrine is still named by its heading");
+    }
+
+    /// **Corruption does not make a fight out of somewhere that completes on visit.** Task #93.
+    ///
+    /// The dev's parenthetical — *excluding a crossroads that may involve a tree* — read against
+    /// `core.locationHasCombat`, which is `not complete and not completeOnVisit`
+    /// (`overworldview.lua:305-310`). Corruption is `setAreaIncomplete` and moves only the first
+    /// half, so on a `competeOnVisit = true` type it takes completion away and arrival gives it
+    /// straight back. `|| self.corrupted` used to answer for those types anyway.
+    ///
+    /// The four cases below are the whole rule: the literal set, the function set, and the parent
+    /// gate that separates them — because the subworld generators reuse two of the same nouns for
+    /// subnodes whose `competeOnVisit` asks whether enemies are standing there.
+    #[test]
+    fn a_corrupted_crossroads_is_not_a_fight_but_a_corrupted_village_is() {
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "here",
+            "camp",
+            vec![
+                node("xrd", "Trenwick crossroads"),
+                node("l5", "Dalton Copse village"),
+                node("fire", "Emswell campfire"),
+            ],
+        ));
+        for k in ["xrd", "l5", "fire"] {
+            m.entry(k).corrupted = true;
+        }
+
+        // The literal `competeOnVisit = true` set: corruption says nothing about them.
+        assert!(m.entry("xrd").completes_on_visit(), "crossroads.lua:6");
+        assert!(!m.entry("xrd").may_be_a_fight(), "the dev's parenthetical, and the whole of #93");
+        assert!(!m.entry("fire").may_be_a_fight(), "campfire.lua:19, the same rule");
+
+        // The function forms read `location.corrupt` themselves, so for them corruption *is* the
+        // fight — `locations/village.lua:63-70`. This is the half that must not move.
+        assert!(!m.entry("l5").completes_on_visit());
+        assert!(m.entry("l5").may_be_a_fight(), "a corrupted village is exactly what it looks like");
+
+        // **The parent gate**, which is not caution: `generators/forest.lua:103-131` gives its own
+        // crossroads `competeOnVisit = subnodeIsPeaceful`, and an interior one can print a level a
+        // surface one never can. Both of these are real cache headings.
+        let inside = m.entry("l4_plaza");
+        inside.heading = "Bainton Clump — level 6 crossroads".into();
+        inside.parent = Some("l4".into());
+        assert!(!m.entry("l4_plaza").completes_on_visit(), "it has a parent, so it is a subnode");
+        assert!(m.entry("l4_plaza").may_be_a_fight(), "and the level says so outright");
+
+        // And without the gate the tail match alone would clear it, which is the fault being
+        // guarded against rather than a hypothetical: `type_is` reads the last word.
+        let quiet = m.entry("l4sub2");
+        quiet.heading = "Bainton Clump crossroads".into();
+        quiet.parent = Some("l4".into());
+        quiet.corrupted = true;
+        assert!(!m.entry("l4sub2").completes_on_visit());
+        assert!(m.entry("l4sub2").may_be_a_fight(), "a tree may be standing on it");
     }
 }
