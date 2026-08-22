@@ -877,31 +877,53 @@ impl WorldMap {
             // chooses **which branch** to take at each fork rather than which side of the subworld to
             // be on.
             //
-            // The doorward term is absent when the destination has no printed position — the fogged
-            // inn — so that search keeps exactly the ordering it was given.
+            // The doorward term is absent when the destination has no printed position, which is
+            // both the fogged inn and any door that has merely gone off screen. Which of those two
+            // it is decides nothing here any more — see the `dest` switch below and #81.
             .filter_map(|p| {
                 let unrevealed = p.connections.saturating_sub(p.neighbours.len() as u32);
                 hops.get(&p.key).map(|d| {
-                    // **Which of `hops` and degree leads depends on whether we can see the door**,
-                    // because the two rules were written for two different errands and only look
-                    // like they contradict.
+                    // **Which of `hops` and degree leads depends on whether we have somewhere to
+                    // be**, because the two rules were written for two different errands and only
+                    // look like they contradict.
                     //
-                    // *Crossing to a known exit.* Nearest first, so the search expands outward from
-                    // where we stand and `doorward` chooses which branch at each fork — the dev's
-                    // *don't backtrack until our current branch is done*. Degree decides between
-                    // nodes equally near and equally doorward.
+                    // *Crossing to a known exit, or to an errand inside.* Nearest first, so the
+                    // search expands outward from where we stand and `doorward` chooses which branch
+                    // at each fork — the dev's *don't backtrack until our current branch is done*.
+                    // Degree decides between nodes equally near and equally doorward.
                     //
-                    // *Searching for something the fog hides* — an inn we have not found, with no
-                    // position to head for. Degree first, which is the rule of 2026-08-15 and the
-                    // village that *got searched a cul-de-sac at a time*. `doorward` is `u64::MAX`
-                    // for every candidate here, so it drops out and this is exactly the key that
-                    // rule was given.
+                    // *Searching for something the fog hides* — an inn we have not found, with
+                    // nowhere at all to head for. Degree first, which is the rule of 2026-08-15 and
+                    // the village that *got searched a cul-de-sac at a time*. `doorward` is
+                    // `u64::MAX` for every candidate here, so it drops out and this is exactly the
+                    // key that rule was given.
+                    //
+                    // ## #81: this was `door_now.is_some()`, and that is not the same question
+                    //
+                    // `door_now` is the destination's position **in the latest dump**, so it is
+                    // absent whenever the door is merely off the current screen — which, crossing a
+                    // large forest, is most of the way across. A crossing with a perfectly definite
+                    // target therefore kept falling into the fogged-search ordering and reorganising
+                    // itself by degree, which is a global measure: the best frontier by degree can
+                    // be anywhere, so the walk repeatedly abandoned the branch it was on.
+                    //
+                    // Wressle Wood, live 2026-08-22, steps 289-296 — four hops out to `l44sub28`
+                    // and four straight back past the plaza to `l44sub3`, eight presses to move two
+                    // nodes. Both are roads, so `is_paved` did not cause it; `l44sub28` has two
+                    // connections and `l44sub3` three, so degree did.
+                    //
+                    // The dev's ruling, 2026-08-22: *use "distance from current position" as the
+                    // highest rank.* Asking `dest` instead of `door_now` is what delivers that
+                    // wherever there is a destination at all, and it leaves the fogged village
+                    // search — which has no `dest` — with the exact ordering the dev gave it in the
+                    // first place. `doorward` still degrades to `u64::MAX` on its own when the door
+                    // has no printed position, so nothing else had to move.
                     //
                     // Inverted rather than wrapped in `Reverse` so both orderings are one type.
                     let near = *d as u64;
                     let teaches = u64::MAX - unrevealed as u64;
                     let (lead, trail) =
-                        match door_now.is_some() { true => (near, teaches), false => (teaches, near) };
+                        match dest.is_some() { true => (near, teaches), false => (teaches, near) };
                     (!p.is_paved(), lead, doorward(p), trail, &p.key)
                 })
             })
@@ -1645,6 +1667,71 @@ mod tests {
                 "the six-way crossroads is worth the extra hop; `dead` is nearer and teaches us two"
             ),
             other => panic!("expected a step into the village, got {other:?}"),
+        }
+    }
+
+    /// **#81, and the other half of the rule above.** The same shape, with somewhere to be.
+    ///
+    /// The dev settled degree-before-distance on 2026-08-15 for a village search, and
+    /// distance-before-everything on 2026-08-22 for a forest crossing, and the two are not in
+    /// conflict: one is looking for something it cannot see, the other is going somewhere it can
+    /// name. What was wrong was the question the code asked to tell them apart — `door_now`, the
+    /// destination's position *in the latest dump*, which is absent whenever the door is merely off
+    /// screen. Most of the way across a large forest, that is every step.
+    ///
+    /// So a crossing with a perfectly definite target kept reorganising itself by degree, and degree
+    /// is global: the richest frontier can be anywhere, so the walk abandoned whichever branch it
+    /// was on. Wressle Wood, live 2026-08-22, went four hops out to `l44sub28` and four straight
+    /// back past the plaza to `l44sub3` — eight presses to move two nodes, both of them roads, so
+    /// `is_paved` was not what did it.
+    ///
+    /// This fixture is
+    /// [`a_frontier_is_chosen_by_what_it_would_reveal_not_by_how_near_it_is`] with an exit handed to
+    /// `cross_toward` and nothing else changed. The exit is never folded, so it has no position and
+    /// `door_now` is `None` — which is the live state, not a contrivance.
+    #[test]
+    fn a_crossing_with_a_door_to_head_for_takes_the_nearer_frontier() {
+        let with_degree = |k: &str, n: u32| Node {
+            key: k.into(),
+            heading: "Saltagh Park road".into(),
+            x: 0.0,
+            y: 0.0,
+            connections: n,
+        };
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump(
+            "l9",
+            "l9sub1",
+            "Saltagh Park road",
+            vec![with_degree("dead", 2), with_degree("mid", 3)],
+            vec![],
+        ));
+        m.fold(&inside_dump(
+            "l9",
+            "mid",
+            "Saltagh Park road",
+            vec![with_degree("l9sub1", 3), with_degree("far", 6)],
+            vec![],
+        ));
+        m.fold(&inside_dump(
+            "l9",
+            "l9sub1",
+            "Saltagh Park road",
+            vec![with_degree("dead", 2), with_degree("mid", 3)],
+            vec![],
+        ));
+
+        // The premise, so a later change cannot make this pass for the wrong reason: we are leaving
+        // for a door we can name and cannot see.
+        assert_eq!(m.placed_now("l9_path_to_l59"), None, "the door has no position this step");
+
+        match m.cross_toward(&[exit("l59")]) {
+            Some(Crossing::Step { to, .. }) | Some(Crossing::Probe { to, .. })
+            | Some(Crossing::Seek { to }) => assert_eq!(
+                to, "dead",
+                "with a destination, nearest first — `far` teaches more and is a hop further out"
+            ),
+            other => panic!("expected a step into the forest, got {other:?}"),
         }
     }
 
