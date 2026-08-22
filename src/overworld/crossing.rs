@@ -287,7 +287,27 @@ impl WorldMap {
                     .min_by_key(|e| {
                         let risk =
                             self.places.get(&e.to_key).map(|p| p.risk()).unwrap_or(Risk::Unseen);
-                        (dist_or_far(&dist, &e.to_key), risk as i64, &e.to_key)
+                        // **The entrance goes last among equals** — a tie-break, never an override.
+                        //
+                        // Live 2026-08-22 2002Z, entering `l4` for `shrine7`:
+                        // `doors l10=16 l1=16 l25=18 shrine1=19`. `l1` and `l10` tie, and both
+                        // remaining terms then preferred `l1` — the door we had walked in through
+                        // ninety seconds earlier. `risk` chose it because we had *just cleared it*,
+                        // so it ranked `Free` against an uncleared village; `&e.to_key` would have
+                        // chosen it too, `"l1" < "l10"`. Two independent preferences, both pointing
+                        // at the way back. The crossing stepped straight out, the planner sent us
+                        // back in, and the run ended `Looping("l4 visited 4 times with no
+                        // progress")`.
+                        //
+                        // **Below distance, and that is the whole design.** The override further
+                        // down is gated to `Goal::Explore` because overruling a *measured* distance
+                        // walked a run away from the anomaly on 2026-08-16. This cannot do that: if
+                        // the entrance is genuinely nearer it wins on the first term and never
+                        // reaches this one. At a tie it cannot be better — going back out undoes the
+                        // move we just made — so no errand gate is needed, and the fallback branch
+                        // below has ranked it last this way all along.
+                        let back_out = Some(&e.to_key) == entrance.as_ref();
+                        (dist_or_far(&dist, &e.to_key), back_out, risk as i64, &e.to_key)
                     })
             };
             // **The gentle pass first, then the same ranking with the rule lifted.**
@@ -3118,6 +3138,80 @@ mod tests {
     ///
     /// That argument belongs to exploring, and the second half of this test is the control: with no
     /// errand naming a destination, an unvisited door is still preferred over the room we just left.
+    #[test]
+    fn the_door_we_came_in_by_loses_a_tie_and_wins_a_measurement() {
+        // Two doors out of `l52`, both one hop from the anomaly at `start`, and we came in by
+        // `l39`. This is the 2026-08-22 2002Z shape: `doors l10=16 l1=16`, tied, and every
+        // remaining term preferring the way back.
+        let build = || {
+            let mut m = WorldMap::new();
+            ready_for_the_anomaly(&mut m);
+            m.hell = Some(0.1);
+            m.fold(&dump(
+                "start",
+                "Cottam campfire",
+                vec![node("l39", "Eight Timberland — level 4 forest"), node("l60", "Asselby — level 7 crypt")],
+            ));
+            m.fold(&dump("l39", "Eight Timberland — level 4 forest", vec![node("l52", "Stillingfleet village")]));
+            m.fold(&dump("l60", "Asselby — level 7 crypt", vec![node("l52", "Stillingfleet village")]));
+            m.fold(&dump(
+                "l52",
+                "Stillingfleet village",
+                vec![node("l39", "Eight Timberland — level 4 forest"), node("l60", "Asselby — level 7 crypt")],
+            ));
+            m.fold(&inside_dump(
+                "l52",
+                "l52sub1",
+                "Stillingfleet general store",
+                vec![],
+                vec![exit("l39"), exit("l60")],
+            ));
+            m.entered_from = Some("l39".into());
+            // **The entrance has to be the door that would otherwise win**, or this proves nothing.
+            // That is the live shape exactly: `l1` was the door we came in by *and* the one we had
+            // just cleared, so `risk` ranked it `Free` against an uncleared alternative, and the key
+            // order agreed. Both terms below distance pointed at the way back.
+            // Both cleared, so `distances` prices the two routes alike. An unfought crypt costs
+            // CROSSING, which separates them on the *first* term and the tie-break is never reached
+            // — the trap this fixture fell into on its first draft.
+            m.entry("l39").completed = true;
+            m.entry("l60").completed = true;
+            m
+        };
+
+        let m = build();
+        assert_eq!(
+            m.next_target().map(|p| p.reason),
+            Some(Goal::CloseAnomaly),
+            "the control: a measured errand, or the ranked branch never runs"
+        );
+        assert_eq!(
+            m.get("l39").unwrap().risk(),
+            m.get("l60").unwrap().risk(),
+            "the premise: risk cannot separate them, so the key would decide"
+        );
+        assert!("l39" < "l60", "and the key alone picks the door we came in by");
+        let door = |m: &WorldMap| m.choose_exit(&[exit("l39"), exit("l60")]).map(|(d, _, _)| d);
+        assert_eq!(
+            door(&m).as_deref(),
+            Some("l60"),
+            "tied on distance, so the door we did not come in by wins"
+        );
+
+        // **And it is only a tie-break.** Put `start` one hop closer through the entrance and the
+        // measurement takes it back — which is what keeps this from becoming the override that
+        // walked a run away from the anomaly on 2026-08-16.
+        let mut nearer = build();
+        nearer.fold(&dump("l39", "Eight Timberland — level 4 forest", vec![node("start", "Cottam campfire")]));
+        nearer.entry("l60").neighbours.remove("start");
+        nearer.entry("start").neighbours.remove("l60");
+        assert_eq!(
+            door(&nearer).as_deref(),
+            Some("l39"),
+            "a measured shorter route through the entrance is still taken"
+        );
+    }
+
     #[test]
     fn a_named_destination_is_worth_walking_back_towards() {
         let build = || {
