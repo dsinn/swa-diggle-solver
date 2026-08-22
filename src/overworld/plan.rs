@@ -1740,7 +1740,7 @@ impl WorldMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::observe::adjacency::{Exit, Node};
+    use crate::observe::adjacency::Node;
     use crate::overworld::fixtures::*;
     use crate::overworld::*;
 
