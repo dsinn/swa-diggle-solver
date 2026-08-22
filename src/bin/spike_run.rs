@@ -139,6 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dump_misses: 0,
         pending_cinematic: false,
         combat_expected: false,
+        turbo_snail: false,
         positions_stale_at: 0,
         needs_recentre: false,
         pan_retries: 0,

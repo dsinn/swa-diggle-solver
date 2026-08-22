@@ -1819,6 +1819,29 @@ pub fn drive(
             // the crossing is over whatever `here` says. Without this clause the fixed loop would
             // simply spend its full budget waiting for a road it had already walked past.
             //
+            // ## The budget is the walk in front of us, not the longest walk in the game
+            //
+            // The dev, 2026-08-22, asked whether the wait is *probing or just doing nothing* and
+            // offered ten seconds, then fifteen. It is not doing nothing — each 300 ms tick pumps
+            // the console, clears a text screen and answers an event, which is what lets the walk
+            // finish at all, since a lore screen holds back the very dump that reports the arrival.
+            // Then: *set it according to the world unit distance travelled and whether or not we
+            // have the turbo snail passive.* That is [`crate::overworld::walk_budget`], and it made
+            // the fixed number an argument nobody has to have again — a hop is now priced from its
+            // own route, so a short one gives up in seconds and a long one is never clipped.
+            //
+            // **A correction, because it was in this comment for one commit:** the earlier version
+            // claimed the engine's 120 units per second predicted the logs, on the strength of a
+            // median of 2.1 s against a predicted 2.1. That was two sorted distributions being
+            // compared end to end, not paired samples, and per hop it is wrong — `l17 -> l4` is 175
+            // units apart and took 11.4 s. The fit in `pace.rs` is paired, which is what exposed the
+            // difference between end-to-end distance and distance actually walked.
+            //
+            // **Leaving the container counts as arriving.** The exit road is a node like any other,
+            // but travelling to it can carry us straight out — and once we are no longer inside,
+            // the crossing is over whatever `here` says. Without this clause the fixed loop would
+            // simply spend its full budget waiting for a road it had already walked past.
+            //
             // ## Why the budget is sixty, and why it is arithmetic rather than a guess
             //
             // The dev, 2026-08-22, asked whether the wait is *probing or just doing nothing*, and
@@ -1859,13 +1882,34 @@ pub fn drive(
                     _ => None,
                 }
             });
-            let by = Instant::now() + Duration::from_secs(60);
+            // **Sized to this walk**, not to the longest walk in the game. See
+            // [`crate::overworld::walk_budget`]: an interior leg is priced flat because the interior
+            // frame has its own scale and 576 measured steps show distance does not predict them, so
+            // what matters here is how many legs the far hop covers.
+            let legs = landing.as_deref().and_then(|k| r.map.walk_legs(&here, k)).unwrap_or_default();
+            let budget = crate::overworld::walk_budget(&legs, r.turbo_snail, Ground::Inside);
+            r.log.push_str(&format!(
+                "  allowing {:.0}s for {} leg(s){}
+",
+                budget.as_secs_f64(),
+                legs.len(),
+                match legs.is_empty() {
+                    true => " — no priced route, so the fixed budget",
+                    false => "",
+                }
+            ));
+            let mut by = Instant::now() + budget;
             let mut arrived = false;
             while Instant::now() < by && !arrived && !r.combat_expected {
                 std::thread::sleep(Duration::from_millis(300));
                 r.pump();
-                r.clear_text_screen();
-                r.handle_event();
+                // **Anything we handle pushes the deadline out.** The budget prices *walking*; a lore
+                // screen or a merchant pauses the walk for as long as we take to answer, which no
+                // fixed envelope can cover. Extending here is what makes running out mean "nothing is
+                // happening" rather than "this is taking a while".
+                if r.clear_text_screen() | r.handle_event().is_some() {
+                    by = Instant::now() + budget;
+                }
                 let at_the_landing = match (&landing, r.map.here()) {
                     (Some(k), Some(h)) => h == k,
                     // Nothing named to wait for, so any movement is the answer, as it was.
@@ -2617,7 +2661,22 @@ pub fn drive(
         }
         r.park();
 
-        let by = Instant::now() + Duration::from_secs(60);
+        // **Sized to this walk.** On the surface the legs are priced by distance — fitted at
+        // `1.08 s + path/157` over 147 paired hops — and by the turbo-snail's exponential ease when
+        // we have it. See [`crate::overworld::walk_budget`].
+        let legs = r.map.walk_legs(&here, &hop.step).unwrap_or_default();
+        let budget = crate::overworld::walk_budget(&legs, r.turbo_snail, Ground::Surface);
+        r.log.push_str(&format!(
+            "  allowing {:.0}s to reach `{}`{}
+",
+            budget.as_secs_f64(),
+            hop.step,
+            match legs.is_empty() {
+                true => " — no priced route, so the fixed budget",
+                false => "",
+            }
+        ));
+        let mut by = Instant::now() + budget;
         let mut arrived = false;
         // `!r.combat_expected` is #82: `handle_event` below arms it when the choice it answers is a
         // `[Combat]` one, and from that moment no arrival is coming — the fight has replaced the
@@ -2630,8 +2689,10 @@ pub fn drive(
             // Text before options here too. Arrival is detected from an adjacency dump, and a lore
             // screen holds that dump back — so without this the loop would spin out its full 60 s
             // waiting for a map that cannot be drawn until the text is gone.
-            r.clear_text_screen();
-            r.handle_event();
+            // Anything handled pushes the deadline out; see the subworld wait above for why.
+            if r.clear_text_screen() | r.handle_event().is_some() {
+                by = Instant::now() + budget;
+            }
             // **The named node, not merely a different one.**
             //
             // This used to be `h != here`, which is right for a single hop and wrong the moment one

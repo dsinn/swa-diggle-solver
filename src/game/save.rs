@@ -240,6 +240,24 @@ pub fn load(path: &Path) -> Result<Table, crate::Error> {
     parse(&source)
 }
 
+/// Does the player own the Magic turbo-snail, which changes how the overworld walk is paced?
+///
+/// The item is a passive whose only flag is `mapLerpMove` (`items/overworldgear.lua:52-68`), and
+/// flags are hashed from `playerData.passives` and `playerData.gear` together
+/// (`overworld.lua:105-109`) — so both lists are searched, not just the one it is bought into.
+///
+/// **Absence is the safe answer and a stale reading is safe too.** `mainSaveData` is written on
+/// screen exit, so a snail bought this minute may not be here yet; reporting `false` only sizes an
+/// arrival wait more generously than it needed to be. See [`crate::overworld::walk_budget`].
+pub fn has_turbo_snail(save: &Table) -> bool {
+    ["passives", "gear"].iter().any(|list| {
+        save.get(list)
+            .and_then(|v| v.as_table())
+            .map(|t| t.arr.iter().any(|v| v.as_str() == Some("turboSnail")))
+            .unwrap_or(false)
+    })
+}
+
 /// True when a run is in progress, i.e. `combatSaveData` exists.
 pub fn combat_in_progress(save_dir: &Path) -> bool {
     save_dir.join("combatSaveData").is_file()
@@ -248,6 +266,18 @@ pub fn combat_in_progress(save_dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The passive is read from either list, because the game hashes both together
+    /// (`overworld.lua:105-109`) and a snail can arrive as combat loot as easily as a purchase.
+    #[test]
+    fn the_turbo_snail_is_found_in_either_inventory_list() {
+        let has = |src: &str| has_turbo_snail(&parse(src).unwrap());
+        assert!(has(r#"return { passives = { "bedroll", "turboSnail" }, gear = {} }"#));
+        assert!(has(r#"return { passives = {}, gear = { "turboSnail" } }"#));
+        assert!(!has(r#"return { passives = { "bedroll" }, gear = {} }"#));
+        // A save with neither list at all is the pre-run state, and must not panic or claim one.
+        assert!(!has("return { }"));
+    }
 
     /// Shaped like the real thing, including the mix of int and float and a nested table.
     const SAMPLE: &str = r#"

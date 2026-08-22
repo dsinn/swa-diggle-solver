@@ -43,6 +43,8 @@ mod crossing;
 mod fixtures;
 mod frame;
 pub use crossing::Crossing;
+mod pace;
+pub use pace::{walk_budget, Ground};
 mod place;
 mod plan;
 pub use plan::{Access, Goal, Hop, Plan};
@@ -2165,6 +2167,47 @@ impl WorldMap {
     /// Is `b` a neighbour of `a` in our own graph? Used to tell a multi-hop from an ordinary step.
     fn can_step_is_adjacent(&self, a: &str, b: &str) -> bool {
         self.places.get(a).map(|p| p.neighbours.contains(b)).unwrap_or(false)
+    }
+
+    /// The legs of the route we expect the game to walk from `from` to `to`, in frame units.
+    ///
+    /// Fed to [`walk_budget`] so an arrival wait can be sized to the walk in front of it rather than
+    /// to the longest walk in the game. `None` whenever the route cannot be priced — an unplaceable
+    /// node, a step we cannot follow, a frame we do not trust — and the caller then falls back to
+    /// the fixed budget, so an unpriced walk is never a *shorter* wait than it used to get.
+    ///
+    /// **It is our route, not necessarily the game's.** `canTravelToIndirect` does its own
+    /// breadth-first search (`overworldview.lua:1330`) and may pick a different path of the same
+    /// length, which is why [`pace::SAFETY`] exists and why this is a budget rather than a
+    /// prediction. Walking `first_step_toward` is the same walker [`WorldMap::far_chain_all`] uses,
+    /// so a far hop is priced along the chain it was actually chosen from.
+    pub fn walk_legs(&self, from: &str, to: &str) -> Option<Vec<f64>> {
+        if from == to {
+            return Some(Vec::new());
+        }
+        let inside = self.inside().is_some();
+        // Interior positions live in their own frame and never in `Place::pos`; see `InsideFrame`.
+        let at = |k: &str| -> Option<(f64, f64)> {
+            match inside {
+                true => self.inside_frame.pos.get(k).copied(),
+                false => self.places.get(k).and_then(|p| p.pos),
+            }
+        };
+        let mut cur = from.to_string();
+        let mut here = at(&cur)?;
+        let mut legs = Vec::new();
+        // The same bound `far_chain_all` uses, for the same reason: our own edges could cycle.
+        for _ in 0..10 {
+            let next = self.first_step_toward(&cur, to, true)?;
+            let there = at(&next)?;
+            legs.push(((there.0 - here.0).powi(2) + (there.1 - here.1).powi(2)).sqrt());
+            if next == to {
+                return Some(legs);
+            }
+            here = there;
+            cur = next;
+        }
+        None
     }
 
     fn first_step_toward(&self, from: &str, to: &str, shun: bool) -> Option<String> {

@@ -47,7 +47,7 @@ use crate::observe::affirm;
 use crate::observe::event;
 use crate::observe::feed::Feed;
 use crate::observe::pan;
-use crate::overworld::{Goal, WorldMap};
+use crate::overworld::{Goal, Ground, WorldMap};
 use crate::win::input::{
     click_at_in, Input, PostMessageInput, SC_NEXT, SC_SPACE, VK_NEXT, VK_SPACE,
 };
@@ -625,6 +625,11 @@ pub struct Run<'a> {
     /// branches on it: both go through the same handler, which is the point — see
     /// [`Run::settle_after_mode_change`].
     pub combat_expected: bool,
+    /// Does the player own the Magic turbo-snail? Read from the save by
+    /// [`crate::game::save::has_turbo_snail`], and used only to pace arrival waits — the snail's
+    /// exponential ease makes a long hop cost about what a short one does. See
+    /// [`crate::overworld::walk_budget`].
+    pub turbo_snail: bool,
     /// The dump count at the moment every recorded screen position stopped being trustworthy.
     ///
     /// [`Run::settled_dump`] will not return anything counted at or before this, so a dump taken
@@ -1027,6 +1032,15 @@ impl Run<'_> {
     pub fn apply_save(&mut self) -> Option<crate::rest::Health> {
         let save = crate::game::save::load(&self.save_dir.join("mainSaveData")).ok()?;
         self.map.apply_save(&save);
+        // **The snail changes the shape of every arrival wait**, so it is read wherever the save
+        // is. See [`crate::overworld::walk_budget`]; losing it is not a case we have to handle,
+        // because a passive cannot be sold, but reading it late only costs a longer wait.
+        let snail = crate::game::save::has_turbo_snail(&save);
+        if snail && !self.turbo_snail {
+            self.log.push_str("  the Magic turbo-snail is aboard — travel is paced by it now
+");
+        }
+        self.turbo_snail = snail;
         // **The first save is also the first chance to know which world this is.** On a fresh
         // profile there is no save at startup, so the cache could not be found then; see
         // [`Run::recall_map`]. Reaching this line at all means the seed is now readable.
