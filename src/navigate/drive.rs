@@ -1791,14 +1791,23 @@ pub fn drive(
             // `here` changing is the game's own statement that we moved, and the overworld path has
             // always used it. Text is cleared inside the wait because arrival raises lore and events,
             // and those hold back the dump that would tell us we arrived.
+            //
+            // **And an exit other than arriving**, which is #82. `handle_event` is called in here,
+            // and answering a `[Combat]` choice arms `r.combat_expected` — at which point there is
+            // no arrival coming, because the fight has replaced the walk. Without this the loop runs
+            // its full timeout and then reports a failure that never happened.
             let by = Instant::now() + Duration::from_secs(30);
             let mut arrived = false;
-            while Instant::now() < by && !arrived {
+            while Instant::now() < by && !arrived && !r.combat_expected {
                 std::thread::sleep(Duration::from_millis(300));
                 r.pump();
                 r.clear_text_screen();
                 r.handle_event();
                 arrived = r.map.here().map(|h| h != here).unwrap_or(false);
+            }
+            if r.combat_expected && !arrived {
+                r.log.push_str("  an event started a fight instead of a walk — handing back\n");
+                continue;
             }
             if !arrived {
                 return Stop::Failed(format!("no arrival after: {what}"));
@@ -2505,7 +2514,12 @@ pub fn drive(
 
         let by = Instant::now() + Duration::from_secs(60);
         let mut arrived = false;
-        while Instant::now() < by && !arrived {
+        // `!r.combat_expected` is #82: `handle_event` below arms it when the choice it answers is a
+        // `[Combat]` one, and from that moment no arrival is coming — the fight has replaced the
+        // walk. Answering the Highwayman near Ulrome on 2026-08-22, this loop took 162 readings of
+        // an empty affirmative slot and then timed out; `CombatEntered` was named on the next pass
+        // of the outer loop, which is where the answer had been all along.
+        while Instant::now() < by && !arrived && !r.combat_expected {
             std::thread::sleep(Duration::from_millis(300));
             r.pump();
             // Text before options here too. Arrival is detected from an adjacency dump, and a lore
@@ -2524,6 +2538,10 @@ pub fn drive(
         }
         if arrived {
             r.hop_misses = 0;
+        }
+        if r.combat_expected && !arrived {
+            r.log.push_str("  an event started a fight on the way — handing back to the observer\n");
+            continue;
         }
         // **Short of the named node is progress, not failure.** An event on the way pauses the walk
         // (arrivals raise lore and choices), and a fight stops it outright. `here` is correct either

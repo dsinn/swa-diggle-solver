@@ -2732,6 +2732,25 @@ impl Run<'_> {
             self.log.push_str("  left alone: more than one real choice\n");
             return Some(ev.title);
         };
+        // **#82: answering a `[Combat]` choice is the announcement that a fight is starting.**
+        //
+        // `combat_expected` existed for exactly this and was set in three places, every one of them
+        // after pressing the Combat *area button* — so a fight that began from a dialogue armed
+        // nothing. What that costs is the arrival wait in [`crate::navigate::drive`], whose only
+        // success condition is standing on the node we pressed Travel for, which combat makes
+        // unreachable. Live 2026-08-22 a highwayman was answered with `[Combat]` mid-travel and the
+        // wait read an empty affirmative slot **162 times** — 300 ms apiece against a 60 s budget,
+        // so very nearly the whole of it — before the outer loop's `identify` saw `CombatEntered`.
+        //
+        // **Armed before the click, not after it.** The fight starts on the game's side the moment
+        // the press lands, and this loop's own verification can be inconclusive; a flag set only on
+        // a verified answer would be missing in precisely the case it is needed. It costs nothing to
+        // be early: the top of the driver's loop takes the flag
+        // (`std::mem::take`) on every pass, so a fight that did not open clears it immediately.
+        if crate::observe::event::starts_combat(&c.text) {
+            self.combat_expected = true;
+            self.log.push_str("  that choice starts a fight — not waiting for an arrival\n");
+        }
         // `onActive` announces a screen at the start of its transition, so settle before clicking
         // and verify, or the click lands on a screen that is still fading in.
         let _ = crate::observe::settle::wait_for_quiescence(self.win, 0.02, Duration::from_secs(8));
