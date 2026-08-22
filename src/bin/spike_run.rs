@@ -70,8 +70,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Before the game is launched and before the mouse is seized: a rejected argument must cost
     // nothing, and a run that has already opened the game has cost something.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let click_frames = diggle_solver::config::click_frames_from_args(&args, cfg.debug_click_frames)
+    let opts = diggle_solver::config::run_args(&args, cfg.debug_click_frames)
         .map_err(diggle_solver::Error::Config)?;
+    let click_frames = opts.click_frames;
     std::fs::create_dir_all(FRAMES)?;
     diggle_solver::win::process::refuse_if_running("lovec.exe", &[])?;
     let save_dir = diggle_solver::game::savedir::locate(cfg.save_dir.clone(), true)?;
@@ -98,7 +99,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let launched = Instant::now();
     let mut game = diggle_solver::game::launch::GameProcess::launch(&cfg, &console)?;
     let win = game.wait_for_window(Duration::from_secs(20))?;
-    std::thread::sleep(Duration::from_secs(3));
+    // **The last moment before the mouse stops being the dev's.** Three seconds by default, which is
+    // what was hard-coded here; `--delay <seconds>` is for pointing a screen recorder at a window
+    // that has only just appeared. Announced, because a run that looks hung and a run that is
+    // waiting on purpose are otherwise the same picture.
+    if opts.hold_off.as_secs() != 3 {
+        println!("holding off {}s before taking the mouse", opts.hold_off.as_secs());
+    }
+    std::thread::sleep(opts.hold_off);
     let window_at = Instant::now();
 
     let mut r = Run {

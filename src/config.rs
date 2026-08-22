@@ -97,31 +97,80 @@ impl Config {
     }
 }
 
-/// Resolves [`Config::debug_click_frames`] against the command line, where the flag belongs.
+/// How long a run waits, after the game's window exists, before it touches anything.
 ///
-/// The config file is the wrong place to reach for something switched on for one run and off again
-/// after — it is a file that gets committed, and a `true` left in it slows every fight afterwards
-/// with nothing in the log to explain it. So the file holds the default and `--click-frames` /
+/// The window has to be up first — that is what a screen recorder has to see before it will attach
+/// to it — so this is measured from `wait_for_window` and not from launch.
+pub const DEFAULT_HOLD_OFF: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Everything the run takes from the command line, parsed in one pass.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunArgs {
+    /// Resolved [`Config::debug_click_frames`].
+    pub click_frames: bool,
+    /// How long to wait after the window appears before seizing the mouse and keyboard.
+    pub hold_off: std::time::Duration,
+}
+
+/// Reads the command line, and refuses anything it does not recognise.
+///
+/// ## Why the flags are here rather than in `config.toml`
+///
+/// The config file is the wrong place for something switched on for one run and off again after —
+/// it gets committed, and a `debug_click_frames = true` left in it slows every fight afterwards with
+/// nothing in the log to explain it. So the file holds the default and `--click-frames` /
 /// `--no-click-frames` override it for a single invocation.
 ///
-/// **An unrecognised argument is an error, not a shrug.** This flag's entire purpose is to produce
-/// photographs, and the way it fails is by producing none — which looks exactly like a run where
-/// nothing interesting happened. `--click-frame` or `--clickframes` would do that silently. Refusing
-/// costs a restart; accepting costs the run the flag was turned on for.
-pub fn click_frames_from_args(args: &[String], default: bool) -> Result<bool, String> {
-    let mut on = default;
-    for a in args {
+/// ## `--delay <seconds>`
+///
+/// The dev, 2026-08-22: *what command do I use to delay Diggle taking control of the mouse and
+/// keyboard? I want to run OBS Studio but it takes a few seconds for it to recognize a newly
+/// launched app.* The run launches the game itself, so there is no moment beforehand at which a
+/// recorder could be pointed at a window that does not exist yet — the only usable gap is between
+/// the window appearing and the first click, which is what this sets. [`DEFAULT_HOLD_OFF`] is the
+/// three seconds that were hard-coded there before, so an invocation without the flag is unchanged.
+///
+/// ## An unrecognised argument is an error, not a shrug
+///
+/// `--click-frames` exists to produce photographs, and the way it fails is by producing none —
+/// which looks exactly like a run where nothing interesting happened. `--click-frame` or
+/// `--clickframes` would do that silently. The same is true of `--delay`, whose failure is a run
+/// that grabs the mouse while the recorder is still starting, which cannot be undone once a live
+/// run is moving. Refusing costs a restart; accepting costs the run the flag was set for.
+///
+/// **One parser, one pass**, because two parsers walking the same argument list is a way for them to
+/// disagree about what is valid — and this project has written that bug down more than once.
+pub fn run_args(args: &[String], click_default: bool) -> Result<RunArgs, String> {
+    let mut out = RunArgs { click_frames: click_default, hold_off: DEFAULT_HOLD_OFF };
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
         match a.as_str() {
-            "--click-frames" => on = true,
-            "--no-click-frames" => on = false,
+            "--click-frames" => out.click_frames = true,
+            "--no-click-frames" => out.click_frames = false,
+            "--delay" => {
+                let Some(v) = it.next() else {
+                    return Err("--delay wants a number of seconds after it".to_string());
+                };
+                // Whole seconds. A recorder is being waited on, and nobody needs a third of one.
+                let secs: u64 = v
+                    .parse()
+                    .map_err(|_| format!("--delay wants a number of seconds, not {v:?}"))?;
+                // Capped, because a mistyped delay is silent in exactly the way the flags above are:
+                // the run sits there looking launched. Ten minutes is far past any recorder.
+                if secs > 600 {
+                    return Err(format!("--delay {secs} is longer than ten minutes; that is a typo"));
+                }
+                out.hold_off = std::time::Duration::from_secs(secs);
+            }
             other => {
                 return Err(format!(
-                    "unrecognised argument {other:?}; expected --click-frames or --no-click-frames"
+                    "unrecognised argument {other:?}; expected --click-frames, --no-click-frames \
+                     or --delay <seconds>"
                 ))
             }
         }
     }
-    Ok(on)
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -146,14 +195,40 @@ mod tests {
 
     #[test]
     fn the_command_line_overrides_the_file_in_both_directions() {
-        assert!(click_frames_from_args(&args(&["--click-frames"]), false).unwrap());
-        assert!(!click_frames_from_args(&args(&["--no-click-frames"]), true).unwrap());
+        assert!(run_args(&args(&["--click-frames"]), false).unwrap().click_frames);
+        assert!(!run_args(&args(&["--no-click-frames"]), true).unwrap().click_frames);
     }
 
     #[test]
     fn no_argument_leaves_the_file_in_charge() {
-        assert!(!click_frames_from_args(&[], false).unwrap());
-        assert!(click_frames_from_args(&[], true).unwrap());
+        assert!(!run_args(&[], false).unwrap().click_frames);
+        assert!(run_args(&[], true).unwrap().click_frames);
+    }
+
+    /// The gap a screen recorder needs, and the three ways of asking for it wrongly.
+    ///
+    /// Every failure here is silent in the same way the click-frame flags are: a run that seizes the
+    /// mouse early cannot be called back, and a run that waits ten minutes looks like one that hung.
+    #[test]
+    fn the_hold_off_is_read_from_the_command_line_and_defaults_to_what_was_hard_coded() {
+        assert_eq!(run_args(&[], false).unwrap().hold_off, DEFAULT_HOLD_OFF);
+        assert_eq!(
+            run_args(&args(&["--delay", "15"]), false).unwrap().hold_off,
+            std::time::Duration::from_secs(15)
+        );
+        // Zero is a real answer: it is what someone who is not recording wants.
+        assert_eq!(
+            run_args(&args(&["--delay", "0"]), false).unwrap().hold_off,
+            std::time::Duration::from_secs(0)
+        );
+        // And it composes with the flag it shares a parser with.
+        let both = run_args(&args(&["--delay", "10", "--click-frames"]), false).unwrap();
+        assert_eq!(both.hold_off, std::time::Duration::from_secs(10));
+        assert!(both.click_frames);
+
+        assert!(run_args(&args(&["--delay"]), false).unwrap_err().contains("seconds"));
+        assert!(run_args(&args(&["--delay", "soon"]), false).unwrap_err().contains("soon"));
+        assert!(run_args(&args(&["--delay", "6000"]), false).unwrap_err().contains("typo"));
     }
 
     #[test]
@@ -161,14 +236,15 @@ mod tests {
         // The failure mode this guards against is silent: the flag exists to produce photographs,
         // and a typo produces none -- which is indistinguishable from a run where nothing happened.
         // A live run is expensive enough that finding out afterwards is the wrong time.
-        let e = click_frames_from_args(&args(&["--click-frame"]), false).unwrap_err();
+        let e = run_args(&args(&["--click-frame"]), false).unwrap_err();
         assert!(e.contains("--click-frames"), "the error must say the spelling it wanted: {e}");
     }
 
     #[test]
     fn the_last_flag_wins_so_a_shell_alias_can_be_overridden() {
-        assert!(!click_frames_from_args(&args(&["--click-frames", "--no-click-frames"]), false)
-            .unwrap());
+        assert!(!run_args(&args(&["--click-frames", "--no-click-frames"]), false)
+            .unwrap()
+            .click_frames);
     }
 
     #[test]
