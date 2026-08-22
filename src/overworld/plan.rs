@@ -4230,4 +4230,91 @@ e	l4	l11
             hops.len()
         );
     }
+
+    /// **#70 against the run that motivated it**, from that run's own world rather than a fixture.
+    ///
+    /// `pick_shrine` used to carry `reachable_without_a_fight`, and the argument for removing it was
+    /// that it does not price anything: `may_be_a_fight` is `heading_has_combat || corrupted`, a
+    /// boolean, so a level 1 forest disqualified a route exactly as hard as a level 9 crypt. That
+    /// argument was made from the code. This makes it from the map the 1519Z run built.
+    ///
+    /// Standing where the run stood at its step 14 — which it spent on `Goal::Explore` — with the
+    /// portal open, as that run's header records (`anomaly open Some(true)`), and with seven shrines
+    /// already known and one of the four consecrations banked:
+    ///
+    /// ```text
+    ///   shrine5   Harswell Coppice — level 7 forest    dist 12   fight-free false
+    ///   shrine6   Fitling shrine                       dist 24   fight-free false
+    ///   shrine3   Burshill shrine                      dist 42   fight-free true
+    ///   shrine4   Thornthorpe shrine                   dist 42   fight-free true
+    /// ```
+    ///
+    /// The nearest shrine in the world is three and a half times closer than the pair the run
+    /// eventually took, and the old filter refused it. The run's report agrees: its **only** two
+    /// `Shrine` goals are steps 68 and 73, both taken while already standing next to the shrine, and
+    /// `shrine5` is never a target at all. It carries zero `RouteTo` lines in 178 steps, which is
+    /// what pins this on the fight filter rather than on `ok`'s route test — a candidate that
+    /// survived to `ok` and failed there would have said so.
+    ///
+    /// ## What this reads, and what it therefore cannot claim
+    ///
+    /// The cache is the world **as the run left it**, so every node it cleared has lost the
+    /// `— level N` from its heading — which is why `shrine3` and `shrine4` read fight-free here and
+    /// very likely did not at step 14. That makes this the *most favourable* version of that world
+    /// for the old rule, and it still fails: `shrine5` was never visited, so it alone kept its
+    /// level, and it alone is what the nearest-shrine question turns on.
+    ///
+    /// The file is `map-cache/1519Z-world-0.txt`, a copy taken 2026-08-21 — because
+    /// `map-cache/world-0.txt` is rewritten by every run, and a fresh profile writes a different
+    /// world entirely. Both are gitignored, so this skips where they are absent, as the log replays
+    /// do.
+    #[test]
+    fn the_nearest_shrine_of_the_1519z_world_is_one_the_old_filter_refused() {
+        let Ok(text) = std::fs::read_to_string("map-cache/1519Z-world-0.txt") else {
+            eprintln!("SKIP: map-cache/1519Z-world-0.txt is not present");
+            return;
+        };
+        let mut m = WorldMap::new();
+        assert!(m.absorb_cache(&text) > 1000, "expected the whole 1519Z world, not a fragment");
+        m.here = Some("l50".into());
+        m.hell = Some(0.1);
+
+        // `shrine5` is the shrine that run never reached, so it is the one whose heading still
+        // carries the level. If this ever stops holding, the file is a different world and every
+        // number below is about something else.
+        assert_eq!(
+            m.get("shrine5").map(|p| p.heading.as_str()),
+            Some("Harswell Coppice — level 7 forest"),
+            "wrong world: `shrine5` is not the level 7 forest the 1519Z run left unvisited"
+        );
+
+        let d = m.distances("l50");
+        let nearest = m
+            .places
+            .values()
+            .filter(|p| p.is_shrine() && p.parent.is_none())
+            .filter_map(|p| d.get(&p.key).map(|n| (*n, p.key.clone())))
+            .min()
+            .expect("the 1519Z world has shrines with routes to them");
+        assert_eq!(nearest, (12, "shrine5".into()), "the nearest shrine, and by how much");
+        assert_eq!(d.get("shrine3"), Some(&42), "the pair the run actually took");
+        assert_eq!(d.get("shrine4"), Some(&42));
+
+        // **A route exists**, so the route test that is still in `ok` is not what refused it.
+        assert!(d.contains_key("shrine5"));
+        // **And the filter that is gone did refuse it.** This is the removed predicate, spelled out:
+        // `.filter(|p| !anomaly_open || self.reachable_without_a_fight(here, &p.key))`.
+        assert!(
+            !m.reachable_without_a_fight("l50", "shrine5"),
+            "if this is fight-free the old filter kept it and #70 changed nothing here"
+        );
+
+        // Today it is the target, from the same place the run spent on exploring.
+        let plan = m.next_target().expect("a world with an open portal and shrines has a target");
+        assert_eq!(
+            (plan.reason, plan.target.as_str()),
+            (Goal::Shrine, "shrine5"),
+            "the portal is open and the nearest shrine is 12 hops away"
+        );
+    }
 }
