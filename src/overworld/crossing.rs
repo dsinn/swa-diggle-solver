@@ -3913,4 +3913,46 @@ mod tests {
             "a woodland shrine subnode is the case `shrine_inside` was written for"
         );
     }
+
+    /// **And with a heart wanted, the crossing searches the village instead of leaving it.**
+    ///
+    /// The dev's ask, 2026-08-22: *it should be searching within the settlement that we entered, not
+    /// disappearing immediately because the entrance isn't adjacent to the store.* This is that,
+    /// stated as a move rather than as a predicate — it is the half that could still have gone wrong
+    /// after the road stopped claiming to be an errand, because "no errand and no door" has to mean
+    /// *explore*, not *stall*.
+    #[test]
+    fn a_village_entered_for_a_heart_is_searched_and_not_left() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("l32", "Enthorpe village", vec![node("shrine2", "Gransmoor shrine")]));
+        m.fold(&inside_dump(
+            "l32",
+            "l32sub14",
+            "Enthorpe west guard post",
+            vec![
+                node("l32sub10", "Enthorpe house"),
+                node("l32_path_to_shrine2", "Road to Gransmoor shrine"),
+            ],
+            vec![exit("shrine2")],
+        ));
+        m.here = Some("l32sub14".into());
+        // The purse the 0203Z run actually had when it started going round in circles.
+        m.gold = 339;
+
+        assert!(m.seeking_a_heart("l32"), "the fixture must want a heart, or this proves nothing");
+        assert!(m.store_inside("l32").is_none(), "and must not have found the shop yet");
+
+        let exits = vec![exit("shrine2")];
+        let moved = m.cross_toward(&exits).expect("no errand and no door means explore, not stall");
+        let toward = match &moved {
+            Crossing::Leave { to } => panic!("left the village it came to shop in, toward `{to}`"),
+            Crossing::Step { toward, .. } | Crossing::Probe { toward, .. } => Some(toward.clone()),
+            _ => None,
+        };
+        assert_ne!(
+            toward.as_deref(),
+            Some("l32_path_to_shrine2"),
+            "still steering at the way out: {moved:?}"
+        );
+    }
 }
