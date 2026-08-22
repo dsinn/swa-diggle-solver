@@ -69,6 +69,28 @@ pub enum Crossing {
     Leave { to: String },
 }
 
+/// Is this place somewhere **inside** `container` that an errand could be waiting at?
+///
+/// The parent test alone is not enough, and that cost a run. An exit carries the container as its
+/// parent — the dump builds its key as `parent.key..'_path_to_'..k` (`overworldview.lua:1043`) —
+/// and its heading reads `Road to <wherever it goes>`. So `l32_path_to_shrine2`, the road out of
+/// Enthorpe toward Gransmoor shrine, **ends in the word `shrine`**, and [`Place::is_shrine`]
+/// answers by heading as well as by key.
+///
+/// Live 2026-08-22 0203Z: [`WorldMap::shrine_inside`] named that road as the errand inside `l32`,
+/// which made `errand_at` a place we reach by *leaving*. `cross_toward` walked to it, the run left
+/// the village it had entered to shop in, and from outside the village was again the nearest place
+/// to buy a heart. Four laps of `l32` -> `shrine2` -> `l32` before the loop guard stopped it, with
+/// `seeking_a_heart("l32")` reading **true** the whole time — the heart guard was right and never
+/// got asked, because `errand_at.is_some()` is tested first.
+///
+/// The surface picker has the same hazard and guards it with `parent.is_none()` — see
+/// `pick_shrine`. That is not available here: an errand inside a container is a child by
+/// definition. So it is the way *out* that has to go.
+fn inside_container(p: &Place, container: &str) -> bool {
+    p.parent.as_deref() == Some(container) && !p.key.starts_with(&format!("{container}_path_to_"))
+}
+
 impl WorldMap {
     /// Are we currently inside a subworld, and if so which one?
     pub fn inside(&self) -> Option<&str> {
@@ -1002,7 +1024,7 @@ impl WorldMap {
             return None;
         }
         self.places.values().find(|p| {
-            p.parent.as_deref() == Some(container)
+            inside_container(p, container)
                 && p.is_general_store()
                 && !self.abandoned.contains(&p.key)
         })
@@ -1133,7 +1155,7 @@ impl WorldMap {
         let dist = self.here.as_deref().map(|h| self.distances(h)).unwrap_or_default();
         self.places
             .values()
-            .filter(|p| p.parent.as_deref() == Some(container))
+            .filter(|p| inside_container(p, container))
             .filter(|p| p.is_shrine() && !p.used && !p.avoid)
             .filter(|p| !self.abandoned.contains(&p.key))
             .min_by_key(|p| (dist_or_far(&dist, &p.key), p.key.clone()))
@@ -1163,7 +1185,7 @@ impl WorldMap {
         let dist = self.here.as_deref().map(|h| self.distances(h)).unwrap_or_default();
         self.places
             .values()
-            .filter(|p| p.parent.as_deref() == Some(container))
+            .filter(|p| inside_container(p, container))
             .filter(|p| p.is_chest() && !p.completed && !p.avoid)
             .filter(|p| !self.abandoned.contains(&p.key))
             .min_by_key(|p| (dist_or_far(&dist, &p.key), p.key.clone()))
@@ -1181,7 +1203,7 @@ impl WorldMap {
         }
         self.places
             .values()
-            .find(|p| p.parent.as_deref() == Some(container) && p.is_inn() && !self.abandoned.contains(&p.key))
+            .find(|p| inside_container(p, container) && p.is_inn() && !self.abandoned.contains(&p.key))
     }
 
     /// Are we inside a village on a rest errand, with its inn still to find?
@@ -3826,6 +3848,69 @@ mod tests {
             m.choose_exit(&doors).map(|(k, _, _)| k).as_deref(),
             Some("l40"),
             "a run that needs a bed takes the safe door, which is the whole point of the ordering"
+        );
+    }
+
+    /// **The way out of a village is not an errand inside it**, however its road is named.
+    ///
+    /// Live 2026-08-22 0203Z, and the run's own loop trace is the shape of it:
+    ///
+    /// ```text
+    ///   37. l32sub14 — Heart -> l32sub10
+    ///   38. shrine2  — Heart -> l32
+    ///   39. l32      — Heart -> l25
+    ///   40. l32sub14 — Heart -> l32sub10
+    /// ```
+    ///
+    /// Enthorpe's road out is `l32_path_to_shrine2`, heading *Road to Gransmoor shrine*. It carries
+    /// `l32` as its parent, and its heading ends in the word `shrine`, so `shrine_inside` named it
+    /// as the errand — a destination reached by **leaving**. The run entered the village to buy a
+    /// heart, walked straight out to `shrine2`, and from there the village was again the nearest
+    /// place to buy one. Four laps before the guard stopped it.
+    ///
+    /// `seeking_a_heart` was true throughout, which is the part worth keeping: the guard that holds
+    /// a run inside a village while it looks for the shop was right and was never consulted, because
+    /// `errand_at.is_some()` is tested first.
+    ///
+    /// The positive control is the second half. A shrine that really is inside — a woodland shrine
+    /// subnode, which is the case [`WorldMap::shrine_inside`] exists for — must still be found, or
+    /// this fix would have traded one silent failure for another.
+    #[test]
+    fn the_road_out_is_not_an_errand_inside_however_it_is_named() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("l32", "Enthorpe village", vec![node("shrine2", "Gransmoor shrine")]));
+        m.fold(&inside_dump(
+            "l32",
+            "l32sub14",
+            "Enthorpe west guard post",
+            vec![
+                node("l32sub10", "Enthorpe house"),
+                node("l32_path_to_shrine2", "Road to Gransmoor shrine"),
+            ],
+            vec![exit("shrine2")],
+        ));
+        m.here = Some("l32sub14".into());
+
+        // The road is still a shrine by heading — that is the trap, and it has not gone away.
+        assert!(
+            m.get("l32_path_to_shrine2").unwrap().is_shrine(),
+            "if the heading stopped reading as a shrine this test proves nothing"
+        );
+        assert_eq!(m.errand_inside("l32"), None, "the way out is not somewhere to go");
+        assert_eq!(m.shrine_inside("l32").map(|p| p.key.as_str()), None);
+
+        // A shrine that genuinely is inside is still the errand.
+        m.fold(&inside_dump(
+            "l32",
+            "l32sub14",
+            "Enthorpe west guard post",
+            vec![node("l32sub9", "Enthorpe woodland shrine")],
+            vec![exit("shrine2")],
+        ));
+        assert_eq!(
+            m.errand_inside("l32").map(|p| p.key.clone()),
+            Some("l32sub9".into()),
+            "a woodland shrine subnode is the case `shrine_inside` was written for"
         );
     }
 }
