@@ -13,9 +13,10 @@
 //! #19 (find buttons with the cursor oracle) adds screens here rather than to the loop.
 
 use super::Stop;
-// `Run::doorway` is linked from the doc comments here; the type itself stays in the parent.
+// Both are linked from the doc comments below and neither is called from here; they stay in the
+// parent, and rustdoc needs them in scope for `[`Run::doorway`]` and `[`drive`]` to resolve.
 #[allow(unused_imports)]
-use super::Run;
+use super::{drive, Run};
 use crate::act::{Button, Screen};
 
 /// What is in front of a run at the moment it starts looking. See [`Run::doorway`].
