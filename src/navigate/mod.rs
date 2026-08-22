@@ -263,7 +263,6 @@ const SLOT_RETRY_PAUSE: Duration = Duration::from_millis(700);
 /// fade several times over while still failing promptly when the map really is not there.
 const RECENTRE_RETRIES: usize = 3;
 
-/// `PartialEq` is for the tests: comparing what [`precheck`] returns against what it should is the
 /// What is in front of a run at the moment it starts looking. See [`Run::doorway`].
 ///
 /// A value rather than a ladder of `if`s, for the reason task #38 gives about arrivals: a ladder
@@ -310,6 +309,7 @@ impl Doorway {
     }
 }
 
+/// `PartialEq` is for the tests: comparing what [`precheck`] returns against what it should is the
 /// only way to check `drive`'s wiring without a running game in front of it.
 #[derive(Debug, PartialEq)]
 pub enum Stop {
