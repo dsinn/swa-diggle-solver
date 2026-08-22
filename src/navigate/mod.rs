@@ -590,6 +590,8 @@ pub struct Run<'a> {
     pub inputs: usize,
     /// The loop guard's memory. See [`Run::sterile_here`] and [`LoopGuard`].
     pub guard: LoopGuard,
+    /// Whether [`Run::recall_map`] has already had its answer, so it stops asking.
+    pub map_recalled: bool,
     /// The last few places we stood, and what we were doing there — the report's evidence.
     ///
     /// A loop is only diagnosable from the *sequence*, and every one of the three met so far was
@@ -966,12 +968,40 @@ impl Run<'_> {
         Some(PathBuf::from(MAP_CACHE).join(format!("world-{seed}.txt")))
     }
 
-    /// Folds in what earlier runs learned about this world. Returns the edge count and the file.
-    pub fn load_map_cache(&mut self) -> Option<(usize, String)> {
+    /// Folds in what earlier runs learned about this world, the first time the save will say which
+    /// world that is. Returns the edge count, the file, and whether positions came with it.
+    ///
+    /// **Called until it succeeds, not once at startup.** A fresh profile has no `mainSaveData` when
+    /// the run begins: the game writes the save on screen *exit* (`utils/classes.lua`), and a run
+    /// that has just walked into the overworld has exited nothing yet. So
+    /// [`Run::map_cache_path`] finds no seed, the cache is not found, and — before 2026-08-22 —
+    /// that was the end of it. The run of 0203Z started blind on a world it had 699 places for,
+    /// logged `no map remembered for this world`, and stopped 46 steps later inside a village whose
+    /// road network it had already mapped in an earlier adventure.
+    ///
+    /// So [`Run::apply_save`] asks again on every step. The save that makes `apply_save` work at all
+    /// is exactly the save that makes the seed readable, which is why this hangs off that call
+    /// rather than off the step loop.
+    ///
+    /// **A late arrival takes the shape and leaves the coordinates**, via
+    /// [`crate::overworld::WorldMap::absorb_cache_structure`] — by then this run has anchored a frame
+    /// of its own, and old positions dropped into it would make the frame disagree with itself. The
+    /// startup call still takes positions, because nothing has been placed yet.
+    pub fn recall_map(&mut self) -> Option<(usize, String, bool)> {
+        if self.map_recalled {
+            return None;
+        }
         let path = self.map_cache_path()?;
+        // Only the *reading* is retried. A world with no cache file must not re-stat it every step
+        // for the length of a run, so the flag is set either way once the seed is known.
+        self.map_recalled = true;
         let text = std::fs::read_to_string(&path).ok()?;
-        let edges = self.map.absorb_cache(&text);
-        Some((edges, path.display().to_string()))
+        let positioned = !self.map.any_placed();
+        let edges = match positioned {
+            true => self.map.absorb_cache(&text),
+            false => self.map.absorb_cache_structure(&text),
+        };
+        Some((edges, path.display().to_string(), positioned))
     }
 
     /// Writes what this run learned, for the next one.
@@ -997,6 +1027,17 @@ impl Run<'_> {
     pub fn apply_save(&mut self) -> Option<crate::rest::Health> {
         let save = crate::game::save::load(&self.save_dir.join("mainSaveData")).ok()?;
         self.map.apply_save(&save);
+        // **The first save is also the first chance to know which world this is.** On a fresh
+        // profile there is no save at startup, so the cache could not be found then; see
+        // [`Run::recall_map`]. Reaching this line at all means the seed is now readable.
+        if let Some((edges, path, positioned)) = self.recall_map() {
+            let how = match positioned {
+                true => "with their positions",
+                false => "for their shape only — this run has already anchored a frame",
+            };
+            self.log.push_str(&format!("recalled {edges} edges from `{path}` {how}
+"));
+        }
         // **The bank has a second home, and mid-fight it is the only one.** `mainSaveData` carries
         // no `statusEffects` while a fight is in progress; `combatSaveData` carries them under a
         // different root. Read only when the main save was silent, so the ordinary path never

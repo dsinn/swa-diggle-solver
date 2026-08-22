@@ -522,6 +522,34 @@ impl WorldMap {
     /// `completed` is not restored either. The save carries it, and the save is the game's own
     /// answer rather than our recollection.
     pub fn absorb_cache(&mut self, text: &str) -> usize {
+        self.absorb_cache_inner(text, true)
+    }
+
+    /// The same, for a cache that arrives **after** this run has already placed something.
+    ///
+    /// Edges, headings, connection counts and parentage are statements about the world's shape and
+    /// are always safe to take. Positions are not: they are in whatever frame the run that wrote
+    /// them was using, and dropping them into a frame this run has already anchored gives
+    /// [`WorldMap::registration`] a set of nodes that disagree with each other — the fault
+    /// [`WorldMap::unplaceable`] reports as *the frame disagrees with itself*.
+    ///
+    /// This is the same trade a v1 file already gets, and for the same reason. Aiming rebuilds
+    /// positions from this run's dumps, which is where a trustworthy one has to come from anyway.
+    ///
+    /// **Why a late load happens at all.** A fresh profile has no `mainSaveData` when the run
+    /// starts — the game writes it on screen *exit*, and a run that has just walked into the
+    /// overworld has exited nothing. So the seed cannot be read, the cache cannot be found, and the
+    /// run begins blind. See [`crate::navigate::Run::recall_map`], which keeps asking.
+    pub fn absorb_cache_structure(&mut self, text: &str) -> usize {
+        self.absorb_cache_inner(text, false)
+    }
+
+    /// Has anything been placed on screen yet — that is, do we have a frame of our own to protect?
+    pub fn any_placed(&self) -> bool {
+        self.places.values().any(|p| p.pos.is_some())
+    }
+
+    fn absorb_cache_inner(&mut self, text: &str, trust_positions: bool) -> usize {
         // **An older cache keeps everything except where things are.**
         //
         // The first cut of this refused a v1 file whole, on the grounds that its coordinates mix two
@@ -537,7 +565,7 @@ impl WorldMap {
         // So a v1 file is read for structure and its positions are dropped on the floor. Aiming then
         // rebuilds from this run's dumps, which is where a trustworthy position has to come from in
         // any case — see [`WorldMap::registration`].
-        let positions_are_trustworthy = text.starts_with(CACHE_VERSION);
+        let positions_are_trustworthy = trust_positions && text.starts_with(CACHE_VERSION);
         let mut edges = 0;
         // Set when any position comes back off disk. See the assignment at the end of this function.
         let mut inherited_a_frame = false;
@@ -2615,6 +2643,38 @@ mod tests {
         let mut m = WorldMap::new();
         m.absorb_cache(&v1.replacen("# diggle map cache v1", CACHE_VERSION, 1));
         assert_eq!(m.get("l9").unwrap().pos, Some((100.0, 200.0)));
+    }
+
+    /// A cache that arrives late is read for its shape and not for where things were.
+    ///
+    /// The run of 2026-08-22 0203Z is why this exists. A fresh profile has no `mainSaveData` when
+    /// the run starts, so the seed could not be read, so `no map remembered for this world` — and
+    /// the run then went round in circles inside a village it had 699 places for. The cache is now
+    /// asked for again on every save, which means it can turn up after this run has already placed
+    /// things, and old coordinates dropped into a frame we have anchored ourselves are the
+    /// disagreement `registration` exists to refuse.
+    #[test]
+    fn a_cache_that_arrives_after_we_have_placed_something_keeps_only_the_shape() {
+        let text = format!(
+            "{CACHE_VERSION}\np\tl9\tSaltagh Park forest\t100\t200\t3\t0\t\ne\tl9\tl19\n"
+        );
+
+        // Nothing placed yet: this is the startup case, and it takes the positions.
+        let mut early = WorldMap::new();
+        assert!(!early.any_placed(), "a new map has no frame to protect");
+        assert!(early.absorb_cache(&text) > 0);
+        assert_eq!(early.get("l9").unwrap().pos, Some((100.0, 200.0)));
+
+        // A frame of our own, from this run's own dump. Now the same file is structure only.
+        let mut late = WorldMap::new();
+        late.fold(&fixtures::dump("l1", "camp", vec![fixtures::node_at("l2", "camp", 500.0, 500.0)]));
+        assert!(late.any_placed(), "the fixture must actually place something, or this proves nothing");
+        assert!(late.absorb_cache_structure(&text) > 0, "the edges are the point of reading it");
+        assert!(late.get("l9").unwrap().neighbours.contains("l19"), "the shape is always safe");
+        assert_eq!(late.get("l9").unwrap().heading, "Saltagh Park forest", "and so is a name");
+        assert_eq!(late.get("l9").unwrap().pos, None, "old coordinates must not enter our frame");
+        // And what we placed ourselves is untouched.
+        assert_eq!(late.get("l2").unwrap().pos, Some((500.0, 500.0)));
     }
 
     /// The save has been carrying the road network all along, and we were reading none of it.

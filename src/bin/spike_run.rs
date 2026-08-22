@@ -126,6 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         committed_to: None,
         inputs: 0,
         guard: Default::default(),
+        map_recalled: false,
         recent: std::collections::VecDeque::new(),
         dump_misses: 0,
         pending_cinematic: false,
@@ -306,11 +307,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Loaded *before* the first dump registers, deliberately: `registration` anchors a new dump
     // against any node that already carries a position, so restoring the old positions first makes
     // this run adopt the earlier frame instead of inventing a fresh one.
-    match r.load_map_cache() {
-        Some((edges, path)) => {
-            r.log.push_str(&format!("recalled {edges} edges from `{path}`\n"));
-        }
-        None => r.log.push_str("no map remembered for this world — starting from the save alone\n"),
+    // `apply_save` above has already tried, and logged if it succeeded. Saying so here is for the
+    // case where it could not: a fresh profile has no save at startup, so this run begins blind and
+    // picks the cache up on whichever later step first writes one.
+    if !r.map_recalled {
+        r.log.push_str(
+            "no save yet, so no map recalled — this world is recognised on the first step that \
+             writes one\n",
+        );
     }
     // The first reading counted too, and used to be taken by hand here: `note_health` needs a before
     // and an after, so on a resumed save there is nothing for it to compare and the intent was never
