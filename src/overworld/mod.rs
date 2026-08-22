@@ -2044,10 +2044,27 @@ impl WorldMap {
     /// [`WorldMap::first_step_toward`] the hops would have taken, one node at a time, so the two can
     /// never disagree about which way we are going.
     pub fn far_hop(&self, from: &str, to: &str) -> Option<String> {
+        self.far_hop_chain(from, to).into_iter().next()
+    }
+
+    /// Every node [`WorldMap::far_hop`] would accept, **furthest first**.
+    ///
+    /// `far_hop` is this list's head, and that is all it ever was. The list exists because the
+    /// caller has one question this cannot answer: whether the node is somewhere it can *click*.
+    /// A hop that is off the clickable map used to be discarded whole and replaced by a single step
+    /// — the dev, 2026-08-22: *if it makes it more reliable and simpler, fast-hop to the farthest
+    /// node on the path that's still visible without panning.* Walking down from the far end is
+    /// exactly that, and its worst case is the adjacent node, which is today's fallback, so it
+    /// cannot be worse than what it replaces.
+    ///
+    /// Live 2026-08-22, `l4` toward `l4_path_to_shrine1`: refused six times running for being off
+    /// the map, the door travellable in one press throughout, one of the refusals 86 px past the
+    /// right edge with its y already on screen.
+    pub fn far_hop_chain(&self, from: &str, to: &str) -> Vec<String> {
         if self.inside().is_some() {
-            return None;
+            return Vec::new();
         }
-        self.far_chain(from, to, &|p: &Place| self.worth_consecrating_here(&p.key))
+        self.far_chain_all(from, to, &|p: &Place| self.worth_consecrating_here(&p.key))
     }
 
     /// Walks our own route to `to`, as far as the game would carry us in one press.
@@ -2055,11 +2072,11 @@ impl WorldMap {
     /// Shared by [`WorldMap::far_hop`] and [`WorldMap::far_hop_inside`], which differ only in
     /// `stop_at` — the question "is this intermediate node one we must not stride past?". Keeping one
     /// walker means the two can never disagree about the *route*, only about where to get off it.
-    fn far_chain(
+    fn far_chain_all(
         &self, from: &str, to: &str, stop_at: &dyn Fn(&Place) -> bool,
-    ) -> Option<String> {
+    ) -> Vec<String> {
         if from == to {
-            return None;
+            return Vec::new();
         }
         let mut cur = from.to_string();
         // Every node the chain could legally end on, nearest first.
@@ -2096,13 +2113,19 @@ impl WorldMap {
         //
         // Furthest first, so a long hop is preferred and a shorter one is the fallback rather than
         // the whole answer.
+        //
+        // **All of them rather than the first**, so a caller that cannot use the furthest can take
+        // the next one down instead of falling all the way back to a single step. See
+        // [`WorldMap::far_hop_chain`] for the ruling that asked for it.
         reach
             .iter()
             .rev()
-            .find(|k| self.shortest_paths_are_gentle(from, k, k.as_str() == to))
-            // One hop is not a multi-hop. Anything the caller could have worked out itself is `None`.
+            .filter(|k| self.shortest_paths_are_gentle(from, k, k.as_str() == to))
+            // One hop is not a multi-hop. Anything the caller could have worked out itself is left
+            // out of the list entirely.
             .filter(|k| !self.can_step_is_adjacent(from, k))
             .cloned()
+            .collect()
     }
 
     /// Distance in hops from `origin` to every node our own edges can reach.

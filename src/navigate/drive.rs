@@ -1410,39 +1410,87 @@ pub fn drive(
             // **The door is still tried first**, and not merely for tidiness. Its position is
             // printed by the dump in front of us; the frame's is inferred from two anchors and a
             // fitted scale. When both can answer, the one that cannot be wrong wins.
-            let far_key = match &mv {
-                Crossing::Step { toward, .. } => r.map.far_hop_inside(&here, toward),
+            //
+            // ## #80: a probe has a route too, and it does not lead to the door
+            //
+            // This was `Crossing::Step` alone, on the grounds that *the other three arms exist
+            // precisely because no route is known*. True of the **door** and false of the walk: a
+            // `Probe` is a step along a route to a frontier the crossing has already chosen and
+            // holds, which is [`crate::overworld::WorldMap::frontier_target`]. What it has no route
+            // to is `toward`, and hopping that way would be hopping toward the very thing the probe
+            // is deliberately not going to yet.
+            //
+            // Measured over the run of 2026-08-22: 42 probes, not one of which asked for a hop.
+            // Every move in Bainton Clump was a `Probe`, so a chain existed at each of them and was
+            // walked a node at a time. `Seek` is included on the same reasoning — it differs from
+            // `Probe` only in having no door to name, and it holds a frontier just the same.
+            //
+            // ## And the farthest node we can see, rather than nothing
+            //
+            // A hop off the clickable map used to be dropped whole. In `l4` toward
+            // `l4_path_to_shrine1` that happened six times in a row with the door travellable in one
+            // press throughout, until it became the immediate next node and the *ordinary* path
+            // panned it into reach — `panned by (0, -196)`. One refusal was 86 px past the right
+            // edge with its y already on screen.
+            //
+            // The dev, 2026-08-22: *if it makes it more reliable and simpler, fast-hop to the
+            // farthest node on the path that's still visible without panning.* So the chain is
+            // walked from the far end and the first clickable node wins. Its worst case is that no
+            // node qualifies and the ordinary adjacent step stands — which is exactly the old
+            // behaviour — so this can add hops and never lose one. Panning here was the other
+            // option and is the worse one: the ordinary path already pans, and a far hop that panned
+            // would be aiming at a coordinate its own pan had just invalidated.
+            let far_toward: Option<String> = match &mv {
+                Crossing::Step { toward, .. } => Some(toward.clone()),
+                Crossing::Probe { .. } | Crossing::Seek { .. } => {
+                    r.map.frontier_target().map(str::to_string)
+                }
                 _ => None,
             };
-            let far_inside: Option<(String, (f64, f64))> = far_key.and_then(|f| {
-                let drawn = f
-                    .strip_prefix(&format!("{container}_path_to_"))
-                    .and_then(|want| fresh.exits.iter().find(|e| e.to_key == want))
-                    .map(|e| ((e.x, e.y), "its road is drawn at"))
-                    .or_else(|| {
-                        r.map
-                            .inside_screen_position(&fresh, &f)
-                            .map(|p| (p, "this visit's frame puts it at"))
-                    });
-                // Nothing on screen and nothing in the frame. An unregistered dump or a room we have
-                // never been adjacent to, and either way the ordinary single step stands.
-                let Some(((x, y), how)) = drawn else {
-                    r.log.push_str(&format!(
-                        "  `{f}` is one press away and nothing places it — hopping instead\n"
-                    ));
-                    return None;
-                };
+            let far_inside: Option<(String, (f64, f64))> = far_toward.and_then(|toward| {
                 let (cw, ch) = r.win.client_size().ok()?;
-                match crate::observe::hud::is_map_point(x as i32, y as i32, cw, ch) {
-                    true => Some((f, (x, y))),
-                    false => {
-                        r.log.push_str(&format!(
-                            "  `{f}` is one press away but {how} \
-                             ({x:.0}, {y:.0}), off the map we can click — hopping instead\n"
-                        ));
-                        None
+                // Why each was left, so a chain that comes back empty can still be told apart from
+                // one that was never computed.
+                let mut passed_over: Vec<String> = Vec::new();
+                for f in r.map.far_hop_chain_inside(&here, &toward) {
+                    // **The door is still tried first**, and not merely for tidiness. Its position
+                    // is printed by the dump in front of us; the frame's is inferred from two
+                    // anchors and a fitted scale. When both can answer, the one that cannot be
+                    // wrong wins.
+                    let drawn = f
+                        .strip_prefix(&format!("{container}_path_to_"))
+                        .and_then(|want| fresh.exits.iter().find(|e| e.to_key == want))
+                        .map(|e| ((e.x, e.y), "its road is drawn at"))
+                        .or_else(|| {
+                            r.map
+                                .inside_screen_position(&fresh, &f)
+                                .map(|p| (p, "this visit's frame puts it at"))
+                        });
+                    // Nothing on screen and nothing in the frame. An unregistered dump, or a room we
+                    // have never been adjacent to.
+                    let Some(((x, y), how)) = drawn else {
+                        passed_over.push(format!("`{f}` (nothing places it)"));
+                        continue;
+                    };
+                    if crate::observe::hud::is_map_point(x as i32, y as i32, cw, ch) {
+                        if !passed_over.is_empty() {
+                            r.log.push_str(&format!(
+                                "  passed over {} for `{f}`, which {how} ({x:.0}, {y:.0})\n",
+                                passed_over.join(", ")
+                            ));
+                        }
+                        return Some((f, (x, y)));
                     }
+                    passed_over
+                        .push(format!("`{f}` ({how} ({x:.0}, {y:.0}), off the map we can click)"));
                 }
+                if !passed_over.is_empty() {
+                    r.log.push_str(&format!(
+                        "  no node on the chain is clickable — {} — stepping instead\n",
+                        passed_over.join(", ")
+                    ));
+                }
+                None
             });
             let (what, at) = match &mv {
                 Crossing::Leave { to } => {
@@ -1468,6 +1516,22 @@ pub fn drive(
                             "crossing `{container}` toward `{toward}` — `{far}` is travellable in \
                              one press at ({:.0}, {:.0}), so not via `{to}` hop by hop",
                             n.0, n.1
+                        ),
+                        *n,
+                    )
+                }
+                // The same press, for a walk heading to a frontier rather than to a door. Named
+                // apart from the arm above because the two are different journeys, and conflating
+                // them in the report has cost this project a diagnosis every time it has happened.
+                Crossing::Probe { to, .. } | Crossing::Seek { to } if far_inside.is_some() => {
+                    let (far, n) = far_inside.as_ref().expect("guarded");
+                    (
+                        format!(
+                            "probing `{container}`{} — `{far}` is travellable in one press at \
+                             ({:.0}, {:.0}), so not via `{to}` hop by hop",
+                            aiming_at(r),
+                            n.0,
+                            n.1
                         ),
                         *n,
                     )

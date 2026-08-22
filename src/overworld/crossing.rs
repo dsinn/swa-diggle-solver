@@ -1417,7 +1417,21 @@ impl WorldMap {
         if !clear_air {
             return None;
         }
-        self.far_chain(from, to, &|p: &Place| self.blocks_departure(&p.key))
+        self.far_chain_all(from, to, &|p: &Place| self.blocks_departure(&p.key)).into_iter().next()
+    }
+
+    /// Every node [`WorldMap::far_hop_inside`] would accept, furthest first — see
+    /// [`WorldMap::far_hop_chain`] for why the caller wants the list and not just its head.
+    pub fn far_hop_chain_inside(&self, from: &str, to: &str) -> Vec<String> {
+        let clear_air = self
+            .inside()
+            .and_then(|c| self.places.get(c))
+            .map(|c| !c.corrupted && !c.in_lost_woods)
+            .unwrap_or(false);
+        if !clear_air {
+            return Vec::new();
+        }
+        self.far_chain_all(from, to, &|p: &Place| self.blocks_departure(&p.key))
     }
 }
 
@@ -2574,6 +2588,106 @@ mod tests {
         let mut corrupt = forest("Bainton Clump — level 1 forest");
         corrupt.entry("l4").corrupted = true;
         assert_eq!(corrupt.far_hop_inside("l4sub1", "l4_path_to_l25"), None);
+    }
+
+    /// **#80.** The chain offers the shorter hops too, so an unclickable far node is not the end.
+    ///
+    /// `far_hop_inside` answers with the furthest node and nothing else, and the driver's only
+    /// recourse when that node was off the clickable map was to give up the hop entirely and take a
+    /// single step. Live 2026-08-22 in `l4` toward `l4_path_to_shrine1`: refused six times running,
+    /// the door travellable in one press throughout, one refusal 86 px past the right edge with its
+    /// y already on screen.
+    ///
+    /// The dev, 2026-08-22: *fast-hop to the farthest node on the path that's still visible without
+    /// panning.* That needs the whole list, furthest first — which is what the walker was computing
+    /// all along and throwing away at the last line.
+    #[test]
+    fn the_fast_hop_chain_offers_the_shorter_hops_too() {
+        let mut m = WorldMap::new();
+        for (a, b) in [("l25sub2", "x1"), ("x1", "x2"), ("x2", "l25_path_to_l4")] {
+            m.entry(a).neighbours.insert(b.into());
+            m.entry(b).neighbours.insert(a.into());
+        }
+        m.entry("l25").heading = "Aike town".into();
+        for k in ["l25sub2", "x1", "x2", "l25_path_to_l4"] {
+            m.entry(k).parent = Some("l25".into());
+            m.entry(k).heading = "Aike road".into();
+        }
+        m.here = Some("l25sub2".into());
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = { hell = 0.1 }, completedAreas = {
+                     l25sub2 = true, x1 = true, x2 = true, l25_path_to_l4 = true } } }",
+            )
+            .unwrap(),
+        );
+
+        let chain = m.far_hop_chain_inside("l25sub2", "l25_path_to_l4");
+        assert_eq!(
+            chain,
+            vec!["l25_path_to_l4".to_string(), "x2".to_string()],
+            "furthest first, and `x1` is left out because a one-hop hop is an ordinary step"
+        );
+        assert_eq!(
+            m.far_hop_inside("l25sub2", "l25_path_to_l4").as_deref(),
+            chain.first().map(String::as_str),
+            "the single answer is still the head of the list"
+        );
+    }
+
+    /// **#80.** A probe is a step along a route, and therefore has a chain the driver can hop.
+    ///
+    /// The fast hop hung off `Crossing::Step` alone, on the grounds that the other arms exist
+    /// *because no route is known*. That is true of the **door** and false of the walk: a probe
+    /// holds a frontier ([`WorldMap::frontier_target`]) and steps toward it by
+    /// `first_step_toward`, which is a route by any definition. Over the run of 2026-08-22, 42
+    /// probes asked for no hop at all; every move in Bainton Clump was one.
+    ///
+    /// The chain reaches the frontier itself, which surprised me and is right: `canTravelToDirect`
+    /// takes **either** end being complete (`overworldview.lua:1316-1321`), so a cleared road one
+    /// step short of an unwalked node still carries us onto it in one press. Four hops for one
+    /// click, at a position the run of 2026-08-22 spent four.
+    #[test]
+    fn a_probe_holds_a_frontier_with_a_chain_to_hop_along() {
+        let mut m = WorldMap::new();
+        for (a, b) in [("l25sub2", "x1"), ("x1", "x2"), ("x2", "x3"), ("x3", "frontier")] {
+            m.entry(a).neighbours.insert(b.into());
+            m.entry(b).neighbours.insert(a.into());
+        }
+        m.entry("l25").heading = "Aike town".into();
+        for k in ["l25sub2", "x1", "x2", "x3", "frontier"] {
+            m.entry(k).parent = Some("l25".into());
+            m.entry(k).heading = "Aike road".into();
+        }
+        // Everything walked but the frontier, which is what makes it one.
+        for k in ["l25sub2", "x1", "x2", "x3"] {
+            m.entry(k).visited = true;
+        }
+        m.entry("frontier").connections = 3;
+        m.here = Some("l25sub2".into());
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = { hell = 0.1 }, completedAreas = {
+                     l25sub2 = true, x1 = true, x2 = true, x3 = true } } }",
+            )
+            .unwrap(),
+        );
+
+        let mv = m.cross_toward(&[exit("l4")]).expect("a move inside the town");
+        let step = match &mv {
+            Crossing::Probe { to, .. } | Crossing::Seek { to } => to.clone(),
+            other => panic!("expected a probe toward the frontier, got {other:?}"),
+        };
+        assert_eq!(step, "x1", "the premise: one hop of a four-hop walk");
+        let target = m.frontier_target().expect("a probe holds its frontier").to_string();
+        assert_eq!(target, "frontier");
+
+        let chain = m.far_hop_chain_inside("l25sub2", &target);
+        assert_eq!(
+            chain,
+            vec!["frontier".to_string(), "x3".to_string(), "x2".to_string()],
+            "all the way to the frontier, because the road up to it is cleared"
+        );
     }
 
     /// **#84, the price on the rule below.** A woodland shrine is worth a step aside, not a search.
