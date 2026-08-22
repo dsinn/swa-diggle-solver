@@ -5586,6 +5586,17 @@ pub fn drive(
 
 #[cfg(test)]
 mod tests {
+
+    /// Every source file the driver is made of, listed because `include_str!` cannot glob.
+    ///
+    /// Read by [`every_fight_the_driver_starts_can_be_aborted`] and kept current by
+    /// [`every_navigate_source_is_in_the_sweep`]. The paths resolve against *this* file, so they
+    /// are bare names within `src/navigate/`.
+    const DRIVER_SOURCES: &[(&str, &str)] = &[
+        ("mod.rs", include_str!("mod.rs")),
+        ("guard.rs", include_str!("guard.rs")),
+        ("startup.rs", include_str!("startup.rs")),
+    ];
     use super::*;
 
     /// **The line that reported the wrong number against the wrong bar**, and what it says now.
@@ -6007,19 +6018,48 @@ mod tests {
     /// checked on one of two paths is a rule with a hole in it" is this file's own phrasing.
     #[test]
     fn every_fight_the_driver_starts_can_be_aborted() {
-        // Only the shipping half. Counting the whole file would count this test's own string
-        // literals, which makes the two totals agree for a reason that has nothing to do with the
-        // driver.
-        let src = include_str!("mod.rs");
-        let src = src.split_once("
+        let (mut starts, mut arms) = (0, 0);
+        for (_, src) in DRIVER_SOURCES {
+            // Only the shipping half of each file. Counting the tests as well would count this
+            // test's own string literals, which makes the two totals agree for a reason that has
+            // nothing to do with the driver.
+            let src = src.split_once("
 #[cfg(test)]").map(|(before, _)| before).unwrap_or(src);
-        let starts = src.matches("fight.run(").count();
-        let arms = src.matches("o.stop_requested() => return Stop::Requested").count();
+            starts += src.matches("fight.run(").count();
+            arms += src.matches("o.stop_requested() => return Stop::Requested").count();
+        }
         assert!(starts >= 3, "expected the driver's fight call sites, found {starts}");
         assert_eq!(
             arms, starts,
             "{starts} fight call sites but {arms} abort arms — one of them reports a stop as a \
              fight that went wrong"
+        );
+    }
+
+    /// The sweep above reads a list, and a list is only as good as whatever keeps it current.
+    ///
+    /// `include_str!` cannot glob, so [`DRIVER_SOURCES`] is written out by hand — and the whole
+    /// point of the split (#76) is that the driver goes on gaining files. A `fight.run(` that moved
+    /// into a file nobody added to the list would not fail to compile and would not fail the sweep;
+    /// it would quietly stop being checked, which is the same hole the sweep exists to close. So
+    /// compare the list against the directory rather than trusting it.
+    #[test]
+    fn every_navigate_source_is_in_the_sweep() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/navigate");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .expect("src/navigate is where this module lives")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".rs"))
+            .collect();
+        on_disk.sort();
+        let mut listed: Vec<String> =
+            DRIVER_SOURCES.iter().map(|(n, _)| (*n).to_string()).collect();
+        listed.sort();
+        assert_eq!(
+            on_disk, listed,
+            "`DRIVER_SOURCES` and `src/navigate/` disagree — a driver source outside the list is a \
+             source the abort sweep never reads"
         );
     }
 }
