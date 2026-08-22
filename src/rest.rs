@@ -127,14 +127,38 @@ pub const INN_COST: i64 = 10;
 /// arrival handler: `Rest` on a campfire is an ordinary area button, and the cost side is already
 /// read — [`fuel`] totals the firewood and `areaUnused` says whether the first rest is free.
 pub const CAMPFIRE_REST_IS_BUILT: bool = false;
-/// **Well-Rested stacks wanted per level of a fight we take on purpose.**
+/// **The bank a deliberate deep fight obliges us to walk in with.**
 ///
-/// The dev's number, 2026-08-20, after a run reached the anomaly and died at turn 24. Well Rested
-/// is not an aura — it is a bank of overkill heals, one spent per kill that heals
+/// The dev's revision, 2026-08-22, replacing `STACKS_PER_LEVEL * level`: *when we wish to fight at
+/// a lv6+ crypt or anomaly, instead of 2x node level, I want at least 5 stacks of Well Rested. If
+/// we come under that, restock up to 20 stacks, or stop short because we're out of gold.*
+///
+/// **A floor, not a target, and the gap between the two is the whole point.** The old rule made one
+/// number do both jobs, so a bank one stack under the want sent the run across the map for one
+/// stack. This is the low-water mark: below it a special trip is worth making, at or above it the
+/// bank is good enough to fight on and the run keeps going. See [`STACKS_TARGET`] for what a trip,
+/// once made, fills to.
+///
+/// Well Rested is not an aura — it is a bank of overkill heals, one spent per kill that heals
 /// (`rpgview.lua:1204-1209`), each worth `min(floor(overkill/2), missingHealth)` (`:1194`). So the
-/// right unit is "how many kills deep is this fight", and twice the level is the dev's estimate of
-/// that.
-pub const STACKS_PER_LEVEL: i64 = 2;
+/// unit is "how many kills deep is this fight", and the dev's judgement is that the level no longer
+/// earns its place in that estimate: a level 6 crypt and a level 8 anomaly both want a bank that is
+/// simply *not nearly empty*.
+pub const STACKS_FLOOR: i64 = 5;
+
+/// **What a restocking visit fills the bank to.**
+///
+/// The high-water mark of the dev's rule of 2026-08-22, and the half that reduces backtracking:
+/// having paid the walk once, buy enough that the next fight does not send us back. Stacks cost
+/// [`INN_COST`] each and one press each, so filling from empty is 200 gold and 20 presses — which
+/// is why [`crate::innplay::MAX_PRESSES`] had to move above it to stay a guard.
+///
+/// **Which of the two numbers is asked depends on who is asking**, and that split already existed:
+/// [`crate::overworld::WorldMap::stacks_short_for`] is the planner deciding whether to *set off*
+/// and answers against [`STACKS_FLOOR`]; [`crate::overworld::WorldMap::stacks_short_ahead`] is the
+/// inn deciding how many times to *press* and answers against this. Asking one number in both
+/// places is what would collapse the band: filling would stop at 5 the moment it crossed it.
+pub const STACKS_TARGET: i64 = 20;
 
 /// The level at which a deliberate fight starts wanting a full bank.
 ///
@@ -157,14 +181,22 @@ pub const DEEP_FIGHT: u32 = 6;
 /// silently not apply to exactly the shrines we know least about.
 pub const ASSUMED_SHRINE_LEVEL: u32 = 7;
 
-/// How many stacks a fight at `level` is worth banking for.
-pub fn stacks_wanted(level: u32) -> i64 {
-    STACKS_PER_LEVEL * level as i64
+/// **Is the bank low enough to be worth a special trip?** The low-water half of the band.
+///
+/// Takes no level: [`worth_banking_for`] has already answered whether the fight is deep enough to
+/// care, and past that line the dev's rule is flat.
+pub fn bank_is_short(banked: i64) -> bool {
+    banked < STACKS_FLOOR
 }
 
-/// How many more stacks a fight at `level` wants, given what is banked. Zero when it is satisfied.
-pub fn stacks_short(banked: i64, level: u32) -> i64 {
-    (stacks_wanted(level) - banked).max(0)
+/// **How many stacks a restock still owes**, given what is banked. Zero once the bank is full.
+///
+/// The high-water half. Note it is *not* the negation of [`bank_is_short`]: between the floor and
+/// the target this is positive while a trip is not warranted, which is exactly the band. A run
+/// standing in a village anyway will still top up — that is the inn's decision and it costs a
+/// press, not a journey.
+pub fn stacks_short(banked: i64) -> i64 {
+    (STACKS_TARGET - banked).max(0)
 }
 
 /// **Is a fight at this level worth stopping to bank for at all?**
@@ -367,23 +399,41 @@ mod tests {
             assert_eq!(site(h), None, "`{h}` is not somewhere to sleep");
         }
     }
-    /// The dev's rule in the two numbers it will actually be asked for.
+    /// **The band, at the two bars and between them.** The dev's rule of 2026-08-22.
+    ///
+    /// *When we wish to fight at a lv6+ crypt or anomaly, instead of 2x node level, I want at least
+    /// 5 stacks of Well Rested. If we come under that, restock up to 20 stacks, or stop short
+    /// because we're out of gold.*
+    ///
+    /// The middle of the band is the case the old rule could not express, and the reason the
+    /// revision exists: at five stacks nothing sends the run anywhere, and the fill it *would* do
+    /// if it were already at a bed is fifteen.
     #[test]
-    fn the_bank_wanted_is_twice_the_level() {
-        // The anomaly is level 8, which is the fight this rule was written after.
-        assert_eq!(stacks_wanted(8), 16);
-        // A corrupted shrine with no heading, which is the case the assumption exists for.
-        assert_eq!(stacks_wanted(ASSUMED_SHRINE_LEVEL), 14);
-        // And the shallowest fight the rule applies to at all.
-        assert_eq!(stacks_wanted(DEEP_FIGHT), 12);
+    fn the_bank_has_a_floor_that_sends_us_and_a_target_that_stops_us() {
+        assert!(bank_is_short(4), "under the floor, so the trip is worth making");
+        assert!(!bank_is_short(STACKS_FLOOR), "five is the dev's `at least`, so five is enough");
+        assert!(!bank_is_short(STACKS_TARGET));
+        assert!(bank_is_short(0), "spent out, which is how the 2026-08-20 run arrived");
+
+        assert_eq!(stacks_short(0), 20, "a full restock from empty");
+        assert_eq!(stacks_short(4), 16, "the fill is measured to the target, not to the floor");
+        assert_eq!(stacks_short(STACKS_FLOOR), 15, "and it does not stop on the way past it");
+        assert_eq!(stacks_short(STACKS_TARGET), 0, "full is full");
+        assert_eq!(stacks_short(25), 0, "and a surplus is not a negative errand");
     }
 
+    /// **The level stopped scaling the bank**, which is the half of the revision easiest to lose.
+    ///
+    /// Every fight past [`DEEP_FIGHT`] wants the same bank now. `worth_banking_for` still reads the
+    /// level, because *whether* is still a question about depth; nothing reads it for *how many*.
     #[test]
-    fn a_bank_already_deep_enough_asks_for_nothing_more() {
-        assert_eq!(stacks_short(16, 8), 0, "exactly enough is enough");
-        assert_eq!(stacks_short(20, 8), 0, "and a surplus is not a negative errand");
-        assert_eq!(stacks_short(11, 8), 5, "eleven is what a real run reached");
-        assert_eq!(stacks_short(0, 8), 16, "spent out, which is how the 2026-08-20 run arrived");
+    fn the_depth_of_the_fight_no_longer_changes_the_number() {
+        // The anomaly is level 8, the fight the original rule was written after; a corrupted shrine
+        // with no heading is `ASSUMED_SHRINE_LEVEL`; `DEEP_FIGHT` is the shallowest that qualifies.
+        for level in [DEEP_FIGHT, ASSUMED_SHRINE_LEVEL, 8, 10] {
+            assert!(worth_banking_for(level));
+            assert_eq!(stacks_short(0), STACKS_TARGET, "level {level} asks for no more and no less");
+        }
     }
 
     /// **The shallow end is excluded on purpose**, and this is the dev's forest correction.

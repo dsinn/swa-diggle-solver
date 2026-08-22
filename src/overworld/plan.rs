@@ -77,8 +77,8 @@ pub enum Goal {
     ///
     /// Distinct from [`Goal::Rest`] in what it is answering. `Rest` is a response to damage already
     /// taken and stops when the bar is full; this is preparation for damage not yet taken, it is
-    /// bought at full health, and it stops when the bank is deep enough for the fight ahead
-    /// ([`crate::rest::stacks_wanted`]).
+    /// bought at full health, and it stops when the bank reaches
+    /// [`crate::rest::STACKS_TARGET`] — or sooner, when the purse runs out.
     ///
     /// The game permits it: `getCanRest` for an inn is a flat `getPlayerGold() >= 10`
     /// (`ui/rest.lua:49`) with no health condition, and `doRest` grants the stack on its own line,
@@ -374,14 +374,18 @@ impl WorldMap {
     /// - the destination is a fight we would be **taking on purpose**
     ///   ([`Place::deliberate_fight_level`], which excludes forests for the dev's reason);
     /// - it is deep enough to be worth the errand ([`crate::rest::worth_banking_for`]);
-    /// - the bank is short of twice its level ([`crate::rest::stacks_short`]);
+    /// - the bank is under [`crate::rest::STACKS_FLOOR`] ([`crate::rest::bank_is_short`]) — the
+    ///   low-water half of the dev's band, so a bank that is merely not full does not move the run;
     /// - **there is still ten gold**, the dev's floor and the inn's own gate — below it the
     ///   requirement is unmeetable rather than merely unmet, and holding the run at it would stall;
     /// - and a bed can actually be reached.
     ///
     /// The last two are what stop this looping. Every other clause is a fact about the world that
     /// the errand itself changes: each rest spends ten gold and adds one stack, so the run walks
-    /// toward the condition it is testing and either satisfies it or runs out of money.
+    /// toward the condition it is testing and either satisfies it or runs out of money. Under the
+    /// band that is *faster* than it was, not slower — the errand is discharged the moment the bank
+    /// reaches [`crate::rest::STACKS_FLOOR`], and the rest of the fill happens at a bed we are
+    /// already standing at.
     ///
     /// Note it does **not** consult `wants_rest`. That flag is about damage taken; this is about
     /// damage to come, and the two are independent — a run at full health with an empty bank is
@@ -392,17 +396,26 @@ impl WorldMap {
     /// it to decide *whether to go*, and [`crate::navigate::Run::rest_at_inn`] uses it to decide
     /// **how many times to press `Rest`** once it is there. Two answers from one function, so a
     /// run cannot set off for stacks it will not then buy.
+    ///
+    /// **Two different bars, and this is the low one.** The dev's rule of 2026-08-22 put a band
+    /// around the bank: below [`crate::rest::STACKS_FLOOR`] a trip is worth making, and a trip once
+    /// made fills to [`crate::rest::STACKS_TARGET`]. This function is the *setting off* half, so it
+    /// asks [`crate::rest::bank_is_short`] first and only then how much the trip owes. Answering
+    /// with the shortfall alone would put us on the road for a single stack, which is the
+    /// backtracking the revision was aimed at.
     fn stacks_short_for(&self, target: &str) -> i64 {
         let Some(level) = self.places.get(target).and_then(Place::deliberate_fight_level) else {
             return 0;
         };
-        match crate::rest::worth_banking_for(level) {
-            true => crate::rest::stacks_short(self.well_rested, level),
+        let worth_it = crate::rest::worth_banking_for(level)
+            && crate::rest::bank_is_short(self.well_rested);
+        match worth_it {
+            true => crate::rest::stacks_short(self.well_rested),
             false => 0,
         }
     }
 
-    /// **How short the bank is for the deepest deliberate fight we know about.**
+    /// **How short the bank is, once any deliberate deep fight is known to be out there.**
     ///
     /// The *inn's* question, and deliberately a different one from [`WorldMap::bank_first`]'s.
     /// That one asks "is the place I am walking to a fight I should bank for", because it is
@@ -412,40 +425,59 @@ impl WorldMap {
     ///
     /// Asking the ladder again here would answer with the inn we are standing in — whose
     /// `deliberate_fight_level` is `None` — and the count would collapse to zero exactly where it
-    /// is needed. The deepest known fight is the honest stand-in: the anomaly is on the map from
-    /// the moment the portal opens, and a crypt we have seen does not stop being a crypt because
-    /// this step is heading elsewhere.
+    /// is needed. So the test is over the whole map: the anomaly is on it from the moment the
+    /// portal opens, and a crypt we have seen does not stop being a crypt because this step is
+    /// heading elsewhere.
+    ///
+    /// **The level decides *whether*, and no longer *how many*.** Under the dev's rule of
+    /// 2026-08-22 the depth of the deepest fight has stopped scaling the bank — every fight past
+    /// [`crate::rest::DEEP_FIGHT`] wants the same [`crate::rest::STACKS_TARGET`] — so this went
+    /// from `max()` to `any()`. [`WorldMap::deepest_fight`] still names the node for the log,
+    /// because "which fight is this about" remains a fair question even when the answer no longer
+    /// changes the count.
+    ///
+    /// **And this is the high bar of the band, not the low one.** It answers 15 at a bank of five,
+    /// where [`WorldMap::stacks_short_for`] answers 0 and refuses the trip. That is not a
+    /// disagreement: the trip costs a walk and this costs a press, and they are priced separately.
     ///
     /// ## Why this terminates, which is the part that matters
     ///
     /// It is the one question this file has been burned by before — a bed that stays wanted is a
     /// loop, and `docs/superpowers/notes/navigation-loops.md` catalogues six of them. **Every rest
     /// moves both terms in the same direction**: one stack banked, ten gold gone. So the condition
-    /// is strictly monotone under its own errand and ends either when the bank is deep enough or
-    /// when the purse drops below [`crate::rest::INN_COST`] — the dev's floor, and the inn's own
-    /// gate. Neither exit depends on anything we cannot see.
+    /// is strictly monotone under its own errand and ends either when the bank reaches
+    /// [`crate::rest::STACKS_TARGET`] or when the purse drops below [`crate::rest::INN_COST`] —
+    /// the dev's floor, and the inn's own gate. Neither exit depends on anything we cannot see.
+    ///
+    /// The band does not weaken that argument, because the two bars move the same way. Crossing
+    /// [`crate::rest::STACKS_FLOOR`] takes the *errand* away at once — one stack bought at four is
+    /// enough to stop the run being sent anywhere — while this keeps counting for as long as we
+    /// happen to be standing at a bed. Both are strictly decreasing in the bank.
     pub fn stacks_short_ahead(&self) -> i64 {
-        self.places
+        let a_deep_fight_is_known = self
+            .places
             .values()
             .filter_map(Place::deliberate_fight_level)
-            .filter(|l| crate::rest::worth_banking_for(*l))
-            .max()
-            .map(|l| crate::rest::stacks_short(self.well_rested, l))
-            .unwrap_or(0)
+            .any(crate::rest::worth_banking_for);
+        match a_deep_fight_is_known {
+            true => crate::rest::stacks_short(self.well_rested),
+            false => 0,
+        }
     }
 
-    /// **Which fight [`WorldMap::stacks_short_ahead`] is pricing.** For the log.
+    /// **Which fight the bank is being kept for.** For the log.
     ///
-    /// The shortfall alone is not readable: `16 stack(s) short` is `2 x 8 - 0` and equally
-    /// `2 x 9 - 2`, and the run of 2026-08-21 1519Z printed 16 at startup and 0 at every rest with
-    /// three thousand gold in the purse and the same level 8 anomaly on the map throughout. Two
-    /// numbers cannot be told apart by their difference. Naming the node and the bank beside it
-    /// makes the line answer for itself.
+    /// The shortfall alone is not readable, and was less so under the old level-scaled rule:
+    /// `16 stack(s) short` was `2 x 8 - 0` and equally `2 x 9 - 2`, and the run of 2026-08-21 1519Z
+    /// printed 16 at startup and 0 at every rest with three thousand gold in the purse and the same
+    /// level 8 anomaly on the map throughout. Two numbers cannot be told apart by their difference.
+    /// Naming the node and the bank beside it makes the line answer for itself.
     ///
-    /// Reproduced from `map-cache/world-0.txt` alone: 699 places, deepest `start`
-    /// (`Cottam - level 8 anomaly`), and `stacks_short_ahead` is exactly 16 with an empty bank. So
-    /// the *shortfall* was never in doubt; what the line could not say was what it thought the
-    /// bank held.
+    /// **It no longer prices anything**, since the dev's rule of 2026-08-22 stopped the level
+    /// scaling the count — [`WorldMap::stacks_short_ahead`] asks only whether *some* deep fight is
+    /// known. Kept anyway, and this is the reason: the count and the node were never separable by
+    /// arithmetic, and the log needs to say which fight it thinks it is preparing for. A run that
+    /// banks for a crypt it has cleared is a different bug from one that miscounts.
     pub fn deepest_fight(&self) -> Option<(&str, u32)> {
         self.places
             .values()
@@ -2261,14 +2293,14 @@ mod tests {
 
         // Spent out, which is how the run of 2026-08-20 arrived at the portal.
         let m = build();
-        assert_eq!(m.stacks_short_ahead(), 16, "twice the level 8 anomaly");
+        assert_eq!(m.stacks_short_ahead(), 20, "the target, flat — the level stopped scaling it");
         let plan = m.next_target().expect("a plan");
         assert_eq!(plan.reason, Goal::StockUp, "the bed comes before the fight");
         assert_eq!(plan.target, "l11", "and it is the village that has one");
 
         // A bank already deep enough leaves the errand exactly as it was.
         let mut m = build();
-        m.well_rested = crate::rest::stacks_wanted(8);
+        m.well_rested = crate::rest::STACKS_TARGET;
         assert_eq!(m.stacks_short_ahead(), 0);
         assert_eq!(m.next_target().unwrap().reason, Goal::CloseAnomaly, "nothing left to buy");
 
@@ -2278,12 +2310,21 @@ mod tests {
         m.gold = crate::rest::INN_COST - 1;
         assert_eq!(m.next_target().unwrap().reason, Goal::CloseAnomaly, "broke, so get on with it");
 
-        // Eleven stacks — what a real run reached, in `at-woodland-shrine-unprayed` — is still five
-        // short of the anomaly, so the errand still fires.
+        // **The band, and this is the case the dev's revision of 2026-08-22 changed.** Eleven
+        // stacks — what a real run reached, in `at-woodland-shrine-unprayed` — is nine under the
+        // target and would have sent the old rule to an inn. It is over the floor, so nothing sends
+        // us anywhere: *at least 5 stacks*, and eleven is at least five.
         let mut m = build();
         m.well_rested = 11;
-        assert_eq!(m.stacks_short_ahead(), 5);
-        assert_eq!(m.next_target().unwrap().reason, Goal::StockUp);
+        assert_eq!(m.stacks_short_ahead(), 9, "a bed we pass would still top us up");
+        assert_eq!(m.next_target().unwrap().reason, Goal::CloseAnomaly, "but not a trip for it");
+
+        // One under the floor is the whole of the difference, and it fills to the target rather
+        // than to the floor — sixteen stacks for a bank of four.
+        let mut m = build();
+        m.well_rested = crate::rest::STACKS_FLOOR - 1;
+        assert_eq!(m.stacks_short_ahead(), 16);
+        assert_eq!(m.next_target().unwrap().reason, Goal::StockUp, "under the floor, so we go");
     }
 
     /// **Hearts outrank the bank, because they share one purse.** The dev's ruling, 2026-08-20.
@@ -2314,14 +2355,14 @@ mod tests {
         // The purse from the live save on 2026-08-20: plenty for both, so both happen — and the
         // heart goes first because it outranks on the ladder.
         let m = build(465);
-        assert_eq!(m.stacks_short_ahead(), 16, "the want is unchanged by the reserve");
-        assert_eq!(m.stacks_to_buy(), 16, "and 465 less the reserve still covers all of it");
+        assert_eq!(m.stacks_short_ahead(), 20, "the want is unchanged by the reserve");
+        assert_eq!(m.stacks_to_buy(), 20, "and 465 less the reserve still covers all of it");
         assert_eq!(m.next_target().unwrap().reason, Goal::Heart, "the heart is the errand");
 
         // **The case the ruling is about.** Enough for a heart and a bed, and not a coin more: every
         // stack bought here is a heart not bought.
         let m = build(HEART_FLOOR);
-        assert_eq!(m.stacks_short_ahead(), 16, "still wanted");
+        assert_eq!(m.stacks_short_ahead(), 20, "still wanted");
         assert_eq!(m.stacks_to_buy(), 0, "and not one of them may be paid for");
         assert!(!m.wants_a_bed(), "so the inn is not an errand while the shelf is stocked");
 
@@ -4554,38 +4595,46 @@ e	l4	l11
         assert_eq!(m.next_target(), None, "walking on would be pointless, and saying so is the answer");
     }
 
-    /// The shortfall and the fight it prices have to agree, or the line is no better than the one
-    /// it replaced. `16` is `2 x 8 - 0` and equally `2 x 9 - 2`.
+    /// The log names the fight the bank is being kept for, and the two have to switch off together.
+    ///
+    /// Under the old level-scaled rule the count moved with the node, which is what made them
+    /// comparable. Since 2026-08-22 it does not — every fight past the floor wants the same twenty
+    /// — so what has to hold now is the **on/off**: while some deep fight is named the count is
+    /// live, and when the last one is cleared both go quiet together. A count still asking for
+    /// twenty with no fight to name would be the bug this pins.
     #[test]
-    fn the_deepest_fight_is_the_one_the_shortfall_is_priced_against() {
+    fn the_deepest_fight_is_named_for_as_long_as_the_bank_is_wanted() {
         let mut m = WorldMap::new();
         m.entry("start").heading = "Cottam — level 8 anomaly".into();
         m.entry("l61").heading = "Meaux — level 7 crypt".into();
         m.entry("l23").heading = "Smithy — level 3 crypt".into();
         assert_eq!(m.deepest_fight(), Some(("start", 8)));
-        assert_eq!(m.stacks_short_ahead(), crate::rest::stacks_wanted(8));
+        assert_eq!(m.stacks_short_ahead(), crate::rest::STACKS_TARGET);
 
-        // Clearing it moves both together, which is the property that makes them comparable.
+        // Clearing the deepest moves the *name* and pointedly not the count.
         m.entry("start").completed = true;
         assert_eq!(m.deepest_fight(), Some(("l61", 7)));
-        assert_eq!(m.stacks_short_ahead(), crate::rest::stacks_wanted(7));
+        assert_eq!(m.stacks_short_ahead(), crate::rest::STACKS_TARGET, "level 7 asks for the same");
 
-        // And a map with nothing deep enough says so rather than naming a fight it is not pricing.
+        // And a map with nothing deep enough says so rather than naming a fight it is not keeping
+        // the bank for — both off, together.
         m.entry("l61").completed = true;
         assert_eq!(m.deepest_fight(), None, "level 3 is below the banking floor");
         assert_eq!(m.stacks_short_ahead(), 0);
     }
 
-    /// The 1519Z line, reconstructed: `16 stack(s) short` came from an empty bank against the
-    /// level 8 anomaly, and the number alone cannot say that.
+    /// The 1519Z line, reconstructed. It printed `16 stack(s) short` from an empty bank against the
+    /// level 8 anomaly, and the number alone could not say that; the same state reads 20 now.
     #[test]
-    fn an_empty_bank_and_a_level_eight_anomaly_are_the_sixteen_the_run_printed() {
+    fn an_empty_bank_and_a_level_eight_anomaly_are_a_full_restock() {
         let mut m = WorldMap::new();
         m.entry("start").heading = "Cottam — level 8 anomaly".into();
         assert_eq!(m.well_rested, 0);
-        assert_eq!(m.stacks_short_ahead(), 16);
-        // The save's own reading is what settles it, and 17 banked is not 16 short.
+        assert_eq!(m.stacks_short_ahead(), 20);
+        // The save's own reading is what settles it, and 17 banked is three short, not twenty.
         m.well_rested = 17;
+        assert_eq!(m.stacks_short_ahead(), 3);
+        m.well_rested = crate::rest::STACKS_TARGET;
         assert_eq!(m.stacks_short_ahead(), 0, "a full bank wants nothing");
     }
 

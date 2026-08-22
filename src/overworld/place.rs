@@ -945,7 +945,7 @@ impl Place {
     /// **The level of a fight we would take here on purpose**, or `None` if arriving is not us
     /// choosing to fight.
     ///
-    /// This is the trigger for the Well-Rested bank ([`crate::rest::stacks_wanted`]), and the
+    /// This is the trigger for the Well-Rested bank ([`crate::rest::worth_banking_for`]), and the
     /// distinction it draws is the dev's, 2026-08-20:
     ///
     /// > Forests have significantly shorter combat nodes on the path, and we don't currently have

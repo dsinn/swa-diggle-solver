@@ -385,13 +385,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // [`WorldMap::stacks_short_ahead`], how deep the want is; the inn prints
     // [`WorldMap::stacks_to_buy`], how much of it the purse may serve. Printing the bank and the
     // node beside the shortfall is what makes the pair comparable at all. See #66.
+    //
+    // **The band is printed too**, since the dev's revision of 2026-08-22. A shortfall that does
+    // not move the run is now an ordinary state rather than a contradiction — nine short with the
+    // bank over `STACKS_FLOOR` means no trip is owed, and a reader cannot tell that from the
+    // shortfall alone any more than 1519Z's reader could tell one 16 from the other.
     r.log.push_str(&format!(
-        "shrines: {} known, {} consecrated (the portal wants {}); well-rested: {} banked, \
-         {} stack(s) short for {}, {} the purse will serve\n\n",
+        "shrines: {} known, {} consecrated (the portal wants {}); well-rested: {} banked \
+         (a trip under {}, filling to {}), {} stack(s) short for {}, {} the purse will serve\n\n",
         r.map.shrines_known(),
         r.map.consecrations(),
         diggle_solver::overworld::SHRINES_BEFORE_THE_ANOMALY,
         r.map.well_rested(),
+        diggle_solver::rest::STACKS_FLOOR,
+        diggle_solver::rest::STACKS_TARGET,
         r.map.stacks_short_ahead(),
         match r.map.deepest_fight() {
             Some((key, level)) => format!("`{key}` at level {level}"),

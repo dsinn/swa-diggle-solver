@@ -214,7 +214,8 @@ pub struct WorldMap {
     /// A consumable, not an aura: one is spent per kill that heals (`rpgview.lua:1204-1209`), and
     /// the only source we can reach is an inn at [`crate::rest::INN_COST`] a stack
     /// (`ui/rest.lua:355-357`). Held here for the same reason `gold` is — the decision it feeds is
-    /// where to go next. See [`crate::rest::stacks_wanted`] for what a fight is worth banking for.
+    /// where to go next. [`crate::rest::STACKS_FLOOR`] is the bank that obliges a trip and
+    /// [`crate::rest::STACKS_TARGET`] is what a trip fills to.
     ///
     /// Zero is an **absent key**, not a stored zero: `affectPlayerStatus` deletes a status the
     /// moment it reaches zero (`overworld.lua:45-47`), so a spent-out character has no

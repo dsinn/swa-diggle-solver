@@ -134,12 +134,17 @@ pub const WAKE_UP: ButtonSpec =
 ///
 /// **Raised from twelve on 2026-08-20**, when banking Well-Rested stacks gave it a second and larger
 /// customer. Twelve was four times what a full bar costs from one health, so it never bound; the
-/// bank asks for [`crate::rest::STACKS_PER_LEVEL`] times the level, which is sixteen for the level 8
-/// anomaly alone — the cap would have silently capped the dev's rule three presses short, at an inn
-/// with the gold in hand and nothing on screen to say why.
+/// bank then asked for twice the level, sixteen for the level 8 anomaly alone — the cap would have
+/// silently capped the dev's rule three presses short, at an inn with the gold in hand and nothing
+/// on screen to say why.
 ///
-/// Twenty covers a level 10 fight, above anything the anomaly or a crypt has been seen to reach.
-pub const MAX_PRESSES: usize = 20;
+/// **Raised again from twenty on 2026-08-22**, for the same reason and a sharper one: the dev's
+/// band fills a restocking visit to [`crate::rest::STACKS_TARGET`], which is twenty exactly. A
+/// ceiling equal to the want is not a ceiling — it binds on the very first full restock from an
+/// empty bank, and does so invisibly. Thirty leaves ten presses of daylight, which is also enough
+/// for the case the guard is really for: a visit interrupted by a dream, re-entered, and asked
+/// again against a save that has not been written (see [`still_wanted`]).
+pub const MAX_PRESSES: usize = 30;
 
 /// How many times to press `Rest` before accepting that the rest screen is not going to open.
 ///
@@ -235,8 +240,8 @@ pub fn parse_rest_data(lines: &[String]) -> Option<RestData> {
 /// - **Enough to fill the bar.** `heal = min(getRestValue(), healthNeed)` per press
 ///   (`ui/rest.lua:353`), so this is a division, not a single click.
 /// - **Enough to bank `stacks_short` Well-Rested stacks**, one per press
-///   (`affectPlayerStatus(statusGive, 1)`, `:355-357`). The dev's rule of 2026-08-20; see
-///   [`crate::rest::stacks_wanted`].
+///   (`affectPlayerStatus(statusGive, 1)`, `:355-357`). The dev's rule of 2026-08-20, revised
+///   2026-08-22; see [`crate::rest::STACKS_TARGET`], which is what a visit fills to.
 ///
 /// Then two limits on the result:
 ///
@@ -473,15 +478,20 @@ Rest data = {
     /// **The ceiling has to sit above every number the rule can ask for.**
     ///
     /// It was twelve, which never bound while healing was the only customer — four times what a
-    /// full bar costs from one health. The bank asks for twice the level, sixteen for the anomaly
-    /// alone, so twelve would have capped the dev's rule four presses short at an inn with the gold
-    /// in hand and nothing on screen to say why. This is the assertion that keeps the guard a guard.
+    /// full bar costs from one health. The bank then asked for twice the level, sixteen for the
+    /// anomaly alone, so twelve would have capped the dev's rule four presses short at an inn with
+    /// the gold in hand and nothing on screen to say why.
+    ///
+    /// **Strictly greater, not `>=`, since 2026-08-22.** The band fills to
+    /// [`crate::rest::STACKS_TARGET`] flat, so equality would mean the cap binds exactly when the
+    /// rule is satisfied for the first time — a guard that fires on the intended path is a rule
+    /// wearing a guard's name. This is the assertion that keeps the two apart.
     #[test]
     fn the_press_ceiling_clears_the_deepest_bank_the_rule_can_want() {
         assert!(
-            MAX_PRESSES >= crate::rest::stacks_wanted(8) as usize,
-            "the level 8 anomaly wants {} presses and the cap is {MAX_PRESSES}",
-            crate::rest::stacks_wanted(8)
+            MAX_PRESSES > crate::rest::stacks_short(0) as usize,
+            "a full restock wants {} presses and the cap is {MAX_PRESSES}",
+            crate::rest::stacks_short(0)
         );
         let full = RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
         assert_eq!(presses_needed(&full, 10_000, 500), MAX_PRESSES, "and it is still a ceiling");
