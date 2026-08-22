@@ -2032,6 +2032,13 @@ pub fn drive(
             let for_a_heart =
                 p.is_settlement() && r.map.wants_a_heart() && !r.map.heart_is_spent(&p.key);
             let rest_here = open_for_business && (for_a_bed || for_a_heart);
+            // **Deliberately still the narrow flag**, while the two sites above take
+            // [`Place::is_container`]. The `stuck_here` arm below returns `Stop::AtSubworld`, so
+            // widening this converts "walked past a village we knew nothing about" into "stopped at
+            // it" — a behaviour change with no evidence behind it yet, where the label and
+            // `nothing_left_to_reveal` are corrections with a run apiece. `subworld_container` means
+            // *we have been inside and know it can be crossed*, which is the stronger claim this arm
+            // wants.
             if p.subworld_container || rest_here {
                 let heading_for = r.map.next_hop().map(|h| h.plan.target);
                 let stuck_here =
@@ -2300,12 +2307,14 @@ pub fn drive(
             // container this click is `Explore` or `Visit` and enters — it does not start a fight.
             // Calling that "fighting `l4`" was the other half of #54: one line claimed an entry that
             // did not happen, and this one described the entry that did as something else.
+            // [`Place::is_container`] rather than the proved-from-inside flag, which is what made
+            // this say `fighting l10` about a village on 2026-08-22. The heading has always known.
             let what = match () {
-                _ if p.subworld_container => "entering",
+                _ if p.is_container() => "entering",
                 _ if p.is_chest() => "opening",
                 _ => "fighting",
             };
-            let toward = match p.subworld_container {
+            let toward = match p.is_container() {
                 true => hop
                     .as_ref()
                     .map(|h| format!(" to cross toward `{}`", h.plan.target))

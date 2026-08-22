@@ -720,6 +720,53 @@ impl Place {
         self.type_is("village") || self.type_is("town")
     }
 
+    /// Is there a subworld behind this place — **whether or not we have ever been inside it**?
+    ///
+    /// [`Place::subworld_container`] is the older answer and is only ever set from a dump taken
+    /// *inside* one, so a village we have not entered this run reads as an ordinary fight. That cost
+    /// the run of 2026-08-22 1855Z a step logged `fighting l10` and a wait that sat four seconds
+    /// looking for a pregame while we stood inside Ulrome. The heading knew all along.
+    ///
+    /// ## The nouns, enumerated from the source rather than guessed
+    ///
+    /// Four files declare a `subworld`, and the surface heading shows `getTypeName`, which is not
+    /// always the `typeName`:
+    ///
+    /// | source | `subworld` | what the heading can read |
+    /// |---|---|---|
+    /// | `village.lua:72` | `village` | `village`, and `town`/`hamlet` from `getTypeName` (`:6-14`) |
+    /// | `in_forest.lua:14` | `forest` | `forest` |
+    /// | `shrine_forest_raw.lua:10` | `forest` | `forest`, or `shrine` once revealed |
+    /// | `world.lua:19` | `church_ground` | `church` |
+    ///
+    /// and eight more types are `in_forest{…}` derivatives that inherit the subworld and rename
+    /// themselves through `trueTypeName` once `variant ~= 1` — `bandit camp` (`bandits.lua:22,28`),
+    /// `graveyard` (`graveyards.lua:17,29`), `mausoleum` (`mausoleums.lua:37,49`) and `spider forest`
+    /// (`spider_forests.lua:36,52`). The last needs no entry of its own, ending in `forest` already.
+    ///
+    /// **`shrine` is deliberately not in the list.** A revealed shrine-forest reads exactly like the
+    /// plain `shrine.lua` type, which is not a container — `shrine2` in that same run was `Gransmoor
+    /// shrine`, played through `Visit` and a word game. Nothing in the heading separates them, so
+    /// this declines rather than guessing, and a revealed shrine-forest stays known only from the
+    /// inside, as everything was before.
+    ///
+    /// ## Why the parent test is not optional
+    ///
+    /// A forest's *interior* nodes are typed `forest` too, so `shrine1sub4 Gripthorpe Brush forest`
+    /// would otherwise read as a container sitting inside another one. Only a surface node can be a
+    /// container, and a surface node is one with no parent — a fact the cache round-trips
+    /// (`WorldMap::cache_text`), so it survives a restart along with the heading.
+    pub fn is_container(&self) -> bool {
+        self.subworld_container || self.heading_says_container()
+    }
+
+    /// The heading half of [`Place::is_container`], which is where the reasoning lives.
+    fn heading_says_container(&self) -> bool {
+        const NOUNS: &[&str] =
+            &["village", "town", "hamlet", "forest", "bandit camp", "graveyard", "mausoleum", "church"];
+        self.parent.is_none() && NOUNS.iter().any(|t| self.type_is(t))
+    }
+
     /// **Somewhere with a bed** — which is all three settlement nouns, task #75.
     ///
     /// Distinct from [`Place::is_settlement`], and the distinction is the whole of #75.
@@ -991,7 +1038,10 @@ impl Place {
         if self.is_chest() && !self.completed {
             return false;
         }
-        !self.subworld_container
+        // [`Place::is_container`] and not `subworld_container`: a village has an interior whether or
+        // not we have stood in it, so counting its surface neighbours can never mean there is
+        // nothing left to see. The narrower flag made every unvisited village look exhausted.
+        !self.is_container()
             && self.connections > 0
             && self.neighbours.len() as u32 >= self.connections
     }
@@ -1002,6 +1052,65 @@ mod tests {
     use super::*;
     use crate::overworld::fixtures::*;
     use crate::overworld::WorldMap;
+
+    /// **A village is a container before we have ever been inside one**, which is the whole point.
+    ///
+    /// Every heading here is verbatim from a run report. `l10`'s is the one that was logged as
+    /// `fighting` on 2026-08-22 while the press it produced walked us into Ulrome.
+    #[test]
+    fn a_heading_says_whether_there_is_a_subworld_behind_it() {
+        let surface = |heading: &str| Place { heading: heading.into(), ..Default::default() };
+        let inside = |heading: &str, parent: &str| {
+            Place { heading: heading.into(), parent: Some(parent.into()), ..Default::default() }
+        };
+
+        // The four `subworld` declarations, in every name their heading can take.
+        assert!(surface("Ulrome — level 6 village").is_container());
+        assert!(surface("Dane town").is_container());
+        assert!(surface("Kexby hamlet").is_container());
+        assert!(surface("Bainton Clump — level 1 forest").is_container());
+        assert!(surface("Ottringham church").is_container());
+        // The `in_forest{…}` derivatives, which rename themselves once seen.
+        assert!(surface("Cottam Boscage — level 2 mausoleum").is_container());
+        assert!(surface("Riccall — level 3 graveyard").is_container());
+        assert!(surface("Skerne — level 4 bandit camp").is_container());
+        assert!(surface("Bainton Clump — level 1 spider forest").is_container());
+
+        // Not containers: an ordinary fight, and the plain shrine type.
+        assert!(!surface("Weedley Copse — level 0 crypt").is_container());
+        assert!(!surface("Rayslack — level 4 crypt").is_container());
+        assert!(!surface("Firby crossroads").is_container());
+        // **The ambiguity this declines to guess at.** A revealed shrine-forest reads the same, and
+        // is left to the proved-from-inside flag rather than swept in with the plain type.
+        assert!(!surface("Gransmoor shrine").is_container());
+
+        // **Interior nodes are typed like their container and must not be mistaken for one.**
+        assert!(!inside("Gripthorpe Brush forest", "shrine1").is_container());
+        assert!(!inside("Ulrome — level 6 house", "l10").is_container());
+
+        // The old flag still wins on its own: proved from inside beats any heading.
+        let proved = Place { subworld_container: true, ..surface("Weedley Copse — level 0 crypt") };
+        assert!(proved.is_container());
+    }
+
+    /// A container always has an interior we have not enumerated, so its surface neighbour count
+    /// can never mean it is exhausted. Before this, every unvisited village looked fully revealed.
+    #[test]
+    fn a_village_we_have_never_entered_is_not_a_place_with_nothing_left() {
+        let mut village = Place {
+            heading: "Ulrome — level 6 village".into(),
+            connections: 2,
+            ..Default::default()
+        };
+        village.neighbours.insert("l7".into());
+        village.neighbours.insert("l18".into());
+        assert!(!village.subworld_container, "the point is that nothing has told us from inside");
+        assert!(!village.nothing_left_to_reveal());
+
+        // A crypt with the same shape is exhausted, which is what keeps this from being vacuous.
+        let crypt = Place { heading: "Weedley Copse — level 0 crypt".into(), ..village.clone() };
+        assert!(crypt.nothing_left_to_reveal());
+    }
 
     /// **What counts as a fight we take on purpose**, which is the dev's forest correction.
     #[test]
