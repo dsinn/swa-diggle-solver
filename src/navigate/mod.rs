@@ -613,15 +613,6 @@ pub const fn answer_for(screen: Screen) -> Answer {
     }
 }
 
-/// What [`drive`] must do about a screen before anything else looks at it.
-///
-/// Split out as a pure function so the wiring is testable: without it, "an unanswered screen stops
-/// the run" would be a claim about a loop that needs a live game to enter. [`answer_for`] is a map,
-/// and a map nothing reads is a comment.
-///
-/// Only [`Answer::Unanswered`] stops. [`Answer::Elsewhere`] deliberately does not: seeing one of
-/// those in `drive` means the component that owns it has already finished — a reward screen still up
-/// after a fight, say — and those resolve on the next iteration rather than being errors.
 /// Has a dump been *counted* since the map was last invalidated?
 ///
 /// Split out as a pure function for the same reason [`precheck`] is: the loop it lives in needs a
@@ -669,6 +660,15 @@ fn camera_is_lost(nodes: &[crate::observe::adjacency::Node], client_w: i32, clie
     !nodes.is_empty() && nodes.iter().all(off)
 }
 
+/// What [`drive`] must do about a screen before anything else looks at it.
+///
+/// Split out as a pure function so the wiring is testable: without it, "an unanswered screen stops
+/// the run" would be a claim about a loop that needs a live game to enter. [`answer_for`] is a map,
+/// and a map nothing reads is a comment.
+///
+/// Only [`Answer::Unanswered`] stops. [`Answer::Elsewhere`] deliberately does not: seeing one of
+/// those in `drive` means the component that owns it has already finished — a reward screen still up
+/// after a fight, say — and those resolve on the next iteration rather than being errors.
 pub fn precheck(screen: Screen) -> Option<Stop> {
     match answer_for(screen) {
         Answer::Unanswered => Some(Stop::Unanswered(screen)),
