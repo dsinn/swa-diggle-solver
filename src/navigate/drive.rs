@@ -1907,6 +1907,10 @@ pub fn drive(
                 // screen or a merchant pauses the walk for as long as we take to answer, which no
                 // fixed envelope can cover. Extending here is what makes running out mean "nothing is
                 // happening" rather than "this is taking a while".
+                //
+                // `|` and not `||`: both calls have to run every tick, and `||` would skip
+                // `handle_event` on any tick that cleared text — which is most of the ticks that
+                // matter, since an event arrives behind its own lore screen.
                 if r.clear_text_screen() | r.handle_event().is_some() {
                     by = Instant::now() + budget;
                 }
@@ -2689,7 +2693,8 @@ pub fn drive(
             // Text before options here too. Arrival is detected from an adjacency dump, and a lore
             // screen holds that dump back — so without this the loop would spin out its full 60 s
             // waiting for a map that cannot be drawn until the text is gone.
-            // Anything handled pushes the deadline out; see the subworld wait above for why.
+            // Anything handled pushes the deadline out, and `|` keeps both calls running every
+            // tick; see the subworld wait above for both.
             if r.clear_text_screen() | r.handle_event().is_some() {
                 by = Instant::now() + budget;
             }
