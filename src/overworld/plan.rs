@@ -968,6 +968,24 @@ impl WorldMap {
         // not, and must not be: `showPrayButton` leads with `not shrineLocation.majorShrine`
         // (`shrine.lua:98-101`), so an unprayed minor shrine is a real errand whatever the portal is
         // doing.
+        //
+        // ## The minor-shrine hop limit of 2026-08-22 belongs to the other graph, and this says why
+        //
+        // The dev, watching a run cross a forest to reach a woodland shrine: *I only care to do a
+        // minor shrine errand if we are adjacent to it*, and then, offered two hops: *two hops is
+        // still not low enough for a minor shrine. One hop or less should be the condition.*
+        //
+        // The rule is real and it is implemented — in [`WorldMap::shrine_inside`], which is the
+        // filter that can see one. **There is no such thing as a minor shrine on the surface.**
+        // `generateNLocationsOfNameAroundLocationsWithinBounds` mints shrine keys as
+        // `shrine1..shrine7` (`utils/world.lua:60-64`, called from
+        // `overworld/generators/world.lua:81`), and `majorShrine` is set for exactly the keys that
+        // spelling produces (`:87-89`) — which is what [`key_is_major_shrine`] mirrors. Minor
+        // shrines are the `shrine_woodland` **subnode** type (`generators/forest.lua:221-233`), and
+        // this filter already excludes everything with a parent.
+        //
+        // So a hop limit here could never fire, and writing one anyway would be a second copy of a
+        // rule to drift out of step with the first — which is most of what this file's history is.
         let worth_a_trip =
             |p: &Place| !p.used || (anomaly_open && p.can_be_consecrated() && !p.consecrated);
         // Hoisted: it walks every place, and asking it once per candidate would make the shrine

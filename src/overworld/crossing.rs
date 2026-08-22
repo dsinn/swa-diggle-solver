@@ -23,7 +23,10 @@
 //! its own bounce: each step reveals a little more and flips the answer. The choice is made once
 //! and kept for the visit.
 
-use super::{dist_or_far, exit_node_key, heading_has_combat, Door, Goal, Place, Risk, WorldMap};
+use super::{
+    dist_or_far, exit_node_key, heading_has_combat, key_is_major_shrine, Door, Goal, Place, Risk,
+    WorldMap,
+};
 use std::collections::BTreeSet;
 
 /// What to do next while crossing a subworld.
@@ -566,6 +569,7 @@ impl WorldMap {
         let leaving_to = match errand_at.is_some()
             || self.seeking_a_rest(&parent)
             || self.seeking_a_heart(&parent)
+            || self.seeking_a_shrine(&parent)
         {
             // The errand outranks the crossing, and leaves the commitment untouched rather than
             // clearing it: the rest is a detour, and the door we were making for is still the door.
@@ -1175,12 +1179,68 @@ impl WorldMap {
     /// `places` hash map would otherwise choose differently on different runs from the same state.
     fn shrine_inside(&self, container: &str) -> Option<&Place> {
         let dist = self.here.as_deref().map(|h| self.distances(h)).unwrap_or_default();
+        // Hops, not travel cost, for the one-hop rule below — see [`WorldMap::hops_from`].
+        let hops = self.here.as_deref().map(|h| self.hops_from(h)).unwrap_or_default();
         self.places
             .values()
             .filter(|p| inside_container(p, container))
             .filter(|p| p.is_shrine() && !p.used && !p.avoid)
             .filter(|p| !self.abandoned.contains(&p.key))
-            .min_by_key(|p| (dist_or_far(&dist, &p.key), p.key.clone()))
+            // **A minor shrine is an errand only when we are already beside it** — the dev,
+            // 2026-08-22: *I only care to do a minor shrine errand if we are adjacent to it*, and
+            // then, on being offered two: *two hops is still not low enough for a minor shrine. One
+            // hop or less should be the condition.*
+            //
+            // It does not retract the Beeford Hedge rule above; it puts a price on it. A woodland
+            // shrine pays a prayer and nothing toward [`SHRINES_BEFORE_THE_ANOMALY`], so it is worth
+            // a step off the road and not a search of the woods.
+            .filter(|p| p.can_be_consecrated() || dist_or_far(&hops, &p.key) <= 1)
+            // **Consecratable above near**, which the old key left to luck. A major shrine's plaza
+            // is the only thing in here that can move the bar, and ranking on `(distance, key)`
+            // alone let a woodland shrine one hop nearer take the errand instead — the key tiebreak
+            // happens to favour `_plaza` when the distances are equal, which is not a rule.
+            .min_by_key(|p| (!p.can_be_consecrated(), dist_or_far(&dist, &p.key), p.key.clone()))
+    }
+
+    /// Are we inside a shrine forest with its shrine still hidden by the fog?
+    ///
+    /// The third of the hold-us-inside guards, beside [`WorldMap::seeking_a_rest`] and
+    /// [`WorldMap::seeking_a_heart`], and the one that was missing. Without it an errand can be
+    /// satisfied by *arriving at the container* and then evaporate: `next_target` excludes the node
+    /// we are standing on, so the plan moves on, and the crossing — finding nothing to stop for —
+    /// walks straight out the far side.
+    ///
+    /// Live 2026-08-22: five hops to `shrine7`, *Cottam Boscage — level 9 forest*, in and out to
+    /// `l55` on the very next step, with the plan already moved to `shrine3`. `shrine_inside` cannot
+    /// help there, because on the first step inside there is nothing to find: `isRevealed` is
+    /// `corrupt or areaIsComplete or areaFlag(key..'_plaza_explored')`
+    /// (`overworld/locations/shrine_forest_raw.lua:5`), so an unexplored shrine forest hides its
+    /// own shrine.
+    ///
+    /// ## Why the key is enough to know it is in there
+    ///
+    /// `shrine_forest_raw` is the **only** location type in the game with `trueTypeName = 'shrine'`,
+    /// it is a `subworld = 'forest'`, and it declares `features = {plaza = {type = 'shrine'}}`
+    /// (`:10-18`). The forest generator builds `parentNode.key..'_plaza'` as the first node of the
+    /// interior, unconditionally (`overworld/generators/forest.lua:398-401`). So for any container
+    /// whose key [`key_is_major_shrine`] accepts, the consecratable shrine exists and its key is
+    /// known before we have laid eyes on it — which is exactly what lets this hold a run inside a
+    /// place it has not searched.
+    ///
+    /// **Consecratable only**, or this reproduces the fault it fixes one layer down: a minor shrine
+    /// under fog cannot even be measured for the one-hop rule above, so searching for one would be
+    /// the unbounded errand that rule exists to refuse.
+    ///
+    /// Ends the moment the plaza is on the map at all — from a dump, the save, or the cache — after
+    /// which [`WorldMap::shrine_inside`] answers for it and this has nothing to add. `abandon` ends
+    /// it too, for the reason every one of these guards carries the clause: a shrine the driver has
+    /// already had its go at is not one the fog is hiding.
+    fn seeking_a_shrine(&self, container: &str) -> bool {
+        if !key_is_major_shrine(container) {
+            return false;
+        }
+        let plaza = format!("{container}_plaza");
+        !self.abandoned.contains(&plaza) && !self.places.contains_key(&plaza)
     }
 
     /// An unopened chest in this subworld, nearest first.
@@ -2514,6 +2574,175 @@ mod tests {
         let mut corrupt = forest("Bainton Clump — level 1 forest");
         corrupt.entry("l4").corrupted = true;
         assert_eq!(corrupt.far_hop_inside("l4sub1", "l4_path_to_l25"), None);
+    }
+
+    /// **#84, the price on the rule below.** A woodland shrine is worth a step aside, not a search.
+    ///
+    /// The dev, 2026-08-22: *I only care to do a minor shrine errand if we are adjacent to it* —
+    /// and, offered two hops as the condition, *two hops is still not low enough for a minor shrine.
+    /// One hop or less should be the condition.* It does not retract the Beeford Hedge ruling that
+    /// put minor shrines in `errand_inside` at all; it says what they are worth once they are there.
+    /// A prayer is the whole payload, and it moves [`SHRINES_BEFORE_THE_ANOMALY`] not at all.
+    ///
+    /// The two fixtures differ in one edge. Note the shrine is **unvisited and incomplete** in both,
+    /// which is why the measure has to be [`WorldMap::hops_from`]: `distances` would price the step
+    /// to it at `CROSSING`, and the first cut of this rule — written against `distances` — refused
+    /// every minor shrine in the game while every test still passed.
+    #[test]
+    fn a_woodland_shrine_is_an_errand_next_door_and_not_two_hops_out() {
+        let woods = |shrine_at: &str| {
+            let mut m = WorldMap::new();
+            m.fold(&inside_dump(
+                "l9",
+                "l9sub1",
+                "Saltagh Park road",
+                vec![node("l9sub4", "Saltagh Park road"), node(shrine_at, "Saltagh Park woodland shrine")],
+                vec![exit("l19")],
+            ));
+            m
+        };
+
+        // One hop: the shrine is a neighbour of where we stand.
+        let near = woods("l9sub2");
+        assert!(near.get("l9sub2").unwrap().is_shrine(), "the premise: the heading names it");
+        assert_eq!(
+            near.errand_inside("l9").map(|p| p.key.as_str()),
+            Some("l9sub2"),
+            "a woodland shrine next door is a step aside worth taking"
+        );
+
+        // Two hops: the same shrine, one edge further out, reached through `l9sub4`.
+        let mut far = WorldMap::new();
+        far.fold(&inside_dump(
+            "l9",
+            "l9sub1",
+            "Saltagh Park road",
+            vec![node("l9sub4", "Saltagh Park road")],
+            vec![exit("l19")],
+        ));
+        far.fold(&inside_dump(
+            "l9",
+            "l9sub4",
+            "Saltagh Park road",
+            vec![node("l9sub1", "Saltagh Park road"), node("l9sub2", "Saltagh Park woodland shrine")],
+            vec![],
+        ));
+        far.fold(&inside_dump(
+            "l9",
+            "l9sub1",
+            "Saltagh Park road",
+            vec![node("l9sub4", "Saltagh Park road")],
+            vec![exit("l19")],
+        ));
+        assert!(far.get("l9sub2").unwrap().is_shrine(), "the control is the same shrine");
+        assert_eq!(far.errand_inside("l9"), None, "two hops is not low enough");
+    }
+
+    /// **#84.** The shrine that can be consecrated outranks the one that happens to be nearer.
+    ///
+    /// `shrine_inside` ranked on `(distance, key)` alone, so a woodland shrine one hop nearer took
+    /// the errand from the plaza — and only the key tiebreak, which favours `_plaza` at *equal*
+    /// distance, made that look right in the fixtures. A minor shrine pays a prayer; the plaza is
+    /// the only thing in a shrine forest that can move [`SHRINES_BEFORE_THE_ANOMALY`].
+    #[test]
+    fn the_consecratable_shrine_outranks_the_nearer_one() {
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump(
+            "shrine7",
+            "shrine7sub1",
+            "Cottam Boscage road",
+            vec![
+                node("shrine7sub2", "Cottam Boscage woodland shrine"),
+                node("shrine7sub3", "Cottam Boscage road"),
+            ],
+            vec![exit("l55")],
+        ));
+        m.fold(&inside_dump(
+            "shrine7",
+            "shrine7sub3",
+            "Cottam Boscage road",
+            vec![node("shrine7sub1", "Cottam Boscage road"), node("shrine7_plaza", "Cottam Boscage shrine")],
+            vec![],
+        ));
+        m.fold(&inside_dump(
+            "shrine7",
+            "shrine7sub1",
+            "Cottam Boscage road",
+            vec![
+                node("shrine7sub2", "Cottam Boscage woodland shrine"),
+                node("shrine7sub3", "Cottam Boscage road"),
+            ],
+            vec![exit("l55")],
+        ));
+
+        let hops = m.hops_from("shrine7sub1");
+        assert_eq!(hops.get("shrine7sub2").copied(), Some(1), "the premise: the minor one is nearer");
+        assert_eq!(hops.get("shrine7_plaza").copied(), Some(2), "and the plaza is further out");
+        assert!(m.get("shrine7_plaza").unwrap().can_be_consecrated(), "and it is the one that counts");
+
+        assert_eq!(
+            m.shrine_inside("shrine7").map(|p| p.key.as_str()),
+            Some("shrine7_plaza"),
+            "the consecratable shrine is the errand, near or not"
+        );
+    }
+
+    /// **#84.** A shrine forest holds a run inside until it has found the shrine it came for.
+    ///
+    /// Live 2026-08-22: five hops to `shrine7`, *Cottam Boscage — level 9 forest*, in and straight
+    /// out to `l55` on the next step, with the plan already moved on to `shrine3`. `next_target`
+    /// excludes the node we are standing on, so arriving at the container satisfied the goal and
+    /// the errand evaporated — and `shrine_inside` could not hold us, because on the first step
+    /// inside there is nothing yet to find: `isRevealed` is
+    /// `corrupt or areaIsComplete or areaFlag(key..'_plaza_explored')`
+    /// (`overworld/locations/shrine_forest_raw.lua:5`).
+    ///
+    /// The premise of the whole guard is that the key is enough to know the shrine is in there —
+    /// see [`WorldMap::seeking_a_shrine`] for the two lines of Lua that make that true.
+    #[test]
+    fn a_shrine_forest_is_not_left_before_its_shrine_has_been_found() {
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump(
+            "shrine7",
+            "shrine7sub1",
+            "Cottam Boscage road",
+            vec![node("shrine7sub2", "Cottam Boscage road"), node("shrine7_path_to_l55", "Road to Wetwang")],
+            vec![exit("l55")],
+        ));
+
+        assert!(m.seeking_a_shrine("shrine7"), "the plaza is fogged, so we are still looking");
+        assert_eq!(m.shrine_inside("shrine7"), None, "the premise: there is nothing found yet");
+        match m.cross_toward(&[exit("l55")]) {
+            Some(Crossing::Step { to, .. }) | Some(Crossing::Probe { to, .. })
+            | Some(Crossing::Seek { to }) => assert_ne!(
+                to, "shrine7_path_to_l55",
+                "we came for the shrine and have not seen it; the road out is not the answer"
+            ),
+            other => panic!("expected a step inside the forest, got {other:?}"),
+        }
+
+        // The moment the plaza is on the map at all, this has nothing left to add: `shrine_inside`
+        // answers for it, and `errand_inside` is what holds us.
+        m.fold(&inside_dump(
+            "shrine7",
+            "shrine7sub2",
+            "Cottam Boscage road",
+            vec![node("shrine7_plaza", "Cottam Boscage shrine")],
+            vec![],
+        ));
+        assert!(!m.seeking_a_shrine("shrine7"), "found; the guard steps out of the way");
+        assert_eq!(
+            m.errand_inside("shrine7").map(|p| p.key.as_str()),
+            Some("shrine7_plaza"),
+            "and the errand is the shrine itself"
+        );
+
+        // A forest that is not a shrine forest is never searched for one, and a shrine the driver
+        // has already had its go at ends the search — the clause every one of these guards carries.
+        assert!(!m.seeking_a_shrine("l9"), "an ordinary forest promises no shrine");
+        let mut given_up = WorldMap::new();
+        given_up.abandon("shrine7_plaza");
+        assert!(!given_up.seeking_a_shrine("shrine7"), "we tried; the fog is not what is hiding it");
     }
 
     /// A shrine inside a forest is an errand, not something to walk past. — the dev, 2026-08-17

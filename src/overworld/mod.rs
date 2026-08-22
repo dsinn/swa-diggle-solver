@@ -2106,6 +2106,14 @@ impl WorldMap {
     }
 
     /// Distance in hops from `origin` to every node our own edges can reach.
+    ///
+    /// **Not [`WorldMap::distances`]**, which is what almost everything else wants: that prices a
+    /// step through [`WorldMap::can_step`], so an edge the game would not currently let us walk in
+    /// one press costs `CROSSING` rather than 1. Right for routing, wrong for a rule phrased in
+    /// hops — the dev's minor-shrine condition of 2026-08-22, *one hop or less*, is about the map's
+    /// shape and not about what is traversable this minute. An unvisited woodland shrine next door
+    /// is one hop away and `CROSSING` to reach, and reading that as "far" is what made the first cut
+    /// of that rule refuse every minor shrine in the game.
     fn hops_from(&self, origin: &str) -> BTreeMap<String, usize> {
         let mut dist: BTreeMap<String, usize> = BTreeMap::new();
         dist.insert(origin.to_string(), 0);

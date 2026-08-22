@@ -2291,10 +2291,29 @@ pub fn drive(
         // The suffix says whether this step is *on the way* or merely *the way it lies*. Without it
         // a run heading nowhere reads exactly like a run heading somewhere -- five identical
         // `(for start, Anomaly)` lines were read as a journey and were five guesses.
+        // **And what the places are called**, which this line never said. #84, from the dev asking
+        // *why did we enter the Cotham Botscage level 9 forest* — a question the report could not
+        // answer, because `194. l27 -> **l30** (for l30, Explore)` gives the key and the goal and
+        // the heading appears only on the `fighting` and `entering` lines. The heading is where the
+        // level lives (`AreaHeading`, `overworldview.lua:388-389`), so without it a report cannot
+        // say what a step cost or why a destination was worth it.
+        //
+        // The destination is named separately only when it is not the step itself, which on a
+        // routed journey is most of them and is exactly the case the question was about.
+        let named = |key: &str| match r.map.get(key).map(|p| p.heading.clone()).unwrap_or_default() {
+            h if h.trim().is_empty() => String::new(),
+            h => format!(" *{h}*"),
+        };
+        let toward = match hop.plan.target == hop.step {
+            true => String::new(),
+            false => named(&hop.plan.target),
+        };
         r.log.push_str(&format!(
-            "{step}. {here} -> **{}** (for {}, {:?}){}\n",
+            "{step}. {here} -> **{}**{} (for {}{}, {:?}){}\n",
             hop.step,
+            named(&hop.step),
             hop.plan.target,
+            toward,
             hop.plan.reason,
             match hop.routed {
                 true => "",
