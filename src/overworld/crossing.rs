@@ -1075,6 +1075,12 @@ impl WorldMap {
     ///
     /// Only asked while the portal is shut. Once it is open the objective is the portal itself and
     /// this bar would keep a run wandering instead of finishing.
+    ///
+    /// **One caller since 2026-08-22, and it is [`Goal::OpenAnomaly`] alone.** `Explore` used to ask
+    /// this too, and that pairing was the exhaustive sweep — a level 4+ node was not explorable
+    /// while any gentle frontier existed anywhere. The dev retired that half; see the note where it
+    /// used to be in [`WorldMap::next_target`]. What is left here is narrower and still true: do not
+    /// go and open the portal on purpose while there is gentler ground to learn from first.
     pub(super) fn gentler_ground_remains(&self, here: &str, ok: &impl Fn(&Place) -> bool) -> bool {
         if self.anomaly_is_open().unwrap_or(false) {
             return false;
@@ -2943,8 +2949,17 @@ mod tests {
     /// visit every node that is lower than level 4, so that we only visit a level 4 node when the
     /// entire frontier is at least level 4.*
     ///
-    /// Both halves are needed and neither alone is enough: suppressing the trigger branch while
-    /// leaving `Explore` free to walk onto the same node would move the problem rather than fix it.
+    /// **Half of this rule was retired on 2026-08-22 and this test still passes** — which is worth
+    /// saying out loud, because it now passes for a different reason than it used to. `Explore` no
+    /// longer *refuses* a trigger node; it ranks against one below distance. Every candidate here is
+    /// one hop from `start`, so the tiebreak decides and the answers are unchanged. What the dev
+    /// retired is the sweep, and the sweep only shows itself when a gentle frontier is **further
+    /// away** than a trigger node — which is
+    /// [`tests::exploring_takes_the_nearer_trigger_node_and_the_gentler_of_two_equals`].
+    ///
+    /// The [`Goal::OpenAnomaly`] gate below is untouched, and that is what the last two assertions
+    /// pin: the planner still never goes and opens the portal on purpose while gentler ground is
+    /// left to learn from.
     #[test]
     fn the_trigger_waits_until_nothing_gentler_is_left() {
         let mut m = WorldMap::new();
@@ -2983,6 +2998,52 @@ mod tests {
         open.fold(&dump("start", "camp", vec![node("l2", "Quiet Glade meadow")]));
         open.hell = Some(0.1);
         assert!(!open.gentler_ground_remains("start", &|_: &Place| true));
+    }
+
+    /// **The sweep, retired.** The dev, 2026-08-22: *retire the pre-anomaly phase of avoiding level
+    /// 4+ nodes*, and asked whether the portal should then be opened deliberately, *only stop the
+    /// exhaustive sweep*.
+    ///
+    /// So exploring expands outward from where we stand, and the old rule survives as a tiebreak
+    /// rather than a veto. Both halves are pinned here, and they need different fixtures: the sweep
+    /// only shows itself when the gentle frontier is **further** than the trigger node, and the
+    /// tiebreak only when they are the same distance.
+    #[test]
+    fn exploring_takes_the_nearer_trigger_node_and_the_gentler_of_two_equals() {
+        // Nearer trigger against a further meadow. `mid` is walked and fully named, so it is not
+        // itself a frontier and cannot win.
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "start",
+            "camp",
+            vec![node("l4", "Grim Barrow — level 4 crypt"), node("mid", "Quiet Glade meadow")],
+        ));
+        m.fold(&dump("mid", "Quiet Glade meadow", vec![node("start", "camp"), node("far", "Dane meadow")]));
+        m.here = Some("start".into());
+        m.entry("mid").visited = true;
+        m.entry("mid").hidden = Some(0);
+
+        assert!(m.get("l4").unwrap().triggers_anomaly(), "the premise: level 4 opens the portal");
+        assert!(!m.get("far").unwrap().triggers_anomaly(), "and the far frontier is gentle");
+        let plan = m.next_target().expect("a plan");
+        assert_eq!(
+            plan.target, "l4",
+            "one hop against two: exploring expands outward, it does not sweep the gentle ground first"
+        );
+
+        // Equal distance, and the tiebreak has its say. Same map with the meadow moved next door.
+        let mut level = WorldMap::new();
+        level.fold(&dump(
+            "start",
+            "camp",
+            vec![node("l4", "Grim Barrow — level 4 crypt"), node("beside", "Quiet Glade meadow")],
+        ));
+        level.here = Some("start".into());
+        let plan = level.next_target().expect("a plan");
+        assert_eq!(
+            plan.target, "beside",
+            "at equal distance the one that does not open the portal wins"
+        );
     }
 
     /// **The decision that killed the run of 2026-08-16**, and the exploring case it must not break.

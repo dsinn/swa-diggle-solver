@@ -1409,7 +1409,6 @@ impl WorldMap {
         // (`tower::press_reveal` is a stub), so there is no such case to lose today — and when there
         // is, the honest fix is to clear `visited` on the nodes the reveal touched rather than to
         // walk back to every one of them on spec.
-        let gentle_only = self.gentler_ground_remains(here, &ok);
         let mut frontier: Vec<&Place> = self
             .places
             .values()
@@ -1419,11 +1418,42 @@ impl WorldMap {
             // over the edges, and this only decides what is worth walking *to*.
             .filter(|p| !p.nothing_left_to_reveal())
             .filter(|p| ok(p))
-            // **The same bar exploring is asked to respect.** Suppressing the trigger branch alone
-            // would only move the problem: the frontier below it holds the very same level 4+ nodes,
-            // and `Explore` would walk onto one anyway. So while gentler ground remains, it is the
-            // only ground exploring considers. See [`WorldMap::gentler_ground_remains`].
-            .filter(|p| !gentle_only || !p.triggers_anomaly())
+            // ## The gentle-ground bar was here, and the dev retired it on 2026-08-22
+            //
+            // It read `!gentle_only || !p.triggers_anomaly()`, so while any gentle frontier existed
+            // **anywhere on the map** a level 4+ node was not explorable at all. That is the
+            // exhaustive sweep, and it is what the dev asked to end: *retire the pre-anomaly phase
+            // of avoiding level 4+ nodes and instead going straight to searching for shrines*, then,
+            // asked whether the portal should be opened on purpose, *only stop the exhaustive
+            // sweep*.
+            //
+            // **The [`Goal::OpenAnomaly`] gate above stays**, which is the whole distinction: the
+            // planner still never *nominates* a trigger node, so the portal is opened by walking
+            // onto hard ground in the course of exploring rather than by deciding to. The old
+            // comment here argued the two had to move together — *suppressing the trigger branch
+            // alone would only move the problem* — and that argument is now inverted on purpose,
+            // because the problem it describes is the outcome we want.
+            //
+            // What the rule was written for is not forgotten. The dev, 2026-08-16, after a fresh
+            // character died in a level 7 crypt: *we don't have the warrior's gear to carry us
+            // through difficult crypts.* **The refusal is gone; the preference moved into the sort
+            // below, under distance.**
+            //
+            // That placement is the whole of the change, and the reason a rank term had to be added
+            // rather than the filter simply deleted:
+            //
+            // - A filter here and a rank *above* `by_hops` are the same rule. `gentle_only` is false
+            //   the moment no gentle frontier is left, so the filter already lets trigger nodes
+            //   through as a last resort — exactly what a top-priority rank term would do. Swapping
+            //   one for the other would have changed nothing.
+            // - Deleting it outright leaves **no preference at all**, because a healthy run reaches
+            //   here through `plan(false, ..)` — `next_target` only passes `skip_hostile = true`
+            //   while `wants_rest` — and this sort has no risk term of its own. The nearest frontier
+            //   would win outright, level 7 crypt or meadow.
+            //
+            // Under `by_hops` it means: explore outward from where we stand, and where two frontiers
+            // are equally far, take the one that does not open the portal. The sweep ends because
+            // distance decides first; the 2026-08-16 rule survives as a tiebreak instead of a veto.
             .collect();
         // Order matters, and a live run showed why. From l10 with l1 and l18 both adjacent and both
         // unvisited, sorting by key chose `l1` — already **completed**, so it revealed nothing — and
@@ -1556,6 +1586,12 @@ impl WorldMap {
                     true => by_bearing.then(by_hops),
                     false => by_hops.then(by_bearing),
                 })
+                // **Gentler ground, at equal distance only** — see the note at the filter above for
+                // why this is a tiebreak and not a rank. `triggers_anomaly` rather than `risk()`,
+                // which would have been the obvious choice and is wrong here: `Risk::Unseen` sorts
+                // *worse* than `Risk::Fight`, and a frontier node with no heading is the very thing
+                // exploring exists to go and look at.
+                .then(a.triggers_anomaly().cmp(&b.triggers_anomaly()))
                 .then(b.connections.cmp(&a.connections))
                 .then(b.hidden.unwrap_or(0).cmp(&a.hidden.unwrap_or(0)))
                 .then(a.key.cmp(&b.key))
