@@ -1837,42 +1837,6 @@ pub fn drive(
             // units apart and took 11.4 s. The fit in `pace.rs` is paired, which is what exposed the
             // difference between end-to-end distance and distance actually walked.
             //
-            // **Leaving the container counts as arriving.** The exit road is a node like any other,
-            // but travelling to it can carry us straight out — and once we are no longer inside,
-            // the crossing is over whatever `here` says. Without this clause the fixed loop would
-            // simply spend its full budget waiting for a road it had already walked past.
-            //
-            // ## Why the budget is sixty, and why it is arithmetic rather than a guess
-            //
-            // The dev, 2026-08-22, asked whether the wait is *probing or just doing nothing*, and
-            // offered ten seconds, then fifteen. It is not doing nothing: each 300 ms tick pumps the
-            // console, clears a text screen and answers an event, which is what lets the walk finish
-            // at all — a lore screen holds back the very dump that reports the arrival.
-            //
-            // But the real answer is that **walk time is a division, not a distribution.** The
-            // avatar accelerates to a hard cap of 120 world units per second
-            // (`overworldview.lua:1201`, `maxX = dirVX*delta*120`) and arrives within 45 units
-            // (`arriveDistSq` 2025), so a hop takes its own path length over 120, plus a ~0.25 s
-            // ramp and a brake at each corner sharper than 0.3 rad.
-            //
-            // That model predicts the logs. Over 200 surface hops in every run report we have, the
-            // median is 2.1 s against a predicted 2.1, the ninetieth 5.4 against 4.3, and the
-            // longest arrival 11.4 s against a longest single edge of 11.2. So the observed maximum
-            // is not a sampling tail to add headroom to — it is the map's longest edge, and the
-            // engine cannot walk it faster.
-            //
-            // **The subworld interiors, which are this loop's business, are the worse case.** Their
-            // edges run longer than the surface's, and `far_chain_all` is bounded at ten hops, so a
-            // far hop is multi-edge by construction and #80 made it ordinary. Furthest reachable
-            // from a node, in seconds at the cap: one hop 3.9 median / 11.8 max, two hops 15.4 /
-            // 22.5, three hops 22.6 / **29.6**. A fifteen-second budget clips the median two-hop far
-            // hop. Thirty clipped the three-hop one by a hair, which is why this is sixty and equal
-            // to the surface wait below.
-            //
-            // The asymmetry decides it. Overrunning costs seconds on a failure that #82 already made
-            // rare. Cutting short returns while the avatar is still walking, which leaves `here`
-            // stale and plans the next step from a node we are about to leave — the exact stall this
-            // whole comment is about.
             let landing: Option<String> = far_inside.as_ref().map(|(k, _)| k.clone()).or_else(|| {
                 match &mv {
                     Crossing::Step { to, .. } | Crossing::Probe { to, .. } | Crossing::Seek { to } => {
@@ -1886,8 +1850,19 @@ pub fn drive(
             // [`crate::overworld::walk_budget`]: an interior leg is priced flat because the interior
             // frame has its own scale and 576 measured steps show distance does not predict them, so
             // what matters here is how many legs the far hop covers.
+            //
+            // **Leaving is a mode change and not a journey.** `Leave`'s destination is a *surface*
+            // key while we are still holding the interior frame, so it can never be priced here —
+            // and it does not need to be, because this wait ends on the container changing. The dev,
+            // 2026-08-22: *60 seconds is still unacceptably high for entering a subworld ... the
+            // timeout should be 10 seconds.* The two entry presses already used ten; this is the
+            // transition that was still being given a walk's budget.
+            let ground = match mv {
+                Crossing::Leave { .. } => Ground::Transition,
+                _ => Ground::Inside,
+            };
             let legs = landing.as_deref().and_then(|k| r.map.walk_legs(&here, k)).unwrap_or_default();
-            let budget = crate::overworld::walk_budget(&legs, r.turbo_snail, Ground::Inside);
+            let budget = crate::overworld::walk_budget(&legs, r.turbo_snail, ground);
             r.log.push_str(&format!(
                 "  allowing {:.0}s for {} leg(s){}
 ",

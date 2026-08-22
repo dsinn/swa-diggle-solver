@@ -89,6 +89,23 @@ pub const SAFETY: f64 = 2.0;
 /// the fixed wait this replaced, so nothing can now wait *longer* than it used to.
 pub const CEILING: Duration = Duration::from_secs(60);
 
+/// What a wait for a **mode change** gets, rather than a wait for a walk.
+///
+/// The dev, 2026-08-22: *60 seconds is still unacceptably high for entering a subworld. For that
+/// specific case, which Diggle should know about because of the navigator, the timeout should be 10
+/// seconds.* Right, and the reason is that a mode change is not a walk at all — the world is being
+/// swapped, so there is no distance to price and nothing for [`SAFETY`] to protect. Either the new
+/// world arrives in a moment or the press did not land.
+///
+/// Ten seconds is also what the navigator's two *entry* waits have always used
+/// (`navigate/drive.rs`'s `Enter` press and [`Run::settle_after_mode_change`]), so this is that
+/// number reaching the one transition that was still being priced as though it were a journey:
+/// leaving a subworld, where the destination is a surface key we cannot even find in the interior
+/// frame, and the wait ends on the container changing rather than on any arrival.
+///
+/// [`Run::settle_after_mode_change`]: crate::navigate::Run
+pub const MODE_CHANGE: Duration = Duration::from_secs(10);
+
 /// Where the walk happens, which decides how its legs are priced. See the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ground {
@@ -96,6 +113,8 @@ pub enum Ground {
     Surface,
     /// Inside a subworld, whose frame has its own scale and whose legs are priced flat.
     Inside,
+    /// Crossing between the two. Not a walk: [`MODE_CHANGE`], whatever the legs say.
+    Transition,
 }
 
 /// How long to allow for a walk along `legs`, each a distance in the map frame for that `ground`.
@@ -105,12 +124,19 @@ pub enum Ground {
 /// unit. An empty slice is a walk we could not price, and gets the [`CEILING`] the fixed wait used
 /// to give everything.
 pub fn walk_budget(legs: &[f64], snail: bool, ground: Ground) -> Duration {
+    // A mode change is answered before any of this: there is no distance to price, so an
+    // unpriceable route is not a reason to wait longer. See [`MODE_CHANGE`].
+    if ground == Ground::Transition {
+        return MODE_CHANGE;
+    }
     if legs.is_empty() {
         return CEILING;
     }
     let seconds: f64 = legs
         .iter()
         .map(|&d| match (ground, snail) {
+            // Answered above; the arm is here only so adding a `Ground` cannot compile silently.
+            (Ground::Transition, _) => 0.0,
             (Ground::Inside, _) => INSIDE_LEG,
             // `exp(-7.5t)` shrinks the gap to `ARRIVE_RADIUS`; below that we are already there.
             (Ground::Surface, true) => (d.max(ARRIVE_RADIUS) / ARRIVE_RADIUS).ln() / SNAIL_DECAY,
@@ -200,6 +226,22 @@ mod tests {
             walk_budget(&legs, false, Ground::Inside),
             OVERHEAD + Duration::from_secs_f64(INSIDE_LEG * SAFETY)
         );
+    }
+
+    /// **A mode change is not a journey**, so it is not priced like one.
+    ///
+    /// The dev, 2026-08-22: *60 seconds is still unacceptably high for entering a subworld ... the
+    /// timeout should be 10 seconds.* Leaving a subworld can never be priced — the destination is a
+    /// surface key while we hold the interior frame — and under the walk model that unpriceable
+    /// route drew the full [`CEILING`]. It gets [`MODE_CHANGE`] whatever the legs say.
+    #[test]
+    fn crossing_between_worlds_is_answered_in_ten_seconds_and_not_sixty() {
+        assert_eq!(walk_budget(&[], false, Ground::Transition), MODE_CHANGE);
+        assert!(walk_budget(&[], false, Ground::Transition) < CEILING);
+        // And the legs cannot talk it back up, however long the route looks.
+        assert_eq!(walk_budget(&[9000.0; 5], false, Ground::Transition), MODE_CHANGE);
+        // The walk grounds are untouched by it.
+        assert_eq!(walk_budget(&[], false, Ground::Inside), CEILING);
     }
 
     /// Standing on it already: no legs, no walk, and the wait is pure overhead.
