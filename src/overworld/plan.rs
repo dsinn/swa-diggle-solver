@@ -1073,12 +1073,19 @@ impl WorldMap {
                 // from at all (`AreaHeading` prints `— level N` only when `locationHasCombat`), so
                 // the number was parsed and then thrown away.
                 //
-                // Live, 1519Z: the eastern shrines were revealed from the south and struck off while
-                // a forest stood between, then consecrated from the north twenty steps later. The
-                // detour bought nothing — one step after the second shrine the run took a level 6
-                // forest fight anyway, to explore. The log carries **zero** `RouteTo(Shrine)` lines
-                // in 175 steps, which is what proves this filter and not `ok`'s route test: a
-                // candidate that survived to `ok` and failed it would have said so.
+                // Live, 1519Z, and measured rather than recalled — see
+                // [`tests::the_nearest_shrine_of_the_1519z_world_is_one_the_old_filter_refused`],
+                // which replays that run's own map cache. With the portal open from step 0 and
+                // seven shrines already known, the run's **first** shrine goal is step 68 of 178,
+                // and both shrines it took were ones it happened to be standing beside. `shrine5`
+                // — *Harswell Coppice, level 7 forest*, twelve hops out against the forty-two to
+                // the pair it took — was never a target at all, because this filter refused it.
+                // Put the filter back and the planner picks the shrine at forty-two: thirty extra
+                // hops, at the state the run was actually in.
+                //
+                // The log carries **zero** `RouteTo(Shrine)` lines in those 178 steps, which is
+                // what pins it on this filter rather than on `ok`'s route test: a candidate that
+                // survived to `ok` and failed there would have said so.
                 //
                 // **What replaced it is the gate, not nothing.** The 2026-08-15 rule this reverses
                 // was written when a shrine was optional reward, and paying a crypt for one spent the
