@@ -1388,11 +1388,32 @@ impl WorldMap {
     /// what makes this safe to switch on rather than a gamble. An interior we have not cleared stops
     /// the chain on its own, one node at a time, exactly as before.
     ///
-    /// ## Uncorrupted, because corruption brings the fog back
+    /// ## Corruption was a permanent ban on a temporary condition — and that was wrong
+    ///
+    /// **This used to read `!c.corrupted`, and it cost the run of 2026-08-22 2002Z every fast hop it
+    /// had.** Both containers it crossed were corrupted — `l4` had gone level 1 to level 6 and `l10`
+    /// from unlevelled to level 6 — so the chain came back empty on every single crossing, and the
+    /// run walked `l4` a node at a time: six steps to `l4sub21`, six more to `l4_path_to_l25`.
+    ///
+    /// The dev, on being shown that: *the corruption is only a one-time clearing of a node's visited
+    /// state. Once we re-visit the nodes, they become fast-hoppable again.* That is the whole of it.
+    /// `setAreaIncomplete` clears `completedAreas[key]` **once** (`overworldview.lua:183-206`); it
+    /// does not make the container permanently unfoggable, and re-clearing a node restores exactly
+    /// what was lost. A flag on the container was standing in for a condition that lives on each
+    /// node and changes as we walk.
+    ///
+    /// So the container test is gone and the node test does the work. It always could:
+    /// [`WorldMap::can_travel_direct`] models the completion rule exactly, refuses the chain one node
+    /// at a time while the interior is genuinely uncleared, and *stops* refusing as we clear it —
+    /// which a container-level boolean can never do. The paragraph above already said this was
+    /// "belt and braces" over a guard that "would refuse most of the chain anyway"; the belt was
+    /// welded shut.
+    ///
+    /// The earlier reasoning, kept because the fog it describes is real:
     ///
     /// The dev, 2026-08-17: *once a settlement is corrupted, the thick fog re-appears, but if that
-    /// hasn't happened, then there is no thick fog to guard against.* Applied to every subworld and
-    /// not only settlements, because the mechanism below is not about settlements.
+    /// hasn't happened, then there is no thick fog to guard against.* True, and the fog lifts again
+    /// the same way it fell — per node, as each is re-cleared.
     ///
     /// The mechanism is not `thickFog` itself — that really is set in one file — but the general
     /// cloud rule beside it, and the effect is the same. `isCloudCovered` (`overworldview.lua:701-706`)
@@ -1418,7 +1439,7 @@ impl WorldMap {
         let clear_air = self
             .inside()
             .and_then(|c| self.places.get(c))
-            .map(|c| !c.corrupted && !c.in_lost_woods)
+            .map(|c| !c.in_lost_woods)
             .unwrap_or(false);
         if !clear_air {
             return None;
@@ -1432,7 +1453,7 @@ impl WorldMap {
         let clear_air = self
             .inside()
             .and_then(|c| self.places.get(c))
-            .map(|c| !c.corrupted && !c.in_lost_woods)
+            .map(|c| !c.in_lost_woods)
             .unwrap_or(false);
         if !clear_air {
             return Vec::new();
@@ -2536,12 +2557,25 @@ mod tests {
         );
         assert_eq!(guarded.far_hop_inside("l25sub2", "l25_path_to_l4"), None);
 
-        // **A corrupted town is not eligible at all.** The dev, 2026-08-17: *once a settlement is
-        // corrupted, the thick fog re-appears.* Same map and same cleared route as the first case,
-        // so the only thing being tested is the corruption gate.
+        // **Corruption on the container does not decide this, and used to.** The dev, 2026-08-22:
+        // *the corruption is only a one-time clearing of a node's visited state. Once we re-visit
+        // the nodes, they become fast-hoppable again.* So a corrupted town whose route has been
+        // re-cleared hops exactly like any other — the flag says nothing about the ground in front
+        // of us.
         let mut corrupt = town(all, vec![]);
         corrupt.entry("l25").corrupted = true;
-        assert_eq!(corrupt.far_hop_inside("l25sub2", "l25_path_to_l4"), None);
+        assert_eq!(
+            corrupt.far_hop_inside("l25sub2", "l25_path_to_l4").as_deref(),
+            Some("l25_path_to_l4"),
+            "a re-cleared route hops whether or not the container was ever corrupted"
+        );
+
+        // **What corruption actually costs is completion, one node at a time** — and that is the
+        // `guarded` case above, already covered by `can_travel_direct`. Same corrupted container,
+        // route not re-cleared: refused, and refused for the reason that can stop being true.
+        let mut wiped = town("l25sub2 = true", vec![]);
+        wiped.entry("l25").corrupted = true;
+        assert_eq!(wiped.far_hop_inside("l25sub2", "l25_path_to_l4"), None);
     }
 
     /// A forest crosses in one press too — and only a **lost woods** does not.
@@ -2589,11 +2623,17 @@ mod tests {
         lost.entry("l4").in_lost_woods = true;
         assert_eq!(lost.far_hop_inside("l4sub1", "l4_path_to_l25"), None);
 
-        // And corruption closes it whatever the kind, which is the dev's rule applied past
-        // settlements: `setAreaIncomplete` takes completion away and the clouds come back with it.
+        // **And corruption does not**, which is the correction of 2026-08-22. `setAreaIncomplete`
+        // takes completion away once; re-clearing gives it back. A container flag cannot express
+        // that, and while it tried, the 2002Z run walked `l4` and `l10` a node at a time from end to
+        // end — both corrupted, so every chain came back empty and nothing said why.
         let mut corrupt = forest("Bainton Clump — level 1 forest");
         corrupt.entry("l4").corrupted = true;
-        assert_eq!(corrupt.far_hop_inside("l4sub1", "l4_path_to_l25"), None);
+        assert_eq!(
+            corrupt.far_hop_inside("l4sub1", "l4_path_to_l25").as_deref(),
+            Some("l4_path_to_l25"),
+            "a corrupted forest whose route is clear hops like any other"
+        );
     }
 
     /// **#80.** The chain offers the shorter hops too, so an unclickable far node is not the end.
