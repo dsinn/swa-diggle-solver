@@ -123,6 +123,7 @@ pub fn walk_budget(legs: &[f64], snail: bool, ground: Ground) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::overworld::fixtures::{inside_dump, node};
     use crate::overworld::WorldMap;
 
     /// A placed node and its edges, set directly.
@@ -173,6 +174,32 @@ mod tests {
         // which is the ordinary state of anything a hop beyond where we have stood.
         assert_eq!(m.walk_legs("a", "c"), None);
         assert_eq!(walk_budget(&m.walk_legs("a", "c").unwrap_or_default(), false, Ground::Surface), CEILING);
+    }
+
+    /// **The first hop after entering a subworld is still priced**, because inside, the leg is the
+    /// unit and the distance is never read. The node we enter on has no position — a dump prints its
+    /// neighbours' and never the player's own — and requiring one would have thrown away 72 of the
+    /// 591 interior travels in the 2026-08-20..22 runs for nothing.
+    #[test]
+    fn an_interior_hop_is_priced_even_though_we_do_not_know_where_we_are_standing() {
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump(
+            "l9",
+            "a",
+            "",
+            vec![node("b", "")],
+            Vec::new(),
+        ));
+        assert!(
+            m.inside().is_some(),
+            "the fixture has to put us inside, or this tests the surface path"
+        );
+        let legs = m.walk_legs("a", "b").expect("a route inside needs no positions");
+        assert_eq!(legs.len(), 1);
+        assert_eq!(
+            walk_budget(&legs, false, Ground::Inside),
+            OVERHEAD + Duration::from_secs_f64(INSIDE_LEG * SAFETY)
+        );
     }
 
     /// Standing on it already: no legs, no walk, and the wait is pure overhead.

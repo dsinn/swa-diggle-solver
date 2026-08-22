@@ -2172,9 +2172,22 @@ impl WorldMap {
     /// The legs of the route we expect the game to walk from `from` to `to`, in frame units.
     ///
     /// Fed to [`walk_budget`] so an arrival wait can be sized to the walk in front of it rather than
-    /// to the longest walk in the game. `None` whenever the route cannot be priced — an unplaceable
-    /// node, a step we cannot follow, a frame we do not trust — and the caller then falls back to
-    /// the fixed budget, so an unpriced walk is never a *shorter* wait than it used to get.
+    /// to the longest walk in the game. The caller falls back to the fixed budget on `None`, so an
+    /// unpriced walk is never a *shorter* wait than it used to get.
+    ///
+    /// **What is actually unpriceable**, measured over the 2026-08-20..22 runs rather than guessed:
+    ///
+    /// - **The first travel of a run on a fresh profile.** A dump prints its neighbours' positions
+    ///   and never the player's own (`overworldview.lua:1031`), so `start` is placed only by the
+    ///   dump that arrives at `l1`, which is one press too late. A run that loads a cache with
+    ///   positions at startup does not have this; a cleared profile cannot, because the seed is
+    ///   unreadable until the first save exists ([`WorldMap::absorb_cache`]).
+    /// - **Leaving a subworld** ([`Crossing::Leave`]), where `to` is a surface key and we are
+    ///   holding the interior frame. Rare — one press in 51 run reports — and the container-change
+    ///   clause in the wait ends it in a second or two regardless.
+    /// - **A destination we have no route to**, which #24 already keeps the planner from nominating.
+    ///
+    /// The ten-hop bound is *not* among them: the longest route any run has planned is six hops.
     ///
     /// **It is our route, not necessarily the game's.** `canTravelToIndirect` does its own
     /// breadth-first search (`overworldview.lua:1330`) and may pick a different path of the same
@@ -2185,18 +2198,25 @@ impl WorldMap {
         if from == to {
             return Some(Vec::new());
         }
+        // **Inside, the leg is the unit and the distance is not needed.** `Ground::Inside` prices a
+        // leg flat, because the interior frame carries its own scale and 576 measured steps show
+        // distance does not predict them — so asking for positions here would refuse to price the
+        // first hop after every entry for nothing. That is not a rare case: a dump never prints the
+        // player's own position (`overworldview.lua:1031`), so the node we enter on is unplaced
+        // until some later dump names it, and the runs of 2026-08-20..22 entered a subworld 72 times
+        // against 591 interior travels. Counting the legs is all this has to get right.
         let inside = self.inside().is_some();
-        // Interior positions live in their own frame and never in `Place::pos`; see `InsideFrame`.
         let at = |k: &str| -> Option<(f64, f64)> {
             match inside {
-                true => self.inside_frame.pos.get(k).copied(),
+                true => Some((0.0, 0.0)),
                 false => self.places.get(k).and_then(|p| p.pos),
             }
         };
         let mut cur = from.to_string();
         let mut here = at(&cur)?;
         let mut legs = Vec::new();
-        // The same bound `far_chain_all` uses, for the same reason: our own edges could cycle.
+        // The same bound `far_chain_all` uses, for the same reason: our own edges could cycle. The
+        // longest route any run has actually planned is six hops.
         for _ in 0..10 {
             let next = self.first_step_toward(&cur, to, true)?;
             let there = at(&next)?;
