@@ -413,6 +413,14 @@ pub const HEART_FLOOR: i64 = HEART_COST + crate::rest::INN_COST;
 /// standing still with a plan it will never satisfy.
 pub const SHRINES_BEFORE_THE_ANOMALY: usize = 3;
 
+/// How many shrines [`WorldMap::best_consecration_order`] will order at once.
+///
+/// A world holds seven (`overworld/generators/world.lua:81`), so this never binds today. It exists
+/// because the search is exact and factorial: choosing three of eight is 336 tours, of twelve it is
+/// 1320, and a planner that runs every step should not have a cliff in it that depends on how
+/// generous a future world generator turns out to be.
+pub const TOUR_CANDIDATE_CAP: usize = 8;
+
 /// Cost to `key`, or [`usize::MAX`] when no known route reaches it — so unreachable places sort
 /// last rather than first.
 ///

@@ -27,7 +27,7 @@
 
 use super::{
     dist_or_far, Place, WorldMap, ANOMALY_KEY, HEART_COST, HEART_FLOOR,
-    SHRINES_BEFORE_THE_ANOMALY,
+    SHRINES_BEFORE_THE_ANOMALY, TOUR_CANDIDATE_CAP,
 };
 // Doc links only. See the note in `place.rs`: the arguments came across intact rather than being
 // requalified to suit the file layout.
@@ -247,6 +247,121 @@ impl WorldMap {
     /// the portal open, and opening it reveals every shrine in the world — the beams, and skipping
     /// the cutscene does not skip the revelation (`shrine.lua`'s `initStates`, *so we can save right
     /// away and main menu skip*). Before the portal there is no corruption to weigh anyway.
+    /// **The cheapest round of consecrations that ends at the anomaly**, as its first leg.
+    ///
+    /// The dev, 2026-08-22: *if three or more shrines are already known because of the map cache or
+    /// previous visits, I want a travelling salesman-esque search that tries to find the best path to
+    /// consecrate three major shrines and go to the anomaly.*
+    ///
+    /// ## Why nearest-first is the wrong rule once the shrines are already on the map
+    ///
+    /// [`SHRINES_BEFORE_THE_ANOMALY`] is not a preference, it is a gate: three consecrations, then
+    /// the portal. So the run is not choosing *a* shrine, it is choosing an **order for all of
+    /// them**, and greedy-nearest optimises the first leg of a journey whose length it never looks
+    /// at. Taking the shrine ten hops behind us because it is two hops nearer than the one ahead
+    /// costs the whole detour twice, and the anomaly is at neither end.
+    ///
+    /// This is the same fault [`WorldMap::cross_toward`]'s frontier ranking had (#81) — a per-pick
+    /// minimum standing in for a tour — one level up, on the surface, where the tour is short enough
+    /// to solve exactly.
+    ///
+    /// ## Exactly, because the problem is tiny
+    ///
+    /// A world holds seven shrines: `generateNLocationsOfNameAroundLocationsWithinBounds(..., 7,
+    /// 'shrine', ...)` (`overworld/generators/world.lua:81`), keyed `shrine1`..`shrine7`
+    /// (`utils/world.lua:60-64`). Choosing three of seven in order is 210 tours, each four legs. No
+    /// heuristic is warranted and none is used: every ordering is costed and the best wins.
+    /// [`TOUR_CANDIDATE_CAP`] keeps that true if a future world is more generous.
+    ///
+    /// ## The anomaly is the last leg, and that is the point
+    ///
+    /// Ending the tour at [`WorldMap::anomaly`] is what makes a shrine *on the way* beat a shrine
+    /// that is marginally nearer and behind us. Without it the search would still be greedy, just
+    /// greedier over three steps. When the anomaly has no known position — beaten, or not open — the
+    /// tour ends at the last shrine and this degrades to "visit all three in the cheapest order",
+    /// which is still better than nearest-first.
+    ///
+    /// ## What this deliberately does not do
+    ///
+    /// It does not hold the answer across steps. The tour is recomputed from where we stand, and
+    /// walking the first leg only shortens it, so the first shrine stays first until we arrive or
+    /// the map learns something — which is the one thing that *should* reorder it. Ties break by key
+    /// so two runs from one state agree.
+    ///
+    /// Costs come from [`WorldMap::distances`], which prices a step by whether the game would let us
+    /// walk it, so a leg through ground we cannot yet traverse is charged `CROSSING` rather than
+    /// pretended free. `None` whenever the bar is already met, the fleet of candidates is too small
+    /// to be worth ordering, or nothing is reachable — in each case the caller's nearest-first pick
+    /// is the right answer and is left to make it.
+    fn best_consecration_order(&self, here: &str, usable: &[&Place]) -> Option<String> {
+        let need = SHRINES_BEFORE_THE_ANOMALY.saturating_sub(self.consecrations());
+        if need == 0 {
+            return None;
+        }
+        // Only a shrine that can actually take the flag moves the bar; a minor one is a prayer and
+        // belongs to the errand rules, not to this.
+        let mut stops: Vec<&str> = usable
+            .iter()
+            .filter(|p| p.can_be_consecrated() && !p.consecrated)
+            .map(|p| p.key.as_str())
+            .collect();
+        stops.sort_unstable();
+        // The dev's threshold. Below it there is nothing to choose between — every known shrine has
+        // to be visited, and the caller's nearest-first is the same answer for less work.
+        if stops.len() < SHRINES_BEFORE_THE_ANOMALY {
+            return None;
+        }
+        stops.truncate(TOUR_CANDIDATE_CAP);
+        let need = need.min(stops.len());
+
+        let end = self.anomaly().map(|p| p.key.clone());
+        let mut legs: std::collections::BTreeMap<&str, BTreeMap<String, usize>> =
+            std::collections::BTreeMap::new();
+        legs.insert(here, self.distances(here));
+        for k in &stops {
+            legs.insert(k, self.distances(k));
+        }
+        // A leg we cannot price at all makes the whole tour unorderable, so it is refused rather
+        // than given a sentinel that would quietly win or quietly lose.
+        let leg = |from: &str, to: &str| -> Option<usize> { legs.get(from)?.get(to).copied() };
+
+        let mut best: Option<(usize, String)> = None;
+        let mut order: Vec<&str> = Vec::with_capacity(need);
+        // Plain depth-first over ordered selections. `need` is three and `stops` is at most
+        // `TOUR_CANDIDATE_CAP`, so the whole search is a few hundred additions.
+        fn walk<'a>(
+            at: &str, order: &mut Vec<&'a str>, stops: &[&'a str], need: usize, end: Option<&str>,
+            spent: usize, leg: &dyn Fn(&str, &str) -> Option<usize>,
+            best: &mut Option<(usize, String)>,
+        ) {
+            if order.len() == need {
+                let total = match end {
+                    Some(e) => match leg(at, e) {
+                        Some(d) => spent + d,
+                        None => return,
+                    },
+                    None => spent,
+                };
+                let first = order[0].to_string();
+                if best.as_ref().is_none_or(|(b, k)| total < *b || (total == *b && first < *k)) {
+                    *best = Some((total, first));
+                }
+                return;
+            }
+            for s in stops {
+                if order.contains(s) {
+                    continue;
+                }
+                let Some(d) = leg(at, s) else { continue };
+                order.push(s);
+                walk(s, order, stops, need, end, spent + d, leg, best);
+                order.pop();
+            }
+        }
+        walk(here, &mut order, &stops, need, end.as_deref(), 0, &leg, &mut best);
+        best.map(|(_, k)| k)
+    }
+
     fn corrupted_shrines_are_needed(&self) -> bool {
         self.consecrations() < SHRINES_BEFORE_THE_ANOMALY && self.clean_shrines_left() == 0
     }
@@ -992,7 +1107,8 @@ impl WorldMap {
         // branch quadratic in the size of the map for an answer that cannot change inside one pass.
         let corrupted_are_needed = anomaly_open && self.corrupted_shrines_are_needed();
         let pick_shrine = || {
-            self.places
+            let usable: Vec<&Place> = self
+                .places
                 .values()
                 .filter(|p| p.key != here && !p.avoid && p.is_shrine())
                 // **A surface destination, so nothing with a parent.** [`Place::is_shrine`] answers
@@ -1121,7 +1237,16 @@ impl WorldMap {
                 // refuses a level 4+ shrine while `hell == 0` because arriving there is what *opens*
                 // the portal, which is not a question about cost at all.
                 .filter(|p| ok(p))
-                .min_by_key(|p| dist_or_far(&dist, &p.key))
+                .collect::<Vec<_>>();
+            // **The order, when there is an order to choose** — see
+            // [`WorldMap::best_consecration_order`]. It answers `None` whenever nearest-first is
+            // already the right call, so this is an accelerator on a rule rather than a second rule.
+            if let Some(first) = self.best_consecration_order(here, &usable) {
+                if let Some(p) = usable.iter().find(|p| p.key == first) {
+                    return Some(*p);
+                }
+            }
+            usable.into_iter().min_by_key(|p| dist_or_far(&dist, &p.key))
         };
 
         // **With the portal live, a reachable shrine outranks the portal itself** — the dev's call,
@@ -3672,6 +3797,97 @@ e	l4	l11
         // Same shrine, once corruption has reset it: now a fight we no longer need.
         m.entry("s1").corrupted = true;
         assert_ne!(m.next_target().unwrap().reason, Goal::Shrine);
+    }
+
+    /// **The tour, and the shrine it declines to take first.**
+    ///
+    /// The dev, 2026-08-22: *if three or more shrines are already known ... a travelling
+    /// salesman-esque search that tries to find the best path to consecrate three major shrines and
+    /// go to the anomaly.*
+    ///
+    /// The map is a line, and the whole argument fits on it:
+    ///
+    /// ```text
+    ///   rift --- x --- shrine1 --- here --- shrine2 --- shrine3
+    /// ```
+    ///
+    /// `shrine1` and `shrine2` are both one hop away, so nearest-first takes `shrine1` — it is first
+    /// by key and there is nothing else to separate them. That is the wrong end of the line. Going
+    /// right first and sweeping back costs 7; going left first costs 9, because `shrine1` has to be
+    /// walked past twice and the rift is beyond it.
+    ///
+    /// The control is the same map with the anomaly taken away: with no final leg, `shrine1` wins
+    /// again — which is the proof that it is **ending at the rift** that does the work here, not the
+    /// ordering by itself.
+    #[test]
+    fn three_known_shrines_are_ordered_as_a_tour_that_ends_at_the_anomaly() {
+        let line = |with_rift: bool| {
+            let mut m = WorldMap::new();
+            let mut edge = |a: &str, b: &str| {
+                m.entry(a).neighbours.insert(b.into());
+                m.entry(b).neighbours.insert(a.into());
+            };
+            if with_rift {
+                edge("rift", "x");
+                edge("x", "shrine1");
+            }
+            edge("shrine1", "here");
+            edge("here", "shrine2");
+            edge("shrine2", "shrine3");
+            for k in ["rift", "x", "shrine1", "here", "shrine2", "shrine3"] {
+                m.entry(k).heading = "Somewhere meadow".into();
+                // Cleared throughout, so `can_travel_direct` holds and a leg costs its hops rather
+                // than `CROSSING`. The measurement here is about order, not about traversability.
+                m.entry(k).completed = true;
+            }
+            for k in ["shrine1", "shrine2", "shrine3"] {
+                m.entry(k).heading = "Gembling shrine".into();
+            }
+            if with_rift {
+                m.entry("rift").heading = "The Rift anomaly".into();
+                m.entry("rift").completed = false;
+            }
+            m.here = Some("here".into());
+            m.hell = Some(0.1);
+            m
+        };
+
+        let m = line(true);
+        assert!(m.anomaly_is_open().unwrap_or(false), "the premise: consecration needs the portal");
+        assert_eq!(m.anomaly().map(|p| p.key.as_str()), Some("rift"), "and a rift to end at");
+        let d = m.distances("here");
+        assert_eq!(d.get("shrine1").copied(), Some(1), "the premise: two shrines tie for nearest");
+        assert_eq!(d.get("shrine2").copied(), Some(1));
+
+        assert_eq!(
+            m.best_consecration_order("here", &m.places.values().collect::<Vec<_>>()).as_deref(),
+            Some("shrine2"),
+            "right first and sweep back, ending at the rift"
+        );
+        let plan = m.next_target().expect("a plan");
+        assert_eq!(plan.reason, Goal::Shrine, "and the tour is wired into the shrine branch");
+        assert_eq!(plan.target, "shrine2");
+
+        // The control. Without the final leg the line has no far end, and the tie goes back to the
+        // key — which is exactly what nearest-first was already doing.
+        let flat = line(false);
+        assert_eq!(flat.anomaly(), None, "the control: nothing to end at");
+        assert_eq!(
+            flat.best_consecration_order("here", &flat.places.values().collect::<Vec<_>>()).as_deref(),
+            Some("shrine1"),
+            "so the rift is what moved the answer, not the ordering by itself"
+        );
+
+        // And the bar being met retires the whole thing: nothing left to order.
+        let mut done = line(true);
+        for k in ["shrine1", "shrine2", "shrine3"] {
+            done.entry(k).consecrated = true;
+        }
+        assert_eq!(done.consecrations(), SHRINES_BEFORE_THE_ANOMALY, "the premise");
+        assert_eq!(
+            done.best_consecration_order("here", &done.places.values().collect::<Vec<_>>()),
+            None
+        );
     }
 
     #[test]
