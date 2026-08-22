@@ -88,6 +88,41 @@ const LEAVE_TRIES: usize = 3;
 /// `transitionDuration` (`utils/defaultconfig.lua:5`), and a deadline rather than a sleep — a screen
 /// that opens at once costs nothing, so this is only ever paid by a press that did not land.
 const LEAVE_LANDS_WITHIN: Duration = Duration::from_secs(4);
+
+/// How soon after an input it is fair to judge whether the input took.
+///
+/// The dev, 2026-08-22: *make sure that the post-validation waits at least half a second after the
+/// input because of animation time.* Right, and the game names the figure — except that the number
+/// to take is **0.625 and not 0.5**. `utils/defaultconfig.lua:5` ships `transitionDuration = 0.5`,
+/// but `main.lua:127` and `:193` both read `userConfig.interface.transitionDuration or 0.625`, so a
+/// profile without the key animates for the longer time. Diggle never writes `userConfig` and cannot
+/// assume a profile has it, so the fallback is the one that has to be covered.
+///
+/// A *floor* on when to look, not a sleep to spend: every caller measures it from the input and
+/// sleeps only the remainder, so a press that already cost longer than this pays nothing.
+const INPUT_SETTLES_BY: Duration = Duration::from_millis(625);
+
+/// How many times to press `Enter` before accepting that the subworld will not open.
+///
+/// Same shape and same reasoning as [`LEAVE_TRIES`]: the overworld swallows presses, and the loss
+/// looks independent between them. The corrective action for a failed post-check is another press —
+/// the dev's instruction of 2026-08-22, after this branch had answered a silent console with a dead
+/// run.
+const ENTER_TRIES: usize = 3;
+
+/// How long one `Enter` press gets to put a subworld on the console before it is pressed again.
+///
+/// Shorter than the ten seconds this replaced, because it is now a *per-attempt* budget with two
+/// more attempts behind it rather than the run's last word, and because the signal is immediate: the
+/// dump naming the subworld is printed on arrival, not after any walk.
+const ENTER_LANDS_WITHIN: Duration = Duration::from_secs(4);
+
+/// How many times to press `Combat` before accepting that no fight will open.
+///
+/// The press this most needed to be true of: `Combat did not open` has ended five runs, more than
+/// any other press failure in the corpus. Three for the same reason [`LEAVE_TRIES`] is three.
+const COMBAT_TRIES: usize = 3;
+
 const EMPTY_MAP: (i32, i32) = (1750, 160);
 /// Touch this file to stop the run **gracefully** at the next step boundary.
 ///

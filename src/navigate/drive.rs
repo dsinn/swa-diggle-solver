@@ -2101,45 +2101,103 @@ pub fn drive(
                     // re-selects and looks again, then presses regardless, because
                     // [`crate::act::AREA_BUTTON_LIVE`] is calibrated on a five-word live population
                     // and may warn but not veto.
-                    if !r.look_for_a_live_slot() {
-                        r.log.push_str(
-                            "  nothing pressable after re-selecting — pressing `Enter` anyway, \
-                             since the live bar may warn but not veto\n",
-                        );
-                    }
-                    r.snap_area_slot("enter-live");
-                    // **The diff is reported, not obeyed.** It used to end the run here, which put a
-                    // pixel comparison in front of the console — the instrument that actually knows.
-                    // Measured over every report: 138 `Enter` presses, the quietest 0.490, so this
-                    // gate has never once fired for `Enter`. That is not a reason to keep it. The
-                    // same bar reads at or below 0.05 on 2% of `Combat` presses and 30% of
-                    // `Travel (subworld)`, and the `l16sub5` run died on exactly that — a press that
-                    // had landed, behind a scene that had not finished rendering.
-                    if !matches!(r.click_area_button("Enter"), Ok(true)) {
-                        r.log.push_str(
-                            "  the `Enter` press moved almost nothing — asking the console rather \
-                             than giving up on a pixel diff\n",
-                        );
-                    }
-                    // Confirm by the *change*, never by "we are in a subworld" — inside a village
-                    // that is already true before the click, and asking it that way is what once had
-                    // a run report that it had entered somewhere it was standing in. Announcement is
-                    // not readiness: the press is not done until the world says it moved.
-                    let by = Instant::now() + Duration::from_secs(10);
-                    loop {
+                    //
+                    // ## The failure of the post-check is another press, and nothing cleverer
+                    //
+                    // The dev, 2026-08-22: *now that we have validation on both sides of the input,
+                    // make sure that the post-input corrective action for a validation failure is
+                    // simply to retry the input, as that bit us before.* It has, more than once —
+                    // this branch used to answer a silent console with `Stop::Failed`, which turns a
+                    // swallowed press into a dead run. The overworld demonstrably swallows them:
+                    // `button_down` plays inside `mousepressed` for a shown, active button
+                    // (`ui/elements/button.lua:278-281`), so a press can be heard and still lose its
+                    // *release* when anything rebuilds the area buttons underneath it.
+                    //
+                    // **What makes a second press safe is the check at the top of the loop.** If the
+                    // first press landed late we are already inside, and pressing (187, 918) again
+                    // would hit whatever the subworld put in that slot. Reading the console before
+                    // each attempt — not only after — is the same rule
+                    // [`Run::left_the_overworld`] follows, and for the same reason.
+                    let mut entered = false;
+                    for attempt in 1..=ENTER_TRIES {
                         r.pump();
                         if r.map.inside().map(str::to_string) != inside_before {
-                            r.log.push_str(&format!(
-                                "  inside `{}` now\n",
-                                r.map.inside().unwrap_or("?")
-                            ));
+                            entered = true;
                             break;
                         }
-                        if Instant::now() >= by {
-                            return Stop::Failed(format!("no subworld after entering {here}"));
+                        if !r.look_for_a_live_slot() {
+                            r.log.push_str(
+                                "  nothing pressable after re-selecting — pressing `Enter` anyway, \
+                                 since the live bar may warn but not veto\n",
+                            );
                         }
-                        std::thread::sleep(Duration::from_millis(200));
+                        if attempt == 1 {
+                            r.snap_area_slot("enter-live");
+                        }
+                        // Marked before the press so the settle below is measured from the input and
+                        // not from whatever the press itself took to return.
+                        let pressed = Instant::now();
+                        // **The diff is reported, not obeyed.** It used to end the run here, which
+                        // put a pixel comparison in front of the console — the instrument that
+                        // actually knows. Measured over every report: 138 `Enter` presses, the
+                        // quietest 0.490, so this gate has never once fired for `Enter`. That is not
+                        // a reason to keep it. The same bar reads at or below 0.05 on 2% of `Combat`
+                        // presses and 30% of `Travel (subworld)`, and the `l16sub5` run died on
+                        // exactly that — a press that had landed, behind a scene that had not
+                        // finished rendering.
+                        if !matches!(r.click_area_button("Enter"), Ok(true)) {
+                            r.log.push_str(
+                                "  the `Enter` press moved almost nothing — asking the console \
+                                 rather than giving up on a pixel diff\n",
+                            );
+                        }
+                        // **Nothing is judged for the first [`INPUT_SETTLES_BY`].** The dev's other
+                        // half of the same instruction: *make sure that the post-validation waits at
+                        // least half a second after the input because of animation time.* The game's
+                        // own figure, and the reason this is 625 ms rather than 500 — see there.
+                        //
+                        // A remainder rather than a fresh sleep: `click_area_button` already spends a
+                        // second of its own, so this normally costs nothing and exists so the
+                        // guarantee does not depend on that.
+                        let settled = pressed + INPUT_SETTLES_BY;
+                        if let Some(left) = settled.checked_duration_since(Instant::now()) {
+                            std::thread::sleep(left);
+                        }
+                        // Confirm by the *change*, never by "we are in a subworld" — inside a
+                        // village that is already true before the click, and asking it that way is
+                        // what once had a run report that it had entered somewhere it was standing
+                        // in. Announcement is not readiness: the press is not done until the world
+                        // says it moved.
+                        let by = Instant::now() + ENTER_LANDS_WITHIN;
+                        while Instant::now() < by {
+                            r.pump();
+                            if r.map.inside().map(str::to_string) != inside_before {
+                                entered = true;
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(200));
+                        }
+                        if entered {
+                            if attempt > 1 {
+                                r.log.push_str(&format!(
+                                    "  `Enter` took on press {attempt} — the overworld swallowed \
+                                     the first {}\n",
+                                    attempt - 1
+                                ));
+                            }
+                            break;
+                        }
+                        r.log.push_str(&format!(
+                            "  `Enter` press {attempt} of {ENTER_TRIES} left us outside `{here}` — \
+                             pressing again\n"
+                        ));
                     }
+                    if !entered {
+                        return Stop::Failed(format!(
+                            "no subworld after {ENTER_TRIES} presses of Enter at {here}"
+                        ));
+                    }
+                    r.log.push_str(&format!("  inside `{}` now\n", r.map.inside().unwrap_or("?")));
                     continue;
                 }
             }
@@ -2293,15 +2351,43 @@ pub fn drive(
             // [`Run::look_for_a_live_slot`] re-selects and looks again, which is the recovery for a
             // stale slot, and then presses regardless: the bar is calibrated on three short words
             // and may not veto. See there.
-            if !r.look_for_a_live_slot() {
-                r.log.push_str(
-                    "  nothing pressable after re-selecting — pressing anyway, since the live bar \
-                     is calibrated on three planks and `Travel` is not one of them\n",
-                );
-            }
-            r.snap_area_slot("combat-live");
-            if !matches!(r.click_area_button("Combat"), Ok(true)) {
-                // **A screen diff is a worse witness than the observer, so ask the observer.**
+            // **A press that did not land is pressed again**, which is the same instruction the
+            // `Enter` path above carries and the place it was worth the most. `Combat did not open`
+            // has ended **five runs**, more than any other press failure in the corpus, and until
+            // now the corrective action for it was to stop.
+            //
+            // Four of those five predate the observer fallback below and the fifth predates
+            // [`Run::look_for_a_live_slot`] above, so today's code would likely have survived all of
+            // them — this is not a claim that the path is broken. It is that its *last* answer was
+            // still `Stop::Failed`, and a swallowed press deserves another press.
+            //
+            // **What makes the retry safe here is stronger than elsewhere.** The observer window is
+            // spent *before* looping, so a pregame that merely opened late has already been named
+            // and returned. A second press therefore only ever goes out when four seconds of looking
+            // found no screen at all. That matters because (187, 918) is not harmless on the screens
+            // this opens — it is `Start` on the pregame — so the guard has to be the one that runs
+            // first, not the one that runs after.
+            let mut opened = None;
+            for attempt in 1..=COMBAT_TRIES {
+                if !r.look_for_a_live_slot() {
+                    r.log.push_str(
+                        "  nothing pressable after re-selecting — pressing anyway, since the live \
+                         bar is calibrated on three planks and `Travel` is not one of them\n",
+                    );
+                }
+                if attempt == 1 {
+                    r.snap_area_slot("combat-live");
+                }
+                let pressed = Instant::now();
+                let diff_saw_it = matches!(r.click_area_button("Combat"), Ok(true));
+                // Nothing is judged for the first [`INPUT_SETTLES_BY`]; see there. Normally free,
+                // because `click_area_button` has already spent a second of its own.
+                let settled = pressed + INPUT_SETTLES_BY;
+                if let Some(left) = settled.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(left);
+                }
+                // **A screen diff is a worse witness than the observer, so ask the observer** — and
+                // now ask it whatever the diff said, rather than only when the diff despaired.
                 //
                 // `click_area_button` judges a press by how much the window changed one second
                 // later. That is a reasonable *first* question and a terrible last one: the pregame
@@ -2313,11 +2399,7 @@ pub fn drive(
                 // `gave-up.png` from that stop is unmistakably the pregame — `Bursall Hedge — level
                 // 2 road` across the top, `Start` at the bottom — with the scene behind it still
                 // black because it had not finished rendering. The press had landed. Nothing looked.
-                //
-                // Bounded by the same [`COMBAT_OPENS_BY`] the other post-press re-look uses, so a
-                // press that genuinely did nothing still ends the run rather than spinning.
                 let by = Instant::now() + COMBAT_OPENS_BY;
-                let mut opened = None;
                 while Instant::now() < by {
                     let s = crate::act::identify(r.win);
                     if matches!(s, crate::act::Screen::Pregame | crate::act::Screen::CombatEntered) {
@@ -2326,21 +2408,31 @@ pub fn drive(
                     }
                     std::thread::sleep(Duration::from_millis(250));
                 }
-                match opened {
-                    Some(s) => {
+                if let Some(s) = opened {
+                    let how = match diff_saw_it {
+                        true => String::new(),
+                        false => " — the diff saw nothing and the press had landed after all".into(),
+                    };
+                    r.log.push_str(&format!("  `Combat` opened {s:?}{how}\n"));
+                    if attempt > 1 {
                         r.log.push_str(&format!(
-                            "  the diff saw nothing but the observer found {s:?} — the press \
-                             landed after all\n"
+                            "  it took press {attempt} — the overworld swallowed the first {}\n",
+                            attempt - 1
                         ));
-                        r.combat_expected = true;
-                        continue;
                     }
-                    None => {
-                        r.snap_screen("combat-no-diff");
-                        r.log_button_scores();
-                    }
+                    break;
                 }
-                return Stop::Failed(format!("Combat did not open at {here}"));
+                r.log.push_str(&format!(
+                    "  `Combat` press {attempt} of {COMBAT_TRIES} opened nothing in \
+                     {COMBAT_OPENS_BY:?}\n"
+                ));
+            }
+            if opened.is_none() {
+                r.snap_screen("combat-no-diff");
+                r.log_button_scores();
+                return Stop::Failed(format!(
+                    "Combat did not open at {here} after {COMBAT_TRIES} presses"
+                ));
             }
             r.combat_expected = true;
             r.settle_after_mode_change(inside_before);
