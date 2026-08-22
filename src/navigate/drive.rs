@@ -787,9 +787,14 @@ pub fn drive(
         //
         // Before any of the branches below, because every one of them is a reason to be at a node
         // and none of them is in a position to notice that we have been at it four times over.
-        // Computed once per step and used twice: by the loop guard below, and by the crossing
-        // branch's door line — which needs exactly this to say whether the door still matches the
-        // errand. Two calls would be two plan computations that could disagree.
+        // **Planned from where we are standing, which inside a subworld is an interior node.**
+        // That is the honest answer for the loop guard — it asks whether *this* node keeps coming
+        // back with nothing gained, and the vantage it is asking about is this one.
+        //
+        // It used to be printed on the crossing's door line too, and that was task #96: the door
+        // line pairs it with `door_note`, which [`WorldMap::choose_exit`] writes from **outside**
+        // the subworld on purpose. Two plans from two vantages, on one line, reading as a
+        // contradiction. The door line computes its own now; see there.
         let doing = r
             .map
             .next_target()
@@ -1362,8 +1367,22 @@ pub fn drive(
             // `door_note` already marks a held commitment with `HELD`; printing the current plan
             // beside it is what makes a stale one visible, since the two disagreeing is the whole
             // symptom.
+            //
+            // **From the same vantage `door_note` was written from** — task #96, and the reason
+            // that entry was filed at all. `doing` above plans from `here`, which in here is an
+            // interior node, so it answers with an interior one: live 2026-08-22 2159Z, inside
+            // `l4`, `door: Heart -> l1 ... | plan now Heart -> l4_path_to_l25`. Nothing was wrong
+            // — `l1` is the outside answer and `l4_path_to_l25` is
+            // [`WorldMap::probe_toward_the_unknown`] doing its job in the only component it could
+            // see — but a line whose two halves disagree by construction cannot say whether a
+            // commitment has gone stale, which is the one thing it exists to say.
+            let out_here = r
+                .map
+                .plan_from_out_here()
+                .map(|p| format!("{:?} -> {}", p.reason, p.target))
+                .unwrap_or_else(|| "no errand".into());
             r.log.push_str(&format!(
-                "  door: {} | reason {} | plan now {doing}\n",
+                "  door: {} | reason {} | plan now {out_here}\n",
                 r.map.door_note().unwrap_or_else(|| "none recorded".into()),
                 r.map.door_reason().map(|d| d.why()).unwrap_or("held from earlier"),
             ));

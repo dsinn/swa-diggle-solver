@@ -101,6 +101,61 @@ impl WorldMap {
         self.places.get(here)?.parent.as_deref()
     }
 
+    /// **Ask the question from outside the forest.**
+    ///
+    /// `next_target` plans from `self.here`, and while we are inside a subworld `here` is an
+    /// interior node. Nothing links an interior node to its container in this map — the two are
+    /// separate components, as [`WorldMap::exit_toward`]'s doc has said all along — so every
+    /// surface place is unroutable, `plan` returns nothing, and the ranked branch of
+    /// [`WorldMap::choose_exit`] is skipped. What is left is `SafestOfWhatIsLeft`: a door
+    /// picked for safety with **no reference to where we are going**.
+    ///
+    /// That is not a rare degenerate case, it is what happens every single time we cross a
+    /// subworld, and it cost three runs on 2026-08-15. From inside `l62` it chose the exit to
+    /// `shrine7` — a dead end already consecrated, prayed at and finished — walked there, turned
+    /// round, re-entered the forest, and then chose `l40` to the south-east while `l57` to the
+    /// south-west stood open on a road already walked and reaching every remaining shrine.
+    ///
+    /// The container is a surface node with surface edges, and it is where we will be standing
+    /// the moment we step out. So plan from there. Every exit's `to_key` is a surface node too,
+    /// which is why that ranking works at all once it is given a target it can measure.
+    ///
+    /// ## The whole map, with one thing changed. It used to be six fields, and that was the
+    /// ## `l10` <-> `l18` ping-pong
+    ///
+    /// The list was `places`, `abandoned`, `roads_done`, `hell`, `wants_rest`, `gold`. Everything
+    /// else took `Default`, and the one that mattered was **`heart_bought`** — the record of
+    /// which general stores we have already emptied.
+    ///
+    /// So the planner, asked from inside Ulrome, was asked by a map that had forgotten every
+    /// heart the run ever bought. With 294 gold in hand `wants_a_heart` was true, the nearest
+    /// settlement with a shelf was `l32`, and the answer came back `Heart -> l32` — whose nearest
+    /// door is `l18`. Outside, the real map remembered, answered `CloseAnomaly -> start`, and
+    /// sent us back into the village. Three ping-pongs in two days, and the run of
+    /// 2026-08-16 0602Z shows the two answers alternating on consecutive lines:
+    ///
+    /// ```text
+    /// 7. l18 -> **l10** (for start, CloseAnomaly)
+    /// 9. crossing `l10` toward `l10_path_to_l18` … door choice: Heart -> l32
+    /// ```
+    ///
+    /// A hand-written field list is a promise to remember every future field, and this file has
+    /// over twenty. Copying the map entire keeps that promise by construction; the vantage point
+    /// is the only thing that should differ, so it is the only thing set.
+    ///
+    /// `here` being a surface node is what makes it "outside" — `inside()` reads the parent of
+    /// `here`, and a container has none.
+    pub fn plan_from_out_here(&self) -> Option<crate::overworld::Plan> {
+        match self.inside() {
+            Some(container) => {
+                let mut m = self.clone();
+                m.here = Some(container.to_string());
+                m.next_target()
+            }
+            None => self.next_target(),
+        }
+    }
+
     /// Which overworld node to leave a subworld toward.
     ///
     /// Each exit leads to exactly one neighbour of the container, and the dump names it
@@ -147,57 +202,12 @@ impl WorldMap {
             return None;
         }
         let entrance = self.entered_from.clone();
-        // **Ask the question from outside the forest.**
+        // **Ask the question from outside the forest** — see [`WorldMap::plan_from_out_here`],
+        // which is the whole of why this is not `self.next_target()`.
         //
-        // `next_target` plans from `self.here`, and while we are inside a subworld `here` is an
-        // interior node. Nothing links an interior node to its container in this map — the two are
-        // separate components, as [`WorldMap::exit_toward`]'s doc has said all along — so every
-        // surface place is unroutable, `plan` returns nothing, and the whole ranked branch below is
-        // skipped. What is left is `SafestOfWhatIsLeft`: a door picked for safety with **no
-        // reference to where we are going**.
-        //
-        // That is not a rare degenerate case, it is what happens every single time we cross a
-        // subworld, and it cost three runs on 2026-08-15. From inside `l62` it chose the exit to
-        // `shrine7` — a dead end already consecrated, prayed at and finished — walked there, turned
-        // round, re-entered the forest, and then chose `l40` to the south-east while `l57` to the
-        // south-west stood open on a road already walked and reaching every remaining shrine.
-        //
-        // The container is a surface node with surface edges, and it is where we will be standing
-        // the moment we step out. So plan from there. Every exit's `to_key` is a surface node too,
-        // which is why the ranking below works at all once it is given a target it can measure.
-        // ## The whole map, with one thing changed. It used to be six fields, and that was the
-        // ## `l10` <-> `l18` ping-pong
-        //
-        // The list was `places`, `abandoned`, `roads_done`, `hell`, `wants_rest`, `gold`. Everything
-        // else took `Default`, and the one that mattered was **`heart_bought`** — the record of
-        // which general stores we have already emptied.
-        //
-        // So the planner, asked from inside Ulrome, was asked by a map that had forgotten every
-        // heart the run ever bought. With 294 gold in hand `wants_a_heart` was true, the nearest
-        // settlement with a shelf was `l32`, and the answer came back `Heart -> l32` — whose nearest
-        // door is `l18`. Outside, the real map remembered, answered `CloseAnomaly -> start`, and
-        // sent us back into the village. Three ping-pongs in two days, and the run of
-        // 2026-08-16 0602Z shows the two answers alternating on consecutive lines:
-        //
-        // ```text
-        // 7. l18 -> **l10** (for start, CloseAnomaly)
-        // 9. crossing `l10` toward `l10_path_to_l18` … door choice: Heart -> l32
-        // ```
-        //
-        // A hand-written field list is a promise to remember every future field, and this file has
-        // over twenty. Copying the map entire keeps that promise by construction; the vantage point
-        // is the only thing that should differ, so it is the only thing set.
-        //
-        // `here` being a surface node is what makes it "outside" — `inside()` reads the parent of
-        // `here`, and a container has none.
-        let outside = self.inside().map(|container| {
-            let mut m = self.clone();
-            m.here = Some(container.to_string());
-            m
-        });
         // **The errand is kept, not just the destination.** It decides whether the anti-backtracking
         // rule below is allowed to overrule a measured answer — see there.
-        let plan = outside.as_ref().unwrap_or(self).next_target();
+        let plan = self.plan_from_out_here();
         let errand = plan.as_ref().map(|p| p.reason.clone());
         let target = plan.map(|p| p.target);
         // **The whole ranking, written down before anything is chosen from it.** See the
@@ -3705,6 +3715,48 @@ mod tests {
             .expect("three doors is not no doors");
         assert_eq!(chosen, "l57", "the door that leads to the shrine, not the one that is merely safe");
         assert_eq!(why.why(), "nearest to the target", "and it was ranked, not fallen back on");
+    }
+
+    /// Task #96: the two plans printed on a crossing's door line are measured from two places.
+    ///
+    /// The line reads `door: <door_note> | reason <why> | plan now <plan>`, and the entry was filed
+    /// because the halves contradicted each other. Live 2026-08-22 2159Z, inside `l4`:
+    ///
+    /// ```text
+    /// door: Heart -> l1; doors l10=1 l1=0 l25=2 shrine1=7 | reason nearest to the target
+    ///                                                    | plan now Heart -> l4_path_to_l25
+    /// ```
+    ///
+    /// `l4_path_to_l25` is an *interior* node, and a surface errand naming one looked like a leak.
+    /// It was not. `door_note` is written by [`WorldMap::choose_exit`] from
+    /// [`WorldMap::plan_from_out_here`] — the container's vantage — and answered `l1`, against which
+    /// `l1=0` is exactly right. `plan now` printed the driver's own `next_target`, planned from
+    /// `here`, which in a subworld is an interior node; from there the heart errand finds no shop it
+    /// can route to and falls through to `probe_toward_the_unknown`, which can only nominate what
+    /// its own component contains. Both answers were correct and neither was the other's.
+    ///
+    /// This fixture reproduces the pair down to the node name: `Heart -> l9_path_to_l1` from inside,
+    /// `Heart -> l1` from out here. The door line now prints the second, so the two halves are
+    /// comparable again and a disagreement means what #51 wanted it to mean — a stale commitment.
+    #[test]
+    fn the_two_plans_on_a_door_line_are_measured_from_two_different_places() {
+        let (mut m, _, _) = a_forest_with_two_doors();
+        // Over the price of a heart with the bed money still behind it, which is the whole of
+        // `wants_a_heart`. `l1 Cowlam village` is the shelf; `l19` is a campfire and sells nothing.
+        m.gold = crate::overworld::HEART_FLOOR;
+        assert_eq!(m.inside(), Some("l9"), "the fixture must actually be inside the forest");
+
+        let inside = m.next_target().expect("the heart errand is live from both vantages");
+        assert_eq!(inside.reason, Goal::Heart);
+        assert_eq!(
+            m.places.get(&inside.target).and_then(|p| p.parent.as_deref()),
+            Some("l9"),
+            "planned from `here`, and `here` reaches nothing but the inside of the forest"
+        );
+
+        let out_here = m.plan_from_out_here().expect("the container can route to the village");
+        assert_eq!(out_here.reason, Goal::Heart, "the same errand, and that is the point");
+        assert_eq!(out_here.target, "l1", "the shop itself, which is what the doors are ranked on");
     }
 
     /// Inside a subworld the route test is not asked, because it would only measure our own model.
