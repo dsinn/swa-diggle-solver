@@ -2801,6 +2801,66 @@ mod tests {
         assert_eq!(late.get("l2").unwrap().pos, Some((500.0, 500.0)));
     }
 
+    /// **One dump decides which of the two above a resumed run gets**, and for a year the startup
+    /// path handed it the wrong one.
+    ///
+    /// [`crate::navigate::Run::recall_map`] branches on `any_placed`, and `spike_run` used to wait
+    /// for a dump before reading the save — so the question was always asked *after* the answer had
+    /// been decided. The recall now happens before that loop; this pins the mechanism, which is
+    /// worth keeping either way, because it is what made the fault look intermittent.
+    ///
+    /// **The asymmetry is [`WorldMap::registration`]'s first line**: a subworld dump is refused
+    /// outright, so a run that resumes inside somewhere places nothing and keeps its coordinates,
+    /// while a run that resumes on the surface defines a frame from its own screen and loses them.
+    /// The surface is the ordinary case. Both keys below are real: 1855Z opened at `l43` and logged
+    /// `for their shape only`, 2002Z opened at `l10_path_to_l18` and logged `with their positions`.
+    #[test]
+    fn where_a_run_resumes_decides_whether_it_keeps_the_remembered_coordinates() {
+        // 1855Z: a surface dump into an empty map takes `Frame::defining` and places everything.
+        let mut surface = WorldMap::new();
+        surface.fold(&fixtures::dump(
+            "l43",
+            "Gilridding crypt",
+            vec![fixtures::node_at("l44", "Bempton Silva forest", 1823.0, 529.0)],
+        ));
+        assert!(surface.any_placed(), "the frame is defined and the cache is now structure-only");
+
+        // 2002Z: an interior dump is refused by `registration`, so nothing is placed at all.
+        let mut inside = WorldMap::new();
+        inside.fold(&fixtures::inside_dump(
+            "l10",
+            "l10_path_to_l18",
+            "Road to Stanningholme crypt",
+            vec![fixtures::node_at("l10sub7", "Ulrome road", 300.0, 400.0)],
+            vec![fixtures::exit("l18")],
+        ));
+        assert!(!inside.any_placed(), "no surface frame, so the coordinates would have survived");
+
+        // **The cost that makes this more than tidiness: a structure-only run writes the loss back.**
+        //
+        // The wait was the visible half — `pace::tests::a_route_through_an_unplaced_node_cannot_be_priced`
+        // has that, and it can only ever make a run slower. This half is the one that does not heal:
+        // the coordinates were on disk, and after a lap they are not.
+        let remembered = format!(
+            "{CACHE_VERSION}\np\tl43\tGilridding crypt\t1823\t529\t5\t0\t\ne\tl43\tl44\n"
+        );
+        let mut structure_only = WorldMap::new();
+        structure_only.fold(&fixtures::dump("far", "camp", vec![fixtures::node_at("n", "camp", 1.0, 1.0)]));
+        assert!(structure_only.any_placed(), "the premise: a frame of our own, so positions are refused");
+        structure_only.absorb_cache_structure(&remembered);
+        assert!(structure_only.get("l43").unwrap().neighbours.contains("l44"), "the shape survives");
+
+        let written = structure_only.cache_text();
+        assert!(
+            written.lines().any(|l| l.starts_with("p\tl43\tGilridding crypt\t-\t-")),
+            "`l43` goes back to disk unplaced, and the next run inherits that: {written}"
+        );
+        assert!(
+            !written.contains("1823"),
+            "the coordinate the file arrived with is gone from the file it leaves as"
+        );
+    }
+
     /// The save has been carrying the road network all along, and we were reading none of it.
     ///
     /// The dev, 2026-08-16: *why is the planner only choosing one node over when we've explored so

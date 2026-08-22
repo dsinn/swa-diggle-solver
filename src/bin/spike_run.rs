@@ -296,6 +296,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return finish(&mut game, &r.log, r.unflushed(), &archive);
         }
     }
+    // **Before the first dump, because the first dump is what takes the positions away.**
+    //
+    // `Run::recall_map` keeps the earlier run's coordinates only while `any_placed` is false, and
+    // the loop below folds a dump the moment one arrives (`Run::pump` -> `WorldMap::fold`). A
+    // surface dump into an empty map takes `Frame::defining` and places everything in it, so by the
+    // time `apply_save` asked, this run had a frame of its own and the cache was downgraded to
+    // structure — silently, and while the comment beneath the loop claimed the opposite.
+    //
+    // **It read as intermittent and was not.** `registration` answers `None` outright for a subworld
+    // dump, so a run that resumed *inside* somewhere placed nothing and kept its coordinates:
+    // 2002Z opened at `l10_path_to_l18` and logged `with their positions`, 1855Z opened at `l43` on
+    // the surface and logged `for their shape only`. The surface is the ordinary case and it was the
+    // losing one.
+    //
+    // It cost twice. `WorldMap::walk_legs` answers `None` for an unplaced node, so every surface
+    // travel fell back on `walk_budget`'s ceiling instead of the distance it was given one for — and
+    // `WorldMap::cache_text` writes `-` for a place with no position, so the run **wrote the loss
+    // back** for every node it had not personally walked past.
+    //
+    // Nothing here needs the game: `Run::map_cache_path` loads `mainSaveData` off disk itself. This
+    // is the same call `apply_save` makes on every step, moved to its first honest opportunity —
+    // and it is still a call that may fail, because a fresh profile has no save yet and the game
+    // writes one on screen *exit*.
+    if let Some((edges, path, positioned)) = r.recall_map() {
+        let how = match positioned {
+            true => "with their positions",
+            false => "for their shape only — something is placed already, which should not happen \
+                      here; see the ordering note above",
+        };
+        r.log.push_str(&format!("recalled {edges} edges from `{path}` {how}\n"));
+    }
     let by = Instant::now() + Duration::from_secs(40);
     while Instant::now() < by && r.latest.is_none() {
         std::thread::sleep(Duration::from_millis(300));
@@ -314,12 +345,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // unconsecrated, and has no idea how to walk there — which is exactly what kept a free
     // consecration untaken across four runs.
     //
-    // Loaded *before* the first dump registers, deliberately: `registration` anchors a new dump
-    // against any node that already carries a position, so restoring the old positions first makes
-    // this run adopt the earlier frame instead of inventing a fresh one.
-    // `apply_save` above has already tried, and logged if it succeeded. Saying so here is for the
-    // case where it could not: a fresh profile has no save at startup, so this run begins blind and
-    // picks the cache up on whichever later step first writes one.
+    // Loaded *before* the first dump registers — see the note above the wait loop, which is where
+    // that now actually happens. `registration` anchors a new dump against any node that already
+    // carries a position, so restoring the old positions first makes this run adopt the earlier
+    // frame instead of inventing a fresh one.
+    //
+    // The call above has already tried, and logged if it succeeded; `apply_save` will keep trying on
+    // every step regardless. Saying so here is for the case where neither could: a fresh profile has
+    // no save at startup, so this run begins blind and picks the cache up on whichever later step
+    // first writes one — and that run keeps the shape and loses the coordinates, correctly, because
+    // by then it has a frame of its own.
     if !r.map_recalled {
         r.log.push_str(
             "no save yet, so no map recalled — this world is recognised on the first step that \

@@ -1048,8 +1048,32 @@ impl Run<'_> {
     ///
     /// **A late arrival takes the shape and leaves the coordinates**, via
     /// [`crate::overworld::WorldMap::absorb_cache_structure`] — by then this run has anchored a frame
-    /// of its own, and old positions dropped into it would make the frame disagree with itself. The
-    /// startup call still takes positions, because nothing has been placed yet.
+    /// of its own, and old positions dropped into it would make the frame disagree with itself.
+    ///
+    /// ## The startup call has to come before the first dump, and until 2026-08-22 it did not
+    ///
+    /// "Nothing has been placed yet" is a claim about **ordering**, not a property of startup, and
+    /// the startup path had stopped satisfying it. `spike_run` waited for a dump before reading the
+    /// save, `Run::pump` folds a dump as it reads it, and a surface dump into an empty map takes
+    /// `Frame::defining` and places everything in it — so `any_placed`
+    /// was already true and the branch above took the structure-only arm.
+    ///
+    /// It read as intermittent because [`crate::overworld::WorldMap::registration`] answers `None`
+    /// outright for a subworld dump: a run resuming *inside* somewhere placed nothing and kept its
+    /// coordinates. 2002Z opened at `l10_path_to_l18` and logged `with their positions`; 1855Z
+    /// opened at `l43` on the surface and logged `for their shape only`.
+    ///
+    /// The startup call is now made from `spike_run` before that loop, which nothing prevents:
+    /// [`Run::map_cache_path`] loads `mainSaveData` off disk itself and wants neither a dump nor a
+    /// console line. `apply_save` still asks on every step, and that is still what covers the fresh
+    /// profile — this only gives the question its first honest opportunity.
+    ///
+    /// **Losing the coordinates is not cosmetic**, which is what makes the ordering worth a section:
+    /// [`crate::overworld::WorldMap::walk_legs`] answers `None` for an unplaced node, so every
+    /// surface travel falls back on [`crate::overworld::walk_budget`]'s ceiling rather than the
+    /// distance it exists to price — and [`crate::overworld::WorldMap::cache_text`] writes `-` for a
+    /// place with no position, so a structure-only run **writes the loss back to disk** for every
+    /// node it did not personally walk past.
     pub fn recall_map(&mut self) -> Option<(usize, String, bool)> {
         if self.map_recalled {
             return None;
