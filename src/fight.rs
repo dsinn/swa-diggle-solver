@@ -678,9 +678,22 @@ impl Fight<'_> {
             .as_ref()
             .map(|p| format!("{}/{}", p.vitals.current, p.vitals.max))
             .unwrap_or_else(|| "?".into());
+        // **#83: what the word spends, not only what it spells.** The line used to read
+        // `wildcards 2->d` — the tile's index and the letter it became, never the material — and so
+        // it could not answer the dev's question of 2026-08-22: *the gold wildcard being used on a
+        // regular enemy that could've been killed with one or two silver wildcards instead.*
+        //
+        // Two numbers settle that between them. The **material** says which wildcard went into the
+        // fire, and [`crate::pick::hoarded`] says what the ranking charged for it — a gold-backed
+        // tile costs its full material score, `gold = 10` against `silver2 = 2` and `silver3 = 3`
+        // (`rpg/effects/material/default.lua`), where every other wildcard is a flat
+        // `WILDCARD_WORTH`. If a gold word won while costing ten times a silver word that also
+        // killed, the fault is above `hoarded` in `Rank::better_than` rather than in the pricing —
+        // and the log now tells those two apart instead of leaving both open.
+        let hoard = crate::pick::hoarded(&tiles, &typed.tiles, self.scorer);
         log.push_str(&format!(
             "turn {turns}: {name} {health}+{armour}hp, us {us}hp, board {letters}\n  \
-             play **{}** (scores {}, tiles {:?}, {} corners{})\n",
+             play **{}** (scores {}, tiles {:?}, {} corners, hoards {hoard:.1}{})\n",
             found.word,
             found.score,
             typed.tiles,
@@ -688,7 +701,14 @@ impl Fight<'_> {
             if typed.uses_a_wildcard() {
                 let w: Vec<String> = typed
                     .steps()
-                    .filter_map(|(i, c)| c.map(|c| format!("{i}->{c}")))
+                    .filter_map(|(i, c)| {
+                        let material = tiles
+                            .get(i)
+                            .and_then(|t| self.scorer.material_name(t))
+                            .unwrap_or("?")
+                            .to_string();
+                        c.map(|c| format!("{i}->{c} ({material})"))
+                    })
                     .collect();
                 format!(", wildcards {}", w.join(" "))
             } else {
