@@ -774,12 +774,16 @@ impl WorldMap {
         candidates.sort_by(|a, b| {
             a.risk()
                 .cmp(&b.risk())
-                .then(a.level().unwrap_or(u32::MAX).cmp(&b.level().unwrap_or(u32::MAX)))
+                .then(
+                    a.remembered_level()
+                        .unwrap_or(u32::MAX)
+                        .cmp(&b.remembered_level().unwrap_or(u32::MAX)),
+                )
                 .then(a.key.cmp(&b.key))
         });
         candidates
             .first()
-            .map(|p| Plan { target: p.key.clone(), reason: Goal::EasiestHostile { level: p.level() }, steered_by: None })
+            .map(|p| Plan { target: p.key.clone(), reason: Goal::EasiestHostile { level: p.remembered_level() }, steered_by: None })
     }
 
     /// The planner proper. `skip_hostile` excludes anywhere a fight is owed, on either axis;
@@ -1298,7 +1302,7 @@ impl WorldMap {
             candidates.sort_by(|a, b| {
                 a.completed
                     .cmp(&b.completed)
-                    .then(a.level().cmp(&b.level()))
+                    .then(a.remembered_level().cmp(&b.remembered_level()))
                     .then(a.key.cmp(&b.key))
             });
             if let Some(p) = candidates.first().filter(|_| !self.gentler_ground_remains(here, &ok)) {
@@ -1735,7 +1739,13 @@ impl WorldMap {
             // An unknown node counts as dangerous: we cannot read a level off a heading we do not
             // have, and a hop is an optimisation — declining one costs a press, taking a bad one can
             // cost the run.
-            let gentle = self.places.get(key).map(|p| p.level().unwrap_or(0) <= 3).unwrap_or(false);
+            //
+            // `remembered_level` rather than `level`, or a crypt cleared by an **earlier** run and
+            // recalled from the cache reads as level 0 and we hop straight over a fight (#79). A
+            // crypt cleared by *this* run still reads 0 and still hops, because there the game is
+            // the one saying so — see [`Place::remembered_level`].
+            let gentle =
+                self.places.get(key).map(|p| p.remembered_level().unwrap_or(0) <= 3).unwrap_or(false);
             if !gentle {
                 return false;
             }

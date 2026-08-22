@@ -489,6 +489,17 @@ impl WorldMap {
     /// we both write and read, and a serialisation crate is a dependency and a build cost for
     /// something a `split('\t')` does. Unknown leading tokens are skipped rather than rejected, so a
     /// newer writer cannot break an older reader.
+    ///
+    /// ## The level has a column of its own, and the version did not move
+    ///
+    /// A `p` row ends `…\t<parent>\t<level>`, where the level is [`Place::base_level`] — see there
+    /// for why the heading alone could not carry it, and #79 for the world this file was written
+    /// blind. Appending rather than bumping [`CACHE_VERSION`] is the point of the paragraph above:
+    /// an older reader takes seven fields and ignores the eighth, and a newer reader finds `None`
+    /// in an older file and falls back to whatever level its headings still hold. Bumping would
+    /// have been actively worse — the version string is what gates `positions_are_trustworthy`, so
+    /// a new one would have thrown away every coordinate in every cache we have, to announce a
+    /// column that costs nothing to miss.
     pub fn cache_text(&self) -> String {
         let mut out = format!("{CACHE_VERSION}\n");
         for p in self.places.values() {
@@ -497,12 +508,13 @@ impl WorldMap {
                 None => ("-".to_string(), "-".to_string()),
             };
             out.push_str(&format!(
-                "p\t{}\t{}\t{x}\t{y}\t{}\t{}\t{}\n",
+                "p\t{}\t{}\t{x}\t{y}\t{}\t{}\t{}\t{}\n",
                 p.key,
                 p.heading,
                 p.connections,
                 p.hidden.map(|h| h.to_string()).unwrap_or_else(|| "-".into()),
                 p.parent.clone().unwrap_or_default(),
+                p.base_level.map(|l| l.to_string()).unwrap_or_else(|| "-".into()),
             ));
             for n in &p.neighbours {
                 out.push_str(&format!("e\t{}\t{n}\n", p.key));
@@ -576,10 +588,20 @@ impl WorldMap {
                     let Some(key) = f.next().filter(|k| !k.is_empty()) else { continue };
                     let (heading, x, y) = (f.next(), f.next(), f.next());
                     let (conns, hidden, parent) = (f.next(), f.next(), f.next());
+                    let level = f.next();
                     let place = self.entry(key);
                     if place.heading.is_empty() {
                         if let Some(h) = heading.filter(|h| !h.is_empty()) {
-                            place.heading = h.to_string();
+                            // `recall_heading`, not `observe_heading`: this is disk, not a
+                            // dump, so it must not claim the game said anything this run. It still
+                            // gives up whatever levels a file written before the column existed
+                            // happens to have kept; the explicit column below wins where it exists.
+                            place.recall_heading(h);
+                        }
+                    }
+                    if place.base_level.is_none() {
+                        if let Some(Ok(l)) = level.map(str::parse::<u32>) {
+                            place.base_level = Some(l);
                         }
                     }
                     if place.pos.is_none() && positions_are_trustworthy {
@@ -1045,7 +1067,7 @@ impl WorldMap {
             let p = self.entry(key);
             p.subworld_container = true;
             if !heading.trim().is_empty() {
-                p.heading = heading.clone();
+                p.observe_heading(heading);
             }
         }
 
@@ -1068,7 +1090,7 @@ impl WorldMap {
 
         {
             let here = self.entry(&a.here_key);
-            here.heading = a.here_heading.clone();
+            here.observe_heading(&a.here_heading);
             here.visited = true;
             here.hidden = Some(a.hidden);
             here.parent = parent.clone();
@@ -1116,7 +1138,7 @@ impl WorldMap {
             // only through the separate exits section (`overworldview.lua:1030-1047`).
             let p = parent.clone();
             let place = self.entry(&n.key);
-            place.heading = n.heading.clone();
+            place.observe_heading(&n.heading);
             place.connections = n.connections;
             if place.parent.is_none() {
                 place.parent = p;
@@ -1153,8 +1175,8 @@ impl WorldMap {
             for e in &a.exits {
                 let place = self.entry(&e.to_key);
                 if place.heading.is_empty() {
-                    place.heading = e.to_heading.clone();
-                        }
+                    place.observe_heading(&e.to_heading);
+                }
                 place.neighbours.insert(container.clone());
                 self.entry(container).neighbours.insert(e.to_key.clone());
             }
@@ -3400,6 +3422,69 @@ mod tests {
         fresh.absorb_cache(&format!("{CACHE_VERSION}\np\tfar\tBorsea shrine\t12\t34\t2\t1\t\n"));
         assert_eq!(fresh.entry("far").heading, "Borsea shrine");
         assert_eq!(fresh.entry("far").pos, Some((12.0, 34.0)));
+    }
+
+    /// **#79, from the run that wrote the fault onto disk.** Replays a real adventure's dumps and
+    /// asks what the cache it would write says about a crypt it cleared on the way through.
+    ///
+    /// `AreaHeading` stops printing `— level N` the moment `locationHasCombat` goes false
+    /// (`overworldview.lua:305-310, 383-392`), so the run met `Bilton — level 2 crypt`, beat it,
+    /// and every later sighting said `Bilton crypt`. `cache_text` wrote the heading it had. A
+    /// second profile on the same seed — the world is a pure function of it
+    /// (`overworld/generators/world.lua:65`) — absorbs that, finds `l13` absent from its own
+    /// `completedAreas`, and reads a level 2 fight as a free walk.
+    ///
+    /// The three assertions are the three links: the game really does strip it, the run banks it
+    /// anyway, and a reader on the other side of the file gets it back. The **negative control** is
+    /// the same file with the new column cut off, which is byte-for-byte what the old writer
+    /// produced — it has to come back free, or the test is passing on something else.
+    #[test]
+    fn a_crypt_cleared_last_run_is_still_a_fight_to_the_next_one() {
+        let stem = "spike-run-20260822-0238Z";
+        let Ok(log) = std::fs::read_to_string(format!("{stem}.log")) else {
+            eprintln!("SKIP: {stem}.log is not present");
+            return;
+        };
+        let lines: Vec<String> = log.lines().map(|l| l.to_string()).collect();
+        let dumps = crate::observe::adjacency::Reader::new().push(&lines);
+        assert!(dumps.len() > 100, "expected a whole run, got {}", dumps.len());
+        let mut lived = WorldMap::new();
+        for a in &dumps {
+            lived.fold(a);
+        }
+
+        // The premise, measured rather than assumed: the heading we are left holding has no level.
+        let l13 = lived.get("l13").expect("the run travelled to l13");
+        assert_eq!(l13.heading, "Bilton crypt", "the run's last word on l13");
+        assert_eq!(l13.level(), None, "so nothing can read a level off it");
+        assert_eq!(l13.base_level, Some(2), "but the fight it was is banked");
+        // And while the game is still saying `free`, that is the answer we give — the live heading
+        // outranks the bank. See [`Place::remembered_level`].
+        assert_eq!(l13.remembered_level(), None, "a live heading wins, including when it is silent");
+
+        // Across the file, into a run that has never heard of this crypt.
+        let text = lived.cache_text();
+        let mut next = WorldMap::new();
+        next.absorb_cache(&text);
+        let recalled = next.get("l13").expect("the cache carries it");
+        assert_eq!(recalled.heading, "Bilton crypt", "the stripped heading is what was written");
+        assert_eq!(recalled.remembered_level(), Some(2), "and the level comes back beside it");
+        assert!(recalled.may_be_a_fight(), "#79: this is what a route was being priced against");
+
+        // The control. Cut the column the fix added and the old fault comes straight back.
+        let old: String = text
+            .lines()
+            .map(|l| match l.starts_with("p\t") {
+                true => l.rsplit_once('\t').map(|(head, _)| head).unwrap_or(l),
+                false => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut without = WorldMap::new();
+        without.absorb_cache(&old);
+        let blind = without.get("l13").expect("the cache still carries it");
+        assert_eq!(blind.remembered_level(), None, "the control is vacuous: it never lost the level");
+        assert!(!blind.may_be_a_fight(), "the fault #79 reported, reproduced");
     }
 
     #[test]

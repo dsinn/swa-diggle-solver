@@ -25,6 +25,42 @@ pub struct Place {
     pub key: String,
     /// `AreaHeading` output. Carries the level and type for combat nodes.
     pub heading: String,
+    /// The combat level this node carried while it was **not** corrupted, kept for good.
+    ///
+    /// ## Why the heading cannot be the only record of it
+    ///
+    /// `AreaHeading` prints `— level N` only while `locationHasCombat` is true
+    /// (`overworldview.lua:388-389`), so **clearing a node deletes its level from every future
+    /// reading of it**. That is correct for the live game and wrong for a file we keep: the run of
+    /// 2026-08-22 cleared five combat nodes and wrote `l13 Bilton crypt` into the world cache where
+    /// it had met `Bilton — level 2 crypt`. A later run on the same seed absorbs that, finds the
+    /// crypt *not* complete in its own save, and reads it as a free walk — poisoning
+    /// [`Place::may_be_a_fight`], and through it every route cost the planner computes.
+    ///
+    /// Combat-zone-ness is a fact about the world, which is a pure function of the seed
+    /// (`overworld/generators/world.lua:65`). Completion is a fact about one profile. Keeping the
+    /// level in a field of its own separates them, so a cleared node still says *this is a fight if
+    /// you have not had it yet*.
+    ///
+    /// ## Why "uncorrupted", and what is derivable from what
+    ///
+    /// Corruption rewrites the level upward — `level = math.max(3, baseLevel, 7-baseLevel)`
+    /// (`world.lua:499-502`) — so 1, 2 and 3 come back as 6, 5 and 4 and nothing else moves. That
+    /// map is not invertible: a level 4 reading is either a base 4 or a corrupted base 3. The dev's
+    /// ruling, 2026-08-22: *I'd agree with tracking specifically the uncorrupted node level. Future
+    /// runs can re-derive it from the corrupted state.* So this records only what was read while
+    /// [`Place::corrupted`] was false, and the corrupted level stays derivable from it; the reverse
+    /// would not be.
+    ///
+    /// A place first met already corrupted keeps `None` here, and loses nothing by it — `corrupted`
+    /// is itself the second clause of [`Place::may_be_a_fight`], and it is read fresh from the save
+    /// every step.
+    ///
+    /// **One window where this can overstate.** Corruption arrives from the save and headings arrive
+    /// from dumps, so a node corrupted between one save read and the next dump is recorded at its
+    /// inflated level. It errs toward a harder fight than the world holds, which is the direction
+    /// [`Place::deliberate_fight_level`] wants to be wrong in, and one save read closes it.
+    pub base_level: Option<u32>,
     /// Neighbours we have seen named. Never includes hidden ones.
     pub neighbours: BTreeSet<String>,
     /// How many locations this one connects to, as the dump reports it. A dead end is 1, and a
@@ -48,6 +84,13 @@ pub struct Place {
     pub pos: Option<(f64, f64)>,
     /// Have we stood on it and taken a dump?
     pub visited: bool,
+    /// Has a dump **this run** named this place — as opposed to the heading coming off disk?
+    ///
+    /// Per-run and deliberately not cached, for the same reason [`Place::visited`] is not: it is a
+    /// statement about what we have been told since the process started, and a file cannot make it
+    /// true. It is what lets [`Place::remembered_level`] treat a silent live heading as the game
+    /// saying *free* while treating a silent recalled one as *we no longer know*.
+    pub heading_from_dump: bool,
     /// From `mainSaveData.overworld.completedAreas`.
     pub completed: bool,
     /// `<key>_consecrated` in `areaFlags`, which is exactly what `isConsecrated` reads
@@ -244,6 +287,62 @@ impl Place {
         self.level().is_some()
     }
 
+    /// Record a heading **the game printed this run**, and bank the level out of it.
+    ///
+    /// The single door for every heading that arrives from a dump, so that [`Place::base_level`]
+    /// cannot be forgotten at one of the four fold sites that write one. A heading with no level in
+    /// it — which is what a cleared node prints — leaves the banked level alone: **a stripped
+    /// heading must never un-teach a fight.**
+    pub fn observe_heading(&mut self, heading: &str) {
+        self.heading = heading.to_string();
+        self.heading_from_dump = true;
+        self.bank_level();
+    }
+
+    /// The same, for a heading coming back off disk rather than off the console.
+    ///
+    /// It fills a gap and claims nothing about the present, which is what
+    /// [`Place::heading_from_dump`] stays false to say. The level is still worth taking: a cache
+    /// written before the level had a column of its own kept it in whichever headings had not yet
+    /// been stripped.
+    pub fn recall_heading(&mut self, heading: &str) {
+        self.heading = heading.to_string();
+        self.bank_level();
+    }
+
+    /// Uncorrupted readings only; see [`Place::base_level`] for why the corrupted level is the
+    /// derivable direction rather than the fact worth storing.
+    fn bank_level(&mut self) {
+        if !self.corrupted {
+            if let Some(level) = self.level() {
+                self.base_level = Some(level);
+            }
+        }
+    }
+
+    /// The level to reason about a fight with: what the game says if it has said anything this run,
+    /// and what we banked if all we have is a recollection.
+    ///
+    /// ## A live heading always wins, including when it is silent
+    ///
+    /// `AreaHeading` is `locationHasCombat` evaluated on the spot (`overworldview.lua:383-392`), so
+    /// a dump that names a place **without** a level is the game stating that arriving there is
+    /// free — a stronger answer than `completedAreas`, which reaches us through a file the game
+    /// only writes on screen *exit*. Falling back to the bank in that case reintroduced the bug the
+    /// bank was built to fix, one layer down: replaying two runs' dumps, a subnode of `l40` cleared
+    /// mid-crossing came back hostile, and `cross_toward` and its neighbour began nominating each
+    /// other. The replay never applies a save, which is the extreme of the same window a live run
+    /// opens for a step or two after every fight.
+    ///
+    /// So the bank speaks only where nothing else can: a place whose heading we have from the cache
+    /// and have not seen named this run. That is exactly the population #79 is about.
+    pub fn remembered_level(&self) -> Option<u32> {
+        self.level().or_else(|| match self.heading_from_dump {
+            true => None,
+            false => self.base_level,
+        })
+    }
+
     /// **What arriving costs**, which is not the same question as [`Place::hostile_to_enter`].
     ///
     /// The game answers this one for us and we were not listening. `AreaHeading`
@@ -288,7 +387,7 @@ impl Place {
         if self.heading.trim().is_empty() {
             return Arrival::Unknown;
         }
-        match self.level() {
+        match self.remembered_level() {
             Some(level) => Arrival::Fight { level },
             None => Arrival::Free,
         }
@@ -497,7 +596,7 @@ impl Place {
     ///
     /// `completed` is checked by the caller, since it is what says whether a fight is still owed.
     pub fn may_be_a_fight(&self) -> bool {
-        heading_has_combat(&self.heading) || self.corrupted
+        heading_has_combat(&self.heading) || self.remembered_level().is_some() || self.corrupted
     }
 
     /// Does this settlement's general store stock a `Heart`? **The heading says so outright.**
@@ -729,7 +828,7 @@ impl Place {
     /// heretic/blood-curse exclusion — are not properties of a heading, so they are answered by
     /// [`WorldMap::anomaly_is_open`] and by the run itself.
     pub fn triggers_anomaly(&self) -> bool {
-        crate::subworld::triggers_anomaly(self.parent.as_deref(), self.level())
+        crate::subworld::triggers_anomaly(self.parent.as_deref(), self.remembered_level())
     }
     /// **The level of a fight we would take here on purpose**, or `None` if arriving is not us
     /// choosing to fight.
@@ -771,10 +870,10 @@ impl Place {
             return None;
         }
         if self.type_is("anomaly") || self.type_is("crypt") {
-            return self.level();
+            return self.remembered_level();
         }
         if self.is_shrine() && self.corrupted {
-            return Some(self.level().unwrap_or(crate::rest::ASSUMED_SHRINE_LEVEL));
+            return Some(self.remembered_level().unwrap_or(crate::rest::ASSUMED_SHRINE_LEVEL));
         }
         None
     }
