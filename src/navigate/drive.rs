@@ -970,8 +970,8 @@ pub fn drive(
                     r.log.push_str(&log);
                     if played.consecrated && !r.confirm_consecrated(&key, CONSECRATE_CONFIRM) {
                         r.log.push_str(
-                            "  shrine: **the screen closed but `_consecrated` never landed** —                              not consecrated after all
-",
+                            "  shrine: **the screen closed but `_consecrated` never landed** — \
+                             not consecrated after all\n",
                         );
                     }
                     if !played.prayed && !played.consecrated {
@@ -2084,8 +2084,42 @@ pub fn drive(
                 // node is a completed, uncorrupted village — there is no fight for it to start.
                 if rest_here {
                     let inside_before = r.map.inside().map(str::to_string);
+                    // **Prove the button is there, press it, then let the console say it worked.**
+                    //
+                    // The dev, 2026-08-22: *this is a validation gap that we've had to correct
+                    // multiple times while building our MVP; we should validate the button's
+                    // existence and readiness, perform the input, and then validate that the button
+                    // is no longer present* — and on that last step, *the console signal is
+                    // sufficient if the feedback is immediate.* It is: entering prints a fresh
+                    // adjacency dump naming the subworld, which is what the loop below waits on.
+                    //
+                    // Only the first step was missing, and only here. Across every run report we
+                    // have, 148 of 148 `Combat` presses were preceded by an `area slot:` reading and
+                    // **0 of 92 `Enter` presses were** — so this pressed a hand-transcribed
+                    // coordinate without ever asking whether a live plank was sitting on it.
+                    // [`Run::look_for_a_live_slot`] is the check the other path has always used: it
+                    // re-selects and looks again, then presses regardless, because
+                    // [`crate::act::AREA_BUTTON_LIVE`] is calibrated on a five-word live population
+                    // and may warn but not veto.
+                    if !r.look_for_a_live_slot() {
+                        r.log.push_str(
+                            "  nothing pressable after re-selecting — pressing `Enter` anyway, \
+                             since the live bar may warn but not veto\n",
+                        );
+                    }
+                    r.snap_area_slot("enter-live");
+                    // **The diff is reported, not obeyed.** It used to end the run here, which put a
+                    // pixel comparison in front of the console — the instrument that actually knows.
+                    // Measured over every report: 138 `Enter` presses, the quietest 0.490, so this
+                    // gate has never once fired for `Enter`. That is not a reason to keep it. The
+                    // same bar reads at or below 0.05 on 2% of `Combat` presses and 30% of
+                    // `Travel (subworld)`, and the `l16sub5` run died on exactly that — a press that
+                    // had landed, behind a scene that had not finished rendering.
                     if !matches!(r.click_area_button("Enter"), Ok(true)) {
-                        return Stop::Failed(format!("Enter did nothing at {here}"));
+                        r.log.push_str(
+                            "  the `Enter` press moved almost nothing — asking the console rather \
+                             than giving up on a pixel diff\n",
+                        );
                     }
                     // Confirm by the *change*, never by "we are in a subworld" — inside a village
                     // that is already true before the click, and asking it that way is what once had
@@ -2295,8 +2329,8 @@ pub fn drive(
                 match opened {
                     Some(s) => {
                         r.log.push_str(&format!(
-                            "  the diff saw nothing but the observer found {s:?} — the press landed                              after all
-"
+                            "  the diff saw nothing but the observer found {s:?} — the press \
+                             landed after all\n"
                         ));
                         r.combat_expected = true;
                         continue;
