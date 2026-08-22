@@ -1711,12 +1711,26 @@ impl WorldMap {
                     true => by_bearing.then(by_hops),
                     false => by_hops.then(by_bearing),
                 })
-                // **Gentler ground, at equal distance only** — see the note at the filter above for
-                // why this is a tiebreak and not a rank. `triggers_anomaly` rather than `risk()`,
-                // which would have been the obvious choice and is wrong here: `Risk::Unseen` sorts
-                // *worse* than `Risk::Fight`, and a frontier node with no heading is the very thing
-                // exploring exists to go and look at.
-                .then(a.triggers_anomaly().cmp(&b.triggers_anomaly()))
+                // **The level, at equal distance** — the dev, 2026-08-22: *use "distance from
+                // current position" as the highest rank, and then use "node level" as the
+                // second-highest (prefer to choose the lower level).*
+                //
+                // This began as `triggers_anomaly`, a boolean, which the level subsumes and
+                // improves on: level 4 and level 9 are not the same errand, and the boolean ranked
+                // them together. `risk()` would have been the obvious third option and is wrong —
+                // `Risk::Unseen` sorts *worse* than `Risk::Fight`, and a frontier node with no
+                // heading is the very thing exploring exists to go and look at.
+                //
+                // `remembered_level` and not `level`, so a crypt cleared by an earlier run and
+                // recalled from the cache is ranked at the fight it really is (#79). **An unknown
+                // level counts as zero**, which is the same choice for the same reason: no level in
+                // a live heading means no combat, and an unheaded node is what we are here to
+                // reveal. Neither reading makes an unknown node look *worse* than a known fight.
+                .then(
+                    a.remembered_level()
+                        .unwrap_or(0)
+                        .cmp(&b.remembered_level().unwrap_or(0)),
+                )
                 .then(b.connections.cmp(&a.connections))
                 .then(b.hidden.unwrap_or(0).cmp(&a.hidden.unwrap_or(0)))
                 .then(a.key.cmp(&b.key))

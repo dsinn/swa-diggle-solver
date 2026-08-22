@@ -1796,6 +1796,37 @@ pub fn drive(
             // and answering a `[Combat]` choice arms `r.combat_expected` — at which point there is
             // no arrival coming, because the fight has replaced the walk. Without this the loop runs
             // its full timeout and then reports a failure that never happened.
+            //
+            // ## The named node, not merely a different one — and this stalled a run
+            //
+            // `h != here` is right for a single hop and wrong the moment one press covers several.
+            // `core.arriveAt` runs at **every** node on the path (`overworldview.lua:1210-1216`), so
+            // the first intermediate arrival ended the wait while the avatar was still walking, and
+            // the next step planned from a `here` the game had already left behind. The surface
+            // wait was fixed for exactly this and this one was not; #80 then made far hops inside a
+            // subworld ordinary, and a latent bug started firing.
+            //
+            // Live 2026-08-22, step 268: a one-press hop across `l63` toward `l63_path_to_l43`
+            // reported `arrived at l63sub7`, an intermediate node. The game carried on out of the
+            // forest and onto `l43`. Our map still said `l63`, so step 270 planned `l63 -> l43`,
+            // locate-me centred on the player, and the click at (960, 540) selected **the node we
+            // were already standing on** — which moves the area strip not at all. Three attempts,
+            // then `re-centred, but l43 is not in the new dump`, which is true of every node you are
+            // standing on. `Failed("selecting l43 did not register after 3 attempts")`.
+            //
+            // **Leaving the container counts as arriving.** The exit road is a node like any other,
+            // but travelling to it can carry us straight out — and once we are no longer inside,
+            // the crossing is over whatever `here` says. Without this clause the fixed loop would
+            // simply spend its full thirty seconds waiting for a road it had already walked past.
+            let landing: Option<String> = far_inside.as_ref().map(|(k, _)| k.clone()).or_else(|| {
+                match &mv {
+                    Crossing::Step { to, .. } | Crossing::Probe { to, .. } | Crossing::Seek { to } => {
+                        Some(to.clone())
+                    }
+                    Crossing::Leave { to } => Some(to.clone()),
+                    _ => None,
+                }
+            });
             let by = Instant::now() + Duration::from_secs(30);
             let mut arrived = false;
             while Instant::now() < by && !arrived && !r.combat_expected {
@@ -1803,13 +1834,31 @@ pub fn drive(
                 r.pump();
                 r.clear_text_screen();
                 r.handle_event();
-                arrived = r.map.here().map(|h| h != here).unwrap_or(false);
+                let at_the_landing = match (&landing, r.map.here()) {
+                    (Some(k), Some(h)) => h == k,
+                    // Nothing named to wait for, so any movement is the answer, as it was.
+                    (None, Some(h)) => h != here,
+                    _ => false,
+                };
+                arrived = at_the_landing || r.map.inside().map(|c| c != container).unwrap_or(true);
             }
             if r.combat_expected && !arrived {
                 r.log.push_str("  an event started a fight instead of a walk — handing back\n");
                 continue;
             }
+            // **Short of the named node is progress, not failure** — the same rule the surface wait
+            // carries, and the reason waiting for a *named* node cannot cost a run. An event pauses
+            // the walk and a fight stops it; `here` is right either way, and the top of the loop
+            // replans from it. Only standing still is a failure.
             if !arrived {
+                if r.map.here().map(|h| h != here).unwrap_or(false) {
+                    r.log.push_str(&format!(
+                        "  stopped short of `{}` at `{}` — replanning from there\n",
+                        landing.as_deref().unwrap_or("?"),
+                        r.map.here().unwrap_or("?")
+                    ));
+                    continue;
+                }
                 return Stop::Failed(format!("no arrival after: {what}"));
             }
             r.log.push_str(&format!("  arrived at `{}`\n", r.map.here().unwrap_or("?")));

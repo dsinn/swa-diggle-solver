@@ -3044,6 +3044,28 @@ mod tests {
             plan.target, "beside",
             "at equal distance the one that does not open the portal wins"
         );
+
+        // **And it is the level, not a boolean.** The dev, 2026-08-22: *use "node level" as the
+        // second-highest (prefer to choose the lower level).* Both of these open the portal, so the
+        // `triggers_anomaly` tiebreak this replaced would have tied them and let the key decide —
+        // and the key says `deep`.
+        let mut two_fights = WorldMap::new();
+        two_fights.fold(&dump(
+            "start",
+            "camp",
+            vec![node("deep", "Yokefleet — level 5 crypt"), node("deeper", "Cowlam — level 9 crypt")],
+        ));
+        two_fights.here = Some("start".into());
+        assert!(
+            two_fights.get("deep").unwrap().triggers_anomaly()
+                && two_fights.get("deeper").unwrap().triggers_anomaly(),
+            "the premise: a boolean cannot separate these"
+        );
+        assert_eq!(
+            two_fights.next_target().expect("a plan").target,
+            "deep",
+            "level 5 before level 9, at the same distance"
+        );
     }
 
     /// **The decision that killed the run of 2026-08-16**, and the exploring case it must not break.
