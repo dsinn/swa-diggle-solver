@@ -6586,7 +6586,7 @@ mod tests {
         // Only the shipping half. Counting the whole file would count this test's own string
         // literals, which makes the two totals agree for a reason that has nothing to do with the
         // driver.
-        let src = include_str!("navigate.rs");
+        let src = include_str!("mod.rs");
         let src = src.split_once("
 #[cfg(test)]").map(|(before, _)| before).unwrap_or(src);
         let starts = src.matches("fight.run(").count();
