@@ -2401,13 +2401,25 @@ pub fn drive(
                 // 2 road` across the top, `Start` at the bottom — with the scene behind it still
                 // black because it had not finished rendering. The press had landed. Nothing looked.
                 //
-                // **And a fight is not the only thing this press can open**, which is what ended
-                // the run of 2026-08-22 1855Z. `getLocationButtons` tests `typeData.subworld`
-                // *before* `basicCombatZone`, so the same plank on a village container **enters** it
-                // — the comment further up this function has said so all along, and this wait did
-                // not know. Live at `l10`: `clicked Combat: screen moved 0.948`, we arrived at
-                // `l10sub7` and the console printed the dump to prove it, and this loop spent four
-                // seconds waiting for a pregame that was never coming and called it nothing.
+                // **And a fight is not the only thing this press can open**, which is what ended the
+                // run of 2026-08-22 1855Z.
+                //
+                // A village has **no `Combat` button at all**. `village.lua:72` sets
+                // `subworld = 'village'` and defines no `getAreaButtons`, so `getLocationButtons`
+                // (`overworldview.lua:461-468`) falls to `basicSubworldZoneButtons` — a single plank
+                // reading **`Explore`**, whose `mousereleased` calls `core.enterSubworld` (`:440-458`).
+                // `basicCombatZoneButtons` is the other set entirely (`:414`), and a village never
+                // reaches it.
+                //
+                // So the press could not have started a fight and was never going to. Live at `l10`
+                // we pressed it anyway, moved 0.948, arrived at `l10sub7` with the console printing
+                // the dump to prove it, and this loop spent four seconds waiting for a pregame.
+                //
+                // **Our own reading said so before the press** and nobody acted on it:
+                // `area slot: a live button, not `Combat` (0.8731)`. That is a live `Explore`, and
+                // the bar is deliberately a warning rather than a veto — see
+                // [`crate::act::AREA_BUTTON_LIVE`] — so pressing was right. Expecting only a fight
+                // back was not.
                 //
                 // So the console is asked alongside the observer, and it is the *better* witness of
                 // the two — see [`Run::pump`]. Entering counts as opened, and the outer loop then
@@ -2417,8 +2429,8 @@ pub fn drive(
                     r.pump();
                     if r.map.inside().map(str::to_string) != inside_before {
                         r.log.push_str(&format!(
-                            "  the `Combat` plank entered `{}` rather than opening a fight — the \
-                             console says so\n",
+                            "  that plank was an `Explore`, not a `Combat` — we are inside `{}` and \
+                             the console says so\n",
                             r.map.inside().unwrap_or("?")
                         ));
                         entered_instead = true;
