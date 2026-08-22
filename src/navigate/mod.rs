@@ -1246,8 +1246,39 @@ impl Run<'_> {
         }
     }
 
+    /// The observer's answer, when it has one worth acting on.
+    ///
+    /// `Screen::Unknown` is the map — see [`crate::act::identify`], whose whole set is the screens
+    /// that are *not* the map — so `Some` here means "definitely not the map" and `None` means
+    /// "nothing recognised, carry on". Taking `win` rather than `&self` so it can be called from a
+    /// loop that is already borrowing the log.
+    fn a_screen_we_know(win: &GameWindow) -> Option<crate::act::Screen> {
+        match crate::act::identify(win) {
+            crate::act::Screen::Unknown => None,
+            named => Some(named),
+        }
+    }
+
     fn locate_me(&mut self, wait_for_pan: bool) -> Located {
         let (cw, ch) = self.win.client_size().unwrap_or((1920, 1080));
+        // **Ask what is on screen before clicking at it.** The dev, 2026-08-22, watching a class
+        // unlock get four blind clicks before the observer was consulted: *if Diggle doesn't know
+        // what it's doing, shouldn't it call the observer sooner?*
+        //
+        // `identify` does run first — at the top of the driver's loop — but it is one look, once per
+        // pass, and everything downstream acts on that verdict for the rest of the iteration. A
+        // screen that animates in *after* the look is invisible until the next one. Live: the
+        // Woodsman's shop closed, `Unlock` faded in, and this walked the whole candidate list
+        // clicking into a full-screen panel; the pass ended, the loop went round, and the observer
+        // named it at **1.0000**.
+        //
+        // Cheap, because the map is `Screen::Unknown` — a name means definitely-not-the-map, so this
+        // never refuses a real locate-me. One capture against four clicks and four half-second
+        // waits, on a path that was about to take five captures anyway.
+        if let Some(named) = Self::a_screen_we_know(self.win) {
+            self.log.push_str(&format!("  not on the map: the observer calls this {named:?}\n"));
+            return Located::Failed;
+        }
         for (n, &(cx, cy)) in EMPTY_MAP_CANDIDATES.iter().enumerate() {
             // Actually check the point is on the map before clicking it.
             //
@@ -1262,7 +1293,7 @@ impl Run<'_> {
                 continue;
             }
             let Ok((ex, ey)) = self.win.client_to_screen(cx, cy) else { continue };
-            let _ = self.tap("clearing a text screen: empty ground", ex, ey);
+            let _ = self.tap("locate-me: clicking empty map", ex, ey);
             self.park();
             std::thread::sleep(Duration::from_millis(500));
             self.pump();
@@ -1272,8 +1303,23 @@ impl Run<'_> {
                 slot.state, slot.score
             ));
             if !slot.state.is_ready() {
-                // That point was not empty: the click selected something, which leaves the slot
-                // showing that location's buttons instead. Try elsewhere.
+                // Two hypotheses for this reading, and only one of them was ever considered. The old
+                // comment held the first: *that point was not empty, the click selected something,
+                // try elsewhere.* The second is that **we are not on the map at all** — and it is
+                // the dangerous one, because every remaining candidate is then a blind click into
+                // whatever is there. A road at (213, 18) once opened the character screen and the
+                // run had no way back.
+                //
+                // So the observer is asked again rather than after the list is exhausted: a screen
+                // can arrive between two of these clicks as easily as before the first.
+                if let Some(named) = Self::a_screen_we_know(self.win) {
+                    self.log.push_str(&format!(
+                        "  candidate {} came back empty because this is {named:?}, not the map\n",
+                        n + 1
+                    ));
+                    return Located::Failed;
+                }
+                // The first hypothesis, then: try elsewhere.
                 continue;
             }
             let Ok((lx, ly)) = self.win.client_to_screen(SHOW_AREA_BUTTONS.0, SHOW_AREA_BUTTONS.1) else { continue };

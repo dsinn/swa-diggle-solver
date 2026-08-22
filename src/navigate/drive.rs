@@ -2479,6 +2479,8 @@ pub fn drive(
         // then sat in the arrival wait for its full sixty seconds and died, having printed "the
         // affirmative slot is empty" two hundred times on the way.
         let mut selected = false;
+        // Set when a fresh dump says the walk is already over — see the arm that sets it.
+        let mut standing_on_it = false;
         let mut at = (target.x as i32, target.y as i32);
         // **Pay back the pan we skipped, because this click is not at a fixed coordinate.**
         //
@@ -2526,6 +2528,21 @@ pub fn drive(
             // place, which reads in the log as the click not registering.
             let (cw, ch) = r.win.client_size().unwrap_or((1920, 1080));
             match r.recentre().filter(|a| !camera_is_lost(&a.nodes, cw, ch)) {
+                // **We may already be there**, which is indistinguishable from a click that did not
+                // register unless it is asked about directly. Selecting the node you are standing on
+                // moves the area strip not at all, and a node you are standing on is never in its
+                // own adjacency list — so both of this branch's failure signals fire at once and
+                // both are wrong. That pair ended the run of 2026-08-22 on `l43`; the arrival wait
+                // that let `here` go stale is fixed above, and this is the guard for the next thing
+                // that manages it.
+                Some(a) if a.here_key == hop.step => {
+                    r.log.push_str(&format!(
+                        "  already standing on `{}` — nothing to select\n",
+                        hop.step
+                    ));
+                    standing_on_it = true;
+                    break;
+                }
                 Some(a) => match a.nodes.iter().find(|n| n.key == hop.step) {
                     Some(n) => {
                         at = (n.x as i32, n.y as i32);
@@ -2547,6 +2564,13 @@ pub fn drive(
                     break;
                 }
             }
+        }
+        // The walk is already done, so there is nothing to press. Handing straight back rather than
+        // reporting an arrival here, because the top of the loop re-reads the map and this branch
+        // knows only that one dump agreed with one plan.
+        if standing_on_it {
+            r.hop_misses = 0;
+            continue;
         }
         if !selected {
             return Stop::Failed(format!(
