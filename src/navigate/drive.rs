@@ -1818,6 +1818,26 @@ pub fn drive(
             // but travelling to it can carry us straight out — and once we are no longer inside,
             // the crossing is over whatever `here` says. Without this clause the fixed loop would
             // simply spend its full thirty seconds waiting for a road it had already walked past.
+            //
+            // ## Why thirty and not ten
+            //
+            // The dev, 2026-08-22, on being told this can cost 30 s: *is that mostly 30 seconds of
+            // probing, or just doing nothing? If it's doing nothing, reduce the timeout to 10
+            // seconds.* It is not doing nothing — each 300 ms tick pumps the console, clears a text
+            // screen and answers an event, which is the machinery that lets the walk finish at all;
+            // a lore screen holds back the very dump that reports the arrival.
+            //
+            // And ten is too short on the measurement. The surface wait below has used this same
+            // named-landing rule for longer, so its logs price it: over 150 surface hops in the
+            // 2026-08-20..22 runs the median is 2.1 s and the ninetieth 6.0 s, but five ran past
+            // 10 s and two of those **arrived** — `shrine7` at 10.5 s (0238Z step 244) and `l4` at
+            // 11.4 s (0649Z step 72). A ten-second budget cuts both of those short. Thirty leaves
+            // roughly 2.6x the worst measured arrival, and the surface wait keeps 60 s.
+            //
+            // The 590 subworld arrivals in those same logs top out at 3.0 s, but they were all
+            // taken under the old `h != here` rule, which stopped at the first node of the path.
+            // They price a single hop, not the multi-hop this now waits out — which is why the
+            // surface figures are the ones that govern.
             let landing: Option<String> = far_inside.as_ref().map(|(k, _)| k.clone()).or_else(|| {
                 match &mv {
                     Crossing::Step { to, .. } | Crossing::Probe { to, .. } | Crossing::Seek { to } => {
