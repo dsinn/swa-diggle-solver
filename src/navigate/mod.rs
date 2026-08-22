@@ -70,6 +70,23 @@ mod drive;
 pub use drive::drive;
 
 pub const FRAMES: &str = "spike-frames-live";
+
+/// The console's announcement that a lore screen is up (`ui/lorescreen.lua`).
+///
+/// Matched as a prefix rather than an equality: the line carries the screen's own text after it,
+/// which is the whole point — `Lore screen:` followed by *As you're passing through Ulrome east
+/// guard post…* is the game telling us exactly what is on the display. See
+/// [`Run::clear_text_screen`] for the run this cost.
+const LORE_LINE: &str = "Lore screen:";
+
+/// Does this stretch of console carry a lore-screen announcement?
+///
+/// Split out from [`Run::clear_text_screen`] so the match itself can be tested: constructing a
+/// `Run` needs a live window, and this predicate is the whole of what the run of 2026-08-22 1855Z
+/// needed and did not have.
+fn announces_a_lore_screen(lines: &[String]) -> bool {
+    lines.iter().any(|l| l.trim_start().starts_with(LORE_LINE))
+}
 /// Where the learned map is kept between runs. See [`Run::save_map_cache`].
 pub const MAP_CACHE: &str = "map-cache";
 const AREA_BUTTONS: crate::win::capture::Region =
@@ -665,6 +682,12 @@ pub struct Run<'a> {
     /// exponential ease makes a long hop cost about what a short one does. See
     /// [`crate::overworld::walk_budget`].
     pub turbo_snail: bool,
+    /// How far into the console we have answered [`LORE_LINE`] announcements.
+    ///
+    /// A mark rather than a flag, for the reason [`crate::observe::feed::Feed::seen_line_since`]
+    /// gives: lore screens recur, so "have we ever seen one" is useless after the first. This says
+    /// "have we seen one we have not yet pressed space at".
+    pub lore_cleared_at: usize,
     /// The dump count at the moment every recorded screen position stopped being trustworthy.
     ///
     /// [`Run::settled_dump`] will not return anything counted at or before this, so a dump taken
@@ -2528,7 +2551,31 @@ impl Run<'_> {
             "  affirmative slot: {:?} (score {:.2}, margin {:.2})\n",
             first.state, first.score, first.margin
         ));
-        if !first.state.is_ready() {
+        // **The console outranks the template here, and a run died proving it.**
+        //
+        // 2026-08-22 1855Z stopped at `l10` with the last console line reading
+        // `Lore screen: As you're passing through Ulrome east guard post you notice the sole guard
+        // pensively looking into the village.` — the game naming the exact screen that was up. The
+        // affirmative template scored **0.05** on it and this returned `false`, so nothing cleared
+        // it; the driver then spent sixteen blind clicks and three area presses on a lore screen.
+        //
+        // Why the template missed is in this function's own doc: the button's position moves with
+        // whether it carries a label, and `combat-no-diff.png` from that stop shows the unlabelled
+        // arrow plaque hard in the bottom-right corner, away from the slot the template reads.
+        // Fixing the template is worth doing and is **not** what makes this safe — a fingerprint cut
+        // from one variant can always miss the next one. The console cannot: `ui/lorescreen.lua`
+        // prints one line per screen, and that line is a statement by the game that a lore screen
+        // exists.
+        //
+        // So a console line we have not yet answered counts as "there is something to clear", and
+        // the press below goes out whatever the slot says.
+        let lore = announces_a_lore_screen(self.feed.since(self.lore_cleared_at));
+        if lore {
+            self.lore_cleared_at = self.feed.mark();
+            self.log
+                .push_str("  the console says a lore screen is up, whatever the slot reads\n");
+        }
+        if !first.state.is_ready() && !lore {
             return false;
         }
         for attempt in 1..=6 {
@@ -2544,6 +2591,16 @@ impl Run<'_> {
             let _ = self.tap_key("clearing a text screen: space", VK_SPACE, SC_SPACE);
             std::thread::sleep(Duration::from_millis(700));
             self.pump();
+            // **A second lore line means a second screen, not a failed press.** The game prints one
+            // per screen and they arrive in runs — entering Ulrome printed two at once — so the
+            // console distinguishes "the press did nothing" from "there is another one behind it",
+            // which the slot alone never could on a screen it cannot see.
+            let more = announces_a_lore_screen(self.feed.since(self.lore_cleared_at));
+            if more {
+                self.lore_cleared_at = self.feed.mark();
+                self.log.push_str("  another lore screen behind it — pressing again\n");
+                continue;
+            }
             let now = self.affirmative();
             if !now.state.is_ready() {
                 self.log.push_str(&format!("  cleared after {attempt} press(es)\n"));
@@ -3034,6 +3091,31 @@ enum Located {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The line that ended the run of 2026-08-22 1855Z**, verbatim from its console.
+    ///
+    /// It was the last thing the game said, and nothing read it. The affirmative template scored
+    /// 0.05 on the screen it announced — the plaque is the unlabelled arrow variant, in the corner
+    /// rather than the slot — so the template gate refused to press space and the driver went on to
+    /// click sixteen times into a lore screen.
+    ///
+    /// The tab is real: the game separates the label from the text with one, which is why this
+    /// matches a prefix and not a whole line.
+    #[test]
+    fn the_console_line_that_cost_a_run_is_recognised_as_a_lore_screen() {
+        let real = "Lore screen:\tAs you're passing through Ulrome east guard post you notice the \
+                    sole guard pensively looking into the village."
+            .to_string();
+        assert!(super::announces_a_lore_screen(&[real]));
+        // A lore screen with no text is still a lore screen, and the feed may indent.
+        assert!(super::announces_a_lore_screen(&["  Lore screen: ".to_string()]));
+        // **Not** any old line that mentions one: an adjacency dump must never be read as a screen.
+        assert!(!super::announces_a_lore_screen(&[
+            "Local overworld data:\tArrived at location\tl10sub7\tUlrome east guard post".into(),
+            "and the Lore screen: is not at the start of this one".into(),
+        ]));
+        assert!(!super::announces_a_lore_screen(&[]));
+    }
 
     /// Every source file the driver is made of, listed because `include_str!` cannot glob.
     ///

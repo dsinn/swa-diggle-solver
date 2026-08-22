@@ -425,13 +425,32 @@ fn open_the_shrine(
     input: &dyn crate::win::input::Input,
     log: &mut String,
 ) -> Result<bool, crate::Error> {
+    open_the_shrine_within(win, input, log, VISIT_OPENS_WITHIN)
+}
+
+/// [`open_the_shrine`], with a caller-supplied ceiling on how long each press may be watched.
+///
+/// Split out for [`CONSECRATION_BUDGET`], which has to bound this loop from outside: three attempts
+/// at [`VISIT_OPENS_WITHIN`] apiece were twelve of the twenty-six seconds the dev objected to. A
+/// zero budget skips the loop entirely rather than pressing blind and not looking — a press we will
+/// not watch is worse than no press, because it can still land somewhere.
+fn open_the_shrine_within(
+    win: &crate::win::window::GameWindow,
+    input: &dyn crate::win::input::Input,
+    log: &mut String,
+    watch_for: std::time::Duration,
+) -> Result<bool, crate::Error> {
+    if watch_for.is_zero() {
+        log.push_str("  shrine: no budget left to watch a press with — not pressing\n");
+        return Ok(false);
+    }
     for attempt in 1..=VISIT_ATTEMPTS {
         input.click(VISIT_CLICK.0, VISIT_CLICK.1)?;
         let opened = crate::act::wait_for(
             win,
             &crate::act::SHRINE_GOBACK,
             crate::act::SHRINE_GOBACK_PRESENT,
-            VISIT_OPENS_WITHIN,
+            watch_for,
         );
         if opened.found() {
             log.push_str(&match attempt {
@@ -473,6 +492,24 @@ fn open_the_shrine(
 /// because the cost of being wrong is asymmetric — waiting a few seconds too long costs a few
 /// seconds, and giving up too early abandons the reward the whole trip was for.
 const BEAM_RETURN: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// Everything after the `Consecrate` press, end to end.
+///
+/// The dev, 2026-08-22: *after we consecrated the shrine without praying, the timeout was too long.
+/// Consecration should only take at most 10 seconds from button press to input availability.* Live
+/// at `shrine2` that stretch cost about **26 s** — [`BEAM_RETURN`] spent in full, then three
+/// re-entry attempts at [`VISIT_OPENS_WITHIN`] apiece, then [`PRAY_ALREADY_THERE`] — and produced
+/// nothing: `no Pray in the slot (best 0.1072 < 0.92)`.
+///
+/// **Capping it cannot cost a consecration**, which is the fact that makes this safe rather than a
+/// gamble. The consecration is already banked by the `wait_until_gone` above, and that returns
+/// early if it failed. Every second after it is spent hunting a `Pray` that is only there when the
+/// blessing was not already claimed. So the worst case is a blessing left behind on a revisit,
+/// against a fixed ten seconds on every consecration.
+///
+/// Spent in order and shared: each wait below takes whatever is left, so a beam that returns
+/// promptly leaves the re-entry more room, and none of them can overrun together.
+const CONSECRATION_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long to look for a `Pray` that should already be on screen.
 ///
@@ -601,10 +638,29 @@ fn spend_the_solve(
         return Ok(());
     }
 
-    let back =
-        crate::act::wait_for(win, &crate::act::SHRINE_GOBACK, crate::act::SHRINE_GOBACK_PRESENT, BEAM_RETURN);
+    // The clock the dev put on this; see [`CONSECRATION_BUDGET`]. Started here rather than at the
+    // press, because everything above it is the consecration *confirming itself* and must not be
+    // cut short — what follows is the optional hunt for `Pray`.
+    let spend_by = std::time::Instant::now() + CONSECRATION_BUDGET;
+    let left = |what: std::time::Duration| {
+        spend_by.checked_duration_since(std::time::Instant::now()).unwrap_or_default().min(what)
+    };
+
+    let back = crate::act::wait_for(
+        win,
+        &crate::act::SHRINE_GOBACK,
+        crate::act::SHRINE_GOBACK_PRESENT,
+        left(BEAM_RETURN),
+    );
     if back.found() {
         out.log.push_str("  shrine: the screen came back after the beam\n");
+    } else if left(BEAM_RETURN).is_zero() {
+        out.log.push_str(&format!(
+            "  shrine: consecrated, and the {CONSECRATION_BUDGET:?} is spent (best {:.4}) — \
+             leaving `Pray` behind rather than standing here\n",
+            back.best
+        ));
+        return Ok(());
     } else {
         // Either the beam is slower than `hellportal.lua:122-138` suggests, or `returnMode` was
         // never taken — which is itself the signal that the blessing was already claimed, since
@@ -612,16 +668,21 @@ fn spend_the_solve(
         // `claim_blessing` refuses to press anything it cannot identify, so guessing wrong here
         // costs a second rather than a wrong button.
         out.log.push_str(&format!(
-            "  shrine: no return to the shrine screen within {BEAM_RETURN:?} (best {:.4}) — \
-             re-entering to look for `Pray`\n",
-            back.best
+            "  shrine: no return to the shrine screen (best {:.4}) — re-entering to look for \
+             `Pray` with {:?} of the budget left\n",
+            back.best,
+            left(CONSECRATION_BUDGET)
         ));
         // Not fatal if it never opens: `claim_blessing` below refuses to press anything it cannot
         // identify, so the cost of arriving here on the map is a logged miss rather than a wrong
         // button. Retried anyway, because this is the same overworld press that is known to be lost.
-        open_the_shrine(win, input, &mut out.log)?;
+        //
+        // **Bounded by what is left of the budget**, which is what stops three attempts at
+        // [`VISIT_OPENS_WITHIN`] apiece from being the largest part of the whole interaction: live at
+        // `shrine2` they were twelve of the twenty-six seconds and opened nothing.
+        open_the_shrine_within(win, input, &mut out.log, left(VISIT_OPENS_WITHIN))?;
     }
-    claim_blessing(win, out, PRAY_ALREADY_THERE)?;
+    claim_blessing(win, out, left(PRAY_ALREADY_THERE))?;
     Ok(())
 }
 

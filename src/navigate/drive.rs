@@ -2368,6 +2368,7 @@ pub fn drive(
             // this opens — it is `Start` on the pregame — so the guard has to be the one that runs
             // first, not the one that runs after.
             let mut opened = None;
+            let mut entered_instead = false;
             for attempt in 1..=COMBAT_TRIES {
                 if !r.look_for_a_live_slot() {
                     r.log.push_str(
@@ -2399,14 +2400,39 @@ pub fn drive(
                 // `gave-up.png` from that stop is unmistakably the pregame — `Bursall Hedge — level
                 // 2 road` across the top, `Start` at the bottom — with the scene behind it still
                 // black because it had not finished rendering. The press had landed. Nothing looked.
+                //
+                // **And a fight is not the only thing this press can open**, which is what ended
+                // the run of 2026-08-22 1855Z. `getLocationButtons` tests `typeData.subworld`
+                // *before* `basicCombatZone`, so the same plank on a village container **enters** it
+                // — the comment further up this function has said so all along, and this wait did
+                // not know. Live at `l10`: `clicked Combat: screen moved 0.948`, we arrived at
+                // `l10sub7` and the console printed the dump to prove it, and this loop spent four
+                // seconds waiting for a pregame that was never coming and called it nothing.
+                //
+                // So the console is asked alongside the observer, and it is the *better* witness of
+                // the two — see [`Run::pump`]. Entering counts as opened, and the outer loop then
+                // handles being inside on its next pass.
                 let by = Instant::now() + COMBAT_OPENS_BY;
                 while Instant::now() < by {
+                    r.pump();
+                    if r.map.inside().map(str::to_string) != inside_before {
+                        r.log.push_str(&format!(
+                            "  the `Combat` plank entered `{}` rather than opening a fight — the \
+                             console says so\n",
+                            r.map.inside().unwrap_or("?")
+                        ));
+                        entered_instead = true;
+                        break;
+                    }
                     let s = crate::act::identify(r.win);
                     if matches!(s, crate::act::Screen::Pregame | crate::act::Screen::CombatEntered) {
                         opened = Some(s);
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(250));
+                }
+                if entered_instead {
+                    break;
                 }
                 if let Some(s) = opened {
                     let how = match diff_saw_it {
@@ -2426,6 +2452,12 @@ pub fn drive(
                     "  `Combat` press {attempt} of {COMBAT_TRIES} opened nothing in \
                      {COMBAT_OPENS_BY:?}\n"
                 ));
+            }
+            // Entering is a landing, not a failure: `combat_expected` stays false because no fight
+            // is coming, and the next pass of the outer loop plans from inside the village.
+            if entered_instead {
+                r.settle_after_mode_change(inside_before);
+                continue;
             }
             if opened.is_none() {
                 r.snap_screen("combat-no-diff");
