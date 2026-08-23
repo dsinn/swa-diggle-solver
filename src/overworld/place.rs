@@ -1085,9 +1085,61 @@ impl Place {
         crate::subworld::Rules::for_parent(self.parent.as_deref())
     }
 
+    /// Neighbours this node has that we have not seen named **and that could still be named**.
+    ///
+    /// The game's own degree, less what we have recorded, less what it is deliberately withholding.
+    ///
+    /// ## `hidden` is a count of secrets, and secrets are not fog (#106)
+    ///
+    /// This subtraction is the whole of the fix, and it rests on one reading of the game's source.
+    /// `verboseAdjacencyData` prints `Hidden location` for a neighbour when
+    /// `core.isCloudCovered(key) or not core.locationIsVisible(location)`
+    /// (`overworldview.lua:1031-1038`). The first of those **can never fire in that loop**:
+    ///
+    /// * `isCloudCovered` ends in `and not locationData[key].connections[overworldData.playerLocation]`
+    ///   (`:704`, and the `thickFog` branch at `:699` carries the same term), so it is false for
+    ///   anything adjacent to the player;
+    /// * the loop iterates `locationData[playerLocation].connections`, so every key in it is
+    ///   adjacent to the player by construction;
+    /// * and adjacency is symmetric — `utils/world.lua:439-440` writes both directions, which is why
+    ///   the game's own `isAdjacent` is exactly this expression (`:1309`).
+    ///
+    /// So in the **Adjacent connections** section, `Hidden location` means `location.secret` without
+    /// the `<key>_revealed` area flag (`locationIsVisible`, `:554-556`) — nothing else. A secret is
+    /// revealed by `events.revealSecretLocation` (`utils/events.lua:161-181`), which runs from an
+    /// event's handler. **Walking there again cannot do it.**
+    ///
+    /// The exits section prints the same marker under a genuine cloud test, and that is counted
+    /// separately as `hidden_exits`. This field is not it.
+    ///
+    /// ## What went wrong without it
+    ///
+    /// `l59sub5 Acklam Backwoods guard post`, live 0547Z on 2026-08-23: degree 5, four neighbours
+    /// named, one `Hidden location`, and a beggar offering *an unmarked path to a hidden area* for
+    /// 10g that the run declined. `5 - 4` never reached zero, so it stayed a frontier for ever, was
+    /// re-elected after being stood on, and cost a round trip before `LOOP_WRITE_OFF` retired it.
+    /// `5 - 4 - 1` is zero, which is the truth: there is nothing there that walking can find.
+    ///
+    /// **Bounded by construction.** `hidden` is only ever set from a dump taken *at* the node
+    /// (`WorldMap::fold`, or the cache column a previous run wrote from one), so an unvisited node
+    /// subtracts nothing and stays a frontier on its full gap, exactly as before.
+    pub fn unrevealed(&self) -> u32 {
+        self.connections
+            .saturating_sub(self.neighbours.len() as u32)
+            .saturating_sub(self.hidden.unwrap_or(0) as u32)
+    }
+
     /// Somewhere the map might still open up: unvisited, or visited with neighbours we never saw.
+    ///
+    /// **Not `hidden > 0`**, which is what this read until #106 and which no visit could ever
+    /// falsify — see [`Place::unrevealed`] for why the count it was testing is a count of secrets.
+    /// The rule this replaces it with is the one [`WorldMap::has_unexplored_roads`] already reached
+    /// from the other side in #73: *a gap that survives a visit is one visiting cannot close.* That
+    /// one gets there by asking whether we have stood here; this one by subtracting the number the
+    /// game printed. They agree wherever both apply, and this is the more exact of the two, because
+    /// it can still see a gap that secrets do **not** account for.
     pub fn is_frontier(&self) -> bool {
-        !self.visited || self.hidden.unwrap_or(0) > 0
+        !self.visited || self.unrevealed() > 0
     }
 
     /// Standing here cannot show us a node we do not already have.
@@ -1100,8 +1152,14 @@ impl Place {
     /// `connections` is the true degree, not the visible one. `verboseAdjacencyData` filters *which*
     /// neighbours it prints by `isCloudCovered` and `locationIsVisible`, but the figure it prints
     /// for each is `table.len(location.connections)` (`overworldview.lua:1031-1035`) — the full
-    /// count. Under thick fog that distinction is the whole rule: a visibility-filtered count would
-    /// under-report and retire nodes that still had neighbours behind the cloud.
+    /// count. That is what makes the two numbers comparable at all.
+    ///
+    /// **And the secrets have to come off the other side of the comparison**, which is #106 and
+    /// what [`Place::unrevealed`] does. This paragraph used to justify the raw difference by saying
+    /// a visibility-filtered count would *under-report and retire nodes that still had neighbours
+    /// behind the cloud*. The cloud was the wrong model: in this loop `Hidden location` can only be
+    /// a secret, for the three reasons set out under [`Place::unrevealed`], and a secret does not
+    /// lift. Left as the raw difference, a node with a secret neighbour could never be retired.
     ///
     /// And `neighbours` accumulates from every side. [`WorldMap::fold`] records each edge in both
     /// directions for every node a dump names, so an **unvisited** node collects its edges as the
@@ -1172,16 +1230,16 @@ impl Place {
         // [`Place::is_container`] and not `subworld_container`: a village has an interior whether or
         // not we have stood in it, so counting its surface neighbours can never mean there is
         // nothing left to see. The narrower flag made every unvisited village look exhausted.
-        !self.is_container()
-            && self.connections > 0
-            && self.neighbours.len() as u32 >= self.connections
+        !self.is_container() && self.connections > 0 && self.unrevealed() == 0
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observe::adjacency::Node;
     use crate::overworld::fixtures::*;
+    use crate::overworld::Adjacency;
     use crate::overworld::WorldMap;
 
     /// **A door is paved because of what it is, not because of what lies through it.** #107.
@@ -1724,5 +1782,67 @@ mod tests {
         quiet.corrupted = true;
         assert!(!m.entry("l4sub2").completes_on_visit());
         assert!(m.entry("l4sub2").may_be_a_fight(), "a tree may be standing on it");
+    }
+
+    /// **A neighbour the game is withholding is a secret, and a secret is not a frontier** (#106).
+    ///
+    /// `l59sub5 Acklam Backwoods guard post`, transcribed from the 0547Z run of 2026-08-23 rather
+    /// than invented. The dump that named it from next door gave `connections: 5`; the dump taken
+    /// standing on it named four neighbours and printed one `Hidden location`; and the event that
+    /// arrived with it was a beggar offering *an unmarked path to a hidden area* for 10g, which the
+    /// run declined. So the withheld neighbour is `location.secret` with no `_revealed` flag, and
+    /// walking back cannot produce it.
+    ///
+    /// Before this, `5 - 4 > 0` kept the node a frontier for ever. It was re-elected at step 129
+    /// having been stood on at step 126, and only `LOOP_WRITE_OFF` stopped it — one wasted round
+    /// trip, every time, for as long as the run stayed in that village.
+    ///
+    /// The second half is the control. Take the secret away and leave everything else alone, and the
+    /// node is a frontier again — which is what says this retires *secrets* rather than retiring
+    /// visited nodes.
+    #[test]
+    fn a_secret_neighbour_is_not_a_frontier_a_visit_could_ever_close() {
+        // Named from next door first, which is where a node's degree comes from: the dump prints
+        // `table.len(location.connections)` for each neighbour, secrets included.
+        let mut m = WorldMap::new();
+        m.fold(&dump(
+            "l59sub2",
+            "Acklam Backwoods road",
+            vec![Node { connections: 5, ..node("l59sub5", "Acklam Backwoods guard post") }],
+        ));
+        assert_eq!(m.entry("l59sub5").connections, 5, "the premise: the game says five");
+        assert!(m.get("l59sub5").unwrap().is_frontier(), "and we have not been there yet");
+
+        // Now stand on it. Four named, one withheld.
+        let standing = Adjacency {
+            hidden: 1,
+            ..dump(
+                "l59sub5",
+                "Acklam Backwoods guard post",
+                vec![
+                    node("l59xrd200x-35", "Acklam Backwoods crossroads"),
+                    node("l59_plaza", "Acklam Backwoods well"),
+                    node("l59sub7", "Acklam Backwoods house"),
+                    node("l59sub6", "Acklam Backwoods house"),
+                ],
+            )
+        };
+        m.fold(&standing);
+
+        let p = m.get("l59sub5").unwrap();
+        assert_eq!(p.neighbours.len(), 5, "four from here, and `l59sub2` from the dump before");
+        assert_eq!(p.hidden, Some(1), "the beggar's path, printed as `Hidden location`");
+        assert_eq!(p.unrevealed(), 0, "five, less what we have seen, less what is withheld");
+        assert!(!p.is_frontier(), "so there is nothing here that walking back could find");
+
+        // The control: the same node with nothing withheld is somewhere worth returning to, because
+        // then the gap really is a road we have not looked down.
+        m.entry("l59sub5").hidden = Some(0);
+        m.entry("l59sub5").connections = 7;
+        assert_eq!(m.get("l59sub5").unwrap().unrevealed(), 2);
+        assert!(
+            m.get("l59sub5").unwrap().is_frontier(),
+            "a gap that secrets do not account for is still a gap"
+        );
     }
 }

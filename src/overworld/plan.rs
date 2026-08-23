@@ -1584,9 +1584,14 @@ impl WorldMap {
         // A frontier is either unvisited *or* visited with neighbours the game refused to name. The
         // second half is worth remembering — "there is no shrine adjacent" is not a conclusion while
         // that count is nonzero — but it is **not worth walking back to**, and treating it as a
-        // destination is a loop. Standing on a node again produces the same dump: the hidden count
-        // is a cloud count, and clouds are cleared by `clearFogAroundPoint` (`wizard_tower.lua:61`),
-        // never by arriving.
+        // destination is a loop. Standing on a node again produces the same dump.
+        //
+        // **Why it produces the same dump was recorded wrongly here until #106**, which matters
+        // because the wrong version pointed at the wizard's tower as the thing that would change it.
+        // The count is not a cloud count: in the adjacent-connections loop the cloud test can never
+        // fire, so `Hidden location` there is a **secret**, cleared by an event and not by fog. See
+        // [`Place::unrevealed`], which now takes it off the frontier arithmetic outright — so this
+        // branch and `is_frontier` no longer disagree about a node with a secret next to it.
         //
         // Live, on 2026-08-08: `l41` was visited with hidden neighbours, so it stayed a frontier for
         // ever. Standing on `l35` the planner explored to `l41`; standing on `l41` the branch
@@ -2575,8 +2580,7 @@ mod tests {
         assert_ne!(plan.reason, Goal::OpenAnomaly);
 
         // With the meadow walked and nothing left under the bar, the trigger is the plan again.
-        m.entry("l2").visited = true;
-        m.entry("l2").hidden = Some(0);
+        walked_out(&mut m, "l2");
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::OpenAnomaly);
         assert_eq!(plan.target, "l4");
@@ -3814,9 +3818,16 @@ e	l4	l11
     /// The fourth bounce, live on 2026-08-08: `l35 -> l41 -> l35`, until the run failed.
     #[test]
     fn a_node_we_have_already_stood_on_is_not_somewhere_to_explore() {
-        // Rebuilt from that run's map. `l41` is visited and complete, with neighbours still under
-        // cloud, so `is_frontier` was true for ever -- and standing there cannot change it, because
-        // the hidden count is a cloud count and arriving does not lift clouds.
+        // Rebuilt from that run's map. `l41` is visited and complete with two neighbours the game
+        // refused to name, so `is_frontier` was true for ever -- and standing there could not change
+        // it.
+        //
+        // **The reason given here was wrong, and #106 is the correction.** It read *the hidden count
+        // is a cloud count and arriving does not lift clouds*. It is a count of **secrets**: in the
+        // adjacent-connections loop the cloud test can never fire, because it ends in `not
+        // connections[playerLocation]` and every key in that loop is adjacent to the player by
+        // construction. See `Place::unrevealed`. The conclusion was right and the mechanism was not,
+        // which is why the same belief left `l59sub5` a permanent frontier three months later.
         //
         // The loop needed both halves. From `l35` the planner explored to `l41`; from `l41` the
         // branch excludes `here`, found nothing else free, fell through to `easiest_hostile` and
@@ -3835,9 +3846,14 @@ e	l4	l11
         }
         m.note_health_level(crate::rest::Health { current: 1, max: 20 });
 
-        // `l41` is still a frontier in the sense that matters for conclusions -- we cannot say what
-        // is next to it -- and that stays true.
-        assert!(m.get("l41").unwrap().is_frontier(), "hidden neighbours are still unknown");
+        // **And it is not a frontier**, which is what changed in #106. We still cannot say what is
+        // next to `l41` -- but the two neighbours it is withholding are secrets, and no amount of
+        // standing there will produce them, so somewhere the map *might* open up is exactly what
+        // this is not.
+        assert!(
+            !m.get("l41").unwrap().is_frontier(),
+            "two of two unseen neighbours are secrets, so there is nothing here a visit can find"
+        );
         // But it is not somewhere to go. The only plan left is the cheapest fight, and crucially it
         // is the SAME plan from either end of the old cycle, so the run makes progress.
         let from_l35 = m.next_target().unwrap();
@@ -4621,8 +4637,7 @@ e	l4	l11
             Goal::OpenAnomaly,
             "a level 4 forest is not the first stop while an unwalked shrine stands"
         );
-        m.entry("shrine2").visited = true;
-        m.entry("shrine2").hidden = Some(0);
+        walked_out(&mut m, "shrine2");
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::OpenAnomaly);
         assert_eq!(plan.target, "l39");

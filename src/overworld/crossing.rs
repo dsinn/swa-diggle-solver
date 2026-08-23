@@ -972,6 +972,12 @@ impl WorldMap {
             // already named reveals one thing, and ranking it top would be ranking work we have
             // already done. Same arithmetic as [`WorldMap::has_unexplored_roads`].
             //
+            // **Less what the game is withholding**, which is #106: the count is
+            // [`Place::unrevealed`] rather than the raw difference, because a neighbour printed as
+            // `Hidden location` in this section is a *secret* and no visit reveals it. Left in, a
+            // node with a secret neighbour ranked for ever as though it still had something to
+            // teach, which is `l59sub5` in the 0547Z run.
+            //
             // Still under `is_paved`, which is a separate and older rule of the dev's and not one
             // this touches: roads are the map's own structure, and this reorders which road to take
             // rather than licensing the brush.
@@ -998,7 +1004,7 @@ impl WorldMap {
             // both the fogged inn and any door that has merely gone off screen. Which of those two
             // it is decides nothing here any more — see the `dest` switch below and #81.
             .filter_map(|p| {
-                let unrevealed = p.connections.saturating_sub(p.neighbours.len() as u32);
+                let unrevealed = p.unrevealed();
                 hops.get(&p.key).map(|d| {
                     // **Which of `hops` and degree leads depends on whether we have somewhere to
                     // be**, because the two rules were written for two different errands and only
@@ -3349,14 +3355,12 @@ mod tests {
         assert_ne!(plan.reason, Goal::OpenAnomaly);
 
         // Walk the meadow. The level 2 crypt is still under the bar, so still first.
-        m.entry("l2").visited = true;
-        m.entry("l2").hidden = Some(0);
+        walked_out(&mut m, "l2");
         let plan = m.next_target().expect("a plan");
         assert_eq!(plan.target, "l3", "a level 2 crypt is gentler ground too");
 
         // Walk that as well and the frontier is level 4 and above, which is when the rule lets go.
-        m.entry("l3").visited = true;
-        m.entry("l3").hidden = Some(0);
+        walked_out(&mut m, "l3");
         let plan = m.next_target().expect("a plan");
         assert_eq!(plan.reason, Goal::OpenAnomaly);
         assert_eq!(plan.target, "l4");

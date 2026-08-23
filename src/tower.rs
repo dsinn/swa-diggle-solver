@@ -25,7 +25,15 @@
 //! 640 world units — ten grid tiles, since the generator works in `posX/64`
 //! (`hellportal.lua:170`) — revealed in every direction, for one click. That is the direct answer to
 //! a hurt run that knows no campfire and no village: the reason it knows none may only be that the
-//! clouds are in the way, and [`crate::overworld::Place::hidden`] counts exactly those.
+//! clouds are in the way.
+//!
+//! **What it is not is a way to lower [`crate::overworld::Place::hidden`]**, which this paragraph
+//! claimed until #106. That field counts the `Hidden location` lines in the dump's *adjacent
+//! connections*, and in that loop the cloud test can never fire — it ends in `not
+//! connections[playerLocation]` (`overworldview.lua:704`) and every key the loop visits is adjacent
+//! to the player by construction. Those are **secrets**, cleared by `events.revealSecretLocation`
+//! (`utils/events.lua:161-181`) and not by fog. What the tower moves is which places exist on the
+//! map at all, which is a different and larger thing; see [`crate::overworld::Place::unrevealed`].
 //!
 //! ## The trap in the slot
 //!
@@ -140,11 +148,16 @@ pub const TYPE_NAME: &str = "wizards' tower";
 ///    `Crafting` at `2` (`wizard_tower.lua:34,44`) are a cheap positive control: if those two are
 ///    not where they should be, we are not on a tower and must not click at all.
 /// 3. **Press, then verify by the fog moving** — not by the button vanishing. `Reveal` swaps to
-///    `Teleport` in place, so the slot stays occupied either way. The observable is
-///    `regenerateClouds()` followed by `overworld:save()` (`:67-68`): new neighbours in the next
-///    adjacency dump, or a drop in [`crate::overworld::Place::hidden`]. That save call also means
-///    the `_used` flag is readable straight afterwards, unusually — this is one of the few actions
-///    that flushes without a screen exit.
+///    `Teleport` in place, so the slot stays occupied either way. The observable is the **used
+///    flag in the save**: the handler sets `areaFlag(usedFlagName())` and then calls
+///    `overworld:save()` (`wizard_tower.lua:66-68`), so it is readable straight afterwards —
+///    unusually, this is one of the few actions that flushes without a screen exit.
+///
+///    **Not a drop in [`crate::overworld::Place::hidden`]**, which this note proposed until #106.
+///    That count is secrets and the tower clears fog; the two do not meet, so the check would have
+///    waited for a number that was never going to move. Nor is it *new neighbours in the next
+///    adjacency dump*: the dump names the neighbours of the node we are standing on, and those are
+///    never cloud-covered in the first place.
 ///
 /// The third step is why this is not two lines. Everything this project has got wrong twice is a
 /// press whose effect was assumed rather than watched.

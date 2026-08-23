@@ -46,11 +46,18 @@ pub(super) const LOOP_GIVE_UP: usize = 4;
 /// leg to point at. This entry is left as written because the *second* failure it describes is
 /// untouched by that and is what this constant is for.
 ///
-/// It elects it forever because `Place::is_frontier` is `!visited || hidden > 0`, and **standing on
-/// a node does not lower `hidden`** when the game goes on withholding a neighbour. So a node can be
-/// permanently "somewhere the map might still open up" while having nothing left to give. The
-/// frontier walk's own guarantee — BFS distance to the chosen frontier strictly decreases — is about
-/// *reaching* it, and holds perfectly well while the run learns nothing.
+/// It elected it forever because `Place::is_frontier` read `!visited || hidden > 0`, and **standing
+/// on a node does not lower `hidden`** when the game goes on withholding a neighbour. So a node
+/// could be permanently "somewhere the map might still open up" while having nothing left to give.
+/// The frontier walk's own guarantee — BFS distance to the chosen frontier strictly decreases — is
+/// about *reaching* it, and holds perfectly well while the run learns nothing.
+///
+/// **That cause is fixed as of #106** and this guard is now the backstop rather than the answer.
+/// `Place::unrevealed` subtracts the withheld count, because a neighbour printed as `Hidden
+/// location` among a node's connections is a *secret* and no visit reveals one. What is left for
+/// this constant is every other way a frontier can teach nothing — a dump we failed to read, a
+/// degree the cache carries wrongly, an interior that regenerates under us — which is exactly the
+/// open-ended set a memory should cover and a rule should not try to enumerate.
 ///
 /// The answer is the one `docs/superpowers/notes/navigation-loops.md` gives for every loop here:
 /// memory, not a ranking. `WorldMap::abandon` is that memory, it already exists, and every chooser

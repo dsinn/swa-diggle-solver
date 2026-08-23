@@ -48,6 +48,25 @@ pub(super) fn ready_for_the_anomaly(m: &mut WorldMap) {
     }
 }
 
+/// Stand on a place and find nothing more there — the **reachable** version of that state.
+///
+/// `visited = true` with `hidden = Some(0)` says it on its own only when the degree the map holds
+/// for the node is already accounted for by the edges the map holds. Standing on a node is what
+/// makes the game name its neighbours, so *visited, no secrets, and an edge still unnamed* is a
+/// state play cannot produce — and since #106 it is one [`Place::is_frontier`] rightly declines to
+/// retire, because a gap that secrets do not explain is a gap worth another look.
+///
+/// Four fixtures asserted exhaustion the short way and were contradicting themselves to do it: the
+/// node arrived through [`node`], which declares degree 2, and only one of those two edges was ever
+/// recorded. Setting the degree to what has been seen is what makes them worlds again.
+pub(super) fn walked_out(m: &mut WorldMap, key: &str) {
+    let seen = m.entry(key).neighbours.len() as u32;
+    let p = m.entry(key);
+    p.visited = true;
+    p.hidden = Some(0);
+    p.connections = seen;
+}
+
 pub(super) fn node_at(key: &str, heading: &str, x: f64, y: f64) -> Node {
     Node { key: key.into(), heading: heading.into(), x, y, connections: 2 }
 }
