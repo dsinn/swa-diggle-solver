@@ -94,6 +94,46 @@ fn inside_container(p: &Place, container: &str) -> bool {
     p.parent.as_deref() == Some(container) && !p.key.starts_with(&format!("{container}_path_to_"))
 }
 
+/// What a [`Crossing::Seek`] is looking for, since it is looking for something.
+///
+/// A `Seek` is a walk with **no destination**, and there are four ways to be in that state: the
+/// three errands whose target the fog is still hiding, and the crossing whose way out we have not
+/// seen. They are the four guards that send `cross_toward` exploring — see the `leaving_to` match —
+/// and this reports which of them fired, in the same order, so the log can name it.
+///
+/// **The log used to name two of the four**, and everything else fell into the exit wording. Live
+/// 2026-08-23 inside Boreas, on a `Heart` errand hunting the general store: *no way out of `l59` in
+/// sight — probing via `l59sub3`*, for twelve steps, which is what made the route read as a failed
+/// search for the exit. It was a shop search and it found the shop.
+///
+/// The wording of the pair that *was* covered has already cost a diagnosis once: reporting a fogged
+/// forest crossing as `searching e1 for its inn` had the run looking for a bar in the woods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Searching {
+    /// A village whose inn the fog still hides, on a rest errand.
+    Inn,
+    /// A village whose general store the fog still hides, on the heart errand.
+    Store,
+    /// A shrine forest whose plaza has never been drawn — which for an unexplored one is every
+    /// visit, since `isRevealed` needs `<key>_plaza_explored` (`shrine_forest_raw.lua:5`).
+    Shrine,
+    /// No errand: a way out we have not seen yet, which in a lost woods is every exit.
+    Exit,
+}
+
+impl Searching {
+    /// The thing being looked for, as the log says it. `Exit` has no phrase here because its line
+    /// is shaped differently — there is no *`container`'s* exit, only no way out in sight.
+    pub fn what(self) -> &'static str {
+        match self {
+            Searching::Inn => "its inn",
+            Searching::Store => "its general store",
+            Searching::Shrine => "its shrine",
+            Searching::Exit => "a way out",
+        }
+    }
+}
+
 impl WorldMap {
     /// Are we currently inside a subworld, and if so which one?
     pub fn inside(&self) -> Option<&str> {
@@ -1324,22 +1364,24 @@ impl WorldMap {
             .find(|p| inside_container(p, container) && p.is_inn() && !self.abandoned.contains(&p.key))
     }
 
-    /// Are we inside a village on a rest errand, with its inn still to find?
+    /// Which of the reasons a [`Crossing::Seek`] has no destination, for the log to say so.
     ///
-    /// The container's own heading is what says "village" — `typeName = 'village'` on the surface
-    /// node — so this asks a question about the place we are *in*, not the place we are on.
-    ///
-    /// **An abandoned inn ends the search**, which is the difference between this and a plain
-    /// `inn_inside().is_none()`. [`WorldMap::abandon`] is the driver's record of having had its go,
-    /// and without that clause a village whose inn refused to serve us would be searched forever:
-    /// the inn is filtered out of `inn_inside`, so the fog case and the tried-it case would look
-    /// identical from here. That is the same shape as every bounce this project has had.
-    /// Which of the two reasons a [`Crossing::Seek`] has no destination, for the log to say so.
-    ///
-    /// `true` is the errand — a village whose inn the fog still hides. `false` is the crossing — an
-    /// exit we cannot see yet, which in a lost woods is every exit.
-    pub fn seeking_an_inn(&self, container: &str) -> bool {
-        self.seeking_a_rest(container)
+    /// **The order is the `leaving_to` guard's order, and it has to be**: more than one of these can
+    /// be true at once — a hurt run in a village it also means to shop in — and the search serves
+    /// all of them at once, since the only way to find any of them is to explore. So this names the
+    /// one that would have held us inside first rather than pretending there is a single answer.
+    pub fn searching_for(&self, container: &str) -> Searching {
+        if self.seeking_a_rest(container) {
+            return Searching::Inn;
+        }
+        if self.seeking_a_heart(container) {
+            return Searching::Store;
+        }
+
+        match self.seeking_a_shrine(container) {
+            true => Searching::Shrine,
+            false => Searching::Exit,
+        }
     }
 
     /// Are we inside a village on the heart errand, with its general store still to find?
@@ -1364,6 +1406,16 @@ impl WorldMap {
         })
     }
 
+    /// Are we inside a village on a rest errand, with its inn still to find?
+    ///
+    /// The container's own heading is what says "village" — `typeName = 'village'` on the surface
+    /// node — so this asks a question about the place we are *in*, not the place we are on.
+    ///
+    /// **An abandoned inn ends the search**, which is the difference between this and a plain
+    /// `inn_inside().is_none()`. [`WorldMap::abandon`] is the driver's record of having had its go,
+    /// and without that clause a village whose inn refused to serve us would be searched forever:
+    /// the inn is filtered out of `inn_inside`, so the fog case and the tried-it case would look
+    /// identical from here. That is the same shape as every bounce this project has had.
     fn seeking_a_rest(&self, container: &str) -> bool {
         if !self.wants_a_bed() || self.gold < crate::rest::INN_COST {
             return false;
@@ -3977,6 +4029,74 @@ mod tests {
             }
             other => panic!("expected an exit crossing, got {other:?}"),
         }
+    }
+
+    /// **#99.** A `Seek` has no destination, and the log has to say which of the four reasons that
+    /// is. Three of them are errands the fog is hiding; the fourth is the way out.
+    ///
+    /// The live case is `Store`. Inside Boreas on 2026-08-23, on a `Heart` errand with the general
+    /// store unrevealed, twelve steps printed *no way out of `l59` in sight* — and the search ended
+    /// by finding the shop, which is what it had been for all along.
+    #[test]
+    fn a_search_with_no_destination_says_which_of_the_four_it_is() {
+        // A village with no inn and no store drawn yet, which is the state all three village
+        // answers share. What separates them is what the run wants.
+        let village = |gold, health| {
+            let mut m = inside_a_village(
+                ("l10sub1", "Ulrome well"),
+                vec![
+                    node("l10sub2", "Ulrome house"),
+                    node("l10_path_to_l19", "Road to Gipsyville"),
+                    node("l10_path_to_l7", "Road to Greenoak"),
+                ],
+                gold,
+            );
+            m.note_health_level(crate::rest::Health { current: health, max: 20 });
+            m
+        };
+
+        // **The positive control for the whole test**: this really is the branch that prints the
+        // line. Without it every assertion below is about a function nothing calls.
+        let mut shopping = village(HEART_FLOOR, 20);
+        assert_eq!(
+            shopping.cross_toward(&[exit("l19"), exit("l7")]),
+            Some(Crossing::Seek { to: "l10sub2".into() }),
+            "a full purse and a fogged store is a search with no destination"
+        );
+        assert_eq!(shopping.searching_for("l10"), Searching::Store);
+        assert_eq!(shopping.searching_for("l10").what(), "its general store");
+
+        // Hurt and a pound short of the shelf: the bed is the errand.
+        let resting = village(HEART_FLOOR - 1, 1);
+        assert_eq!(resting.searching_for("l10"), Searching::Inn);
+
+        // Both wanted at once, which is an ordinary state rather than a corner: the search serves
+        // both, and the answer is the guard that would have held us inside first.
+        let both = village(HEART_FLOOR, 1);
+        assert_eq!(both.searching_for("l10"), Searching::Inn, "the `leaving_to` order decides");
+
+        // Nothing wanted, so the same fogged village is a plain crossing.
+        let passing = village(HEART_FLOOR - 1, 20);
+        assert_eq!(passing.searching_for("l10"), Searching::Exit);
+
+        // And the third errand, which has no purse in it at all: a shrine forest whose plaza no
+        // dump has drawn. Keeping the purse empty rules the other two out at their first line.
+        let mut shrine = WorldMap::new();
+        shrine.fold(&dump("l19", "Gipsyville crypt", vec![node("shrine1", "Gransmoor shrine")]));
+        shrine.fold(&inside_dump(
+            "shrine1",
+            "shrine1sub1",
+            "a glade",
+            vec![node("shrine1sub2", "a glade")],
+            vec![exit("l19")],
+        ));
+        shrine.apply_save(&crate::game::save::parse("return { player = { gold = 0 } }").unwrap());
+        assert_eq!(shrine.searching_for("shrine1"), Searching::Shrine);
+
+        // The negative control: the plaza on the map at all ends that search, and the container is
+        // a crossing again.
+        shrine.entry("shrine1_plaza").heading = "Gransmoor shrine".into();
+        assert_eq!(shrine.searching_for("shrine1"), Searching::Exit);
     }
 
     #[test]

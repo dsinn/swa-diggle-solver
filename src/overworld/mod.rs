@@ -42,7 +42,7 @@ mod crossing;
 #[cfg(test)]
 mod fixtures;
 mod frame;
-pub use crossing::Crossing;
+pub use crossing::{Crossing, Searching};
 mod pace;
 pub use pace::{walk_budget, Ground};
 mod place;

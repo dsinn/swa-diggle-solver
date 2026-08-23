@@ -1594,18 +1594,22 @@ pub fn drive(
                 // Its own line, and deliberately not either of the two above. A search with no
                 // destination at all is a third thing.
                 //
-                // Two ways to have no destination, and the log used to name only one of them. An inn
-                // we have not found is the errand case; an exit the fog has not shown us is the
-                // crossing case, and a lost woods makes it the common one. Reporting the second as
-                // `searching e1 for its inn` had the run looking for a bar in the woods.
+                // **Four ways to have no destination**, and the log named two of them until #99: an
+                // inn, a general store or a shrine the fog still hides are the errand cases, and an
+                // exit we have not seen is the crossing case, which a lost woods makes the common
+                // one. See [`crate::overworld::Searching`], which holds the evidence for both
+                // mistakes — the shop search that read as a failed hunt for the exit, and the fogged
+                // forest that read as looking for a bar in the woods.
                 Crossing::Seek { to } => match fresh.nodes.iter().find(|n| &n.key == to) {
                     Some(n) => (
-                        match r.map.seeking_an_inn(&container) {
-                            true => format!(
-                                "searching `{container}` for its inn via `{to}`{}", aiming_at(r)
-                            ),
-                            false => format!(
+                        match r.map.searching_for(&container) {
+                            crate::overworld::Searching::Exit => format!(
                                 "no way out of `{container}` in sight — probing via `{to}`{}",
+                                aiming_at(r)
+                            ),
+                            what => format!(
+                                "searching `{container}` for {} via `{to}`{}",
+                                what.what(),
                                 aiming_at(r)
                             ),
                         },
