@@ -1470,7 +1470,23 @@ impl Run<'_> {
     /// So [`Run::recentre`]'s two clicks trigger a pan that has already run. Its *wait* was the only
     /// part ever needed — the arrival dump's own coordinates are taken mid-glide, which is why they
     /// cannot be used and why this asks for the pan-finished dump instead.
-    fn settled_dump_in_hand(&self) -> Option<Adjacency> {
+    ///
+    /// ## It has to read the feed, not just [`Run::latest`]
+    ///
+    /// The dev, watching the 2211Z run of 2026-08-23: *at the Gipsyville crypt, it seems we did
+    /// redundant locate-me again.* The pan dump was there — the console holds
+    /// `Arrived at location l19` and then `Screen pan finished l19`, all five neighbours on screen,
+    /// so nothing was wrong with it — and this said no anyway, because it was reading a field
+    /// instead of the feed.
+    ///
+    /// The order is what made that inevitable. `latest` is only written by [`Run::pump`], the last
+    /// pump of a surface iteration is before the event handlers, and the pan lands a **full second**
+    /// after the arrival (`offsetTransition` reaches 1 at `overworldview.lua:1250-1256`), by which
+    /// time the driver is already inside the 2.5-second `Finish` probe. The dump duly printed, into
+    /// a buffer nobody read again before the decision. So the fix is one pump and not a wait:
+    /// `Screen pan finished` is a *line*, and asking for it means reading the console.
+    fn settled_dump_in_hand(&mut self) -> Option<Adjacency> {
+        self.pump();
         match self.untouched_since_the_dump() {
             true => self.latest.as_ref().filter(|a| a.reason.contains("pan")).cloned(),
             false => None,
