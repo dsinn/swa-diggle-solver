@@ -1897,7 +1897,11 @@ pub fn drive(
                     "  the Combat press showed no movement — waiting to see what arrived\n",
                 );
             } else {
-                let _ = r.click_area_button("Travel (subworld)");
+                // **Pressed, not watched** — the arrival wait immediately below is this press's
+                // whole test, and it always was. The diff that used to run here was discarded on
+                // arrival for the reason the next comment gives, and it was not free to discard:
+                // see [`Run::press_area_button`] for what a third of these presses were paying.
+                r.press_area_button("Travel (subworld)");
             }
             // Arrival, not pixels.
             //

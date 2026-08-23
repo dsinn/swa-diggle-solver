@@ -2126,8 +2126,11 @@ impl Run<'_> {
         use crate::innplay;
 
         // 1. `Enter`. It is the ordinary area button, in the slot everything else uses.
+        // Pressed and not watched: [`crate::innplay::ENTERED`] on the line below is the test, and
+        // the diff this used to take was thrown away. The mark is claimed **before** the press so a
+        // line the game prints faster than we can ask for it is still inside the window we search.
         let mark = self.feed.mark();
-        let _ = self.click_area_button("Enter");
+        self.press_area_button("Enter");
         if !self.wait_for_line(mark, innplay::ENTERED, Duration::from_secs(8)) {
             self.log.push_str("  rest: `Enter` did not open the inn\n");
             return Rested::Failed;
@@ -2464,22 +2467,26 @@ impl Run<'_> {
         }
     }
 
-    fn click_area_button(&mut self, what: &str) -> Result<bool, Box<dyn std::error::Error>> {
-        let before = crate::win::capture::capture_window(self.win)?;
-        // **What the game itself thinks is selected, before we click at arithmetic.** Task #19, in
-        // its read-only first form: `AREA_BUTTON` is a coordinate transcribed by hand from `ss`/`os`
-        // multipliers in the Lua, and a transcription that is wrong looks exactly like one that is
-        // right until a run dies on it. When hotspot navigation is live the game has parked the real
-        // pointer on the centre of a control it computed itself, so the two can simply be compared.
-        //
-        // Reported, never acted on. `None` is the ordinary case — any real mouse movement clears the
-        // highlight (`main.lua:420`) — and a disagreement might equally mean the game has a
-        // *different* control selected, which is information rather than an error. See
-        // [`crate::win::cursor`] for why nothing here presses a direction key to find out.
+    /// Aims at the area slot, says what the game thinks is selected there, presses, and parks.
+    ///
+    /// The press itself, with no test of whether it worked — every caller supplies its own, and the
+    /// three of them differ so much that this is the whole of what they share. See
+    /// [`Run::press_area_button`] for the map of which test belongs to which press.
+    ///
+    /// **What the game itself thinks is selected, before we click at arithmetic.** Task #19, in its
+    /// read-only first form: `AREA_BUTTON` is a coordinate transcribed by hand from `ss`/`os`
+    /// multipliers in the Lua, and a transcription that is wrong looks exactly like one that is
+    /// right until a run dies on it. When hotspot navigation is live the game has parked the real
+    /// pointer on the centre of a control it computed itself, so the two can simply be compared.
+    ///
+    /// Reported, never acted on. `None` is the ordinary case — any real mouse movement clears the
+    /// highlight (`main.lua:420`) — and a disagreement might equally mean the game has a *different*
+    /// control selected, which is information rather than an error. See [`crate::win::cursor`] for
+    /// why nothing here presses a direction key to find out.
+    fn aim_at_the_area_slot(&mut self, what: &str) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(miss) = crate::win::cursor::miss_by(self.win, AREA_BUTTON) {
             self.log.push_str(&format!(
-                "  the game has a control selected {miss:.0} px from where `{what}` is aimed
-"
+                "  the game has a control selected {miss:.0} px from where `{what}` is aimed\n"
             ));
         }
         let (bx, by) = self.win.client_to_screen(AREA_BUTTON.0, AREA_BUTTON.1)?;
@@ -2487,22 +2494,91 @@ impl Run<'_> {
             return Err("click failed".into());
         }
         self.park();
-        // **Watched, not waited out — this is the most-repeated wait in a run.**
+        Ok(())
+    }
+
+    /// Presses the area slot and **looks at nothing**.
+    ///
+    /// ## The third kind of press
+    ///
+    /// [`Run::click_area_button`] asks *did the screen change*, [`Run::left_the_overworld`] asks
+    /// *where are we now*, and this one asks nothing at all — because its callers already have a
+    /// better test running than either, and it begins the moment the press lands.
+    ///
+    /// The subworld `Travel` is the press that named it. Its verdict has been deliberately discarded
+    /// ever since a frame diff over one second called a *successful* move a failure: travel opens
+    /// with a walk animation that barely changes the screen in that window, so the diff read 0.002
+    /// while the player was in fact walking to the well. Arrival — `here` becoming the node we aimed
+    /// at — replaced it as the test. The diff stayed on regardless, paid for and unread.
+    ///
+    /// The inn's `Enter` is the other: it waits on [`crate::innplay::ENTERED`], a line the game
+    /// prints from the inn's own `onActive`, which is the console saying the thing a diff could only
+    /// guess at.
+    ///
+    /// ## What the watch was costing
+    ///
+    /// [`crate::win::capture::capture_window`] is `PrintWindow` with `PW_RENDERFULLCONTENT`,
+    /// measured at a **28.5 ms** median over this window (`spike-cheap-capture.md`, against 4.4 ms
+    /// for a `BitBlt` crop). A watched press pays one of those before the click and one per poll,
+    /// and cannot reach its first look sooner than [`crate::timing::POLL_SCREEN`].
+    ///
+    /// So the floor, for a press whose screen has plainly moved, is a quarter-second and two full
+    /// captures — and a press that never clears [`AREA_BUTTON_MOVED`] pays the whole
+    /// [`crate::timing::AFTER_AREA_BUTTON`] deadline and five of them. That second case is not the
+    /// rare one: of the 27 subworld `Travel` presses in the 1828Z run of 2026-08-23, **9 came in at
+    /// or under the bar**, median 0.233 and quietest 0.001. At the rate the 0547Z run pressed
+    /// `Travel` that is the better part of a minute spent measuring a number nobody reads.
+    ///
+    /// ## Why dropping the watch costs nothing
+    ///
+    /// Nothing was reading the verdict, and the delay it incidentally provided is not needed either.
+    /// `core.travelTo` (`overworldview.lua:1394-1400`) sets a path and lets `love.update` walk it,
+    /// so there is no transition to sit out; the arrival loop pumps the console on its own
+    /// [`crate::timing::POLL_ARRIVAL`] tick, and the inn's wait pumps on
+    /// [`crate::timing::POLL_CONSOLE`]. Neither depended on this call for either time or text.
+    ///
+    /// **This is not the default, and it is not the cheap option to reach for.** A press with no
+    /// test of its own belongs on [`Run::click_area_button`] or [`Run::left_the_overworld`]. This
+    /// one is for a caller that can name the test it is using instead — which is why
+    /// `no_press_is_left_without_a_test` refuses a discarded verdict from the other two.
+    fn press_area_button(&mut self, what: &str) -> bool {
+        match self.aim_at_the_area_slot(what) {
+            Ok(()) => {
+                self.log.push_str(&format!("  pressed {what} — the caller's own test decides\n"));
+                true
+            }
+            Err(e) => {
+                self.log.push_str(&format!("  could not press {what}: {e}\n"));
+                false
+            }
+        }
+    }
+
+    fn click_area_button(&mut self, what: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        let before = crate::win::capture::capture_window(self.win)?;
+        self.aim_at_the_area_slot(what)?;
+        // **Watched, not waited out.**
         //
         // The dev, 2026-08-23: *it's the main navigator driver loop where I think we can save the
-        // most time.* The 0547Z report pressed an area button **151 times**, 103 of them `Travel`,
-        // and every one of them paid a flat second before anything looked.
+        // most time.* The 0547Z report pressed an area button 123 times and every one of them paid a
+        // flat second before anything looked.
         //
-        // None of that second came from the game. Pressing `Travel` runs `core.travelTo`
-        // (`overworldview.lua:1394-1400`), which sets a path and lets `love.update` walk it — so the
-        // screen starts changing on the next frame and there is no transition to sit out. What the
-        // second was really covering is that the *test* is expensive: `capture_window` is
-        // `PrintWindow` with `PW_RENDERFULLCONTENT` over the whole client area.
+        // None of that second came from the game. `StartTransition` swaps `activeMode` and the input
+        // tables immediately (`main.lua:146-176`) and `transitionTimer` drives nothing but a
+        // dissolve shader in `love.draw` (`:389-391`), so the screen begins changing on the very
+        // next frame however long the dissolve runs. What the second was really covering is that the
+        // *test* is expensive: `capture_window` is `PrintWindow` with `PW_RENDERFULLCONTENT` over
+        // the whole client area, at a 28.5 ms median (`spike-cheap-capture.md`).
         //
         // So the deadline stays exactly where it was and only the sampling changes. The decision is
         // untouched — the same `before` frame, the same [`crate::observe::settle::FULL`] region and
         // the same [`AREA_BUTTON_MOVED`] bar — and a press that never lands still costs what it
         // always did.
+        //
+        // **The presses that were paying this for nothing have left**, which is the other half:
+        // subworld `Travel` and the inn's `Enter` both had a better test of their own running and
+        // discarded the verdict anyway. They now go through [`Run::press_area_button`], which is
+        // where the measurement lives.
         let deadline = Instant::now() + crate::timing::AFTER_AREA_BUTTON;
         let (mut moved, mut looked) = (0.0, false);
         let mut failure = None;
@@ -2544,9 +2620,12 @@ impl Run<'_> {
     /// mistakes have ended runs, and the second is the one that ends them silently, because the
     /// driver walks off to work on a screen that never arrived.
     ///
-    /// So the split is by *intent*, and it is the distinction to keep: a press meant to keep us on
-    /// the map (`Travel`) is a diff question and stays with `click_area_button`; a press meant to
-    /// take us **off** it (`Visit`, `Shop`, `Combat`) is an identity question and belongs here.
+    /// So the split is by *intent*, and it is the distinction to keep. A press meant to take us
+    /// **off** the map (`Visit`, `Shop`, `Combat`) is an identity question and belongs here. A press
+    /// meant to keep us on it is a diff question and stays with `click_area_button` — unless the
+    /// caller already has a stronger test of its own running, in which case the honest thing is to
+    /// take no reading at all rather than pay for one and drop it, which is
+    /// [`Run::press_area_button`].
     ///
     /// ## The retry, and why it is safe
     ///
@@ -3703,6 +3782,60 @@ mod tests {
             on_disk, listed,
             "`DRIVER_SOURCES` and `src/navigate/` disagree — a driver source outside the list is a \
              source the abort sweep never reads"
+        );
+    }
+
+    /// **A press whose verdict is thrown away should not have been measured**, and #113 is what that
+    /// costs: [`Run::click_area_button`] spends up to [`crate::timing::AFTER_AREA_BUTTON`] and five
+    /// full-window `PrintWindow` captures reaching an answer, and [`Run::left_the_overworld`]
+    /// presses again until it can identify the screen. Both earn that from a caller who reads them.
+    /// Discarding the result says the caller does not — and the subworld `Travel` press and the
+    /// inn's `Enter` each carried one for months with a better test running beside it.
+    ///
+    /// A source-reading test in the manner of this file's abort sweep, because the property is about
+    /// the shape of the code: discarding a `#[must_use]` compiles cleanly and is exactly what an
+    /// editor writes to quieten a warning without pricing it. [`Run::press_area_button`] is the
+    /// honest answer when there genuinely is nothing to read.
+    ///
+    /// The second assertion is the positive control the first one needs. A scan that finds nothing
+    /// to complain about because the method was renamed underneath it is not a passing test, it is a
+    /// blind one.
+    #[test]
+    fn no_press_is_left_without_a_test() {
+        const WATCHED: [&str; 2] = ["click_area_button", "left_the_overworld"];
+        let discard = ["let _ = ", "let _: "];
+
+        let mut offenders = Vec::new();
+        let mut mentions = 0;
+        for (name, src) in DRIVER_SOURCES {
+            // The shipping half only, for the abort sweep's reason: this test's own list of names
+            // would otherwise satisfy the control it is trying to impose.
+            let src = src.split_once("\n#[cfg(test)]").map(|(before, _)| before).unwrap_or(src);
+            for (i, line) in src.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue;
+                }
+                mentions += WATCHED.iter().filter(|w| code.contains(**w)).count();
+                if discard.iter().any(|d| code.contains(d))
+                    && WATCHED.iter().any(|w| code.contains(w))
+                {
+                    offenders.push(format!("{name}:{}  {}", i + 1, code));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a watched press has its verdict discarded — press without watching instead:\n{}",
+            offenders.join("\n")
+        );
+        // Well under the 7 that are there, because the number to defend against is **zero** — a
+        // rename takes every mention with it — and pinning the exact count would fail a run of
+        // ordinary churn for a reason that has nothing to do with the rule.
+        assert!(
+            mentions >= 4,
+            "the sweep found only {mentions} watched presses to police, which means it is reading \
+             for a name that has moved rather than for the thing it cares about"
         );
     }
 }

@@ -272,13 +272,18 @@ pub const AFTER_MODE_CHANGE: Duration = Duration::from_millis(1200);
 pub const AFTER_RESUME: Duration = Duration::from_millis(1500);
 
 /// **A deadline, not a wait.** How long [`crate::navigate::Run::click_area_button`] keeps asking
-/// whether an area button — Travel, Enter, Shop, Combat — actually landed.
+/// whether an area button actually landed.
 ///
-/// The most-repeated wait in a run: the 0547Z report pressed one **130 times** and slept the whole
-/// second on every one. `core.travelTo` (`overworldview.lua:1394-1400`) sets a path and lets
-/// `love.update` walk it, so the screen starts changing on the next frame; the second was really
-/// paying for the *test*, which is a full-window `PrintWindow`. It is now sampled at
-/// [`POLL_SCREEN`] against the same region and the same bar.
+/// It was the most-repeated wait in a run, slept flat on every press. Two things changed that. It is
+/// now *sampled* at [`POLL_SCREEN`] against the same region and the same bar, so a press whose
+/// screen has plainly moved stops paying for the presses that have not — the screen begins changing
+/// on the frame after the click (`main.lua:146-176`, `:389-391`), and what the second was really
+/// covering is that the test is a full-window `PrintWindow` at a 28.5 ms median. And the presses
+/// with a better test of their own no longer come here at all: subworld `Travel` waits on arrival
+/// and the inn's `Enter` waits on the console, so both take
+/// [`crate::navigate::Run::press_area_button`] and read nothing.
+///
+/// What is left on this deadline is the press whose *only* test is the screen moving.
 pub const AFTER_AREA_BUTTON: Duration = Duration::from_millis(1000);
 
 /// After a click on a shop shelf or its paging arrow.
