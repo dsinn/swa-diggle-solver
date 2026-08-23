@@ -694,7 +694,11 @@ pub fn drive(
             }
         } else if r.map.standing_on_what_we_came_for(r.committed_to.as_deref())
             && r.latest.is_some()
-            && r.select_here()
+            // **Ask before pressing.** [`Run::the_arrival_already_selected_us`] carries the game
+            // source: `core.arriveAt` refreshes the area buttons to the arrived node and prints the
+            // dump afterwards, so holding that dump *is* the receipt. Short-circuited, so
+            // `select_here` and its two clicks still run for every case that is not a fresh arrival.
+            && (r.the_arrival_already_selected_us() || r.select_here())
         {
             // **Select, do not wait.** We are standing on the node we walked to and the next action
             // is one press at a fixed coordinate, so the pan this would otherwise sit through buys
@@ -726,6 +730,23 @@ pub fn drive(
             // Treated as a miss rather than a stop, which is what this branch already does with a
             // locate-me that did not answer: go round, re-identify, try again.
             let (cw, ch) = r.win.client_size().unwrap_or((1920, 1080));
+            // **The pan we would have paid for may already have happened.**
+            //
+            // [`Run::settled_dump_in_hand`] has the source: an arrival starts `centreScreenOnPlayer`
+            // itself, and the tween prints `Screen pan finished` when it lands. Held to the *same*
+            // sanity test as a locate-me's answer, because a free dump is not a trustworthy one —
+            // that invariant is the point of the note above, and a settled dump drawing a camera
+            // somewhere impossible is exactly as wrong however it was come by.
+            let free =
+                r.settled_dump_in_hand().filter(|a| !camera_is_lost(&a.nodes, cw, ch));
+            if let Some(a) = free {
+                r.recentre_misses = 0;
+                r.log.push_str(&format!(
+                    "{step}. the arrival panned the map itself — using its dump rather than                      asking again
+"
+                ));
+                a
+            } else {
             match r.recentre().filter(|a| !camera_is_lost(&a.nodes, cw, ch)) {
                 Some(a) => {
                     r.recentre_misses = 0;
@@ -756,6 +777,7 @@ pub fn drive(
                         r.recentre_misses
                     ));
                 }
+            }
             }
         };
         let here = r.map.here().unwrap_or("?").to_string();

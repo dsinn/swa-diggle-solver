@@ -133,6 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         snaps: std::collections::HashMap::new(),
         committed_to: None,
         inputs: 0,
+        inputs_at_dump: 0,
         guard: Default::default(),
         map_recalled: false,
         recent: std::collections::VecDeque::new(),

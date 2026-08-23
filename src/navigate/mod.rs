@@ -87,6 +87,23 @@ const LORE_LINE: &str = "Lore screen:";
 fn announces_a_lore_screen(lines: &[String]) -> bool {
     lines.iter().any(|l| l.trim_start().starts_with(LORE_LINE))
 }
+/// Does this dump say the game has just arrived at the node we think we are on — and that
+/// nothing was raised over the top of it?
+///
+/// The reason strings are the game's, and there are only three: `core.arriveAt` prints
+/// `didEvent and 'Arrived at location with event' or 'Arrived at location'`
+/// (`overworldview.lua:1442`), the pan tween prints `Screen pan finished` (`:1255`), and a load
+/// prints `World loaded`. A whole run's console carried nothing else.
+///
+/// **The `with event` form is deliberately excluded**, and it is the only judgement in here. An
+/// arrival that raised an event is precisely the case where the map is not what is on screen, and
+/// while the caller's input guard would normally catch that — answering the event is a click —
+/// this does not depend on having got there first. Cheap to refuse: the fallback is the locate-me
+/// that used to run unconditionally.
+fn arrival_selected_us(a: &Adjacency, here: Option<&str>) -> bool {
+    a.reason.trim() == "Arrived at location" && Some(a.here_key.as_str()) == here
+}
+
 /// Where the learned map is kept between runs. See [`Run::save_map_cache`].
 pub const MAP_CACHE: &str = "map-cache";
 const AREA_BUTTONS: crate::win::capture::Region =
@@ -659,6 +676,12 @@ pub struct Run<'a> {
     /// How many inputs this run has sent. Numbers the lines [`Run::tap`] writes, so a click heard
     /// at the game can be found in the report by counting.
     pub inputs: usize,
+    /// [`Run::inputs`] as it stood when [`Run::latest`] was folded.
+    ///
+    /// The whole of what makes a dump *still true*: if nothing has been clicked or typed
+    /// since it arrived, nothing can have changed the state it described. See
+    /// [`Run::untouched_since_the_dump`].
+    pub inputs_at_dump: usize,
     /// The loop guard's memory. See [`Run::sterile_here`] and [`LoopGuard`].
     pub guard: LoopGuard,
     /// Whether [`Run::recall_map`] has already had its answer, so it stops asking.
@@ -779,6 +802,7 @@ impl Run<'_> {
                 _ => {}
             }
             self.latest = Some(a);
+            self.inputs_at_dump = self.inputs;
             self.dumps += 1;
         }
     }
@@ -1382,6 +1406,72 @@ impl Run<'_> {
     /// Returns whether the arrow press landed, read from the slot the same way [`Run::recentre`]
     /// reads it: the arrow is *replaced* by the location's buttons, so an arrow still sitting there
     /// means the press did not take.
+    /// Has anything been pressed since the newest dump was folded?
+    ///
+    /// `false` means the dump still describes the screen: the game changes what it is showing in
+    /// response to input, or to an animation — and an animation announces itself with a dump of
+    /// its own. This is the guard that lets the two below trust an arrival.
+    fn untouched_since_the_dump(&self) -> bool {
+        self.inputs == self.inputs_at_dump
+    }
+
+    /// **Are the area buttons already ours, without pressing anything?**
+    ///
+    /// The dev, watching the 1828Z run: *the re-center just before we enter Ulrome Village seems
+    /// unnecessary.* It is, and `core.arriveAt` (`overworldview.lua:1418-1443`) says so in the order
+    /// it does three things:
+    ///
+    /// ```lua
+    /// core.refreshAreaButtons(location)                     -- :1432
+    /// if userConfig.interface.centreMapOnArrive and ... then
+    ///     core.centreScreenOnPlayer()                       -- :1439
+    /// end
+    /// core.verboseAdjacencyData('Arrived at location')      -- :1442
+    /// ```
+    ///
+    /// `refreshAreaButtons` **is** `selectedLocation = location; selectedLocationName = key` plus
+    /// that location's buttons (`:474-476`), and `centreMapOnArrive` ships **true**
+    /// (`utils/defaultconfig.lua:13`). The dump is printed *last*, so **holding an `Arrived at
+    /// location` dump for the node under our feet is the receipt that both already happened.**
+    ///
+    /// So [`Run::select_here`] — click an empty map point to raise the arrow, then click the arrow
+    /// to refresh and re-centre — asks for work the arrival did. Worse than redundant: the first
+    /// click *deselects*, clearing the buttons and inserting the arrow, so the pair destroys correct
+    /// state and rebuilds it.
+    ///
+    /// The comment this replaces kept the arrow press because *it is the press that sets
+    /// `selectedLocation` to us*. True of the arrow, and beside the point after an arrival. The run
+    /// of 2026-08-20 it remembers is the case where **no arrival just happened** — out of combat,
+    /// out of a mode change, after our own click at the map — and
+    /// [`Run::untouched_since_the_dump`] is exactly that distinction.
+    fn the_arrival_already_selected_us(&self) -> bool {
+        self.untouched_since_the_dump()
+            && self.latest.as_ref().is_some_and(|a| arrival_selected_us(a, self.map.here()))
+    }
+
+    /// **A settled dump we did not have to pay a pan for.**
+    ///
+    /// The other half of the same finding, and the half that costs a click on every surface step.
+    /// The arrival's own `centreScreenOnPlayer` starts the tween, and the tween announces itself
+    /// when it lands: `if offsetTransition == 1 then core.verboseAdjacencyData('Screen pan
+    /// finished')` (`overworldview.lua:1254-1256`). The 1828Z console shows the pair with nothing of
+    /// ours in between:
+    ///
+    /// ```text
+    /// Arrived at location    l10   Ulrome village
+    /// Screen pan finished    l10   Ulrome village
+    /// ```
+    ///
+    /// So [`Run::recentre`]'s two clicks trigger a pan that has already run. Its *wait* was the only
+    /// part ever needed — the arrival dump's own coordinates are taken mid-glide, which is why they
+    /// cannot be used and why this asks for the pan-finished dump instead.
+    fn settled_dump_in_hand(&self) -> Option<Adjacency> {
+        match self.untouched_since_the_dump() {
+            true => self.latest.as_ref().filter(|a| a.reason.contains("pan")).cloned(),
+            false => None,
+        }
+    }
+
     fn select_here(&mut self) -> bool {
         !matches!(self.locate_me(false), Located::Failed)
     }
@@ -3339,6 +3429,48 @@ mod tests {
         ("drive.rs", include_str!("drive.rs")),
     ];
     use super::*;
+
+    /// **The three reasons the game prints, and which of them means "the buttons are already ours".**
+    ///
+    /// The dev, watching the 1828Z run: *the re-center just before we enter Ulrome Village seems
+    /// unnecessary.* It was: `core.arriveAt` calls `refreshAreaButtons(location)` (`:1432`), which is
+    /// `selectedLocation = location` plus that location's buttons, and only *then* prints this dump
+    /// (`:1442`). So the dump is the receipt, and clicking an empty map point to raise the arrow and
+    /// clicking the arrow to put the buttons back is asking for work already done.
+    ///
+    /// Reason strings verbatim from `spike-run-20260823-1828Z.log`, where a whole run produced no
+    /// fourth kind.
+    #[test]
+    fn only_a_plain_arrival_at_the_node_underfoot_means_the_buttons_are_ours() {
+        let dump = |reason: &str, key: &str| Adjacency {
+            reason: reason.into(),
+            here_key: key.into(),
+            here_heading: "Ulrome village".into(),
+            subworld: None,
+            nodes: Vec::new(),
+            hidden: 0,
+            exits: Vec::new(),
+            hidden_exits: 0,
+        };
+
+        assert!(
+            arrival_selected_us(&dump("Arrived at location", "l10"), Some("l10")),
+            "the case the dev pointed at"
+        );
+
+        // The camera settling says nothing about the selection, and is the *other* half of the
+        // finding — see `Run::settled_dump_in_hand`, which is the one that wants this reason.
+        assert!(!arrival_selected_us(&dump("Screen pan finished", "l10"), Some("l10")));
+        // A load has selected nothing.
+        assert!(!arrival_selected_us(&dump("World loaded", "l10"), Some("l10")));
+        // An arrival that raised an event: the map is not what is on screen.
+        assert!(!arrival_selected_us(&dump("Arrived at location with event", "l10"), Some("l10")));
+
+        // Arriving *somewhere else* is the stale-dump case, and it is the one that would put a press
+        // on another node's buttons — the failure the arrow press was kept for.
+        assert!(!arrival_selected_us(&dump("Arrived at location", "l10_path_to_l1"), Some("l10")));
+        assert!(!arrival_selected_us(&dump("Arrived at location", "l10"), None));
+    }
 
     /// **The line that reported the wrong number against the wrong bar**, and what it says now.
     ///
