@@ -1,0 +1,60 @@
+# The repo's own style, written down so that rustfmt agrees with it rather than fights it.
+#
+# **Nothing here has been run over the tree.** This file exists so that a `cargo fmt` — deliberate or
+# accidental — reformats as little as possible, and so that the style is a setting rather than a
+# convention nobody wrote down. See the note at the bottom before running one.
+#
+# ## Measured, 2026-08-23, over all 117 files and 63,416 lines of `src/`
+#
+#   rustfmt defaults          11,453 lines move   (18.1%)
+#   this file                  3,537 lines move    (5.6%)
+#
+# So the settings below account for roughly seven tenths of the disagreement, and the rest is
+# genuine: some of it rustfmt correcting lines that really are over 100 columns, some of it rustfmt
+# expanding compact shapes this codebase writes on purpose.
+#
+# ## Why each one
+#
+# `max_width` is not the interesting setting and was never the problem — the repo already writes to
+# 100 columns, measured: the 95th percentile line is exactly 100 and only 1.19% run past 101. It is
+# set explicitly anyway, because it is the number every heuristic below is a fraction of.
+#
+# `use_small_heuristics = "Max"` is the one that matters, and it is the whole of the first
+# measurement above. The sub-widths default to fractions of `max_width` — `chain_width` to 60% — so
+# a method chain that fits comfortably inside 100 columns still gets exploded one call per line:
+#
+#     self.places.get(to).map(|p| p.triggers_anomaly()).unwrap_or(false)
+#
+# becomes five lines under the defaults and stays as it is written here. This file is full of that
+# shape and it is more readable in one piece.
+#
+# `fn_params_layout = "Compressed"` keeps a long signature's parameters on a continuation line
+# instead of one per line, which is how every wide signature in this repo is already written:
+#
+#     fn best_rest_site<'a>(
+#         &'a self, here: &str, dist: &BTreeMap<String, usize>, ok: &dyn Fn(&Place) -> bool,
+#     ) -> Option<&'a Place>
+#
+# It is worth little on its own — six lines out of 697 on the file it was measured against — and is
+# here for the signatures rather than for the count.
+#
+# All three are stable; checked against rustfmt 1.9.0-stable.
+#
+# ## Do not run `cargo fmt` in this repo
+#
+# Two reasons, and the second is the one that decides it.
+#
+# `cargo fmt` formats **every** target, and its `-- <path>` arguments are flags for rustfmt rather
+# than a file filter — so `cargo fmt -- src/navigate/drive.rs` reformats the whole crate. That is
+# not a hypothetical: it happened on 2026-08-23 and took 112 files and 11,318 insertions with it.
+# To format one file, run `rustfmt --edition 2021 <file>`.
+#
+# And a repo-wide reformat is worth more here than it would be elsewhere, because this project
+# diagnoses by archaeology. The doc comments cite dates, runs and commits constantly, and working
+# out why a line is the way it is routinely means `git blame` on it. Moving 3,537 lines of the
+# most-worked-on code puts a wall in front of that. Formatting a file you are already rewriting is
+# free — the blame is moving anyway — and that is the only time to do it.
+
+max_width = 100
+use_small_heuristics = "Max"
+fn_params_layout = "Compressed"
