@@ -129,7 +129,9 @@ impl Event {
     /// harmless option costs us an event, while taking a harmful one cannot be undone. If nothing
     /// survives, the caller is expected to leave the event alone rather than guess.
     pub fn safe_choice(&self) -> Option<&Choice> {
-        self.choices.iter().find(|c| !harmful(&c.text) && !costs_everything(&c.text))
+        self.choices
+            .iter()
+            .find(|c| !harmful(&c.text) && !murderous(&c.text) && !costs_everything(&c.text))
     }
 
     /// [`safe_choice`], additionally declining to start a fight when `avoid_combat` is set.
@@ -155,6 +157,11 @@ impl Event {
             .iter()
             .find(|c| {
                 !harmful(&c.text)
+                    // **Who the fight is with**, which is a different question from whether there is
+                    // one: see [`murderous`] and the dev's ruling quoted there. This is the screen
+                    // that the dying paladin got past, and it is not conditional on our health —
+                    // being at full strength is not a licence.
+                    && !murderous(&c.text)
                     && !costs_everything(&c.text)
                     // Priced goods, screened out with the same standing as being robbed: see
                     // [`costs_gold`]. The purse belongs to the heart errand and the inn.
@@ -170,7 +177,13 @@ impl Event {
             // damage band that routs them rather than a kill — the dev's rule for the MVP, and
             // already built. Nothing here needs to ask for it; declining to pay is enough to reach
             // the code that does.
-            .or_else(|| self.choices.iter().find(|c| starts_combat(&c.text)))
+            // **And never a murder, even here.** The highwayman's fight is the case this arm was
+            // written for and it stays available; what may not happen is reaching the end of the
+            // options and settling on the one the game tags `[Murderer]`. If that leaves nothing,
+            // the caller reports an unanswered event, which is recoverable — the alternative is not.
+            .or_else(|| {
+                self.choices.iter().find(|c| starts_combat(&c.text) && !murderous(&c.text))
+            })
     }
 }
 
@@ -258,6 +271,68 @@ pub fn costs_gold(text: &str) -> bool {
         rest = &after[close..];
     }
     false
+}
+
+/// Does this option **murder someone who is not fighting us**?
+///
+/// The dev's rule, 2026-08-23, after a run killed a dying paladin: *I only want to avoid murder.
+/// Combat in other dialogues, as long as it's not for murdering a human being (such as the
+/// woodsman), should be fine. The crossroads' tree, the highwayman, and the muggers are examples of
+/// acceptable combat.* So this is a screen on **who**, not on whether a fight starts —
+/// [`starts_combat`] stays a separate axis and is no longer a reason to decline on its own.
+///
+/// ## Why [`harmful`] cannot do this job, proved by the event that got past it
+///
+/// `dying_paladin.lua` offers the same murder twice, and which one you are shown depends on your
+/// gear rather than on the act:
+///
+/// ```lua
+/// text = {cost, '[Combat]',           black, ' - "Blood. The book hungers for blood."'},  -- :245
+/// text = {cost, '[Murderer][Combat]', black, ' - Attack them.'},                          -- :259
+/// ```
+///
+/// **Both call `scenarios.paladinEvent(location)`.** `:249`'s `showIf` is
+/// `not playerHasGearFlag'curseCollectBlood'`, so a run carrying that curse — as the 0547Z run did —
+/// is shown only the untagged one, whose prose contains no verb `harmful` knows. It was taken at
+/// 52/52 health, because the only thing that had ever declined a fight was being hurt.
+///
+/// `spider_forest.lua:62,73` is the same pair around the **woodsman**, an NPC who sells antivenom
+/// and warns you about the spiders: `[Murderer][Combat] - "Are you alone?"` and
+/// `[Combat] - "The book hungers for blood."`, both calling `scenarios.woodsmanEvent`.
+///
+/// ## The three things it screens, and each is enumerated from the game rather than guessed
+///
+/// - **The `[Murderer]` tag.** The game's own declaration, and `harmful` never saw it: the word
+///   split turns `[Murderer]` into `murderer`, and the list holds `murder`. So
+///   `spider_forest.lua:62`'s `- "Are you alone?"` was tagged as murder and read as harmless.
+/// - **Blood-lust prose**, which is how every `curseCollectBlood` variant is worded. All five in the
+///   game, each verified to call an attack scenario:
+///   `dying_paladin:245` *"Blood. The book hungers for blood."* (paladinEvent),
+///   `spider_forest:73` *"The book hungers for blood."* (woodsmanEvent),
+///   `village_attack:42` *"That's unfortunate, you bleed right?"* (villageAttack),
+///   `village_attack:229` *"I smell blood!"* (villageAttack),
+///   `recalled:49` *"Blood. Want blood."* (attackVillage).
+///   No other combat option in the game mentions blood — the treant is *"Cut it down."*, the
+///   highwayman *"No, your life"*, the defences *"Rush in to defend."* and *"Defend the village."*.
+/// - **Siding with an attack on a village.** `village_attack:260` *"Join the attack."* sets
+///   `playerAttack = true` and runs `villageAttack`; `:271` *"Revel in the chaos."* sets the same
+///   flag without a fight, which is complicity rather than combat and so would never have been
+///   screened at all. `harmful` misses the first because `the` in front of `attack` makes it read as
+///   a noun — the very exemption [`reads_as_a_noun`] exists for.
+///
+/// **Deliberately over-broad in the safe direction**, as [`harmful`] is: a false positive costs one
+/// unanswered event, and a false negative kills someone.
+///
+/// What it does **not** screen, because the dev named these as acceptable: the treant at the
+/// crossroads (`hidden_path.lua:27,49,76,148`), the highwayman (`highwaymen.lua:53,58`), and
+/// defending a village under attack (`village_attack.lua:214`, `recalled.lua:39`).
+pub fn murderous(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    t.contains("[murderer]")
+        || t.contains("blood")
+        || t.contains("bleed")
+        || t.contains("join the attack")
+        || t.contains("revel in the chaos")
 }
 
 pub fn harmful(text: &str) -> bool {
@@ -616,6 +691,149 @@ Choices = {
     }
 
     /// The highwayman: "your money or your life", and we choose neither the money nor dying.
+    /// **The dying paladin, verbatim off the console of the 0547Z run, which killed him.**
+    ///
+    /// The dev: *we slayed the Paladin in cold blood.* Both options were printed, the peaceful one
+    /// second, and `safe_choice_avoiding_combat` is a `find` — so with `avoid_combat` false at 52/52
+    /// health the `[Combat]` line was simply first past the filter.
+    ///
+    /// The wording is the `curseCollectBlood` variant of `dying_paladin.lua:259`'s
+    /// `[Murderer][Combat] - Attack them.` and calls the same `paladinEvent` scenario, so the tag we
+    /// would have screened on is absent for a reason that has nothing to do with the act.
+    #[test]
+    fn the_dying_paladin_is_not_killed_at_any_health() {
+        let ev = Event {
+            title: "Injured paladin at Youlthorpe crypt".into(),
+            text: String::new(),
+            choices: vec![
+                Choice { text: "[Combat] - \"Blood. The book hungers for blood.\"".into(), x: 960, y: 675 },
+                Choice { text: "Tell them you'll rush back with aid.".into(), x: 960, y: 729 },
+            ],
+        };
+        assert!(murderous(&ev.choices[0].text), "the blood variant is the murder");
+        // The health axis is not what decides this, which was the whole defect.
+        for hurt in [true, false] {
+            let picked = ev.safe_choice_avoiding_combat(hurt).expect("answerable");
+            assert_eq!(picked.text, "Tell them you'll rush back with aid.", "hurt={hurt}");
+        }
+        assert_eq!(ev.safe_choice().unwrap().text, "Tell them you'll rush back with aid.");
+    }
+
+    /// The woodsman, the dev's own example, and the same shape as the paladin.
+    ///
+    /// `spider_forest.lua:62,73` — `[Murderer][Combat] - "Are you alone?"` and
+    /// `[Combat] - "The book hungers for blood."`, both calling `scenarios.woodsmanEvent`. The first
+    /// is the hole [`harmful`] left open on its own: the word split makes `[Murderer]` into
+    /// `murderer`, and the list holds `murder`, so a murder with innocuous prose read as harmless.
+    #[test]
+    fn the_woodsman_survives_both_ways_of_offering_his_death() {
+        assert!(murderous("[Murderer][Combat] - \"Are you alone?\""), "the tag is the game's word");
+        assert!(!harmful("[Murderer][Combat] - \"Are you alone?\""), "which `harmful` cannot see");
+        assert!(murderous("[Combat] - \"The book hungers for blood.\""));
+
+        let ev = Event {
+            title: "Woodsman in Bempton Silva".into(),
+            text: String::new(),
+            choices: vec![
+                Choice { text: "[Combat] - \"The book hungers for blood.\"".into(), x: 960, y: 594 },
+                Choice { text: "\"What are you selling?\"".into(), x: 960, y: 648 },
+            ],
+        };
+        assert_eq!(ev.safe_choice_avoiding_combat(false).unwrap().text, "\"What are you selling?\"");
+    }
+
+    /// **The other side of the dev's ruling, and the half that is easy to break by accident.**
+    ///
+    /// 2026-08-23: *Combat in other dialogues, as long as it's not for murdering a human being,
+    /// should be fine. The crossroads' tree, the highwayman, and the muggers are examples of
+    /// acceptable combat.* So a fight is not a reason to decline, and each of these is a real option
+    /// from the game that must still be reachable.
+    #[test]
+    fn the_fights_the_dev_named_are_still_taken() {
+        for ok in [
+            "[Combat] - Cut it down.",                    // hidden_path.lua:27, the crossroads' tree
+            "[Combat][Curse] - \"I have a way with wood.\"", // :49
+            "[Combat][Curse] - \"The trees are after me!\"", // :76
+            "[Combat] - 'Sling' it.",                     // :148
+            "[Combat] - \"No, your life\"",               // highwaymen.lua:53
+            "[Combat] - \"I'd rather die\"",              // :58
+            "[Combat] - Rush in to defend.",              // village_attack.lua:214
+            "[Combat] - Defend the village.",             // recalled.lua:39
+        ] {
+            assert!(!murderous(ok), "{ok} is a fight, not a murder");
+            assert!(starts_combat(ok), "{ok} should still read as a fight");
+        }
+
+        // And end to end: the stump is still cut down when we are well.
+        let ev = Event {
+            title: "Stump in the road".into(),
+            text: "One of the paths leaving the crossroads has a stump blocking the path.".into(),
+            choices: vec![
+                Choice { text: "[Combat] - Cut it down.".into(), x: 960, y: 594 },
+                Choice { text: "Leave it.".into(), x: 960, y: 648 },
+            ],
+        };
+        assert!(starts_combat(&ev.safe_choice_avoiding_combat(false).unwrap().text));
+        // Hurt, the older rule still applies and we walk away instead.
+        assert_eq!(ev.safe_choice_avoiding_combat(true).unwrap().text, "Leave it.");
+    }
+
+    /// Siding with an attack on a village, in both the shapes the game offers it.
+    ///
+    /// `village_attack.lua:260` *"Join the attack."* runs `villageAttack` with `playerAttack = true`;
+    /// `:271` *"Revel in the chaos."* sets the same flag with no fight at all, so nothing that
+    /// screens combat would ever have caught it. The blood-lust wordings at `:42` and `:229` and
+    /// `recalled.lua:49` are the `curseCollectBlood` variants of the same act.
+    #[test]
+    fn joining_an_attack_on_a_village_is_a_murder_however_it_is_worded() {
+        for m in [
+            "[Combat] - Join the attack.",
+            "Revel in the chaos.",
+            "[Combat] - \"That's unfortunate, you bleed right?\"",
+            "[Combat] - \"I smell blood!\"",
+            "[Combat] - \"Blood. Want blood.\"",
+        ] {
+            assert!(murderous(m), "{m}");
+        }
+        // `harmful` lets the first through, which is what makes this its own screen: `the` in front
+        // of `attack` reads as a noun, the exemption `reads_as_a_noun` exists for.
+        assert!(!harmful("[Combat] - Join the attack."));
+
+        let ev = Event {
+            title: "Attack on Bainton Clump".into(),
+            text: "The village is under attack!".into(),
+            choices: vec![
+                Choice { text: "[Combat] - Join the attack.".into(), x: 960, y: 594 },
+                Choice { text: "Revel in the chaos.".into(), x: 960, y: 648 },
+                Choice { text: "[Combat] - Rush in to defend.".into(), x: 960, y: 702 },
+            ],
+        };
+        assert_eq!(
+            ev.safe_choice_avoiding_combat(false).unwrap().text,
+            "[Combat] - Rush in to defend.",
+            "the one option that is not siding with the attackers"
+        );
+    }
+
+    /// The last-resort arm may reach for a fight, and still not for a murder.
+    ///
+    /// Its reason for existing is the highwayman — see the fallback's own note — and that case is
+    /// unaffected. What must not happen is running out of options and settling on the one the game
+    /// tags `[Murderer]`: an unanswered event is recoverable and a death is not.
+    #[test]
+    fn the_combat_fallback_will_not_settle_on_a_murder() {
+        let ev = Event {
+            title: "Injured paladin at Youlthorpe crypt".into(),
+            text: String::new(),
+            choices: vec![
+                Choice { text: "[Murderer][Combat] - Attack them.".into(), x: 960, y: 594 },
+                Choice { text: "[-All gold] - Hand it over".into(), x: 960, y: 648 },
+            ],
+        };
+        assert_eq!(ev.safe_choice_avoiding_combat(true), None, "nothing here may be taken");
+        assert_eq!(ev.safe_choice(), None);
+    }
+
     #[test]
     fn the_highwayman_is_fought_rather_than_paid() {
         // Real choices from `overworld/events/arrived/highwaymen.lua:37,52`, as the console printed
