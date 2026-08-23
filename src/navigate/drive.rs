@@ -2551,111 +2551,107 @@ pub fn drive(
         //
         // So the placement is checked against [`crate::observe::hud::is_map_point`] before it is
         // used, which is the same check every dumped neighbour has passed since a road at (213, 18)
-        // opened the character screen. Failing it costs one press's worth of ambition: `hop.step` is
-        // still the ordinary adjacent step, which is on screen by construction, and the run walks
-        // there instead. Panning the far target into view is the better answer and is #28's machinery
-        // applied to this branch — worth doing, and not worth guessing at while a run is stopping
-        // over it.
+        // opened the character screen.
+        //
+        // ## Failing that check costs the *distance*, not the hop
+        //
+        // It used to cost the hop. Live 2026-08-23 0056Z, twice in consecutive steps: `l45` was
+        // travellable in one press and no dump had ever drawn it, so the whole hop was surrendered
+        // and `l48 -> l41 -> l32` came out as three single steps — with `l32` on the same chain and
+        // on screen throughout. The dev's ruling of 2026-08-22 is *fast-hop to the farthest node on
+        // the path that's still visible without panning*, which is `far_hop_chain`, furthest-first
+        // for exactly this reason, and which the crossing branch has walked since it landed. This
+        // branch took its head alone.
+        //
+        // The walk itself is [`crate::overworld::WorldMap::aim_far_hop`], where it can be tested
+        // without a window; what stays here is what to *say* about its answer and what to do when it
+        // has none. The worst case is the old one: nothing on the chain can be aimed at, `hop.step`
+        // is still the ordinary adjacent step, which is on screen by construction, and the run walks
+        // there instead. So this can add hops and never lose one. Panning the far target into view
+        // remains the better answer for the head of the chain and is #28's machinery applied to this
+        // branch — worth doing, and not worth guessing at while a run is stopping over it.
         let mut far_target: Option<crate::observe::adjacency::Node> = None;
-        if let Some(far) = r.map.far_hop(&here, &hop.plan.target) {
-            match fresh.nodes.iter().find(|n| n.key == far) {
-                Some(n) => {
-                    r.log.push_str(&format!(
-                        "  the road to `{far}` is clear the whole way — one press instead of hop by hop\n"
-                    ));
-                    far_target = Some(n.clone());
-                    hop.step = far;
+        let aim = r.map.aim_far_hop(&fresh, &here, &hop.plan.target, r.win.client_size().ok());
+        match &aim.taken {
+            // The game printed this coordinate itself, so the dump's own node is what we click and
+            // its heading and degree come with it.
+            Some(a) if a.in_dump => {
+                r.log.push_str(&format!(
+                    "  the road to `{}` is clear the whole way — one press instead of hop by hop\n",
+                    a.key
+                ));
+                far_target = fresh.nodes.iter().find(|n| n.key == a.key).cloned();
+                hop.step = a.key.clone();
+            }
+            // Placed from the world frame, so the node has to be assembled from what the map
+            // remembers of it.
+            Some(a) => {
+                let (x, y) = a.at;
+                r.log.push_str(&format!(
+                    "  `{}` is travellable in one press and is not in this dump — placed from the \
+                     world frame at ({x:.0}, {y:.0})\n",
+                    a.key
+                ));
+                far_target = Some(crate::observe::adjacency::Node {
+                    key: a.key.clone(),
+                    heading: r.map.get(&a.key).map(|p| p.heading.clone()).unwrap_or_default(),
+                    x,
+                    y,
+                    connections: r.map.get(&a.key).map(|p| p.connections).unwrap_or(0),
+                });
+                hop.step = a.key.clone();
+            }
+            None => {}
+        }
+        if !aim.passed_over.is_empty() {
+            match aim.taken.is_some() {
+                // Printed after the choice it explains, so the report reads "we took this, and here
+                // is what stood in front of it".
+                true => r.log.push_str(&format!("  passed over {}\n", aim.passed_over.join(", "))),
+                false => r.log.push_str(&format!(
+                    "  the chain toward `{}` is travellable in one press and none of it can be \
+                     aimed at: {}\n",
+                    hop.plan.target,
+                    aim.passed_over.join(", ")
+                )),
+            }
+        }
+        // **Make the map smaller rather than give up the hop.**
+        //
+        // The dev, 2026-08-17: *fast-hopping to the shrine after the anomaly opened also did not
+        // work; we did adjacent hops the slow way again.* The run of 0436Z declined `shrine7` four
+        // times running — placed at y = 1566, 1538, 1440, 1235 against a 1080-px window — and walked
+        // it one node at a time. The hop was computed correctly every time; only the aiming failed.
+        //
+        // **Only once the whole chain has failed**, which is why this sits after the walk rather
+        // than inside it: a nearer node we can already click is a hop in hand, and it costs no
+        // re-derive at all.
+        //
+        // **Zoom, not drag, and the reason is staleness.** Dragging the node into view is #56 and
+        // would leave every *other* coordinate in `fresh` shifted by an amount we measured rather
+        // than knew — including `hop.step`'s, which is where we fall back to. Zooming invalidates
+        // them honestly: [`Run::zoom_out`] sets `positions_stale_at` and `needs_recentre`, so the
+        // `continue` below re-derives the whole step from a dump taken after the change. Nothing is
+        // carried across it. That is the same reasoning the crossing branch already records where it
+        // reaches for the zoom first.
+        //
+        // It cannot spin: `zoom_out` is once per run — a step out halves `targetZoomMul`, clamped at
+        // `0.5` (`overworldview.lua:996`), so from the default `1` the first press is already at the
+        // floor — and it returns `false` thereafter, which falls through to the ordinary step exactly
+        // as before. Halving toward the centre is also enough for the numbers above: 1566 comes back
+        // to about 1053.
+        if aim.taken.is_none() {
+            if let Some(far) = aim.off_window.clone() {
+                if r.zoom_out() {
+                    continue;
                 }
-                // Not in this dump, so place it from the frame. `None` here means the frame cannot
-                // speak for it — an unregistered island, or a dump sharing nothing with the frame —
-                // and the ordinary single step is the answer, as it was before any of this.
-                // Two ways to have no usable coordinate, and they are worth telling apart in the
-                // log: the frame could not speak for the node at all, or it did and the answer is
-                // somewhere no click may go. The first is an unregistered island; the second is an
-                // ordinary consequence of the map being bigger than the window.
-                // Bound before the `match` rather than used as its scrutinee, because the
-                // off-window arm now needs `&mut r` and a scrutinee holding a borrow of `r.map`
-                // would forbid it.
-                None => {
-                    let placed = r.map.screen_position(&fresh, &far).map(|(x, y)| {
-                        // Unknown client size counts as unusable: aiming needs the window's
-                        // measurements, and guessing at them is what this branch is being fixed for.
-                        let clickable = r
-                            .win
-                            .client_size()
-                            .map(|(cw, ch)| {
-                                crate::observe::hud::is_map_point(x as i32, y as i32, cw, ch)
-                            })
-                            .unwrap_or(false);
-                        ((x, y), clickable)
-                    });
-                    match placed {
-                    Some(((x, y), false)) => {
-                        r.log.push_str(&format!(
-                            "  `{far}` is travellable in one press but the frame puts it at \
-                             ({x:.0}, {y:.0}), which is off the map we can click\n"
-                        ));
-                        // **Make the map smaller rather than give up the hop.**
-                        //
-                        // The dev, 2026-08-17: *fast-hopping to the shrine after the anomaly opened
-                        // also did not work; we did adjacent hops the slow way again.* The run of
-                        // 0436Z declined `shrine7` four times running — placed at y = 1566, 1538,
-                        // 1440, 1235 against a 1080-px window — and walked it one node at a time.
-                        // The hop was computed correctly every time; only the aiming failed.
-                        //
-                        // **Zoom, not drag, and the reason is staleness.** Dragging the node into
-                        // view is #56 and would leave every *other* coordinate in `fresh` shifted by
-                        // an amount we measured rather than knew — including `hop.step`'s, which is
-                        // where we fall back to. Zooming invalidates them honestly:
-                        // [`Run::zoom_out`] sets `positions_stale_at` and `needs_recentre`, so the
-                        // `continue` below re-derives the whole step from a dump taken after the
-                        // change. Nothing is carried across it. That is the same reasoning the
-                        // crossing branch already records where it reaches for the zoom first.
-                        //
-                        // It cannot spin: `zoom_out` is once per run — a step out halves
-                        // `targetZoomMul`, clamped at `0.5` (`overworldview.lua:996`), so from the
-                        // default `1` the first press is already at the floor — and it returns
-                        // `false` thereafter, which falls through to the ordinary step exactly as
-                        // before. Halving toward the centre is also enough for the numbers above:
-                        // 1566 comes back to about 1053.
-                        if r.zoom_out() {
-                            continue;
-                        }
-                        r.log.push_str(&format!(
-                            "  and the map is already as small as it goes — stepping to `{}` \
-                             instead\n",
-                            hop.step
-                        ));
-                    }
-                    Some(((x, y), true)) => {
-                        r.log.push_str(&format!(
-                            "  `{far}` is travellable in one press and is not in this dump — placed \
-                             from the world frame at ({x:.0}, {y:.0})\n"
-                        ));
-                        far_target = Some(crate::observe::adjacency::Node {
-                            key: far.clone(),
-                            heading: r.map.get(&far).map(|p| p.heading.clone()).unwrap_or_default(),
-                            x,
-                            y,
-                            connections: r.map.get(&far).map(|p| p.connections).unwrap_or(0),
-                        });
-                        hop.step = far;
-                    }
-                    // **Say WHICH of the three, because they are three different repairs.** The
-                    // line here used to read "the frame cannot place it", which reads as too few
-                    // anchors and sends the reader at #21 — and in two of the three runs that
-                    // produced this branch the frame was usable at every surface dump they took.
-                    // See [`crate::overworld::WorldMap::unplaceable`].
-                    None => {
-                        let why = r.map.unplaceable(&fresh, &far);
-                        r.log.push_str(&format!(
-                            "  `{far}` is travellable in one press but cannot be aimed at: \
-                             {why} — stepping to `{}` instead\n",
-                            hop.step
-                        ));
-                    }
-                    }
-                }
+                r.log.push_str(&format!(
+                    "  `{far}` wanted nothing but a smaller map, and the map is already as small as \
+                     it goes — stepping to `{}` instead\n",
+                    hop.step
+                ));
+            } else if !aim.passed_over.is_empty() {
+                r.log.push_str(&format!("  stepping to `{}` instead\n", hop.step));
             }
         }
         let hop = hop;

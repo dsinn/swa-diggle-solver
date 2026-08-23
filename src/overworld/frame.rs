@@ -203,6 +203,35 @@ impl Default for ScreenScale {
     }
 }
 
+
+/// A node of a far hop's chain we can actually click, and where.
+///
+/// See [`WorldMap::aim_far_hop`]. `in_dump` separates the two ways to have a coordinate — the game
+/// printed it, or we inferred it from the frame — which the caller reports differently because they
+/// fail differently.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Aimed {
+    pub key: String,
+    pub at: (f64, f64),
+    pub in_dump: bool,
+}
+
+/// The result of walking a far hop's chain looking for something to aim at.
+///
+/// `taken` is `None` when the whole chain failed, which is the state the ordinary adjacent step
+/// already handles. The other two fields exist so the log can say *why*, since a chain that came
+/// back empty and one that was never computed read identically otherwise — and #95 spent a run's
+/// worth of diagnosis on exactly that kind of silence.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FarAim {
+    pub taken: Option<Aimed>,
+    /// Every entry declined, furthest first, each with its reason in words.
+    pub passed_over: Vec<String>,
+    /// The furthest entry that failed **only** for being off the window. A smaller map can undo
+    /// this one failure and no other, which is what makes it worth separating.
+    pub off_window: Option<String>,
+}
+
 impl WorldMap {
     /// Where a place is, with one estimate allowed: the anomaly, which we can locate without
     /// having seen it.
@@ -506,6 +535,65 @@ impl WorldMap {
                 f.disagreement
             ),
         }
+    }
+
+    /// Which node of a far hop's chain we may actually **aim a click at**, and what was passed over.
+    ///
+    /// [`WorldMap::far_hop_chain`] answers "how far would one press carry us", furthest first, and
+    /// deliberately does not know where the window is. This is the other half: walk that list from
+    /// the far end and take the first entry that has a usable screen coordinate. The chain's own
+    /// worst case is the ordinary adjacent step, so this can add hops and never lose one.
+    ///
+    /// **The three ways to place an entry, in the order they are tried:**
+    ///
+    /// - **this dump names it** — the game printed the coordinate itself, so nothing is inferred and
+    ///   nothing can be stale. Dumped neighbours are on the clickable map by construction and are
+    ///   taken without further test, which is what the surface branch has always done;
+    /// - **the frame places it somewhere clickable** — [`WorldMap::screen_position`], checked against
+    ///   [`crate::observe::hud::is_map_point`], because a frame position says where the node *is* and
+    ///   the map is bigger than the window. `shrine7` once came out 487 px below the bottom edge and
+    ///   the run clicked it anyway, three attempts and a re-centre, and that was the run;
+    /// - **neither** — recorded in `passed_over` with [`WorldMap::unplaceable`]'s reason, and the
+    ///   next entry down gets its turn.
+    ///
+    /// `client` is the window's client size; `None` — an unreadable window — counts as unusable
+    /// rather than as permission, since aiming needs the measurements and guessing at them is the
+    /// fault this walk exists to fix.
+    ///
+    /// **Why the whole list rather than its head.** Live 2026-08-23 0056Z, twice in consecutive
+    /// steps: `l45` was travellable in one press and no dump had ever drawn it, so the hop was
+    /// surrendered whole and `l48 -> l41 -> l32` came out as three single steps — with `l32` on the
+    /// same chain and on screen throughout. The dev's ruling of 2026-08-22 is *fast-hop to the
+    /// farthest node on the path that's still visible without panning*, and the crossing branch has
+    /// walked its chain that way since it landed.
+    pub fn aim_far_hop(
+        &self, a: &Adjacency, from: &str, to: &str, client: Option<(i32, i32)>,
+    ) -> FarAim {
+        let mut out = FarAim::default();
+        for far in self.far_hop_chain(from, to) {
+            if let Some(n) = a.nodes.iter().find(|n| n.key == far) {
+                out.taken = Some(Aimed { key: far, at: (n.x, n.y), in_dump: true });
+                return out;
+            }
+            let Some((x, y)) = self.screen_position(a, &far) else {
+                out.passed_over.push(format!("`{far}` ({})", self.unplaceable(a, &far)));
+                continue;
+            };
+            let clickable = client
+                .map(|(cw, ch)| crate::observe::hud::is_map_point(x as i32, y as i32, cw, ch))
+                .unwrap_or(false);
+            if clickable {
+                out.taken = Some(Aimed { key: far, at: (x, y), in_dump: false });
+                return out;
+            }
+            out.passed_over.push(format!(
+                "`{far}` (the frame puts it at ({x:.0}, {y:.0}), off the map we can click)"
+            ));
+            // The furthest that failed for **this** reason alone, which is the only failure a
+            // smaller map can undo. Kept as the first one seen, since the walk is furthest-first.
+            out.off_window.get_or_insert(far);
+        }
+        out
     }
 
     /// Where the most recent dump put `key`, in that dump's own frame — doors included.
@@ -1093,5 +1181,141 @@ mod tests {
                 "{path}: surface nodes left unplaced by the world frame: {stranded:?}"
             );
         }
+    }
+
+    /// A line of cleared road with the far end unaimable, which is #98 in miniature.
+    ///
+    /// `a — b — c — d — e`, everything cleared, so one press would carry us all the way to `e`. The
+    /// three entries in front of `c` are the three states the live run met on 2026-08-23 0056Z:
+    /// `e` was never drawn by any dump (a save-only node, [`WorldMap::apply_save`]'s doing), `d` is
+    /// placed but 1600 px down a 1080-px window, and `c` is placed where a click may go.
+    fn a_cleared_line_with_two_unaimable_ends() -> WorldMap {
+        let mut m = WorldMap::default();
+        for (x, y) in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e"), ("a", "z")] {
+            m.entry(x).neighbours.insert(y.into());
+            m.entry(y).neighbours.insert(x.into());
+        }
+        for k in ["a", "b", "c", "d", "e", "z", "w"] {
+            m.entry(k).heading = "Bessingby road".into();
+        }
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = { hell = 0 }, completedAreas = {
+                     a = true, b = true, c = true, d = true, e = true, z = true } } }",
+            )
+            .unwrap(),
+        );
+        // The frame, and the only dump that ever draws anything: `b`, `z` and `w` are placed by it,
+        // which is what later dumps register against.
+        m.fold(&dump(
+            "a",
+            "Bessingby road",
+            vec![
+                node_at("b", "Bessingby road", 400.0, 400.0),
+                node_at("z", "Bessingby road", 200.0, 200.0),
+                node_at("w", "Bessingby road", 250.0, 150.0),
+            ],
+        ));
+        // Two hops out, so the dump in front of us cannot name it — placed by hand exactly as a
+        // second dump from `b` would have placed it.
+        m.entry("c").pos = Some((600.0, 500.0));
+        // Placed, and 520 px below the bottom edge of a 1080-px client.
+        m.entry("d").pos = Some((2000.0, 1600.0));
+        m.here = Some("a".into());
+        m
+    }
+
+    /// **The whole of #98.** The head of the chain cannot be aimed at; the answer is the next entry
+    /// down that can, not the adjacent step.
+    #[test]
+    fn a_far_hop_walks_down_its_chain_instead_of_surrendering_the_whole_hop() {
+        let m = a_cleared_line_with_two_unaimable_ends();
+        let fresh = dump(
+            "a",
+            "Bessingby road",
+            vec![
+                node_at("b", "Bessingby road", 400.0, 400.0),
+                node_at("z", "Bessingby road", 200.0, 200.0),
+            ],
+        );
+
+        // **The positive controls**, both of which the fix depends on and neither of which it
+        // creates. One press would carry us to `e`, and `e` is what the old head-only branch asked
+        // for and then threw away — it has no coordinate anywhere.
+        // `b` is not on it and should not be: `far_chain_all` drops the adjacent node, because one
+        // hop is not a multi-hop and the caller already had it.
+        assert_eq!(m.far_hop_chain("a", "e"), ["e", "d", "c"], "the chain to walk down");
+        assert_eq!(m.far_hop("a", "e").as_deref(), Some("e"), "the head, which is unaimable");
+        assert_eq!(m.screen_position(&fresh, "e"), None, "and that is why it is unaimable");
+        // And the walk has to *gain* something: the adjacent step is `b`, so stopping at `c` is a
+        // hop this branch would otherwise not have taken.
+        assert_eq!(m.first_step_toward("a", "e", true).as_deref(), Some("b"));
+
+        let aim = m.aim_far_hop(&fresh, "a", "e", Some((1920, 1080)));
+        let taken = aim.taken.expect("`c` is placed where a click may go");
+        assert_eq!(taken.key, "c");
+        assert_eq!(taken.at, (600.0, 500.0));
+        assert!(!taken.in_dump, "two hops out, so no dump in front of us names it");
+
+        // Both refusals are named, furthest first, and each says which of the three it was.
+        assert_eq!(aim.passed_over.len(), 2, "{:?}", aim.passed_over);
+        assert!(aim.passed_over[0].contains("`e`"), "{:?}", aim.passed_over);
+        assert!(aim.passed_over[0].contains("no dump has ever drawn"), "{:?}", aim.passed_over);
+        assert!(aim.passed_over[1].contains("`d`"), "{:?}", aim.passed_over);
+        assert!(aim.passed_over[1].contains("off the map we can click"), "{:?}", aim.passed_over);
+        // `d` failed for the one reason a smaller map can undo — but nothing zooms here, because a
+        // node we can already click is a hop in hand.
+        assert_eq!(aim.off_window.as_deref(), Some("d"));
+    }
+
+    /// A node this dump names is taken without asking the frame, which is what the surface branch
+    /// has always done: the game printed the coordinate, so nothing is inferred.
+    #[test]
+    fn a_node_the_dump_itself_draws_is_taken_from_the_dump() {
+        let m = a_cleared_line_with_two_unaimable_ends();
+        // The same world, seen from a dump that happens to draw `c` — one hop nearer than the run
+        // is standing, which is what an arrival at `b` would print.
+        let fresh = dump(
+            "a",
+            "Bessingby road",
+            vec![
+                node_at("z", "Bessingby road", 200.0, 200.0),
+                node_at("c", "Bessingby road", 640.0, 480.0),
+            ],
+        );
+        let aim = m.aim_far_hop(&fresh, "a", "e", Some((1920, 1080)));
+        let taken = aim.taken.expect("the dump draws `c` itself");
+        assert_eq!(taken.key, "c");
+        assert!(taken.in_dump);
+        assert_eq!(taken.at, (640.0, 480.0), "the dump's own number, not the frame's 600, 500");
+    }
+
+    /// When the whole chain fails, the answer is the ordinary adjacent step — and the caller is
+    /// told which entry failed *only* for being off the window, since that is the one a smaller map
+    /// would rescue.
+    #[test]
+    fn a_chain_that_fails_all_the_way_down_names_the_furthest_a_zoom_would_reach() {
+        let m = a_cleared_line_with_two_unaimable_ends();
+        // A dump that draws neither `b` nor `c`, and still registers: `z` and `w` are two anchors.
+        let fresh = dump(
+            "a",
+            "Bessingby road",
+            vec![
+                node_at("z", "Bessingby road", 200.0, 200.0),
+                node_at("w", "Bessingby road", 250.0, 150.0),
+            ],
+        );
+        // A window too small for any of them, which is the same fault `shrine7` had four times
+        // running at 1080 px.
+        let aim = m.aim_far_hop(&fresh, "a", "e", Some((300, 300)));
+        assert_eq!(aim.taken, None, "nothing on the chain can be clicked");
+        assert_eq!(aim.passed_over.len(), 3, "{:?}", aim.passed_over);
+        assert_eq!(aim.off_window.as_deref(), Some("d"), "the furthest a smaller map could reach");
+
+        // An unreadable window counts as unusable rather than as permission: aiming needs the
+        // measurements, and this branch exists because guessing at them cost a run.
+        let blind = m.aim_far_hop(&fresh, "a", "e", None);
+        assert_eq!(blind.taken, None);
+        assert_eq!(blind.passed_over.len(), 3, "{:?}", blind.passed_over);
     }
 }
