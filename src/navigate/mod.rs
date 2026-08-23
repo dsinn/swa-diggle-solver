@@ -533,6 +533,26 @@ fn camera_is_lost(nodes: &[crate::observe::adjacency::Node], client_w: i32, clie
     !nodes.is_empty() && nodes.iter().all(off)
 }
 
+/// Is this client point inside the window we are about to click at?
+///
+/// **A click outside it does not miss the button — it misses the game.** `click_at_in` converts
+/// to screen coordinates and injects there, so a negative client x lands on whatever else is on
+/// the desktop, at coordinates nobody chose. That it also cannot select anything is the lesser
+/// half of the problem.
+///
+/// Live 2026-08-23, the 2335Z run: an arrival dump printed mid-glide put `l45` at
+/// **(-254, 63)** and three of its four neighbours at negative x. The run clicked there, read
+/// the strip as unmoved, and stopped with `selecting l45 did not register` — which is true and
+/// says nothing about why.
+///
+/// Deliberately not [`crate::observe::hud::is_map_point`], which also excludes chrome. That is
+/// the right question for *where may we click to find empty map*; this one is *can this click
+/// reach the window at all*, and a node genuinely drawn under the top strip is a different
+/// argument that should be made separately.
+pub(crate) fn on_screen(at: (i32, i32), client_w: i32, client_h: i32) -> bool {
+    (0..client_w).contains(&at.0) && (0..client_h).contains(&at.1)
+}
+
 /// `, for frontier X` when the crossing holds one, and nothing when it does not.
 ///
 /// A suffix rather than its own line, because it qualifies the step being logged rather than
@@ -3799,6 +3819,31 @@ mod tests {
             "`DRIVER_SOURCES` and `src/navigate/` disagree — a driver source outside the list is a \
              source the abort sweep never reads"
         );
+    }
+
+    /// **A click outside the window does not miss the button; it misses the game.**
+    ///
+    /// The four coordinates are the ones the 2335Z run of 2026-08-23 was handed for `l32`'s
+    /// neighbours by an arrival dump printed mid-glide, against the four the settled dump gave for
+    /// the same four nodes twenty lines later. The run clicked the first set — `l45` at (-254, 63)
+    /// went to whatever was on the desktop there, the strip did not move, and the run stopped
+    /// saying the selection had not registered.
+    #[test]
+    fn a_mid_glide_coordinate_is_not_somewhere_we_may_click() {
+        let (w, h) = (1920, 1080);
+        // Printed by `Arrived at location l32`, before `centreScreenOnPlayer` had finished.
+        for at in [(-254, 63), (-25, 211), (-3, 393), (-225, 442)] {
+            assert!(!on_screen(at, w, h), "{at:?} is off the window and was clicked anyway");
+        }
+        // The same four from `Screen pan finished l32`, which is what should have been used.
+        for at in [(709, 210), (938, 357), (960, 540), (738, 588)] {
+            assert!(on_screen(at, w, h), "{at:?} is the settled position and must be clickable");
+        }
+        // The edges, because a node exactly on the boundary is the case a bounds check gets wrong.
+        assert!(on_screen((0, 0), w, h), "the top-left pixel is inside the window");
+        assert!(!on_screen((w, 0), w, h), "one past the right edge is not");
+        assert!(!on_screen((0, h), w, h), "nor one past the bottom");
+        assert!(on_screen((w - 1, h - 1), w, h), "but the last pixel is");
     }
 
     /// **A press whose verdict is thrown away should not have been measured**, and #113 is what that

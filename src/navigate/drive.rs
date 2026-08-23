@@ -2900,7 +2900,13 @@ pub fn drive(
         let mut selected = false;
         // Set when a fresh dump says the walk is already over — see the arm that sets it.
         let mut standing_on_it = false;
-        let mut at = (target.x as i32, target.y as i32);
+        // **An aim we are willing to click at, or none at all.**
+        //
+        // `None` is not the same as "we have not looked" — it is *this coordinate must not be
+        // clicked*, and the loop below turns it into the re-centre path rather than a press. The
+        // 2335Z stall is what it is for: a coordinate that came off a mid-glide arrival dump
+        // survived a settle that failed, and got clicked at (-254, 63).
+        let mut at = Some((target.x as i32, target.y as i32));
         // **Pay back the pan we skipped, because this click is not at a fixed coordinate.**
         //
         // See [`Run::skipped_the_pan`]. The shortcut is taken on the strength of the next action
@@ -2910,27 +2916,69 @@ pub fn drive(
         if std::mem::take(&mut r.skipped_the_pan) {
             let (cw, ch) = r.win.client_size().unwrap_or((1920, 1080));
             r.log.push_str("  this step skipped the pan and now wants a node — settling first\n");
-            if let Some(a) = r.recentre().filter(|a| !camera_is_lost(&a.nodes, cw, ch)) {
-                if let Some(n) = a.nodes.iter().find(|n| n.key == hop.step) {
-                    at = (n.x as i32, n.y as i32);
+            // **And if the settle does not answer, the old coordinate is not a fallback.**
+            //
+            // That is the whole reason this block exists. `target` came from whatever dump was
+            // last in hand, and the settle is being paid for precisely because that dump may have
+            // been printed mid-glide — `core.arriveAt` prints *before* `centreScreenOnPlayer`
+            // finishes, so its positions are the old offsets. Keeping the value the settle was
+            // meant to replace is the one outcome that cannot be right.
+            //
+            // Live 2026-08-23: the arrival dump at `l32` put `l45` at (-254, 63) and its own
+            // neighbours at -25, -3 and -225; the settled dump twenty lines later put the same four
+            // at 709, 938, 960 and 738. The run clicked the first set.
+            at = match r.recentre().filter(|a| !camera_is_lost(&a.nodes, cw, ch)) {
+                Some(a) => {
+                    a.nodes.iter().find(|n| n.key == hop.step).map(|n| (n.x as i32, n.y as i32))
                 }
+                None => None,
+            };
+            if at.is_none() {
+                r.log.push_str(&format!(
+                    "  the settle did not place `{}` — the coordinate we had is from before the \
+                     pan and will not be clicked\n",
+                    hop.step
+                ));
             }
         }
+        let mut tries = 0;
         for attempt in 1..=SELECT_RETRIES {
-            let Ok((sx, sy)) = r.win.client_to_screen(at.0, at.1) else {
-                return Stop::Failed("coordinate conversion failed".into());
+            tries = attempt;
+            let (cw, ch) = r.win.client_size().unwrap_or((1920, 1080));
+            // **Aim first, then click** — see [`on_screen`] for what a click outside the window
+            // actually does. An unusable aim scores zero and falls into the re-centre path below,
+            // which is the recovery that already exists and the one this wanted all along.
+            let moved = match at.filter(|p| on_screen(*p, cw, ch)) {
+                Some((x, y)) => {
+                    let Ok((sx, sy)) = r.win.client_to_screen(x, y) else {
+                        return Stop::Failed("coordinate conversion failed".into());
+                    };
+                    // Watched rather than waited out — [`Run::select_and_watch`] has the argument,
+                    // and the fraction it hands back is the one this line has always weighed.
+                    r.select_and_watch(&format!("travel: select `{}`", hop.step), sx, sy)
+                }
+                None => {
+                    if let Some((x, y)) = at {
+                        r.log.push_str(&format!(
+                            "  `{}` is at ({x}, {y}), which is outside the {cw}x{ch} window — not \
+                             clicking there\n",
+                            hop.step
+                        ));
+                    }
+                    0.0
+                }
             };
-            // Watched rather than waited out — [`Run::select_and_watch`] has the argument, and the
-            // fraction it hands back is the same one this line has always weighed.
-            let moved = r.select_and_watch(&format!("travel: select `{}`", hop.step), sx, sy);
             if moved > SELECT_MOVED {
                 selected = true;
                 break;
             }
-            r.log.push_str(&format!(
-                "  selecting {} at ({}, {}) moved the strip {moved:.4}, attempt {attempt} of {SELECT_RETRIES}\n",
-                hop.step, at.0, at.1
-            ));
+            if let Some((x, y)) = at {
+                r.log.push_str(&format!(
+                    "  selecting {} at ({x}, {y}) moved the strip {moved:.4}, attempt {attempt} of \
+                     {SELECT_RETRIES}\n",
+                    hop.step
+                ));
+            }
             if attempt == SELECT_RETRIES {
                 break;
             }
@@ -2957,10 +3005,10 @@ pub fn drive(
                 }
                 Some(a) => match a.nodes.iter().find(|n| n.key == hop.step) {
                     Some(n) => {
-                        at = (n.x as i32, n.y as i32);
+                        at = Some((n.x as i32, n.y as i32));
                         r.log.push_str(&format!(
                             "  re-centred; `{}` is now at ({}, {})\n",
-                            hop.step, at.0, at.1
+                            hop.step, n.x as i32, n.y as i32
                         ));
                     }
                     None => {
@@ -2985,8 +3033,31 @@ pub fn drive(
             continue;
         }
         if !selected {
+            // **The world may simply have moved under us**, which is not a failure and is what
+            // happened on 2026-08-23. `core.arriveAt` runs at every node on a path, so leaving a
+            // container can report an arrival while the avatar walks on; the run planned
+            // `l32 -> l45` from an `l32` it was already leaving, and by the third look it was
+            // standing at `l25`, where `l45` is not adjacent and never would be.
+            //
+            // The dev's standing rule, 2026-08-20: *add safeguards so that something as a failed
+            // click can be recovered. We have already built other recovery methods like
+            // re-centering.* The arrival wait below this already follows it — *short of the named
+            // node is progress, not failure* — and the selection above it did not.
+            //
+            // So: if we are no longer where we planned from, hand back and let the top of the loop
+            // plan from where we actually are. Only standing still is a failure.
+            r.pump();
+            if r.map.here().map(|h| h != here).unwrap_or(false) {
+                r.log.push_str(&format!(
+                    "  the walk carried on to `{}` while we were aiming at `{}` — replanning from \
+                     there\n",
+                    r.map.here().unwrap_or("?"),
+                    hop.step
+                ));
+                continue;
+            }
             return Stop::Failed(format!(
-                "selecting {} did not register after {SELECT_RETRIES} attempts",
+                "selecting {} did not register in {tries} attempt(s)",
                 hop.step
             ));
         }
