@@ -1,0 +1,13 @@
+# Commits that moved lines without changing them. `git blame` steps over these and reports the
+# revision that last touched the code itself, which is the one worth reading.
+#
+# Wired up with:
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# That is a local setting, so each clone runs it once. GitHub honours the file without it.
+
+# style: rustfmt the tree, so `cargo fmt --all --check` can gate it (2026-08-23)
+# 92 files, formatting only -- 777 tests pass either side and every string literal and comment line
+# is byte-identical.
+1e7503e13c7bfaaef4dbaeba0048800de479ff46

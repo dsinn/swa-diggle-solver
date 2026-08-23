@@ -72,20 +72,41 @@
 #
 # All three are stable; checked against rustfmt 1.9.0-stable.
 #
-# ## Do not run `cargo fmt` in this repo
+# ## The tree is formatted, and the check is what keeps it that way
 #
-# Two reasons, and the second is the one that decides it.
+# As of `1e7503e` the whole tree agrees with this file, so:
 #
-# `cargo fmt` formats **every** target, and its `-- <path>` arguments are flags for rustfmt rather
-# than a file filter — so `cargo fmt -- src/navigate/drive.rs` reformats the whole crate. That is
-# not a hypothetical: it happened on 2026-08-23 and took 112 files and 11,318 insertions with it.
-# To format one file, run `rustfmt --edition 2021 <file>`.
+#     cargo fmt --all --check     # exit 0 when clean, 1 and a diff when not
+#     cargo fmt --all             # fix it
 #
-# And a repo-wide reformat is worth more here than it would be elsewhere, because this project
-# diagnoses by archaeology. The doc comments cite dates, runs and commits constantly, and working
-# out why a line is the way it is routinely means `git blame` on it. Moving 3,537 lines of the
-# most-worked-on code puts a wall in front of that. Formatting a file you are already rewriting is
-# free — the blame is moving anyway — and that is the only time to do it.
+# `--check` is the `mix format --check-formatted` of Rust: it writes nothing and its exit code is
+# the answer. `hooks/pre-commit` in this repo is a two-line wrapper round it; enable it once per
+# clone with `git config core.hooksPath hooks`.
+#
+# **`cargo fmt` formats every target, and `-- <path>` does not narrow it.** Those arguments are
+# flags for rustfmt, not a file filter, so `cargo fmt -- src/navigate/drive.rs` reformats the whole
+# crate. That is not hypothetical — it happened on 2026-08-23, before the tree was formatted, and
+# took 112 files with it. To format one file, run `rustfmt --edition 2021 <file>`. Now that the tree
+# is clean the blast radius of the mistake is nil, but the flag still does not mean what it looks
+# like it means.
+#
+# ## What the reformat was and was not worth
+#
+# It fixed **362 over-long code lines** (441 down to 79). Not the ~1,900 first claimed for it: that
+# figure counted diff hunks *containing* a line over 100 columns, and the long lines here are
+# overwhelmingly **comments**, which rustfmt does not touch — 1,914 of the 2,355, and still 1,921
+# afterwards.
+#
+# 362 lines would have been a thin reason for a 92-file diff on its own. The gate is the reason: it
+# cannot be used at all until the tree agrees with the config, and it removes formatting from the
+# list of things anyone has to think about again.
+#
+# The objection it had to answer was archaeology — this project works out why a line is the way it
+# is by reading `git blame`, and the doc comments cite dates and runs on nearly every page. The
+# format commit is listed in `.git-blame-ignore-revs`, which git honours via
+# `git config blame.ignoreRevsFile .git-blame-ignore-revs`. A handful of lines per file still blame
+# to it: the ones rustfmt *created*, closing delimiters like `})` and `));` with no earlier revision
+# to attribute them to. Fourteen such lines in the worst file, and nobody reads blame on a `})`.
 
 max_width = 100
 use_small_heuristics = "Max"

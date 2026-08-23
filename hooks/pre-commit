@@ -1,0 +1,25 @@
+#!/bin/sh
+#
+# Refuse a commit that does not agree with rustfmt.toml.
+#
+# Opt-in, once per clone:
+#
+#     git config core.hooksPath hooks
+#
+# To undo: `git config --unset core.hooksPath`. To skip it for one commit, `git commit --no-verify`.
+#
+# `cargo fmt --all --check` is Rust's `mix format --check-formatted`: it writes nothing, prints the
+# diff it would have applied, and its exit code is the answer. The tree has agreed with the config
+# since 1e7503e, which is what makes this usable as a gate rather than a permanent red light.
+#
+# Deliberately not `cargo fmt --all`: a hook that rewrites files under a commit in progress changes
+# what is about to be committed without saying so, and this repo has already lost an afternoon to
+# formatting that ran wider than anyone asked.
+
+if ! cargo fmt --all --check; then
+    echo
+    echo "pre-commit: the tree disagrees with rustfmt.toml (diff above)."
+    echo "  fix:  cargo fmt --all"
+    echo "  skip: git commit --no-verify"
+    exit 1
+fi
