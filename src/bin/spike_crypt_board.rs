@@ -66,8 +66,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Drains the console into the mirror and returns any completed adjacency dumps.
     let pump = |console: &mut Console,
-                    mirror: &mut LogMirror,
-                    reader: &mut adjacency::Reader|
+                mirror: &mut LogMirror,
+                reader: &mut adjacency::Reader|
      -> Result<Vec<adjacency::Adjacency>, Box<dyn std::error::Error>> {
         let lines = console.read_new()?;
         if lines.is_empty() {
@@ -119,7 +119,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     log.push_str(&format!(
         "at {} — {}\ntarget {} — {} (level {:?}) at ({:.1},{:.1})\n\n",
-        map.here_key, map.here_heading, target.key, target.heading, target.level(), target.x, target.y
+        map.here_key,
+        map.here_heading,
+        target.key,
+        target.heading,
+        target.level(),
+        target.x,
+        target.y
     ));
 
     // ---- 2. travel there ----
@@ -195,7 +201,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match diggle_solver::act::click(&win, &diggle_solver::act::PROGRESS) {
                 Ok(inliers) => {
                     clicks += 1;
-                    log.push_str(&format!("- click {clicks}: plaque verified, inliers {inliers:.3}\n"));
+                    log.push_str(&format!(
+                        "- click {clicks}: plaque verified, inliers {inliers:.3}\n"
+                    ));
                     std::thread::sleep(Duration::from_millis(1400));
                     stuck = 0;
                 }
@@ -262,7 +270,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ));
                 }
                 if let Some(gf) = t.table_at("rpg.player.gearFlags") {
-                    log.push_str(&format!("\ngearFlags: {:?}\n", gf.map.keys().collect::<Vec<_>>()));
+                    log.push_str(&format!(
+                        "\ngearFlags: {:?}\n",
+                        gf.map.keys().collect::<Vec<_>>()
+                    ));
                 } else {
                     log.push_str("\ngearFlags: <absent>\n");
                 }

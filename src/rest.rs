@@ -250,7 +250,6 @@ pub fn can_bank_a_stack(gold: i64) -> bool {
     gold >= INN_COST
 }
 
-
 /// A place that can restore health.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Site {
@@ -287,7 +286,11 @@ pub fn site(heading: &str) -> Option<Site> {
     // So `town` and `hamlet` were invisible to the rest planner, however hurt the run and however
     // near it stood — and no log would say so, because a place that never enters the ranking cannot
     // be reported as having lost it. Found by a regression control in #72 rather than by a run.
-    } else if h.ends_with("village") || h.ends_with("town") || h.ends_with("hamlet") || h.ends_with("inn") {
+    } else if h.ends_with("village")
+        || h.ends_with("town")
+        || h.ends_with("hamlet")
+        || h.ends_with("inn")
+    {
         Some(Site::Inn)
     } else {
         None
@@ -425,7 +428,8 @@ mod tests {
         assert_eq!(site("Emswell campfire"), Some(Site::Campfire));
 
         // And nothing else is a bed. A forest is where the run gets hurt, not where it recovers.
-        for h in ["Bursall Hedge — level 2 forest", "Yokefleet — level 6 crypt", "Firby crossroads"] {
+        for h in ["Bursall Hedge — level 2 forest", "Yokefleet — level 6 crypt", "Firby crossroads"]
+        {
             assert_eq!(site(h), None, "`{h}` is not somewhere to sleep");
         }
     }
@@ -462,7 +466,11 @@ mod tests {
         // with no heading is `ASSUMED_SHRINE_LEVEL`; `DEEP_FIGHT` is the shallowest that qualifies.
         for level in [DEEP_FIGHT, ASSUMED_SHRINE_LEVEL, 8, 10] {
             assert!(worth_banking_for(level));
-            assert_eq!(stacks_short(0), STACKS_TARGET, "level {level} asks for no more and no less");
+            assert_eq!(
+                stacks_short(0),
+                STACKS_TARGET,
+                "level {level} asks for no more and no less"
+            );
         }
     }
 
@@ -485,7 +493,6 @@ mod tests {
         // `getPlayerGold() >= 10` (`ui/rest.lua:49`) and nothing else.
         assert_eq!(INN_COST, 10);
     }
-
 
     #[test]
     fn four_lost_is_the_bar() {

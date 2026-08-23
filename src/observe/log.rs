@@ -25,9 +25,9 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Console::{
     AllocConsole, FillConsoleOutputAttribute, FillConsoleOutputCharacterW, FreeConsole,
-    GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleOutputCharacterW, SetConsoleCursorPosition,
-    SetConsoleOutputCP, SetConsoleScreenBufferSize, CONSOLE_SCREEN_BUFFER_INFO, COORD,
-    STD_OUTPUT_HANDLE,
+    GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleOutputCharacterW,
+    SetConsoleCursorPosition, SetConsoleOutputCP, SetConsoleScreenBufferSize,
+    CONSOLE_SCREEN_BUFFER_INFO, COORD, STD_OUTPUT_HANDLE,
 };
 
 /// Rows of scrollback. An arrival prints ~5 lines and a finished pan reprints the block, so
@@ -117,11 +117,7 @@ impl Console {
     }
 
     fn read_rows(
-        &self,
-        h: HANDLE,
-        info: &CONSOLE_SCREEN_BUFFER_INFO,
-        from: i16,
-        to: i16,
+        &self, h: HANDLE, info: &CONSOLE_SCREEN_BUFFER_INFO, from: i16, to: i16,
     ) -> Result<Vec<String>, crate::Error> {
         let width = info.dwSize.X;
         let mut buf = vec![0u16; width as usize];

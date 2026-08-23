@@ -41,7 +41,11 @@ fn luma(frame: &Frame, cx: i32, cy: i32, radius: i32) -> f64 {
             n += 1.0;
         }
     }
-    if n == 0.0 { 0.0 } else { sum / n }
+    if n == 0.0 {
+        0.0
+    } else {
+        sum / n
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -118,7 +122,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "| capture | median | min | max |\n|---|---|---|---|\n\
          | `PrintWindow` full window | {fm:.1} ms | {:.1} | {:.1} |\n\
          | `BitBlt` board rect | **{cm:.1} ms** | {:.1} | {:.1} |\n\n**{:.1}x faster**\n\n",
-        full[0], full[full.len() - 1], cheap[0], cheap[cheap.len() - 1], fm / cm.max(0.001)
+        full[0],
+        full[full.len() - 1],
+        cheap[0],
+        cheap[cheap.len() - 1],
+        fm / cm.max(0.001)
     ));
 
     // ---- agreement, idle board then with tiles selected ----

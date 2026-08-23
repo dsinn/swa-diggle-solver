@@ -176,11 +176,17 @@ pub enum SelectError {
     /// A tile would not select after every attempt. Carries the dump index.
     Stuck(usize),
     /// A click landed somewhere unplanned; the board is not in a state we can reason about.
-    Stray { wanted: usize, got: Vec<usize> },
+    Stray {
+        wanted: usize,
+        got: Vec<usize>,
+    },
     /// The on-screen keyboard would not take the letter. Almost always a restricted wildcard whose
     /// pattern does not admit it (`onscreenKeypress`, `rpg.lua:664`), which is a planning error
     /// rather than an input one — and the keyboard is still up, so the caller must clear it.
-    LetterRefused { tile: usize, letter: char },
+    LetterRefused {
+        tile: usize,
+        letter: char,
+    },
     Win(crate::Error),
 }
 
@@ -442,21 +448,13 @@ impl<'a> Board<'a> {
     pub fn read(&self) -> Result<Vec<f64>, crate::Error> {
         let (x, y, w, h) = self.rect;
         let frame = capture_client_rect(self.win, x, y, w, h)?;
-        Ok(self
-            .centres
-            .iter()
-            .map(|&(cx, cy)| luma(&frame, cx - x, cy - y, self.radius))
-            .collect())
+        Ok(self.centres.iter().map(|&(cx, cy)| luma(&frame, cx - x, cy - y, self.radius)).collect())
     }
 
     /// Which tiles currently differ from `baseline`.
     pub fn selected_now(&self, baseline: &[f64]) -> Result<Vec<bool>, crate::Error> {
         let now = self.read()?;
-        Ok(now
-            .iter()
-            .zip(baseline)
-            .map(|(a, b)| (a - b).abs() > CHANGED)
-            .collect())
+        Ok(now.iter().zip(baseline).map(|(a, b)| (a - b).abs() > CHANGED).collect())
     }
 
     /// Which tile positions actually hold a tile.
@@ -727,17 +725,19 @@ impl<'a> Board<'a> {
         }
 
         for _ in 0..LETTER_ATTEMPTS {
-            crate::win::input::type_text_injected(
-                &letter.to_string(),
-                Duration::from_millis(40),
-            )?;
+            crate::win::input::type_text_injected(&letter.to_string(), Duration::from_millis(40))?;
             if self.wait_for_board(&board, true, KEYBOARD_TIMEOUT)? {
                 // `hideKeyboard` calls `tileboard.unhide()` (`rpg.lua:704`), so the board fades back
                 // in rather than reappearing. Rejoining the word before it agrees with us would
                 // compare a half-faded board against the baseline, read every tile as changed, and
                 // abort on a stray at the *next* click -- a failure that would look like the
                 // ordinary click's fault rather than the wildcard's.
-                return verify(self.settle_to(baseline, &expected, restless, BOARD_RETURN_TIMEOUT)?);
+                return verify(self.settle_to(
+                    baseline,
+                    &expected,
+                    restless,
+                    BOARD_RETURN_TIMEOUT,
+                )?);
             }
         }
         Err(SelectError::LetterRefused { tile: i, letter })
@@ -935,9 +935,8 @@ mod bomb_tests {
     /// characters would mis-index every tile after it.
     #[test]
     fn a_digit_tile_is_a_bomb_and_the_rest_are_not() {
-        let board = [
-            "D", "M", "3", "R", "D", "2", "E", "M", "U", "S", "QU", "D", "A", "U", "U", "E",
-        ];
+        let board =
+            ["D", "M", "3", "R", "D", "2", "E", "M", "U", "S", "QU", "D", "A", "U", "U", "E"];
         let counting: Vec<usize> = board
             .iter()
             .enumerate()
@@ -971,9 +970,8 @@ mod bomb_tests {
     /// Tile 1 is the `!!!!`; it had not been touched, it had ticked.
     #[test]
     fn an_exclamation_tile_counts_down_and_is_one_tile_however_many_marks() {
-        let board = [
-            "V", "!!!!", "S", "R", "E", "L", "E", "M", "E", "!", "E", "A", "B", "G", "G", "E",
-        ];
+        let board =
+            ["V", "!!!!", "S", "R", "E", "L", "E", "M", "E", "!", "E", "A", "B", "G", "G", "E"];
         assert_eq!(board.len(), 16, "sixteen tiles");
         assert_eq!(
             board.iter().map(|t| t.len()).sum::<usize>(),
@@ -1278,7 +1276,10 @@ mod tests {
         // Mid-fade every tile reads as changed. That must come back as Unexpected so the poll keeps
         // going -- returning Yes here is the bug that aborts the next click with a stray.
         let all: Vec<usize> = (0..8).collect();
-        assert_eq!(compare_selection(&all, &[0, 3], &[]), Settled::Unexpected(vec![1, 2, 4, 5, 6, 7]));
+        assert_eq!(
+            compare_selection(&all, &[0, 3], &[]),
+            Settled::Unexpected(vec![1, 2, 4, 5, 6, 7])
+        );
     }
 
     #[test]
@@ -1359,7 +1360,13 @@ mod tests {
     fn the_click_budget_covers_the_measured_worst_case() {
         // Worst observed click -> visible was 143 ms. A timeout below that would abandon tiles that
         // were about to appear, and retry them -- toggling them back off.
-        assert!(CLICK_TIMEOUT.as_millis() >= 143 * 3, "timeout too tight for the measured worst case");
-        assert!(POLL.as_millis() >= 10, "polling faster than this is GDI churn for no latency gain");
+        assert!(
+            CLICK_TIMEOUT.as_millis() >= 143 * 3,
+            "timeout too tight for the measured worst case"
+        );
+        assert!(
+            POLL.as_millis() >= 10,
+            "polling faster than this is GDI churn for no latency gain"
+        );
     }
 }

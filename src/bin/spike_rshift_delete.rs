@@ -114,7 +114,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // No restless list here: this spike drives the keyboard, not a planned word, so it has no reason
     // to have read the tiles. An empty list only means every column top is watched.
-    if board.wait_until_ready(Duration::from_secs(20), &[])? == diggle_solver::combat::Ready::Never {
+    if board.wait_until_ready(Duration::from_secs(20), &[])? == diggle_solver::combat::Ready::Never
+    {
         log.push_str("ABORT: board never filled and settled\n");
         finish(&log, &mut game);
         return Ok(());

@@ -25,8 +25,8 @@ use diggle_solver::{config::Config, game::launch::PipedGameProcess};
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows::Win32::Foundation::POINT;
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 const FRAMES_DIR: &str = "spike-frames-2";
 /// How many samples sample_noise_floor takes per screen, and how far apart.
@@ -75,13 +75,8 @@ struct StepRecord {
 }
 
 fn record_step(
-    steps: &mut Vec<StepRecord>,
-    label: &str,
-    floor: f64,
-    before: &Frame,
-    after: &Frame,
-    before_bmp: String,
-    after_bmp: String,
+    steps: &mut Vec<StepRecord>, label: &str, floor: f64, before: &Frame, after: &Frame,
+    before_bmp: String, after_bmp: String,
 ) -> bool {
     let delta = before.diff_fraction(after, settle::FULL);
     let threshold = (floor * settle::REACT_MULTIPLE).max(settle::REACT_FLOOR);
@@ -206,7 +201,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         notes.push(format!(
             "First posted click on Start did NOT react (delta below max({}x{floor:.4}, {})). \
              Retrying once more before concluding, given how consequential this measurement is.",
-            settle::REACT_MULTIPLE, settle::REACT_FLOOR,
+            settle::REACT_MULTIPLE,
+            settle::REACT_FLOOR,
         ));
         let before2 = current.clone();
         let before2_path = save(&before2, "03b-startmenu-before-click-retry")?;
@@ -229,7 +225,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if click_reacted {
         floor = sample_noise_floor(&win, FLOOR_SAMPLES, FLOOR_GAP)?;
-        notes.push(format!("Noise floor re-sampled on the screen after the Start click: {floor:.4}."));
+        notes.push(format!(
+            "Noise floor re-sampled on the screen after the Start click: {floor:.4}."
+        ));
     } else {
         notes.push("Posted mouse click on Start did NOT react on either attempt -- floor left unchanged for the next step.".into());
     }
@@ -314,7 +312,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          stalled at further-step: {:?}\n\n\
          ## Notes\n{}\n\n\
          ## Per-step table\n{table}\n",
-        cursor_before.x, cursor_before.y, cursor_after.x, cursor_after.y,
+        cursor_before.x,
+        cursor_before.y,
+        cursor_after.x,
+        cursor_after.y,
         stalled_at,
         notes.iter().map(|n| format!("- {n}\n")).collect::<String>(),
     );

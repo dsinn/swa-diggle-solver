@@ -57,7 +57,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut hard = Vec::new();
         for (word, ngram) in read_shrine_lexicon(&src) {
             if word.len() != len {
-                return Err(format!("shrine{len}.lua has a {}-letter word {word:?}", word.len()).into());
+                return Err(
+                    format!("shrine{len}.lua has a {}-letter word {word:?}", word.len()).into()
+                );
             }
             // Strict bounds, exactly as `words.getRandomShrine` applies them. A word sitting exactly
             // on a bound would belong to no band and could never be the answer -- worth knowing about
@@ -67,12 +69,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else if ngram > 0.0 && ngram < 1.0 {
                 hard.push(word);
             } else {
-                return Err(format!("{word:?} has ngram {ngram}, which no difficulty band admits").into());
+                return Err(
+                    format!("{word:?} has ngram {ngram}, which no difficulty band admits").into()
+                );
             }
         }
         write_list(&out.join(format!("shrine-answers-{len}-easy.txt")), &easy)?;
         write_list(&out.join(format!("shrine-answers-{len}-hard.txt")), &hard)?;
-        println!("answers {len}: easy {} hard {} total {}", easy.len(), hard.len(), easy.len() + hard.len());
+        println!(
+            "answers {len}: easy {} hard {} total {}",
+            easy.len(),
+            hard.len(),
+            easy.len() + hard.len()
+        );
     }
 
     // ---- guesses ----
@@ -108,7 +117,8 @@ fn read_shrine_lexicon(src: &str) -> Vec<(String, f64)> {
         let line = line.trim();
         let Some((k, v)) = line.split_once('=') else { continue };
         let v = v.trim_end_matches(',');
-        let (Ok(ngram), true) = (v.parse::<f64>(), k.bytes().all(|b| b.is_ascii_lowercase())) else {
+        let (Ok(ngram), true) = (v.parse::<f64>(), k.bytes().all(|b| b.is_ascii_lowercase()))
+        else {
             continue;
         };
         out.push((k.to_string(), ngram));

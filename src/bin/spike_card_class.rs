@@ -18,9 +18,8 @@ use std::path::Path;
 
 fn load(path: &Path) -> Result<Frame, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut rdr = png::Decoder::new(file)
-        .read_info()
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut rdr =
+        png::Decoder::new(file).read_info().map_err(|e| format!("{}: {e}", path.display()))?;
     let mut buf = vec![0; rdr.output_buffer_size()];
     let info = rdr.next_frame(&mut buf).map_err(|e| format!("{}: {e}", path.display()))?;
     let n = info.color_type.samples();

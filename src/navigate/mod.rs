@@ -239,8 +239,7 @@ const LEAVE_INN_CLICKS: usize = 3;
 /// than a world map, and where the nodes fall depends on the seed. All of these are inside the map
 /// area and clear of the chrome ([`hud::is_map_point`] covers the top strip and the corners), and
 /// they are spread so that a map dense around one is sparse around another.
-const EMPTY_MAP_CANDIDATES: [(i32, i32); 4] =
-    [EMPTY_MAP, (1750, 800), (170, 240), (960, 170)];
+const EMPTY_MAP_CANDIDATES: [(i32, i32); 4] = [EMPTY_MAP, (1750, 800), (170, 240), (960, 170)];
 /// Where the cursor is parked so it cannot hover something we are about to fingerprint.
 ///
 /// Deliberately clear of the view's hotspot rectangle, `{0, 0, 300, height*0.8}`
@@ -1179,9 +1178,11 @@ impl Run<'_> {
         let text = self.map.cache_text();
         let wrote = std::fs::create_dir_all(MAP_CACHE).and_then(|()| std::fs::write(&path, &text));
         match wrote {
-            Ok(()) => self
-                .log
-                .push_str(&format!("remembered {} places in `{}`\n", self.map.len(), path.display())),
+            Ok(()) => self.log.push_str(&format!(
+                "remembered {} places in `{}`\n",
+                self.map.len(),
+                path.display()
+            )),
             Err(e) => self.log.push_str(&format!("could not write {}: {e}\n", path.display())),
         }
     }
@@ -1194,8 +1195,10 @@ impl Run<'_> {
         // because a passive cannot be sold, but reading it late only costs a longer wait.
         let snail = crate::game::save::has_turbo_snail(&save);
         if snail && !self.turbo_snail {
-            self.log.push_str("  the Magic turbo-snail is aboard — travel is paced by it now
-");
+            self.log.push_str(
+                "  the Magic turbo-snail is aboard — travel is paced by it now
+",
+            );
         }
         self.turbo_snail = snail;
         // **The first save is also the first chance to know which world this is.** On a fresh
@@ -1206,8 +1209,10 @@ impl Run<'_> {
                 true => "with their positions",
                 false => "for their shape only — this run has already anchored a frame",
             };
-            self.log.push_str(&format!("recalled {edges} edges from `{path}` {how}
-"));
+            self.log.push_str(&format!(
+                "recalled {edges} edges from `{path}` {how}
+"
+            ));
         }
         // **The bank has a second home, and mid-fight it is the only one.** `mainSaveData` carries
         // no `statusEffects` while a fight is in progress; `combatSaveData` carries them under a
@@ -1570,7 +1575,10 @@ impl Run<'_> {
                 // The first hypothesis, then: try elsewhere.
                 continue;
             }
-            let Ok((lx, ly)) = self.win.client_to_screen(SHOW_AREA_BUTTONS.0, SHOW_AREA_BUTTONS.1) else { continue };
+            let Ok((lx, ly)) = self.win.client_to_screen(SHOW_AREA_BUTTONS.0, SHOW_AREA_BUTTONS.1)
+            else {
+                continue;
+            };
             // Counted BEFORE the click. Anything already in hand describes the map as it was, and the
             // whole point of pressing the arrow is to learn where the map is now.
             let before = self.dumps;
@@ -1686,8 +1694,7 @@ impl Run<'_> {
             .filter_map(|b| crate::act::score_exact(self.win, b).ok().map(|q| (b.name, q)))
             .collect();
         scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let top: Vec<String> =
-            scored.iter().take(4).map(|(n, q)| format!("{n} {q:.4}")).collect();
+        let top: Vec<String> = scored.iter().take(4).map(|(n, q)| format!("{n} {q:.4}")).collect();
         match top.is_empty() {
             true => self.log.push_str("  nothing could be scored — the capture itself failed\n"),
             false => self.log.push_str(&format!("  loudest fingerprints: {}\n", top.join(", "))),
@@ -2022,8 +2029,10 @@ impl Run<'_> {
     pub fn close_affirmative_run(&mut self) {
         if let Some((_, n)) = self.affirm_repeat.take() {
             if n > 1 {
-                self.log
-                    .push_str(&format!("  … the affirmative slot said that {} more times\n", n - 1));
+                self.log.push_str(&format!(
+                    "  … the affirmative slot said that {} more times\n",
+                    n - 1
+                ));
             }
         }
     }
@@ -2153,8 +2162,11 @@ impl Run<'_> {
             let mut opened = None;
             for try_n in 1..=innplay::REST_TRIES {
                 let mark = self.feed.mark();
-                match crate::act::click_when_ready(self.win, &crate::act::INN_REST, innplay::REST_WAIT)
-                {
+                match crate::act::click_when_ready(
+                    self.win,
+                    &crate::act::INN_REST,
+                    innplay::REST_WAIT,
+                ) {
                     Ok(q) => {
                         self.log.push_str(&format!("  rest: `Rest` found at {q:.4}\n"));
                         // **Get off the button before anything looks at it again.**
@@ -2577,10 +2589,7 @@ impl Run<'_> {
     /// polls [`crate::act::identify`] with its own recovery around a pregame that can arrive as
     /// either of two screens. Converting them would be a downgrade dressed as consistency.
     fn left_the_overworld(
-        &mut self,
-        what: &str,
-        says: Option<&str>,
-        landed: &[crate::act::Screen],
+        &mut self, what: &str, says: Option<&str>, landed: &[crate::act::Screen],
     ) -> bool {
         for attempt in 1..=LEAVE_TRIES {
             let now = crate::act::identify(self.win);
@@ -2598,8 +2607,9 @@ impl Run<'_> {
             // coordinate is transcribed from Lua multipliers, and a wrong transcription looks
             // exactly like a right one until a run dies on it.
             if let Some(miss) = crate::win::cursor::miss_by(self.win, AREA_BUTTON) {
-                self.log
-                    .push_str(&format!("  the game has a control selected {miss:.0} px from `{what}`\n"));
+                self.log.push_str(&format!(
+                    "  the game has a control selected {miss:.0} px from `{what}`\n"
+                ));
             }
             let Ok((bx, by)) = self.win.client_to_screen(AREA_BUTTON.0, AREA_BUTTON.1) else {
                 self.log.push_str(&format!("  could not place the `{what}` press on screen\n"));
@@ -2621,7 +2631,8 @@ impl Run<'_> {
                 self.pump();
                 if let Some(line) = says {
                     if self.feed.seen_line_since(mark, line) {
-                        self.log.push_str(&format!("  `{what}` opened it — the game said `{line}`\n"));
+                        self.log
+                            .push_str(&format!("  `{what}` opened it — the game said `{line}`\n"));
                         return true;
                     }
                 }
@@ -2871,8 +2882,7 @@ impl Run<'_> {
         let lore = announces_a_lore_screen(self.feed.since(self.lore_cleared_at));
         if lore {
             self.lore_cleared_at = self.feed.mark();
-            self.log
-                .push_str("  the console says a lore screen is up, whatever the slot reads\n");
+            self.log.push_str("  the console says a lore screen is up, whatever the slot reads\n");
         }
         if !first.state.is_ready() && !lore {
             return false;
@@ -2952,10 +2962,12 @@ impl Run<'_> {
             // Recognised on its own artwork rather than by position, because the same slot reads
             // `Restart` when a save exists and pressing that eulogises the run. See
             // [`crate::act::MENU_START`], which measures both sides.
-            || matches!(
-                crate::act::score_exact(self.win, &crate::act::MENU_START),
-                Ok(q) if q >= crate::act::MENU_START_PRESENT
-            ),
+            || {
+                matches!(
+                    crate::act::score_exact(self.win, &crate::act::MENU_START),
+                    Ok(q) if q >= crate::act::MENU_START_PRESENT
+                )
+            },
         )
     }
 
@@ -3135,8 +3147,11 @@ impl Run<'_> {
         if ev.title.to_ascii_lowercase().contains("rumble") {
             self.pending_cinematic = true;
         }
-        self.log.push_str(&format!("  event **{}**: {:?}\n", ev.title,
-            ev.choices.iter().map(|c| c.text.clone()).collect::<Vec<_>>()));
+        self.log.push_str(&format!(
+            "  event **{}**: {:?}\n",
+            ev.title,
+            ev.choices.iter().map(|c| c.text.clone()).collect::<Vec<_>>()
+        ));
         // **The one moment the console names a lost woods**, taken before the answer rather than
         // after. See [`Run::record_a_lost_woods`].
         if crate::subworld::is_the_mist_event(&ev.title) {
@@ -3160,22 +3175,23 @@ impl Run<'_> {
         let hurt = health.map(crate::rest::health_is_low).unwrap_or(true);
         // Never `choices[0]`: a corrupted village can put "Kill him" first. And never a `[Combat]`
         // option while hurt, which is a different axis and needs asking separately.
-        let pick = ev
-            .continue_choice()
-            .or_else(|| ev.safe_choice_avoiding_combat(hurt))
-            .cloned();
+        let pick = ev.continue_choice().or_else(|| ev.safe_choice_avoiding_combat(hurt)).cloned();
         if let Some(c) = &pick {
             if hurt && crate::observe::event::starts_combat(&c.text) {
                 // The fallback fired: every option was a fight. Said out loud because it is a
                 // decision, not a default — see `Event::safe_choice_avoiding_combat`.
                 self.log.push_str(&format!(
                     "  **taking a fight at {} — every option was `[Combat]`**\n",
-                    health.map(|h| format!("{}/{}", h.current, h.max)).unwrap_or("unknown health".into())
+                    health
+                        .map(|h| format!("{}/{}", h.current, h.max))
+                        .unwrap_or("unknown health".into())
                 ));
             } else if hurt {
                 self.log.push_str(&format!(
                     "  hurt ({}), so avoiding any `[Combat]` option\n",
-                    health.map(|h| format!("{}/{}", h.current, h.max)).unwrap_or("health unreadable".into())
+                    health
+                        .map(|h| format!("{}/{}", h.current, h.max))
+                        .unwrap_or("health unreadable".into())
                 ));
             }
         }
@@ -3293,9 +3309,9 @@ impl Run<'_> {
                             answered = true;
                             break;
                         }
-                        Ok(q) => self
-                            .log
-                            .push_str(&format!("  attempt {attempt}: still on the event ({q:.4})\n")),
+                        Ok(q) => self.log.push_str(&format!(
+                            "  attempt {attempt}: still on the event ({q:.4})\n"
+                        )),
                         // A capture fault is not evidence either way, so it neither confirms nor
                         // retries into a loop — the count runs out honestly.
                         Err(e) => self.log.push_str(&format!("  attempt {attempt}: {e}\n")),
@@ -3352,8 +3368,9 @@ impl Run<'_> {
                         .map(|(b, a)| b.diff_fraction(&a, crate::observe::settle::FULL))
                         .unwrap_or(0.0);
                     if moved > 0.05 {
-                        self.log
-                            .push_str(&format!("  left the shop on attempt {attempt} ({moved:.3})\n"));
+                        self.log.push_str(&format!(
+                            "  left the shop on attempt {attempt} ({moved:.3})\n"
+                        ));
                         left = true;
                         break;
                     }
@@ -3644,8 +3661,13 @@ mod tests {
             // Only the shipping half of each file. Counting the tests as well would count this
             // test's own string literals, which makes the two totals agree for a reason that has
             // nothing to do with the driver.
-            let src = src.split_once("
-#[cfg(test)]").map(|(before, _)| before).unwrap_or(src);
+            let src = src
+                .split_once(
+                    "
+#[cfg(test)]",
+                )
+                .map(|(before, _)| before)
+                .unwrap_or(src);
             starts += src.matches("fight.run(").count();
             arms += src.matches("o.stop_requested() => return Stop::Requested").count();
         }

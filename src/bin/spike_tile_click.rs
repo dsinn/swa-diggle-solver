@@ -57,7 +57,8 @@ fn tile_luma(frame: &Frame, cx: i32, cy: i32, radius: i32) -> f64 {
                 continue;
             }
             let i = ((y * frame.width + x) * 4) as usize;
-            let (b, g, r) = (frame.bgra[i] as f64, frame.bgra[i + 1] as f64, frame.bgra[i + 2] as f64);
+            let (b, g, r) =
+                (frame.bgra[i] as f64, frame.bgra[i + 1] as f64, frame.bgra[i + 2] as f64);
             sum += 0.114 * b + 0.587 * g + 0.299 * r;
             n += 1.0;
         }
@@ -221,11 +222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The board must be back where it started, or something was left selected.
     let restored = all_luma(&capture_window(&win)?, &centres, radius);
-    let drift = restored
-        .iter()
-        .zip(&baseline)
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0f64, f64::max);
+    let drift = restored.iter().zip(&baseline).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
 
     log.push_str(&format!(
         "\n## Result\n\n**{correct} of {} tiles clicked correctly**\n\nresidual drift after \

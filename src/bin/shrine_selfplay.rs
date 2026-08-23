@@ -86,7 +86,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let cursor = Arc::clone(&cursor);
                 let opener = Arc::clone(&opener);
                 handles.push(std::thread::spawn(move || -> Result<Tally, String> {
-                    let mut solver = Solver::new(&Baked, length, band).map_err(|e| e.to_string())?;
+                    let mut solver =
+                        Solver::new(&Baked, length, band).map_err(|e| e.to_string())?;
                     let answers = solver.candidates();
                     let mut tally = Tally::default();
                     loop {
@@ -227,6 +228,10 @@ impl Tally {
     }
 
     fn mean(&self) -> f64 {
-        if self.games == 0 { 0.0 } else { self.guesses as f64 / self.games as f64 }
+        if self.games == 0 {
+            0.0
+        } else {
+            self.guesses as f64 / self.games as f64
+        }
     }
 }

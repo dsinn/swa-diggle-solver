@@ -286,13 +286,20 @@ mod tests {
         // too low -- within a tile's height, so it would select the WRONG NEIGHBOUR rather than
         // missing, which is the failure that never announces itself.
         let tall = crate::geometry::Geometry::for_passive("tall16Board", 16).geometry;
-        assert!(tall.col_y_offsets.iter().any(|&o| o != 0.0), "expected offsets: {:?}", tall.col_y_offsets);
+        assert!(
+            tall.col_y_offsets.iter().any(|&o| o != 0.0),
+            "expected offsets: {:?}",
+            tall.col_y_offsets
+        );
         let c = tile_centres(&tall, 1920, 1080);
         assert_eq!(c.len(), 16);
         // Column 1 is short (5 of 6) and therefore raised relative to the full middle column.
         let col1_bottom = c[0].1;
         let col2_bottom = c[tall.rows_per_col[0]].1;
-        assert!(col1_bottom < col2_bottom, "short column should sit higher: {col1_bottom} vs {col2_bottom}");
+        assert!(
+            col1_bottom < col2_bottom,
+            "short column should sit higher: {col1_bottom} vs {col2_bottom}"
+        );
     }
 
     #[test]

@@ -534,11 +534,7 @@ mod tests {
 
     /// A geometry with one column, so dump order is the only order and corners are trivial.
     fn strip(n: usize) -> Geometry {
-        Geometry {
-            rows_per_col: vec![n],
-            corners: vec![(1, 1)],
-            ..Geometry::default()
-        }
+        Geometry { rows_per_col: vec![n], corners: vec![(1, 1)], ..Geometry::default() }
     }
 
     fn typed(tiles: &[Tile], geom: &Geometry, word: &str) -> Option<Vec<usize>> {
@@ -685,7 +681,8 @@ mod tests {
     #[test]
     fn a_locked_column_removes_its_tiles() {
         let t = plain("AAAABBBB");
-        let mut g = Geometry { rows_per_col: vec![4, 4], corners: vec![(1, 1)], ..Geometry::default() };
+        let mut g =
+            Geometry { rows_per_col: vec![4, 4], corners: vec![(1, 1)], ..Geometry::default() };
         g.locked_cols.insert(2);
         assert_eq!(typed(&t, &g, "AB"), None, "every B sits in the locked column");
         assert_eq!(typed(&t, &g, "AA"), Some(vec![0, 1]));

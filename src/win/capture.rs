@@ -39,8 +39,7 @@ pub struct Region {
 /// background on the hero-select screen, where it hashes blank gradient and looks
 /// convincingly stable while measuring nothing characteristic of that screen. Every
 /// screen carries its own region, chosen from its own controls. See design v2 §6.1.
-pub const START_MENU_REGION: Region =
-    Region { nx: 0.0326, ny: 0.7037, nw: 0.2930, nh: 0.0926 };
+pub const START_MENU_REGION: Region = Region { nx: 0.0326, ny: 0.7037, nw: 0.2930, nh: 0.0926 };
 
 /// The bottom-right **progress button** — the wooden plaque with a right-pointing arrow that
 /// advances a cutscene or dialogue. Measured from a live arrival cutscene at 1920x1080:
@@ -158,8 +157,7 @@ impl Frame {
             png::Encoder::new(std::io::BufWriter::new(file), self.width as u32, self.height as u32);
         enc.set_color(png::ColorType::Rgba);
         enc.set_depth(png::BitDepth::Eight);
-        let mut writer =
-            enc.write_header().map_err(|e| crate::Error::Win32(e.to_string()))?;
+        let mut writer = enc.write_header().map_err(|e| crate::Error::Win32(e.to_string()))?;
         // Frame is top-down BGRA; PNG wants RGBA.
         let mut rgba = Vec::with_capacity(self.bgra.len());
         for px in self.bgra.chunks_exact(4) {
@@ -228,11 +226,7 @@ impl Frame {
 /// `x`/`y` are client coordinates; the returned frame's origin is that point, so callers offset
 /// their own coordinates by it.
 pub fn capture_client_rect(
-    win: &GameWindow,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
+    win: &GameWindow, x: i32, y: i32, w: i32, h: i32,
 ) -> Result<Frame, crate::Error> {
     if w <= 0 || h <= 0 {
         return Err(crate::Error::Win32(format!("capture rect has no extent: {w}x{h}")));
@@ -315,9 +309,13 @@ pub fn capture_window(win: &GameWindow) -> Result<Frame, crate::Error> {
         };
         let mut bgra = vec![0u8; (w * h * 4) as usize];
         let scanned = GetDIBits(
-            mem_dc, bmp, 0, h as u32,
+            mem_dc,
+            bmp,
+            0,
+            h as u32,
             Some(bgra.as_mut_ptr() as *mut _),
-            &mut info, DIB_RGB_COLORS,
+            &mut info,
+            DIB_RGB_COLORS,
         );
 
         SelectObject(mem_dc, old);

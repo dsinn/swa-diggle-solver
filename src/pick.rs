@@ -482,7 +482,11 @@ mod tests {
         // If this is wrong the fixture is wrong, not the code, and every assertion below would be
         // passing for the wrong reason.
         for (i, letter) in ["Q", "Z"].iter().enumerate() {
-            assert_eq!(sc.material_name(&tiles[i]).as_deref(), Some(GOLD), "{letter} is solid gold");
+            assert_eq!(
+                sc.material_name(&tiles[i]).as_deref(),
+                Some(GOLD),
+                "{letter} is solid gold"
+            );
         }
         assert_eq!(sc.material_name(&tiles[2]).as_deref(), Some("wood"), "E is not");
 
@@ -537,7 +541,8 @@ mod tests {
             wood_only: wood,
             heals_fully: false,
             hoarded: 0.0,
-            shed: 0, hazard_fall: 0,
+            shed: 0,
+            hazard_fall: 0,
             deviation: 0.0,
         };
         // Neither of these clears the board, so a threshold rule calls them equal. They are not.
@@ -569,7 +574,8 @@ mod tests {
             wood_only: wood,
             heals_fully: heal,
             hoarded,
-            shed: 0, hazard_fall: 0,
+            shed: 0,
+            hazard_fall: 0,
             deviation: 0.0,
         };
         let both = tier(true, true, 99.0);
@@ -603,18 +609,58 @@ mod tests {
     /// The rule in the shape it is actually used — a comparison between candidates, not a score.
     #[test]
     fn between_two_kills_the_one_that_spends_less_wins() {
-        let plain = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, shed: 0, hazard_fall: 0, deviation: 9.0 };
-        let golden = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 40.0, shed: 0, hazard_fall: 0, deviation: 0.0 };
+        let plain = Rank {
+            fire_eaten: 0,
+            wood_only: false,
+            heals_fully: false,
+            hoarded: 0.0,
+            shed: 0,
+            hazard_fall: 0,
+            deviation: 9.0,
+        };
+        let golden = Rank {
+            fire_eaten: 0,
+            wood_only: false,
+            heals_fully: false,
+            hoarded: 40.0,
+            shed: 0,
+            hazard_fall: 0,
+            deviation: 0.0,
+        };
         assert!(plain.better_than(&golden), "a tidier board is not worth a Q");
         assert!(!golden.better_than(&plain));
 
         // Below the payout, though. `wood_only` is gear paying out for real, and this is a saving.
-        let paid = Rank { fire_eaten: 0, wood_only: true, heals_fully: false, hoarded: 40.0, shed: 0, hazard_fall: 0, deviation: 9.0 };
+        let paid = Rank {
+            fire_eaten: 0,
+            wood_only: true,
+            heals_fully: false,
+            hoarded: 40.0,
+            shed: 0,
+            hazard_fall: 0,
+            deviation: 9.0,
+        };
         assert!(paid.better_than(&plain), "a payout in hand outranks a tile kept back");
 
         // And the wildcard case the dev asked for: same gold either way, so do not also burn one.
-        let gold_only = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 10.0, shed: 0, hazard_fall: 0, deviation: 0.0 };
-        let gold_and_wild = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 11.0, shed: 0, hazard_fall: 0, deviation: 0.0 };
+        let gold_only = Rank {
+            fire_eaten: 0,
+            wood_only: false,
+            heals_fully: false,
+            hoarded: 10.0,
+            shed: 0,
+            hazard_fall: 0,
+            deviation: 0.0,
+        };
+        let gold_and_wild = Rank {
+            fire_eaten: 0,
+            wood_only: false,
+            heals_fully: false,
+            hoarded: 11.0,
+            shed: 0,
+            hazard_fall: 0,
+            deviation: 0.0,
+        };
         assert!(gold_only.better_than(&gold_and_wild), "no reason to spend a wildcard as well");
     }
 
@@ -727,11 +773,15 @@ mod tests {
     fn wood_only_reads_the_letter_implied_material_not_just_an_explicit_one() {
         let Some(sc) = scorer() else { return };
         let tiles = board(&["E", "A", "R"]);
-        let all_wood = tiles.iter().all(|t| sc.material_name(t).is_some_and(|m| m.starts_with(WOOD)));
+        let all_wood =
+            tiles.iter().all(|t| sc.material_name(t).is_some_and(|m| m.starts_with(WOOD)));
         // If this is false the fixture is wrong, not the code -- and the assertion below would then
         // be passing for the wrong reason.
-        assert!(all_wood, "expected plain letters to resolve to wood: {:?}",
-            tiles.iter().map(|t| sc.material_name(t)).collect::<Vec<_>>());
+        assert!(
+            all_wood,
+            "expected plain letters to resolve to wood: {:?}",
+            tiles.iter().map(|t| sc.material_name(t)).collect::<Vec<_>>()
+        );
         assert!(wood_only(&tiles, &[0, 1, 2], &sc));
         assert!(!wood_only(&tiles, &[], &sc), "an empty word cannot have killed anything");
     }
@@ -771,7 +821,10 @@ mod tests {
         // The **Wooden idol buckler** has both, so either reason is enough.
         assert!(pays(&idol_buckler, full), "the armour still pays");
         assert!(pays(&idol_buckler, capped_but_hurt), "and at full armour the heal does");
-        assert!(!pays(&idol_buckler, capped), "neither payout is available: no heal wanted, no room");
+        assert!(
+            !pays(&idol_buckler, capped),
+            "neither payout is available: no heal wanted, no room"
+        );
 
         // The **Braced buckler** adds a queued tile, which cares about none of it.
         for state in [hurt, full, bleeding, capped] {
@@ -797,12 +850,15 @@ mod tests {
     /// (`items/specialtilegear.lua:31-34`) and neither is a wood-*kill* flag.
     #[test]
     fn the_targe_alone_does_not_make_wood_only_worth_chasing() {
-        let targe = |f: &str| f == "tileRefillSpecialWoodbraced" || f == "tileQueueSpecialWoodbraced";
+        let targe =
+            |f: &str| f == "tileRefillSpecialWoodbraced" || f == "tileQueueSpecialWoodbraced";
         // No combination of health and bleeding makes it pay, because it has no wood-kill flag at all.
         for injured in [true, false] {
             for bleeding in [true, false] {
                 for room in [true, false] {
-                    assert!(!Preferences::from_flags(targe, injured, bleeding, room).wood_only_pays);
+                    assert!(
+                        !Preferences::from_flags(targe, injured, bleeding, room).wood_only_pays
+                    );
                 }
             }
         }
@@ -810,16 +866,64 @@ mod tests {
 
     #[test]
     fn a_payout_outranks_tidier_letters_and_wood_outranks_a_falling_hazard() {
-        let wood = Rank { fire_eaten: 0, wood_only: true, heals_fully: false, hoarded: 0.0, shed: 0, hazard_fall: 0, deviation: 99.0 };
-        let hazard = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, shed: 0, hazard_fall: 5, deviation: 1.0 };
+        let wood = Rank {
+            fire_eaten: 0,
+            wood_only: true,
+            heals_fully: false,
+            hoarded: 0.0,
+            shed: 0,
+            hazard_fall: 0,
+            deviation: 99.0,
+        };
+        let hazard = Rank {
+            fire_eaten: 0,
+            wood_only: false,
+            heals_fully: false,
+            hoarded: 0.0,
+            shed: 0,
+            hazard_fall: 5,
+            deviation: 1.0,
+        };
         assert!(wood.better_than(&hazard), "a wood-only kill outranks any number of falls");
 
-        let falls = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, shed: 0, hazard_fall: 2, deviation: 50.0 };
-        let tidy = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, shed: 0, hazard_fall: 1, deviation: 0.0 };
+        let falls = Rank {
+            fire_eaten: 0,
+            wood_only: false,
+            heals_fully: false,
+            hoarded: 0.0,
+            shed: 0,
+            hazard_fall: 2,
+            deviation: 50.0,
+        };
+        let tidy = Rank {
+            fire_eaten: 0,
+            wood_only: false,
+            heals_fully: false,
+            hoarded: 0.0,
+            shed: 0,
+            hazard_fall: 1,
+            deviation: 0.0,
+        };
         assert!(falls.better_than(&tidy), "a falling hazard outranks a tidier board");
 
-        let a = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, shed: 0, hazard_fall: 1, deviation: 3.0 };
-        let b = Rank { fire_eaten: 0, wood_only: false, heals_fully: false, hoarded: 0.0, shed: 0, hazard_fall: 1, deviation: 4.0 };
+        let a = Rank {
+            fire_eaten: 0,
+            wood_only: false,
+            heals_fully: false,
+            hoarded: 0.0,
+            shed: 0,
+            hazard_fall: 1,
+            deviation: 3.0,
+        };
+        let b = Rank {
+            fire_eaten: 0,
+            wood_only: false,
+            heals_fully: false,
+            hoarded: 0.0,
+            shed: 0,
+            hazard_fall: 1,
+            deviation: 4.0,
+        };
         assert!(a.better_than(&b), "with the payouts equal, lower deviation wins");
         assert!(!b.better_than(&a));
         assert!(!a.better_than(&a), "better_than is strict");

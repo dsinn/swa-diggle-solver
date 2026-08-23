@@ -19,7 +19,9 @@
 
 // Named by the doc comments throughout; none of them is called from here.
 #[allow(unused_imports)]
-use super::{click_when_ready, event_plaque_score, identify, locate, score_exact, slot_is_eulogise};
+use super::{
+    click_when_ready, event_plaque_score, identify, locate, score_exact, slot_is_eulogise,
+};
 
 /// A button we are willing to click, described by how to *recognise* it.
 pub struct Button {
@@ -1363,8 +1365,7 @@ pub const SHRINE_SLOT_OCCUPIED: f64 = 0.60;
 /// the two buttons added later were checked by nothing — including the check that would have caught
 /// their search boxes being smaller than their own templates. A hand-written list silently stops
 /// covering the thing you just added, which is the moment coverage matters most.
-pub const ALL: &[&Button] =
-    &[
+pub const ALL: &[&Button] = &[
     &CONTINUE,
     &PROGRESS,
     &COMBAT_FINISH,

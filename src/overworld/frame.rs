@@ -203,7 +203,6 @@ impl Default for ScreenScale {
     }
 }
 
-
 /// A node of a far hop's chain we can actually click, and where.
 ///
 /// See [`WorldMap::aim_far_hop`]. `in_dump` separates the two ways to have a coordinate — the game
@@ -638,7 +637,10 @@ mod tests {
         m.fold(&dump(
             "here",
             "camp",
-            vec![node_at("away", "Westerly meadow", -100.0, 0.0), node_at("step", "Easterly road", 50.0, 0.0)],
+            vec![
+                node_at("away", "Westerly meadow", -100.0, 0.0),
+                node_at("step", "Easterly road", 50.0, 0.0),
+            ],
         ));
         // Lists `away`, which the first dump already placed, so this one can be **registered**
         // against the frame — `registration` anchors on a node it has a position for, and a dump it
@@ -668,7 +670,11 @@ mod tests {
         // with no edges is not the same thing as a node we cannot get to. Its position is never
         // observed; this dump cannot be registered against the frame, so it places nothing, and the
         // corruption centroid is what stands in.
-        m.fold(&dump("island", "island camp", vec![node_at("start", "The Rift anomaly", 0.0, 0.0)]));
+        m.fold(&dump(
+            "island",
+            "island camp",
+            vec![node_at("start", "The Rift anomaly", 0.0, 0.0)],
+        ));
         m.here = Some("here".into());
 
         // Control: portal shut, so direction is not a consideration and the nearest wins.
@@ -703,7 +709,10 @@ mod tests {
         m.fold(&dump(
             "here",
             "camp",
-            vec![node_at("away", "Westerly meadow", -100.0, 0.0), node_at("step", "Easterly road", 50.0, 0.0)],
+            vec![
+                node_at("away", "Westerly meadow", -100.0, 0.0),
+                node_at("step", "Easterly road", 50.0, 0.0),
+            ],
         ));
         m.fold(&dump(
             "step",
@@ -718,7 +727,11 @@ mod tests {
 
         // Corrupted, exactly as a save's area flags leave it: flagged, never seen, never placed.
         m.entry("far").corrupted = true;
-        m.fold(&dump("island", "island camp", vec![node_at("start", "The Rift anomaly", 0.0, 0.0)]));
+        m.fold(&dump(
+            "island",
+            "island camp",
+            vec![node_at("start", "The Rift anomaly", 0.0, 0.0)],
+        ));
         // **And unplaced.** Stated rather than assumed: the first draft of this test left it to the
         // island dump failing to register, and it turned out to be placed anyway -- so the test
         // measured a map with a perfectly good bearing and proved nothing. The state under test is
@@ -730,7 +743,10 @@ mod tests {
         let plan = m.next_target().expect("something to explore");
         // The pair that only this split can express: we know the errand, and we cannot aim at it.
         assert_eq!(plan.reason, Goal::RouteTo(Box::new(Goal::CloseAnomaly)), "the errand is known");
-        assert_eq!(plan.steered_by, None, "a bearing that cannot order the frontier is not steering");
+        assert_eq!(
+            plan.steered_by, None,
+            "a bearing that cannot order the frontier is not steering"
+        );
         assert_eq!(plan.target, "away", "so it falls back to nearest unvisited, and says so");
 
         // The control: place that same corrupted node and the identical map now steers. Only
@@ -750,40 +766,66 @@ mod tests {
     #[test]
     fn a_node_missing_from_the_dump_is_placed_from_the_frame() {
         let mut m = WorldMap::new();
-        m.fold(&dump("here", "Somewhere", vec![
-            Node { key: "a".into(), heading: "A".into(), x: 100.0, y: 100.0, connections: 2 },
-            Node { key: "b".into(), heading: "B".into(), x: 200.0, y: 100.0, connections: 2 },
-        ]));
-        m.fold(&dump("a", "A", vec![
-            Node { key: "b".into(), heading: "B".into(), x: 250.0, y: 70.0, connections: 2 },
-            Node { key: "c".into(), heading: "C".into(), x: 350.0, y: 70.0, connections: 2 },
-        ]));
+        m.fold(&dump(
+            "here",
+            "Somewhere",
+            vec![
+                Node { key: "a".into(), heading: "A".into(), x: 100.0, y: 100.0, connections: 2 },
+                Node { key: "b".into(), heading: "B".into(), x: 200.0, y: 100.0, connections: 2 },
+            ],
+        ));
+        m.fold(&dump(
+            "a",
+            "A",
+            vec![
+                Node { key: "b".into(), heading: "B".into(), x: 250.0, y: 70.0, connections: 2 },
+                Node { key: "c".into(), heading: "C".into(), x: 350.0, y: 70.0, connections: 2 },
+            ],
+        ));
 
         // Standing at `b`, panned again. `a` is not in this dump; `b` and `c` are, and two anchors
         // is the minimum a fit needs — one cannot see the zoom, which is what ended a live run.
-        let now = dump("here2", "elsewhere", vec![
-            Node { key: "b".into(), heading: "B".into(), x: -100.0, y: 0.0, connections: 2 },
-            Node { key: "c".into(), heading: "C".into(), x: 0.0, y: 0.0, connections: 2 },
-        ]);
+        let now = dump(
+            "here2",
+            "elsewhere",
+            vec![
+                Node { key: "b".into(), heading: "B".into(), x: -100.0, y: 0.0, connections: 2 },
+                Node { key: "c".into(), heading: "C".into(), x: 0.0, y: 0.0, connections: 2 },
+            ],
+        );
         assert!(!now.nodes.iter().any(|n| n.key == "a"), "the fixture must not name `a`");
         // `c` is world (300,100) drawn at (0,0) and `b` is world (200,100) drawn at (-100,0): same
         // scale, so the shift is (300,100) and `a` — world (100,100) — is drawn 200 left of `c`.
-        assert_eq!(m.screen_position(&now, "c"), Some((0.0, 0.0)), "the anchor draws where it says");
+        assert_eq!(
+            m.screen_position(&now, "c"),
+            Some((0.0, 0.0)),
+            "the anchor draws where it says"
+        );
         assert_eq!(m.screen_position(&now, "a"), Some((-200.0, 0.0)), "and the rest move with it");
 
         // **One anchor is not enough to aim with.** The scale would have to be assumed, and assuming
         // it is what aimed a click at (463, 841) instead of (672, 713) on 2026-08-16.
-        let thin = dump("here3", "elsewhere", vec![
-            Node { key: "c".into(), heading: "C".into(), x: 0.0, y: 0.0, connections: 2 },
-        ]);
-        assert_eq!(m.screen_position(&thin, "a"), None, "a fit that cannot be checked is not offered");
+        let thin = dump(
+            "here3",
+            "elsewhere",
+            vec![Node { key: "c".into(), heading: "C".into(), x: 0.0, y: 0.0, connections: 2 }],
+        );
+        assert_eq!(
+            m.screen_position(&thin, "a"),
+            None,
+            "a fit that cannot be checked is not offered"
+        );
 
         // And a dump at half the zoom is followed rather than fought: `b` and `c` are 100 apart in
         // the frame and 50 apart here, so the scale is 2 and `a` sits 100 left of `c` on screen.
-        let zoomed = dump("here4", "elsewhere", vec![
-            Node { key: "b".into(), heading: "B".into(), x: -50.0, y: 0.0, connections: 2 },
-            Node { key: "c".into(), heading: "C".into(), x: 0.0, y: 0.0, connections: 2 },
-        ]);
+        let zoomed = dump(
+            "here4",
+            "elsewhere",
+            vec![
+                Node { key: "b".into(), heading: "B".into(), x: -50.0, y: 0.0, connections: 2 },
+                Node { key: "c".into(), heading: "C".into(), x: 0.0, y: 0.0, connections: 2 },
+            ],
+        );
         assert_eq!(m.screen_position(&zoomed, "a"), Some((-100.0, 0.0)), "scale, not just offset");
 
         // A node the frame has never placed cannot be invented.
@@ -812,12 +854,34 @@ mod tests {
             "l32sub1",
             "Enthorpe house",
             vec![
-                Node { key: "l32_path_to_l7".into(), heading: "Somewhere l7 crossroads".into(), x: 450.0, y: 500.0, connections: 2 },
-                Node { key: "l32sub2".into(), heading: "Enthorpe house".into(), x: 650.0, y: 500.0, connections: 2 },
+                Node {
+                    key: "l32_path_to_l7".into(),
+                    heading: "Somewhere l7 crossroads".into(),
+                    x: 450.0,
+                    y: 500.0,
+                    connections: 2,
+                },
+                Node {
+                    key: "l32sub2".into(),
+                    heading: "Enthorpe house".into(),
+                    x: 650.0,
+                    y: 500.0,
+                    connections: 2,
+                },
             ],
             vec![
-                Exit { x: 450.0, y: 500.0, to_key: "l7".into(), to_heading: "Somewhere l7 crossroads".into() },
-                Exit { x: 850.0, y: 500.0, to_key: "l1".into(), to_heading: "Somewhere l1 crossroads".into() },
+                Exit {
+                    x: 450.0,
+                    y: 500.0,
+                    to_key: "l7".into(),
+                    to_heading: "Somewhere l7 crossroads".into(),
+                },
+                Exit {
+                    x: 850.0,
+                    y: 500.0,
+                    to_key: "l1".into(),
+                    to_heading: "Somewhere l1 crossroads".into(),
+                },
             ],
         );
         m.fold(&now);
@@ -919,7 +983,13 @@ mod tests {
             "l32",
             "l32sub1",
             "Enthorpe house",
-            vec![Node { key: "l32sub4".into(), heading: "Enthorpe house".into(), x: 500.0, y: 700.0, connections: 2 }],
+            vec![Node {
+                key: "l32sub4".into(),
+                heading: "Enthorpe house".into(),
+                x: 500.0,
+                y: 700.0,
+                connections: 2,
+            }],
             vec![
                 Exit { x: 500.0, y: 500.0, to_key: "l7".into(), to_heading: "h".into() },
                 Exit { x: 500.0, y: 900.0, to_key: "l1".into(), to_heading: "h".into() },
@@ -944,7 +1014,13 @@ mod tests {
             "l32",
             "l32sub1",
             "Enthorpe house",
-            vec![Node { key: "l32sub4".into(), heading: "Enthorpe house".into(), x: 700.0, y: 500.0, connections: 2 }],
+            vec![Node {
+                key: "l32sub4".into(),
+                heading: "Enthorpe house".into(),
+                x: 700.0,
+                y: 500.0,
+                connections: 2,
+            }],
             vec![
                 Exit { x: 500.0, y: 500.0, to_key: "l7".into(), to_heading: "h".into() },
                 Exit { x: 900.0, y: 500.0, to_key: "l1".into(), to_heading: "h".into() },
@@ -968,36 +1044,54 @@ mod tests {
     fn a_one_anchor_dump_inherits_the_measured_scale_instead_of_assuming_one() {
         let mut m = WorldMap::new();
         // The frame, defined by its first dump: `a` at (100,100) and `b` at (200,100).
-        m.fold(&dump("here", "Somewhere", vec![
-            node_at("a", "A", 100.0, 100.0),
-            node_at("b", "B", 200.0, 100.0),
-        ]));
+        m.fold(&dump(
+            "here",
+            "Somewhere",
+            vec![node_at("a", "A", 100.0, 100.0), node_at("b", "B", 200.0, 100.0)],
+        ));
 
         // Zoomed out a step, so everything draws at half size. Two anchors, so the scale is there to
         // be measured: `a` and `b` are 100 apart in the frame and 50 apart here.
         m.zoom_changed();
-        m.fold(&dump("n1", "Halfway", vec![
-            node_at("a", "A", 50.0, 50.0),
-            node_at("b", "B", 100.0, 50.0),
-            node_at("d", "D", 150.0, 50.0),
-        ]));
-        assert_eq!(m.get("d").unwrap().pos, Some((300.0, 100.0)), "measured, so `d` is in frame units");
+        m.fold(&dump(
+            "n1",
+            "Halfway",
+            vec![
+                node_at("a", "A", 50.0, 50.0),
+                node_at("b", "B", 100.0, 50.0),
+                node_at("d", "D", 150.0, 50.0),
+            ],
+        ));
+        assert_eq!(
+            m.get("d").unwrap().pos,
+            Some((300.0, 100.0)),
+            "measured, so `d` is in frame units"
+        );
 
         // **The step that used to poison everything.** One anchor, still at the zoomed-out scale.
         // Assuming 1.0 here would put `e` at (350, 100) — half a node's spacing out, and permanent.
-        m.fold(&dump("n2", "Further", vec![
-            node_at("d", "D", 150.0, 50.0),
-            node_at("e", "E", 200.0, 50.0),
-        ]));
-        assert_eq!(m.get("e").unwrap().pos, Some((400.0, 100.0)), "the remembered scale still applies");
+        m.fold(&dump(
+            "n2",
+            "Further",
+            vec![node_at("d", "D", 150.0, 50.0), node_at("e", "E", 200.0, 50.0)],
+        ));
+        assert_eq!(
+            m.get("e").unwrap().pos,
+            Some((400.0, 100.0)),
+            "the remembered scale still applies"
+        );
 
         // And the frame is still one frame: a later dump mixing an old node with a new one agrees
         // with both. Under the old rule this is where the two populations met and averaged.
-        let mixed = dump("n3", "Elsewhere", vec![
-            node_at("b", "B", 100.0, 50.0),
-            node_at("e", "E", 200.0, 50.0),
-            node_at("d", "D", 150.0, 50.0),
-        ]);
+        let mixed = dump(
+            "n3",
+            "Elsewhere",
+            vec![
+                node_at("b", "B", 100.0, 50.0),
+                node_at("e", "E", 200.0, 50.0),
+                node_at("d", "D", 150.0, 50.0),
+            ],
+        );
         assert_eq!(m.frame_disagreement(&mixed), None, "no two anchors contradict each other");
         assert_eq!(m.screen_position(&mixed, "a"), Some((50.0, 50.0)), "so aiming still lands");
     }
@@ -1011,23 +1105,36 @@ mod tests {
     #[test]
     fn a_zoom_suspends_placing_until_a_dump_can_measure_it() {
         let mut m = WorldMap::new();
-        m.fold(&dump("here", "Somewhere", vec![
-            node_at("a", "A", 100.0, 100.0),
-            node_at("b", "B", 200.0, 100.0),
-        ]));
+        m.fold(&dump(
+            "here",
+            "Somewhere",
+            vec![node_at("a", "A", 100.0, 100.0), node_at("b", "B", 200.0, 100.0)],
+        ));
         m.zoom_changed();
 
         // One anchor and an unknown scale: this dump can say nothing about where `d` is.
-        m.fold(&dump("n1", "Halfway", vec![node_at("a", "A", 50.0, 50.0), node_at("d", "D", 150.0, 50.0)]));
-        assert_eq!(m.get("d").unwrap().pos, None, "a guess here is a guess for the rest of the run");
+        m.fold(&dump(
+            "n1",
+            "Halfway",
+            vec![node_at("a", "A", 50.0, 50.0), node_at("d", "D", 150.0, 50.0)],
+        ));
+        assert_eq!(
+            m.get("d").unwrap().pos,
+            None,
+            "a guess here is a guess for the rest of the run"
+        );
         assert!(m.get("d").is_some(), "the node is still known — only its position is withheld");
 
         // Two anchors measure it, and `d` is placed the moment a dump can say where it is.
-        m.fold(&dump("n2", "Halfway", vec![
-            node_at("a", "A", 50.0, 50.0),
-            node_at("b", "B", 100.0, 50.0),
-            node_at("d", "D", 150.0, 50.0),
-        ]));
+        m.fold(&dump(
+            "n2",
+            "Halfway",
+            vec![
+                node_at("a", "A", 50.0, 50.0),
+                node_at("b", "B", 100.0, 50.0),
+                node_at("d", "D", 150.0, 50.0),
+            ],
+        ));
         assert_eq!(m.get("d").unwrap().pos, Some((300.0, 100.0)));
     }
 
@@ -1039,20 +1146,25 @@ mod tests {
     #[test]
     fn anchors_that_disagree_stop_the_frame_being_used_at_all() {
         let mut m = WorldMap::new();
-        m.fold(&dump("here", "Somewhere", vec![
-            node_at("a", "A", 100.0, 100.0),
-            node_at("b", "B", 200.0, 100.0),
-        ]));
+        m.fold(&dump(
+            "here",
+            "Somewhere",
+            vec![node_at("a", "A", 100.0, 100.0), node_at("b", "B", 200.0, 100.0)],
+        ));
         // `c` planted at a position no dump could have produced, standing in for a node placed at
         // the wrong scale before this rule existed — or read out of a cache written by such a run.
         m.entry("c").pos = Some((350.0, 100.0));
 
-        let bad = dump("n1", "Halfway", vec![
-            node_at("a", "A", 50.0, 50.0),
-            node_at("b", "B", 100.0, 50.0),
-            node_at("c", "C", 150.0, 50.0),
-            node_at("new", "New", 200.0, 50.0),
-        ]);
+        let bad = dump(
+            "n1",
+            "Halfway",
+            vec![
+                node_at("a", "A", 50.0, 50.0),
+                node_at("b", "B", 100.0, 50.0),
+                node_at("c", "C", 150.0, 50.0),
+                node_at("new", "New", 200.0, 50.0),
+            ],
+        );
         let px = m.frame_disagreement(&bad).expect("the anchors cannot all be right");
         assert!(px > FRAME_TOLERANCE, "{px} px of disagreement is a broken frame, not noise");
         m.fold(&bad);
@@ -1069,7 +1181,11 @@ mod tests {
     fn a_place_the_save_named_but_no_dump_ever_drew_says_so() {
         let mut m = WorldMap::new();
         let at = |k: &str, x: f64, y: f64| Node {
-            key: k.into(), heading: "road".into(), x, y, connections: 2
+            key: k.into(),
+            heading: "road".into(),
+            x,
+            y,
+            connections: 2,
         };
         // Two dumps, so `here` and its neighbours are placed and the frame can measure a scale.
         m.fold(&dump("l1", "road", vec![at("l2", 400.0, 400.0), at("l3", 800.0, 600.0)]));
@@ -1103,7 +1219,11 @@ mod tests {
     fn a_dump_sharing_nothing_placed_blames_the_frame_and_says_why() {
         let mut m = WorldMap::new();
         let at = |k: &str, x: f64, y: f64| Node {
-            key: k.into(), heading: "road".into(), x, y, connections: 2
+            key: k.into(),
+            heading: "road".into(),
+            x,
+            y,
+            connections: 2,
         };
         m.fold(&dump("l1", "road", vec![at("l2", 400.0, 400.0), at("l3", 800.0, 600.0)]));
         // A dump from somewhere else entirely: nothing in it has a position in our frame.
@@ -1135,10 +1255,9 @@ mod tests {
         // 0436Z is included and deliberately not asserted on: its 9 mute dumps are the opening of
         // a run, before anything has been placed, and folding that into the claim would make the
         // claim vaguer rather than stronger.
-        for (path, mute_allowed) in [
-            ("spike-run-20260821-0313Z.log", 0),
-            ("spike-run-20260821-0357Z.log", 0),
-        ] {
+        for (path, mute_allowed) in
+            [("spike-run-20260821-0313Z.log", 0), ("spike-run-20260821-0357Z.log", 0)]
+        {
             let Ok(log) = std::fs::read_to_string(path) else {
                 eprintln!("SKIP: {path} is not present");
                 continue;
@@ -1168,7 +1287,10 @@ mod tests {
             // Interior keys: subnodes, plazas, the roads out, and the crossroads the game names by
             // coordinate. None of them is the world frame's to hold — see [`InsideFrame`].
             let interior = |k: &str| {
-                k.contains("sub") || k.contains("_plaza") || k.contains("_path_to_") || k.contains("xrd")
+                k.contains("sub")
+                    || k.contains("_plaza")
+                    || k.contains("_path_to_")
+                    || k.contains("xrd")
             };
             let stranded: Vec<&str> = m
                 .places

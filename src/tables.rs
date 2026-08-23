@@ -34,13 +34,69 @@ pub struct Shape {
 /// Every alternate board in the game. The default 4×4 is not here: it is
 /// [`crate::geometry::Geometry::default`], since it applies when no passive grants a shape.
 pub const SHAPES: &[Shape] = &[
-    Shape { key: "diamond16Board", cols: 7, rows: 4, hexagonal: true, middle_col: 0, col_tile_counts: &[], corners: &[(1,1),(4,1),(4,4),(7,1)] },
-    Shape { key: "erudite", cols: 5, rows: 5, hexagonal: false, middle_col: 0, col_tile_counts: &[], corners: &[(1,1),(5,1),(1,5),(5,5)] },
-    Shape { key: "hench", cols: 5, rows: 4, hexagonal: true, middle_col: 3, col_tile_counts: &[3,3,4,3,3], corners: &[(1,1),(3,1),(5,1),(1,3),(5,3)] },
-    Shape { key: "hex4", cols: 4, rows: 4, hexagonal: true, middle_col: 2, col_tile_counts: &[], corners: &[(1,1),(2,1),(4,1),(1,3),(2,4),(4,2)] },
-    Shape { key: "hex5", cols: 5, rows: 5, hexagonal: true, middle_col: 3, col_tile_counts: &[], corners: &[(1,1),(3,1),(5,1),(1,3),(3,5),(5,3)] },
-    Shape { key: "stoutCharacter", cols: 5, rows: 3, hexagonal: false, middle_col: 0, col_tile_counts: &[], corners: &[(1,1),(5,1),(1,3),(5,3)] },
-    Shape { key: "tall16Board", cols: 3, rows: 6, hexagonal: true, middle_col: 0, col_tile_counts: &[], corners: &[(1,1),(2,1),(3,1),(1,5),(2,6),(3,5)] },
+    Shape {
+        key: "diamond16Board",
+        cols: 7,
+        rows: 4,
+        hexagonal: true,
+        middle_col: 0,
+        col_tile_counts: &[],
+        corners: &[(1, 1), (4, 1), (4, 4), (7, 1)],
+    },
+    Shape {
+        key: "erudite",
+        cols: 5,
+        rows: 5,
+        hexagonal: false,
+        middle_col: 0,
+        col_tile_counts: &[],
+        corners: &[(1, 1), (5, 1), (1, 5), (5, 5)],
+    },
+    Shape {
+        key: "hench",
+        cols: 5,
+        rows: 4,
+        hexagonal: true,
+        middle_col: 3,
+        col_tile_counts: &[3, 3, 4, 3, 3],
+        corners: &[(1, 1), (3, 1), (5, 1), (1, 3), (5, 3)],
+    },
+    Shape {
+        key: "hex4",
+        cols: 4,
+        rows: 4,
+        hexagonal: true,
+        middle_col: 2,
+        col_tile_counts: &[],
+        corners: &[(1, 1), (2, 1), (4, 1), (1, 3), (2, 4), (4, 2)],
+    },
+    Shape {
+        key: "hex5",
+        cols: 5,
+        rows: 5,
+        hexagonal: true,
+        middle_col: 3,
+        col_tile_counts: &[],
+        corners: &[(1, 1), (3, 1), (5, 1), (1, 3), (3, 5), (5, 3)],
+    },
+    Shape {
+        key: "stoutCharacter",
+        cols: 5,
+        rows: 3,
+        hexagonal: false,
+        middle_col: 0,
+        col_tile_counts: &[],
+        corners: &[(1, 1), (5, 1), (1, 3), (5, 3)],
+    },
+    Shape {
+        key: "tall16Board",
+        cols: 3,
+        rows: 6,
+        hexagonal: true,
+        middle_col: 0,
+        col_tile_counts: &[],
+        corners: &[(1, 1), (2, 1), (3, 1), (1, 5), (2, 6), (3, 5)],
+    },
 ];
 
 pub fn shape(key: &str) -> Option<&'static Shape> {
@@ -110,7 +166,12 @@ mod tests {
             // Order matters, not just membership: it is the typist's corner tie-break.
             assert_eq!(baked.corners, corners.as_slice(), "{key} corners (order matters)");
         }
-        assert_eq!(seen, SHAPES.len(), "the game has {seen} board shapes, we baked {}", SHAPES.len());
+        assert_eq!(
+            seen,
+            SHAPES.len(),
+            "the game has {seen} board shapes, we baked {}",
+            SHAPES.len()
+        );
     }
 
     #[test]

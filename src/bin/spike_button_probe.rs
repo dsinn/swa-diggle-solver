@@ -108,7 +108,9 @@ fn start_menu(cfg: &Config) -> Result<(Session, f64), Box<dyn std::error::Error>
 
 /// Walk the hotspot graph toward `target`, choosing the arrow that most reduces
 /// distance. Returns the presses made and whether we landed on target.
-fn navigate_to(s: &Session, target: (i32, i32)) -> Result<(Vec<&'static str>, bool), Box<dyn std::error::Error>> {
+fn navigate_to(
+    s: &Session, target: (i32, i32),
+) -> Result<(Vec<&'static str>, bool), Box<dyn std::error::Error>> {
     let mut log = Vec::new();
     // One press to establish a highlight at all; without one, Return is a no-op.
     s.input.press_extended_key(VK_DOWN, SC_DOWN)?;
@@ -123,7 +125,11 @@ fn navigate_to(s: &Session, target: (i32, i32)) -> Result<(Vec<&'static str>, bo
         let dx = target.0 - c.0;
         let dy = target.1 - c.1;
         let (vk, sc, name) = if dx.abs() >= dy.abs() {
-            if dx > 0 { (VK_RIGHT, SC_RIGHT, "Right") } else { (VK_LEFT, SC_LEFT, "Left") }
+            if dx > 0 {
+                (VK_RIGHT, SC_RIGHT, "Right")
+            } else {
+                (VK_LEFT, SC_LEFT, "Left")
+            }
         } else if dy > 0 {
             (VK_DOWN, SC_DOWN, "Down")
         } else {
@@ -199,11 +205,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Arcade: ss(1,0.75) default 250x100 xOffset -2 -> (1420,810). Goes STRAIGHT to
     //   setActiveMode with no mode.load() -> the discriminating case.
     // Start:  (500,810). Known negative; re-confirm under identical conditions.
-    let targets: [(&str, (i32, i32)); 3] = [
-        ("discord", (263, 38)),
-        ("arcade", (1420, 810)),
-        ("start", (500, 810)),
-    ];
+    let targets: [(&str, (i32, i32)); 3] =
+        [("discord", (263, 38)), ("arcade", (1420, 810)), ("start", (500, 810))];
     out.push_str("\nPART 2\n");
     for (tag, target) in targets {
         println!("=== PART 2: {tag} target {target:?} ===");

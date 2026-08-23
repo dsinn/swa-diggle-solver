@@ -54,9 +54,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn write_png(frame: &diggle_solver::win::capture::Frame, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn write_png(
+    frame: &diggle_solver::win::capture::Frame, path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::create(path)?;
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), frame.width as u32, frame.height as u32);
+    let mut enc =
+        png::Encoder::new(std::io::BufWriter::new(file), frame.width as u32, frame.height as u32);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
     let mut rgba = Vec::with_capacity(frame.bgra.len());

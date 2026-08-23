@@ -240,10 +240,7 @@ mod tests {
     fn suffixes_are_ordered_longest_first() {
         for (i, a) in SUFFIXES_LONGEST_FIRST.iter().enumerate() {
             for b in &SUFFIXES_LONGEST_FIRST[i + 1..] {
-                assert!(
-                    !a.ends_with(*b) || a.len() >= b.len(),
-                    "{b} would shadow {a}"
-                );
+                assert!(!a.ends_with(*b) || a.len() >= b.len(), "{b} would shadow {a}");
                 assert!(a.len() >= b.len(), "{a} before {b} breaks longest-first");
             }
         }

@@ -112,7 +112,8 @@ impl Geometry {
     }
 
     fn flat_of(&self, (col, row): (usize, usize)) -> Option<usize> {
-        if col == 0 || row == 0 || col > self.rows_per_col.len() || row > self.rows_per_col[col - 1] {
+        if col == 0 || row == 0 || col > self.rows_per_col.len() || row > self.rows_per_col[col - 1]
+        {
             return None;
         }
         Some(self.rows_per_col[..col - 1].iter().sum::<usize>() + row - 1)
@@ -126,7 +127,9 @@ impl Geometry {
     /// already reads off the dump.
     pub fn slot_selectable(&self, flat: usize) -> bool {
         match self.position(flat) {
-            Some((col, row)) => !self.locked_cols.contains(&col) && !self.locked_rows.contains(&row),
+            Some((col, row)) => {
+                !self.locked_cols.contains(&col) && !self.locked_rows.contains(&row)
+            }
             None => false,
         }
     }
@@ -168,7 +171,8 @@ impl Geometry {
 
         if let Some(flags) = save.table_at("rpg.player.gearFlags") {
             for key in flags.map.keys() {
-                if let Some(n) = key.strip_prefix("tileboardUnselectableRow").and_then(parse_index) {
+                if let Some(n) = key.strip_prefix("tileboardUnselectableRow").and_then(parse_index)
+                {
                     geometry.locked_rows.insert(n);
                 } else if let Some(n) =
                     key.strip_prefix("tileboardUnselectableCol").and_then(parse_index)
@@ -269,19 +273,11 @@ fn shape_to_geometry(shape: &crate::tables::Shape) -> Geometry {
     let mut col_y_offsets = Vec::with_capacity(cols);
     for i in 1..=cols {
         let given = explicit.get(i - 1).copied();
-        let base = if hexagonal {
-            rows.saturating_sub(middle.abs_diff(i))
-        } else {
-            rows
-        };
+        let base = if hexagonal { rows.saturating_sub(middle.abs_diff(i)) } else { rows };
         rows_per_col.push(given.unwrap_or(base));
         // `d` is measured against the COMPUTED base, not the override: `colTileCounts` can shorten a
         // column without moving it (`tileboard.lua:92-98`).
-        col_y_offsets.push(if hexagonal {
-            (rows - base) as f64 * TILE_SIZE * 0.5
-        } else {
-            0.0
-        });
+        col_y_offsets.push(if hexagonal { (rows - base) as f64 * TILE_SIZE * 0.5 } else { 0.0 });
     }
 
     Geometry {
@@ -366,7 +362,8 @@ mod tests {
         }
         // `stoutCharacter` is the 5x3 board (`items/boardshapes.lua:12-27`). Its corners are at
         // column 5, which does not even exist on the default board.
-        let save = crate::game::save::parse(r#"return { passives = { "stoutCharacter" } }"#).unwrap();
+        let save =
+            crate::game::save::parse(r#"return { passives = { "stoutCharacter" } }"#).unwrap();
         let r = Geometry::from_save(&save, 15);
         assert!(r.problems.is_empty(), "problems: {:?}", r.problems);
         assert_eq!(r.geometry.rows_per_col, vec![3, 3, 3, 3, 3]);
@@ -496,7 +493,11 @@ mod ragged_board_tests {
         let r = Geometry::from_save(&live_save(), 15);
         assert_eq!(r.geometry.rows_per_col, vec![4, 3, 4, 4]);
         assert_eq!(r.geometry.total_tiles(), 15);
-        assert!(r.problems.is_empty(), "no complaint for a legitimately ragged board: {:?}", r.problems);
+        assert!(
+            r.problems.is_empty(),
+            "no complaint for a legitimately ragged board: {:?}",
+            r.problems
+        );
     }
 
     #[test]
@@ -517,10 +518,9 @@ mod ragged_board_tests {
     fn a_full_board_is_unaffected() {
         // No `columns` key at all, which is the normal case -- the game only writes it when the
         // board is short (tileboard.lua:2457).
-        let save = crate::game::save::parse(
-            "return { tileboard = { \"A\", \"B\", \"C\", \"D\" } }",
-        )
-        .expect("parses");
+        let save =
+            crate::game::save::parse("return { tileboard = { \"A\", \"B\", \"C\", \"D\" } }")
+                .expect("parses");
         let r = Geometry::from_save(&save, 16);
         assert_eq!(r.geometry.rows_per_col, vec![4, 4, 4, 4]);
     }
@@ -538,7 +538,10 @@ mod ragged_board_tests {
         assert!(top_of_short.1 < bottom_of_short.1, "row 3 sits above row 1");
         // And column 1, which is full, reaches higher still than the short column's top.
         let top_of_full = centres[3]; // C
-        assert!(top_of_full.1 < top_of_short.1, "the full column has a tile where column 2 has a gap");
+        assert!(
+            top_of_full.1 < top_of_short.1,
+            "the full column has a tile where column 2 has a gap"
+        );
     }
 
     /// A board that has lost a corner is playable, not broken — and against the shield boss it has
@@ -565,11 +568,7 @@ mod ragged_board_tests {
         .unwrap();
         let r = Geometry::from_save(&save, 15);
         assert_eq!(r.geometry.rows_per_col, vec![4, 4, 4, 3], "the save's own heights");
-        assert!(
-            r.problems.is_empty(),
-            "a ragged board is not a broken one: {:?}",
-            r.problems
-        );
+        assert!(r.problems.is_empty(), "a ragged board is not a broken one: {:?}", r.problems);
         // The default shape corners include (4,4), which no longer exists.
         let gone = r.geometry.corners.iter().filter(|&&c| r.geometry.flat_of(c).is_none()).count();
         assert!(gone > 0, "the fixture must actually lose a corner, or it tests nothing");

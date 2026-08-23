@@ -20,9 +20,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::time::Duration;
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, PostMessageW, WM_KEYDOWN, WM_KEYUP,
-};
+use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, PostMessageW, WM_KEYDOWN, WM_KEYUP};
 
 const FULL: Region = Region { nx: 0.0, ny: 0.0, nw: 1.0, nh: 1.0 };
 /// How long to let the screen react (or not) before re-capturing.
@@ -134,7 +132,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              could be trusted to mean anything. Per the brief, stopping here rather than\n\
              running or interpreting the keyboard loop.\n",
         );
-        std::fs::File::create("docs/superpowers/spikes/04-keycap.md")?.write_all(report.as_bytes())?;
+        std::fs::File::create("docs/superpowers/spikes/04-keycap.md")?
+            .write_all(report.as_bytes())?;
         print!("{report}");
         let _ = game.kill();
         std::process::exit(1);
@@ -235,7 +234,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for s in &steps {
         table.push_str(&format!(
             "| {:04} | {:016x} | {:.4} | {:.4} | {} |\n",
-            s.index, s.pre_hash, s.nonblack, s.delta, if s.reacted { "yes" } else { "no" }
+            s.index,
+            s.pre_hash,
+            s.nonblack,
+            s.delta,
+            if s.reacted { "yes" } else { "no" }
         ));
     }
     table.push_str(&format!(

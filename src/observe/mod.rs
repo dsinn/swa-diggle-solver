@@ -1,10 +1,10 @@
 pub mod adjacency;
 pub mod affirm;
-pub mod hud;
-pub mod pan;
 pub mod board;
 pub mod event;
 pub mod feed;
+pub mod hud;
 pub mod log;
+pub mod pan;
 pub mod settle;
 pub mod template;

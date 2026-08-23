@@ -33,7 +33,8 @@ const NEUTRAL: (i32, i32) = (760, 240);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
-    let pid: u32 = args.next().ok_or("usage: spike_select_probe <pid> <node_x> <node_y>")?.parse()?;
+    let pid: u32 =
+        args.next().ok_or("usage: spike_select_probe <pid> <node_x> <node_y>")?.parse()?;
     let nx: i32 = args.next().ok_or("need node x")?.parse()?;
     let ny: i32 = args.next().ok_or("need node y")?.parse()?;
 

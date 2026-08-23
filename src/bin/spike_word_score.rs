@@ -209,7 +209,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     input.focus();
     std::thread::sleep(Duration::from_millis(400));
     if !input.has_foreground() {
-        log.push_str("ABORT: the game does not have foreground; injected text would go elsewhere\n");
+        log.push_str(
+            "ABORT: the game does not have foreground; injected text would go elsewhere\n",
+        );
         game.close(Duration::from_secs(15));
         std::fs::File::create(REPORT)?.write_all(log.as_bytes())?;
         println!("{log}");
@@ -245,8 +247,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- submit and measure the exact delta ----
     if !input.has_foreground() {
-        log.push_str("NOTE: foreground lost before submit; re-taking it
-");
+        log.push_str(
+            "NOTE: foreground lost before submit; re-taking it
+",
+        );
         input.focus();
         std::thread::sleep(Duration::from_millis(400));
     }

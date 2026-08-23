@@ -52,8 +52,7 @@ pub(super) fn skip_cinematic(r: &mut Run) -> Result<(), String> {
 
     // `Menu`: a `small` 100x100 at ss(1, 0), xOffset -2.63, yOffset 0.38 (`ui/options.lua:333-337`),
     // so (1657, 38) at 1920x1080. Red, top right.
-    let (mx, my) =
-        r.win.client_to_screen(1657, 38).map_err(|e| format!("Menu coords: {e}"))?;
+    let (mx, my) = r.win.client_to_screen(1657, 38).map_err(|e| format!("Menu coords: {e}"))?;
     crate::win::input::click_at(mx, my).map_err(|e| format!("Menu click: {e}"))?;
     r.park();
     std::thread::sleep(crate::timing::AFTER_MODE_CHANGE);
@@ -76,12 +75,8 @@ pub(super) fn skip_cinematic(r: &mut Run) -> Result<(), String> {
 
     // Verified, not blind: this slot reads `Restart` when it is not `Continue`, and `Restart`
     // eulogises the run.
-    crate::act::click_exact(
-        r.win,
-        &crate::act::CONTINUE,
-        crate::act::CONTINUE_PRESENT,
-    )
-    .map_err(|e| format!("no Continue on the main menu: {e}"))?;
+    crate::act::click_exact(r.win, &crate::act::CONTINUE, crate::act::CONTINUE_PRESENT)
+        .map_err(|e| format!("no Continue on the main menu: {e}"))?;
     std::thread::sleep(crate::timing::AFTER_RESUME);
     r.pump();
     Ok(())
@@ -181,7 +176,9 @@ fn pick_a_champion(r: &mut Run, game_dir: &Path) -> Result<i32, String> {
     let catalogue = match crate::items::Catalogue::load(game_dir) {
         Ok(c) => c,
         Err(e) => {
-            r.log.push_str(&format!("  no item catalogue ({e}) — falling back to the middle card\n"));
+            r.log.push_str(&format!(
+                "  no item catalogue ({e}) — falling back to the middle card\n"
+            ));
             return Ok(middle);
         }
     };
@@ -248,12 +245,8 @@ pub fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
 
     // Verified click: this slot reads `Restart` when a save exists, and that eulogises the run.
     // `act::click` refuses rather than guessing, which is the entire safety argument.
-    let q = crate::act::click_exact(
-        r.win,
-        &crate::act::MENU_START,
-        crate::act::MENU_START_PRESENT,
-    )
-    .map_err(|e| format!("could not click `Start`: {e}"))?;
+    let q = crate::act::click_exact(r.win, &crate::act::MENU_START, crate::act::MENU_START_PRESENT)
+        .map_err(|e| format!("could not click `Start`: {e}"))?;
     r.log.push_str(&format!("  clicked `Start` ({q:.4})\n"));
 
     // Confirm the press was ACTED ON, not merely that the button was there.
@@ -433,7 +426,9 @@ pub fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
             };
         }
         if Instant::now() >= deadline {
-            return Err(format!("neither `World loaded` nor `Pregame screen:` within 120s ({i} Returns sent)"));
+            return Err(format!(
+                "neither `World loaded` nor `Pregame screen:` within 120s ({i} Returns sent)"
+            ));
         }
         // Logged because the unlock chain's length varies with `persistentSaveData`, so how many of
         // these it takes is the one number that says which path the profile went down.

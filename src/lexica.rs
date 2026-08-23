@@ -235,11 +235,7 @@ mod tests {
         assert!(lx.problems().is_empty(), "problems: {:?}", lx.problems());
         assert!(lx.len() >= 8, "expected several lexica, got {}", lx.len());
         // Derived per `utils/dictionaries.lua:23` from subkey 'Bone'.
-        assert!(
-            lx.status_keys().contains(&"lexiconBonusBone"),
-            "keys: {:?}",
-            lx.status_keys()
-        );
+        assert!(lx.status_keys().contains(&"lexiconBonusBone"), "keys: {:?}", lx.status_keys());
     }
 
     #[test]

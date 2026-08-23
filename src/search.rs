@@ -71,10 +71,7 @@ impl Dictionary {
         words.sort_unstable();
         words.dedup();
         if words.is_empty() {
-            return Err(crate::Error::Config(format!(
-                "no words parsed from {}",
-                path.display()
-            )));
+            return Err(crate::Error::Config(format!("no words parsed from {}", path.display())));
         }
         Ok(Dictionary { words })
     }
@@ -169,9 +166,7 @@ impl Modifiers {
     ///
     /// `tile_count` is the board dump's length, used to check the derived shape fits.
     pub fn from_save(
-        game_dir: &Path,
-        save: &crate::game::save::Table,
-        tile_count: usize,
+        game_dir: &Path, save: &crate::game::save::Table, tile_count: usize,
     ) -> Result<(Self, Geometry), crate::Error> {
         let statuses = crate::lexica::Lexica::statuses_from_save(save);
         let lexica = crate::lexica::Lexica::load(game_dir)?;
@@ -771,8 +766,7 @@ impl Goal {
     /// `lethal` is the EXACT damage that kills, unbuffered, because every branch here is arithmetic
     /// about overkill and a padded threshold would silently shift the free window.
     fn killing_blow(
-        kill: Goal, lethal: i64, player: Option<&PlayerState>,
-        prefs: crate::pick::Preferences,
+        kill: Goal, lethal: i64, player: Option<&PlayerState>, prefs: crate::pick::Preferences,
     ) -> Goal {
         let Some(p) = player else { return kill };
         if !p.heals {
@@ -893,14 +887,8 @@ const CLAIM: usize = 512;
 /// and mis-models the rest. Claiming on demand needs no cost model at all, and stays balanced if the
 /// cost profile later changes.
 pub fn search(
-    dict: &Dictionary,
-    scorer: &Scorer,
-    tiles: &[Tile],
-    geometry: &Geometry,
-    mods: &Modifiers,
-    goal: Goal,
-    picking: &crate::pick::Context,
-    threads: usize,
+    dict: &Dictionary, scorer: &Scorer, tiles: &[Tile], geometry: &Geometry, mods: &Modifiers,
+    goal: Goal, picking: &crate::pick::Context, threads: usize,
 ) -> Outcome {
     match goal {
         Goal::FirstKill { need } => {
@@ -930,14 +918,8 @@ pub fn search(
 /// board-walk in [`crate::pick::hazard_fall`] on the overwhelming majority that are irrelevant.
 #[allow(clippy::too_many_arguments)]
 pub fn ranked_kill(
-    dict: &Dictionary,
-    scorer: &Scorer,
-    tiles: &[Tile],
-    geometry: &Geometry,
-    mods: &Modifiers,
-    need: i64,
-    picking: &crate::pick::Context,
-    threads: usize,
+    dict: &Dictionary, scorer: &Scorer, tiles: &[Tile], geometry: &Geometry, mods: &Modifiers,
+    need: i64, picking: &crate::pick::Context, threads: usize,
 ) -> Outcome {
     let typist = Typist::new(tiles, geometry);
     let corner_count = geometry.corner_count();
@@ -974,7 +956,15 @@ pub fn ranked_kill(
                         let Some(typed) = typist.type_word(word) else { continue };
                         let consumed: Vec<Tile> =
                             typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
-                        let score = scored(scorer, mods, word, &consumed, Some(&typed), typed.corners_used, corner_count);
+                        let score = scored(
+                            scorer,
+                            mods,
+                            word,
+                            &consumed,
+                            Some(&typed),
+                            typed.corners_used,
+                            corner_count,
+                        );
                         if score >= need {
                             let rank = crate::pick::rank(
                                 tiles,
@@ -1050,11 +1040,7 @@ pub fn ranked_kill(
 
 /// Exhaustive hardest-hit search, balanced by work-stealing.
 pub fn max_damage(
-    dict: &Dictionary,
-    scorer: &Scorer,
-    tiles: &[Tile],
-    geometry: &Geometry,
-    mods: &Modifiers,
+    dict: &Dictionary, scorer: &Scorer, tiles: &[Tile], geometry: &Geometry, mods: &Modifiers,
     threads: usize,
 ) -> Outcome {
     let typist = Typist::new(tiles, geometry);
@@ -1089,7 +1075,15 @@ pub fn max_damage(
                         let Some(typed) = typist.type_word(word) else { continue };
                         let consumed: Vec<Tile> =
                             typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
-                        let score = scored(scorer, mods, word, &consumed, Some(&typed), typed.corners_used, corner_count);
+                        let score = scored(
+                            scorer,
+                            mods,
+                            word,
+                            &consumed,
+                            Some(&typed),
+                            typed.corners_used,
+                            corner_count,
+                        );
                         if local_best.as_ref().map(|b| score > b.score).unwrap_or(true) {
                             local_best = Some(Found { word: word.clone(), score, slice });
                         }
@@ -1138,14 +1132,8 @@ pub fn max_damage(
 }
 
 pub fn race_for_kill(
-    dict: &Dictionary,
-    scorer: &Scorer,
-    tiles: &[Tile],
-    geometry: &Geometry,
-    mods: &Modifiers,
-    need: i64,
-    picking: &crate::pick::Context,
-    threads: usize,
+    dict: &Dictionary, scorer: &Scorer, tiles: &[Tile], geometry: &Geometry, mods: &Modifiers,
+    need: i64, picking: &crate::pick::Context, threads: usize,
 ) -> Outcome {
     race_for_band(dict, scorer, tiles, geometry, mods, need, None, picking, threads)
 }
@@ -1156,15 +1144,8 @@ pub fn race_for_kill(
 /// a lethal word is not an acceptable answer even though it scores higher.
 #[allow(clippy::too_many_arguments)]
 pub fn race_for_band(
-    dict: &Dictionary,
-    scorer: &Scorer,
-    tiles: &[Tile],
-    geometry: &Geometry,
-    mods: &Modifiers,
-    need: i64,
-    below: Option<i64>,
-    picking: &crate::pick::Context,
-    threads: usize,
+    dict: &Dictionary, scorer: &Scorer, tiles: &[Tile], geometry: &Geometry, mods: &Modifiers,
+    need: i64, below: Option<i64>, picking: &crate::pick::Context, threads: usize,
 ) -> Outcome {
     let typist = Typist::new(tiles, geometry);
     let corner_count = geometry.corner_count();
@@ -1216,7 +1197,15 @@ pub fn race_for_band(
                     let Some(typed) = typist.type_word(word) else { continue };
                     let consumed: Vec<Tile> =
                         typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
-                    let score = scored(scorer, mods, word, &consumed, Some(&typed), typed.corners_used, corner_count);
+                    let score = scored(
+                        scorer,
+                        mods,
+                        word,
+                        &consumed,
+                        Some(&typed),
+                        typed.corners_used,
+                        corner_count,
+                    );
                     if score >= need && below.map(|b| score < b).unwrap_or(true) {
                         // Ranked, not raced. Every word in the band ends the exchange the same way,
                         // so the tiles it spends are the only thing left to choose on.
@@ -1247,8 +1236,7 @@ pub fn race_for_band(
                             None => true,
                         };
                         if better {
-                            local_lethal =
-                                Some((Found { word: word.clone(), score, slice }, rank));
+                            local_lethal = Some((Found { word: word.clone(), score, slice }, rank));
                         }
                         continue;
                     }
@@ -1352,8 +1340,19 @@ mod tests {
         plain("OYCAACTPORLIGAHJ")
     }
 
-    fn race(scorer: &Scorer, dict: &Dictionary, tiles: &[Tile], mods: &Modifiers, need: i64) -> Outcome {
-        race_for_kill(dict, scorer, tiles, &Geometry::default(), mods, need, &crate::pick::Context::default(), 8)
+    fn race(
+        scorer: &Scorer, dict: &Dictionary, tiles: &[Tile], mods: &Modifiers, need: i64,
+    ) -> Outcome {
+        race_for_kill(
+            dict,
+            scorer,
+            tiles,
+            &Geometry::default(),
+            mods,
+            need,
+            &crate::pick::Context::default(),
+            8,
+        )
     }
 
     /// The shortsword, end to end, against the readings that exposed it.
@@ -1378,9 +1377,8 @@ mod tests {
             plan: crate::gear::Gear::from_pairs(&[("wordScoreBonusPreLength456", 3.0)]).compile(),
             ..Modifiers::none()
         };
-        let tiles = |w: &str| -> Vec<Tile> {
-            w.chars().map(|c| Tile::plain(&c.to_string())).collect()
-        };
+        let tiles =
+            |w: &str| -> Vec<Tile> { w.chars().map(|c| Tile::plain(&c.to_string())).collect() };
 
         let aapa = tiles("AAPA");
         let unarmed = scored(&scorer, &bare, "AAPA", &aapa, None, 0, 0);
@@ -1447,8 +1445,17 @@ mod tests {
         let tiles = crypt_board();
         let mods = Modifiers::none();
         let goal = Goal::Scare { need: 1000, below: 1001 };
-        let out =
-            race_for_band(&dict, &scorer, &tiles, &Geometry::default(), &mods, 1000, Some(1001), &crate::pick::Context::default(), 8);
+        let out = race_for_band(
+            &dict,
+            &scorer,
+            &tiles,
+            &Geometry::default(),
+            &mods,
+            1000,
+            Some(1001),
+            &crate::pick::Context::default(),
+            8,
+        );
 
         assert!(out.lethal.is_none(), "no word on this board scores 1000, so the band is empty");
         let best = out.best.as_ref().expect("the scan still collects a best word");
@@ -1681,8 +1688,15 @@ mod tests {
             longest: Some(Found { word: "OATMEALS".into(), score: 12, slice: 1 }),
             words_considered: 10,
         };
-        assert!(!out.should_refresh(8), "an 8-letter word meets the threshold even if not top-scoring");
-        assert_eq!(out.choice().map(|f| f.word.as_str()), Some("JAY"), "still PLAY the best scorer");
+        assert!(
+            !out.should_refresh(8),
+            "an 8-letter word meets the threshold even if not top-scoring"
+        );
+        assert_eq!(
+            out.choice().map(|f| f.word.as_str()),
+            Some("JAY"),
+            "still PLAY the best scorer"
+        );
     }
 
     #[test]
@@ -1775,11 +1789,8 @@ mod tests {
         let (_, geometry) = Modifiers::from_save(&game_dir(), &save, 16).unwrap();
         assert_eq!(geometry.corner_count(), 4, "the denominator ignores the locks");
 
-        let reachable = geometry
-            .corner_indices()
-            .into_iter()
-            .filter(|&i| geometry.slot_selectable(i))
-            .count();
+        let reachable =
+            geometry.corner_indices().into_iter().filter(|&i| geometry.slot_selectable(i)).count();
         assert_eq!(reachable, 2, "only the row-1 corners are left");
 
         // And the search reflects it: the best word cannot exceed the half-damage ceiling.
@@ -1789,9 +1800,18 @@ mod tests {
         let mut cornerless = Modifiers::none();
         cornerless.resist_cornerless = true;
 
-        let best = race_for_kill(&dict, &scorer, &board, &geometry, &cornerless, 100_000, &crate::pick::Context::default(), 8)
-            .best
-            .expect("something is playable");
+        let best = race_for_kill(
+            &dict,
+            &scorer,
+            &board,
+            &geometry,
+            &cornerless,
+            100_000,
+            &crate::pick::Context::default(),
+            8,
+        )
+        .best
+        .expect("something is playable");
         let typed = Typist::new(&board, &geometry).type_word(&best.word).unwrap();
         assert!(typed.corners_used <= 2, "{} used {} corners", best.word, typed.corners_used);
         assert!(cornerless.modifier(typed.corners_used, geometry.corner_count()) <= 0.5);
@@ -1875,12 +1895,22 @@ mod tests {
         .unwrap();
         let (mods, _) = Modifiers::from_save(&game_dir(), &save, 16).unwrap();
         assert!(mods.overkill_gold);
-        assert_eq!(Goal::for_enemy(&mods, 3, 0, None, None, crate::pick::Preferences::default()), Goal::MaxDamage);
+        assert_eq!(
+            Goal::for_enemy(&mods, 3, 0, None, None, crate::pick::Preferences::default()),
+            Goal::MaxDamage
+        );
         // An ordinary enemy ranks its kills instead of racing for the first. Gold does not scale
         // with the excess here, so there is nothing to spend the extra damage on and the board the
         // word leaves behind is what the choice is for.
         assert_eq!(
-            Goal::for_enemy(&Modifiers::none(), 3, 2, None, None, crate::pick::Preferences::default()),
+            Goal::for_enemy(
+                &Modifiers::none(),
+                3,
+                2,
+                None,
+                None,
+                crate::pick::Preferences::default()
+            ),
             Goal::RankedKill { need: 6 }
         );
     }
@@ -1913,8 +1943,26 @@ mod tests {
         let geom = Geometry::default();
         let mods = Modifiers::none();
 
-        let kill = search(&dict, &scorer, &board, &geom, &mods, Goal::FirstKill { need: 3 }, &crate::pick::Context::default(), 8);
-        let hardest = search(&dict, &scorer, &board, &geom, &mods, Goal::MaxDamage, &crate::pick::Context::default(), 8);
+        let kill = search(
+            &dict,
+            &scorer,
+            &board,
+            &geom,
+            &mods,
+            Goal::FirstKill { need: 3 },
+            &crate::pick::Context::default(),
+            8,
+        );
+        let hardest = search(
+            &dict,
+            &scorer,
+            &board,
+            &geom,
+            &mods,
+            Goal::MaxDamage,
+            &crate::pick::Context::default(),
+            8,
+        );
 
         let first = kill.lethal.expect("a 3-health enemy is killable here");
         let best = hardest.best.expect("max damage must report something");
@@ -1940,7 +1988,8 @@ mod tests {
         }
         let dict = Dictionary::load(&game_dir()).unwrap();
         let scorer = Scorer::new(&game_dir()).unwrap();
-        let out = max_damage(&dict, &scorer, &crypt_board(), &Geometry::default(), &Modifiers::none(), 8);
+        let out =
+            max_damage(&dict, &scorer, &crypt_board(), &Geometry::default(), &Modifiers::none(), 8);
         assert_eq!(out.words_considered, dict.len(), "every word must be examined exactly once");
         assert!(out.best.is_some());
     }
@@ -1989,7 +2038,15 @@ mod tests {
         let rank_of = |word: &str| {
             let typed = typist.type_word(word)?;
             let consumed: Vec<Tile> = typed.tiles.iter().map(|&i| board[i].clone()).collect();
-            let score = scored(&scorer, &mods, word, &consumed, Some(&typed), typed.corners_used, geom.corner_count());
+            let score = scored(
+                &scorer,
+                &mods,
+                word,
+                &consumed,
+                Some(&typed),
+                typed.corners_used,
+                geom.corner_count(),
+            );
             (score >= need).then(|| {
                 crate::pick::rank(
                     &board,
@@ -2129,7 +2186,8 @@ mod scare_goal_tests {
     fn a_frightenable_enemy_with_no_room_keeps_its_band_rather_than_losing_it() {
         // health 4 of a maximum 6: fleeing needs it at or below (6-1)/2 = 2, so 2 damage; 4 kills.
         // The raw band is 2..=3, one point of slack, and half of that is nothing to spend.
-        let g = Goal::for_enemy(&feared(), 4, 0, Some(6), None, crate::pick::Preferences::default());
+        let g =
+            Goal::for_enemy(&feared(), 4, 0, Some(6), None, crate::pick::Preferences::default());
         assert_eq!(g, Goal::Scare { need: 2, below: 4 }, "unbuffered, but still a scare");
     }
 
@@ -2152,7 +2210,8 @@ mod scare_goal_tests {
     /// The buffer must never turn a survivable scare into a kill.
     #[test]
     fn the_buffered_ceiling_still_leaves_the_enemy_alive() {
-        let g = Goal::for_enemy(&feared(), 12, 0, Some(12), None, crate::pick::Preferences::default());
+        let g =
+            Goal::for_enemy(&feared(), 12, 0, Some(12), None, crate::pick::Preferences::default());
         let Goal::Scare { need, below } = g else { panic!("expected a scare, got {g:?}") };
         assert!(below <= 12, "damage below this must not reach the 12 that kills");
         assert!(need < below, "the band must not be empty");
@@ -2200,7 +2259,14 @@ mod scare_goal_tests {
         // where `scare_need` goes to zero.
         for health in 1..=6 {
             for armour in 0..=2 {
-                let g = Goal::for_enemy(&feared(), health, armour, Some(12), None, crate::pick::Preferences::default());
+                let g = Goal::for_enemy(
+                    &feared(),
+                    health,
+                    armour,
+                    Some(12),
+                    None,
+                    crate::pick::Preferences::default(),
+                );
                 if let Goal::Scare { need, below } = g {
                     assert!(
                         need >= MIN_MEANINGFUL_DAMAGE,
@@ -2226,25 +2292,37 @@ mod scare_goal_tests {
         // rpgview.lua:1646 -- the flee branch requires `not currentEnemy.immobile`. Trying to scare
         // one would leave it alive and still attacking.
         let m = Modifiers { immobile: true, ..feared() };
-        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12), None, crate::pick::Preferences::default()), Goal::RankedKill { need: 13 });
+        assert_eq!(
+            Goal::for_enemy(&m, 12, 0, Some(12), None, crate::pick::Preferences::default()),
+            Goal::RankedKill { need: 13 }
+        );
     }
 
     #[test]
     fn without_a_known_maximum_we_do_not_guess() {
-        assert_eq!(Goal::for_enemy(&feared(), 12, 0, None, None, crate::pick::Preferences::default()), Goal::RankedKill { need: 13 });
+        assert_eq!(
+            Goal::for_enemy(&feared(), 12, 0, None, None, crate::pick::Preferences::default()),
+            Goal::RankedKill { need: 13 }
+        );
     }
 
     #[test]
     fn overkill_gold_still_wants_the_corpse() {
         // Gold scales with the excess, so this fight is the exception.
         let m = Modifiers { overkill_gold: true, ..feared() };
-        assert_eq!(Goal::for_enemy(&m, 12, 0, Some(12), None, crate::pick::Preferences::default()), Goal::MaxDamage);
+        assert_eq!(
+            Goal::for_enemy(&m, 12, 0, Some(12), None, crate::pick::Preferences::default()),
+            Goal::MaxDamage
+        );
     }
 
     #[test]
     fn a_one_health_maximum_offers_no_non_lethal_scare() {
         // leaves_at_or_below is None below 2 max health, so there is no room to hurt without killing.
-        assert_eq!(Goal::for_enemy(&feared(), 1, 0, Some(1), None, crate::pick::Preferences::default()), Goal::RankedKill { need: 2 });
+        assert_eq!(
+            Goal::for_enemy(&feared(), 1, 0, Some(1), None, crate::pick::Preferences::default()),
+            Goal::RankedKill { need: 2 }
+        );
     }
 }
 
@@ -2346,10 +2424,7 @@ mod lexicon_bonus_tests {
 
     fn with_bonus(pairs: &[(&str, f64)]) -> Modifiers {
         Modifiers {
-            bonuses: pairs
-                .iter()
-                .map(|(w, v)| (HashSet::from([w.to_string()]), *v))
-                .collect(),
+            bonuses: pairs.iter().map(|(w, v)| (HashSet::from([w.to_string()]), *v)).collect(),
             ..Modifiers::none()
         }
     }

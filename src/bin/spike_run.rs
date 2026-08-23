@@ -209,11 +209,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Cleared by the arrow in the bottom-right corner — the dev, watching it happen. Both
             // the key and the click go at the same button; see [`Run::clear_the_gate`].
             Doorway::Text => {
-                r.log.push_str("  a text screen is gating the menu
-");
+                r.log.push_str(
+                    "  a text screen is gating the menu
+",
+                );
                 if !r.clear_the_gate() {
-                    r.log.push_str("  could not clear it — looking again
-");
+                    r.log.push_str(
+                        "  could not clear it — looking again
+",
+                    );
                 }
             }
             Doorway::Resume => {
@@ -323,8 +327,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some((edges, path, positioned)) = r.recall_map() {
         let how = match positioned {
             true => "with their positions",
-            false => "for their shape only — something is placed already, which should not happen \
-                      here; see the ordering note above",
+            false => {
+                "for their shape only — something is placed already, which should not happen \
+                      here; see the ordering note above"
+            }
         };
         r.log.push_str(&format!("recalled {edges} edges from `{path}` {how}\n"));
     }
@@ -476,14 +482,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // gets the screen's name beside the excuse instead of having to open the frame and guess.
     if !matches!(stop, Stop::AnomalyBeaten) {
         let seen = diggle_solver::act::identify(r.win);
-        r.log.push_str(&format!("the observer calls the stop screen **{seen:?}**
-"));
+        r.log.push_str(&format!(
+            "the observer calls the stop screen **{seen:?}**
+"
+        ));
         r.log_button_scores();
         match diggle_solver::win::capture::capture_window(r.win) {
             Ok(f) => {
                 let path = PathBuf::from(FRAMES).join("gave-up.png");
                 match f.write_png(&path) {
-                    Ok(()) => r.log.push_str(&format!("screen at the stop: `{}`\n\n", path.display())),
+                    Ok(()) => {
+                        r.log.push_str(&format!("screen at the stop: `{}`\n\n", path.display()))
+                    }
                     Err(e) => r.log.push_str(&format!("could not write the stop frame: {e}\n\n")),
                 }
             }

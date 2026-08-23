@@ -23,12 +23,12 @@
 //!                            the log reader must be the process that launched the game.
 
 use diggle_solver::config::Config;
+use diggle_solver::observe::template::Template;
 use diggle_solver::win::capture::{capture_window, Frame, START_MENU_REGION};
 use diggle_solver::win::input::{
     Input, PostMessageInput, SC_DOWN, SC_LEFT, SC_RETURN, SC_RIGHT, SC_SPACE, SC_UP, VK_DOWN,
     VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
 };
-use diggle_solver::observe::template::Template;
 use diggle_solver::win::window::{self, GameWindow};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -39,9 +39,8 @@ const PID_FILE: &str = ".diggle-pid";
 const FRAME_DIR: &str = "spike-frames-live";
 const VK_BACK: u16 = 0x08;
 const SC_BACK: u16 = 0x0E;
-const FULL: diggle_solver::win::capture::Region = diggle_solver::win::capture::Region {
-    nx: 0.0, ny: 0.0, nw: 1.0, nh: 1.0,
-};
+const FULL: diggle_solver::win::capture::Region =
+    diggle_solver::win::capture::Region { nx: 0.0, ny: 0.0, nw: 1.0, nh: 1.0 };
 
 fn cursor() -> (i32, i32) {
     let mut p = POINT::default();
@@ -67,19 +66,17 @@ fn attach() -> Result<(u32, GameWindow), Box<dyn std::error::Error>> {
         .map_err(|_| "no .diggle-pid — run `diggle launch` first")?
         .trim()
         .parse()?;
-    let win = window::find_by_pid(pid)
-        .ok_or("recorded pid has no visible window — the game may have exited; run `diggle launch`")?;
+    let win = window::find_by_pid(pid).ok_or(
+        "recorded pid has no visible window — the game may have exited; run `diggle launch`",
+    )?;
     Ok((pid, win))
 }
 
 /// Writes a PNG next to the BMP so the frame can be viewed directly.
 fn write_png(frame: &Frame, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::create(path)?;
-    let mut enc = png::Encoder::new(
-        std::io::BufWriter::new(file),
-        frame.width as u32,
-        frame.height as u32,
-    );
+    let mut enc =
+        png::Encoder::new(std::io::BufWriter::new(file), frame.width as u32, frame.height as u32);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
     let mut writer = enc.write_header()?;
@@ -126,20 +123,11 @@ const MIN_INLIERS: f64 = 0.95;
 const TRACK_RADIUS: i32 = 130;
 
 fn track_patch(
-    win: &GameWindow,
-    tpl: &Template,
-    x: i32,
-    y: i32,
-    expect: (i32, i32),
+    win: &GameWindow, tpl: &Template, x: i32, y: i32, expect: (i32, i32),
 ) -> Option<((i32, i32), f64, f64)> {
     let after = capture_window(win).ok()?;
     let (ex, ey) = (x + expect.0, y + expect.1);
-    let bounds = (
-        ex - TRACK_RADIUS,
-        ey - TRACK_RADIUS,
-        ex + TRACK_RADIUS,
-        ey + TRACK_RADIUS,
-    );
+    let bounds = (ex - TRACK_RADIUS, ey - TRACK_RADIUS, ex + TRACK_RADIUS, ey + TRACK_RADIUS);
     let m = diggle_solver::observe::template::find_at_scale_in(&after, tpl, 1.0, 1, Some(bounds))?;
     if m.inliers < MIN_INLIERS {
         return None;
@@ -174,11 +162,7 @@ fn patch_variance(tpl: &Template) -> f64 {
 /// first to localise, then `step=1` in a ±6 window to get the exact offset. Pixel art demands
 /// `step=1` for the FINAL answer (design v2 §6.3), not for finding the neighbourhood.
 fn find_coarse_then_fine(
-    frame: &Frame,
-    tpl: &Template,
-    x: i32,
-    y: i32,
-    radius: i32,
+    frame: &Frame, tpl: &Template, x: i32, y: i32, radius: i32,
 ) -> Option<diggle_solver::observe::template::Match> {
     let coarse = diggle_solver::observe::template::find_at_scale_in(
         frame,
@@ -205,7 +189,9 @@ fn find_coarse_then_fine(
 ///
 /// The threshold sits between the two regimes: ambient shimmer and cloud drift move a small
 /// fraction of the frame, a pan moves nearly all of it.
-fn wait_map_still(win: &GameWindow, timeout: Duration) -> Result<Frame, Box<dyn std::error::Error>> {
+fn wait_map_still(
+    win: &GameWindow, timeout: Duration,
+) -> Result<Frame, Box<dyn std::error::Error>> {
     const STILL: f64 = 0.03;
     let deadline = std::time::Instant::now() + timeout;
     let mut prev = capture_window(win)?;
@@ -233,13 +219,7 @@ fn wait_map_still(win: &GameWindow, timeout: Duration) -> Result<Frame, Box<dyn 
 /// displacement along the axis is largest and confidently matched. Returns the patch (re-cropped
 /// from the post-pan frame), where it now sits, the measured displacement, and the match quality.
 fn calibrate_and_pick(
-    win: &GameWindow,
-    input: &PostMessageInput,
-    cw: i32,
-    ch: i32,
-    vk: u16,
-    sc: u16,
-    ms: u64,
+    win: &GameWindow, input: &PostMessageInput, cw: i32, ch: i32, vk: u16, sc: u16, ms: u64,
 ) -> Result<(Template, i32, i32, (i32, i32), f64), Box<dyn std::error::Error>> {
     // Start from rest, or the "before" frame is already mid-pan.
     let a = wait_map_still(win, Duration::from_secs(3))?;
@@ -274,18 +254,17 @@ fn calibrate_and_pick(
         }
     }
     let Some((_, tpl, nx, ny, d, inl)) = best else {
-        return Err("no candidate patch could be confidently re-found after the pan — the tracker \
+        return Err(
+            "no candidate patch could be confidently re-found after the pan — the tracker \
                     cannot measure this screen"
-            .into());
+                .into(),
+        );
     };
     Ok((tpl, nx, ny, d, inl))
 }
 
 fn measure_pan(
-    win: &GameWindow,
-    input: &PostMessageInput,
-    dir: &str,
-    ms: u64,
+    win: &GameWindow, input: &PostMessageInput, dir: &str, ms: u64,
 ) -> Result<(i32, i32), Box<dyn std::error::Error>> {
     let (vk, sc) = match dir {
         "up" => (VK_UP, SC_UP),
@@ -374,12 +353,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("client_origin={:?} (screen coords of client 0,0)", (ox, oy));
             let c = cursor();
             println!("cursor_screen={:?} cursor_client={:?}", c, (c.0 - ox, c.1 - oy));
-            println!("fullframe={:016x} nonblack={:.4}", f.region_hash(FULL), f.nonblack_fraction());
+            println!(
+                "fullframe={:016x} nonblack={:.4}",
+                f.region_hash(FULL),
+                f.nonblack_fraction()
+            );
             // START_MENU_REGION is meaningful ONLY on the start menu; elsewhere it hashes
             // whatever happens to sit there (empty background on hero select). Use
             // `diggle hash <x0> <y0> <x1> <y1>` to measure a region for THIS screen.
-            println!("start_menu_region={:016x}  <- only meaningful on the start menu",
-                     f.region_hash(START_MENU_REGION));
+            println!(
+                "start_menu_region={:016x}  <- only meaningful on the start menu",
+                f.region_hash(START_MENU_REGION)
+            );
         }
         "shot" => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("shot");
@@ -397,8 +382,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Choose a screen's fingerprint region BY MEASUREMENT. Reports the hash plus
             // an idle-stability check, because a region overlapping animation is exactly
             // how the first FINGERPRINT_REGION went wrong (idle noise floor 0.5228).
-            let n: Vec<i32> = args[1..5.min(args.len())]
-                .iter().filter_map(|a| a.parse().ok()).collect();
+            let n: Vec<i32> =
+                args[1..5.min(args.len())].iter().filter_map(|a| a.parse().ok()).collect();
             if n.len() != 4 {
                 return Err("usage: hash <x0> <y0> <x1> <y1>  (client pixels)".into());
             }
@@ -412,8 +397,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let c = capture_window(&win)?;
             let h = a.region_hash(r);
             let stable = h == b.region_hash(r) && h == c.region_hash(r);
-            println!("region px=({},{})-({},{})  normalized={:.4},{:.4},{:.4},{:.4}",
-                     n[0], n[1], n[2], n[3], r.nx, r.ny, r.nw, r.nh);
+            println!(
+                "region px=({},{})-({},{})  normalized={:.4},{:.4},{:.4},{:.4}",
+                n[0], n[1], n[2], n[3], r.nx, r.ny, r.nw, r.nh
+            );
             println!("hash={h:016x}");
             println!("idle noise floor = {:.4} (want 0.0000)", a.diff_fraction(&c, r));
             println!("stable across 3 samples = {stable}");
@@ -479,7 +466,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let (dx, dy) = (target.0 - c.0, target.1 - c.1);
                 let (vk, sc, n) = if dx.abs() >= dy.abs() {
-                    if dx > 0 { (VK_RIGHT, SC_RIGHT, "Right") } else { (VK_LEFT, SC_LEFT, "Left") }
+                    if dx > 0 {
+                        (VK_RIGHT, SC_RIGHT, "Right")
+                    } else {
+                        (VK_LEFT, SC_LEFT, "Left")
+                    }
                 } else if dy > 0 {
                     (VK_DOWN, SC_DOWN, "Down")
                 } else {
@@ -490,7 +481,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  {i:2} {n:5} -> {:?}", cursor());
             }
             let landed = cursor();
-            println!("landed={landed:?} target={target:?} on_target={}", dist(landed, target) <= 60.0);
+            println!(
+                "landed={landed:?} target={target:?} on_target={}",
+                dist(landed, target) <= 60.0
+            );
         }
         "find" => {
             // Locate a game sprite in the current frame. Reports the whole scale sweep,
@@ -513,7 +507,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // "rendering differs" from "never tested the right offset".
             let bounds = if args.len() >= 7 {
                 let n: Vec<i32> = args[3..7].iter().filter_map(|a| a.parse().ok()).collect();
-                if n.len() == 4 { Some((n[0], n[1], n[2], n[3])) } else { None }
+                if n.len() == 4 {
+                    Some((n[0], n[1], n[2], n[3]))
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -541,7 +539,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let (Some(a), Some(b)) = (results.first(), results.get(1)) {
                 println!(
                     "\nbest_inliers={:.3} runner_up={:.3} margin={:.3}",
-                    a.inliers, b.inliers, a.inliers - b.inliers
+                    a.inliers,
+                    b.inliers,
+                    a.inliers - b.inliers
                 );
             }
         }
@@ -610,7 +610,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Measured rate is ~0.3 px/ms, but which key moves content which way is exactly
             // the sort of thing worth measuring once rather than getting silently backwards.
             let calib_ms = 300u64;
-            let (kx, ky) = (measure_pan(&win, &input, "left", calib_ms)?, measure_pan(&win, &input, "up", calib_ms)?);
+            let (kx, ky) = (
+                measure_pan(&win, &input, "left", calib_ms)?,
+                measure_pan(&win, &input, "up", calib_ms)?,
+            );
             println!("calibration: hold left {calib_ms}ms -> content d=({:+},{:+})", kx.0, kx.1);
             println!("calibration: hold up   {calib_ms}ms -> content d=({:+},{:+})", ky.0, ky.1);
             let rate_x = kx.0 as f64 / calib_ms as f64; // px per ms, signed, for "left"
@@ -622,13 +625,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Pan content by (dx,dy) using whichever key has the right sign.
             let pan = |dx: i32, dy: i32| -> Result<(), Box<dyn std::error::Error>> {
                 if dx != 0 {
-                    let (dir, r) = if (dx as f64) * rate_x > 0.0 { ("left", rate_x) } else { ("right", -rate_x) };
+                    let (dir, r) = if (dx as f64) * rate_x > 0.0 {
+                        ("left", rate_x)
+                    } else {
+                        ("right", -rate_x)
+                    };
                     let ms = (dx.abs() as f64 / r.abs()).round() as u64;
-                    let (vk, sc) = if dir == "left" { (VK_LEFT, SC_LEFT) } else { (VK_RIGHT, SC_RIGHT) };
+                    let (vk, sc) =
+                        if dir == "left" { (VK_LEFT, SC_LEFT) } else { (VK_RIGHT, SC_RIGHT) };
                     input.hold_extended_key(vk, sc, Duration::from_millis(ms.clamp(30, 4000)))?;
                 }
                 if dy != 0 {
-                    let (dir, r) = if (dy as f64) * rate_y > 0.0 { ("up", rate_y) } else { ("down", -rate_y) };
+                    let (dir, r) =
+                        if (dy as f64) * rate_y > 0.0 { ("up", rate_y) } else { ("down", -rate_y) };
                     let ms = (dy.abs() as f64 / r.abs()).round() as u64;
                     let (vk, sc) = if dir == "up" { (VK_UP, SC_UP) } else { (VK_DOWN, SC_DOWN) };
                     input.hold_extended_key(vk, sc, Duration::from_millis(ms.clamp(30, 4000)))?;
@@ -643,12 +652,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut n = 0;
             let mut ys: Vec<i32> = Vec::new();
             let mut y = -hy;
-            while y <= hy { ys.push(y); y += step; }
+            while y <= hy {
+                ys.push(y);
+                y += step;
+            }
             for (row, &py) in ys.iter().enumerate() {
                 let mut xs: Vec<i32> = Vec::new();
                 let mut x = -hx;
-                while x <= hx { xs.push(x); x += step; }
-                if row % 2 == 1 { xs.reverse(); } // serpentine: minimise panning
+                while x <= hx {
+                    xs.push(x);
+                    x += step;
+                }
+                if row % 2 == 1 {
+                    xs.reverse();
+                } // serpentine: minimise panning
                 for &px in &xs {
                     // Offset (px,py) means: bring the point at (centre + (px,py)) to centre,
                     // i.e. move content by (-px,-py) relative to the untouched map.
@@ -711,7 +728,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(format!(
                     "cursor at client ({ccx},{ccy}), not the map hotspot ({},{}). \
                      Run `diggle nav {} {}` first — refusing to measure.",
-                    cw / 2, ch / 2, cw / 2, ch / 2
+                    cw / 2,
+                    ch / 2,
+                    cw / 2,
+                    ch / 2
                 )
                 .into());
             }
@@ -756,7 +776,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 m.inliers
             );
             if m.inliers < 0.6 {
-                println!("WARNING: low inliers — the patch may have been re-rendered or left the frame");
+                println!(
+                    "WARNING: low inliers — the patch may have been re-rendered or left the frame"
+                );
             }
         }
         "hold" => {
@@ -853,20 +875,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             if let Some(tb) = t.table_at("tileboard") {
-                println!("  tileboard: {} letters, columns={:?}", tb.arr.len(),
-                    tb.get("columns").and_then(|c| c.as_table()).map(|c| {
-                        c.arr.iter().filter_map(|v| v.as_int()).collect::<Vec<_>>()
-                    }));
+                println!(
+                    "  tileboard: {} letters, columns={:?}",
+                    tb.arr.len(),
+                    tb.get("columns")
+                        .and_then(|c| c.as_table())
+                        .map(|c| { c.arr.iter().filter_map(|v| v.as_int()).collect::<Vec<_>>() })
+                );
             }
-            println!(
-                "combat in progress: {}",
-                diggle_solver::game::save::combat_in_progress(&dir)
-            );
+            println!("combat in progress: {}", diggle_solver::game::save::combat_in_progress(&dir));
         }
         "solve" => {
             // Offline: given board letters and enemy health, report what would be played. Lets the
             // search be exercised without a running game, which is how it gets checked at all.
-            let letters = args.get(1).ok_or("usage: solve <letters> <health> [armour] [threads]")?;
+            let letters =
+                args.get(1).ok_or("usage: solve <letters> <health> [armour] [threads]")?;
             let health: i64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
             let armour: i64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
             let threads: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
@@ -890,15 +913,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // count -- `diamond16Board`, `tall16Board` and the default 4x4 all hold sixteen tiles and
             // put their corners in different places, and hexagonal boards have six corners rather
             // than four. So `--board <passiveKey>` names the shape, and it is always printed.
-            let board_passive = args
-                .iter()
-                .position(|a| a == "--board")
-                .and_then(|i| args.get(i + 1))
-                .cloned();
+            let board_passive =
+                args.iter().position(|a| a == "--board").and_then(|i| args.get(i + 1)).cloned();
             let resolved = match &board_passive {
-                Some(key) => {
-                    diggle_solver::geometry::Geometry::for_passive(key, tiles.len())
-                }
+                Some(key) => diggle_solver::geometry::Geometry::for_passive(key, tiles.len()),
                 None => diggle_solver::geometry::Geometry::for_passive("__none__", tiles.len()),
             };
             let geometry = resolved.geometry;
@@ -952,7 +970,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => println!("best:   none"),
             }
             match &out.longest {
-                Some(f) => println!("longest: {} ({} letters, scores {})", f.word, f.word.chars().count(), f.score),
+                Some(f) => println!(
+                    "longest: {} ({} letters, scores {})",
+                    f.word,
+                    f.word.chars().count(),
+                    f.score
+                ),
                 None => println!("longest: none"),
             }
             let threshold = tiles.len() / 2;
@@ -966,8 +989,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Matches a template against a SAVED frame, with no game running. This is the positive
             // control the live path lacks: if a template cropped byte-identically out of a frame
             // does not match that frame, the fault is in the matcher, not on screen.
-            let tpl_path = args.get(1).ok_or("usage: findpng <template> <frame.png> [x0 y0 x1 y1]")?;
-            let frame_path = args.get(2).ok_or("usage: findpng <template> <frame.png> [x0 y0 x1 y1]")?;
+            let tpl_path =
+                args.get(1).ok_or("usage: findpng <template> <frame.png> [x0 y0 x1 y1]")?;
+            let frame_path =
+                args.get(2).ok_or("usage: findpng <template> <frame.png> [x0 y0 x1 y1]")?;
             let tpl = Template::load(Path::new(tpl_path))?;
             // Decode the frame into the same BGRA layout capture_window produces, so this exercises
             // exactly the comparison the live path does.
@@ -981,7 +1006,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bgra.extend_from_slice(&[px[2], px[1], px[0], 255]);
             }
             let frame = Frame { width: info.width as i32, height: info.height as i32, bgra };
-            println!("template {} {}x{}; frame {}x{}", tpl.name, tpl.width, tpl.height, frame.width, frame.height);
+            println!(
+                "template {} {}x{}; frame {}x{}",
+                tpl.name, tpl.width, tpl.height, frame.width, frame.height
+            );
             let bounds = if args.len() >= 7 {
                 let v: Vec<i32> = args[3..7].iter().filter_map(|a| a.parse().ok()).collect();
                 (v.len() == 4).then(|| (v[0], v[1], v[2], v[3]))
@@ -1000,8 +1028,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Measuring a UI bounding box means looking at it. Eyeballing a region off a
             // full-resolution screenshot is how the F1 classifier ended up hashing map and sea
             // around a panel; cropping the candidate and viewing it proves what is inside.
-            let (inp, outp) = (args.get(1).ok_or("usage: croppng <in> <out> <x0> <y0> <x1> <y1>")?,
-                               args.get(2).ok_or("usage: croppng <in> <out> <x0> <y0> <x1> <y1>")?);
+            let (inp, outp) = (
+                args.get(1).ok_or("usage: croppng <in> <out> <x0> <y0> <x1> <y1>")?,
+                args.get(2).ok_or("usage: croppng <in> <out> <x0> <y0> <x1> <y1>")?,
+            );
             let n: Vec<u32> = args[3..7].iter().map(|a| a.parse().unwrap()).collect();
             let (x0, y0, x1, y1) = (n[0], n[1], n[2], n[3]);
             let decoder = png::Decoder::new(std::fs::File::open(inp)?);
@@ -1058,9 +1088,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Reads the channel until a dump arrives, or gives up. Returns the LAST one: if
             // arrival fired an event the newest dump is the authoritative one.
             let collect = |console: &mut diggle_solver::observe::log::Console,
-                               mirror: &mut diggle_solver::observe::log::LogMirror,
-                               secs: u64|
-             -> Result<Option<diggle_solver::observe::adjacency::Adjacency>, Box<dyn std::error::Error>> {
+                           mirror: &mut diggle_solver::observe::log::LogMirror,
+                           secs: u64|
+             -> Result<
+                Option<diggle_solver::observe::adjacency::Adjacency>,
+                Box<dyn std::error::Error>,
+            > {
                 let deadline = std::time::Instant::now() + Duration::from_secs(secs);
                 let mut last = None;
                 while std::time::Instant::now() < deadline {
@@ -1096,14 +1129,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Ok(f) = capture_window(&win) {
                     let _ = f.write_bmp(Path::new(&shot));
                 }
-                echo(&console, format!("ABORT: no adjacency dump after Continue; screen saved to {shot}"));
+                echo(
+                    &console,
+                    format!("ABORT: no adjacency dump after Continue; screen saved to {shot}"),
+                );
                 game.close(Duration::from_secs(15));
                 return Ok(());
             };
             echo(
                 &console,
-                format!("at {} — {}; {} visible neighbour(s), {} hidden",
-                    map.here_key, map.here_heading, map.nodes.len(), map.hidden),
+                format!(
+                    "at {} — {}; {} visible neighbour(s), {} hidden",
+                    map.here_key,
+                    map.here_heading,
+                    map.nodes.len(),
+                    map.hidden
+                ),
             );
 
             // --- choose a target ---
@@ -1116,9 +1157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .nodes
                     .iter()
                     .find(|n| n.type_is("shrine"))
-                    .or_else(|| {
-                        map.nodes.iter().min_by_key(|n| n.level().unwrap_or(u32::MAX))
-                    })
+                    .or_else(|| map.nodes.iter().min_by_key(|n| n.level().unwrap_or(u32::MAX)))
                     .cloned(),
             };
             let Some(target) = target else {
@@ -1126,9 +1165,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 game.close(Duration::from_secs(15));
                 return Ok(());
             };
-            echo(&console, format!("target {} — {} at ({:.1},{:.1})", target.key, target.heading, target.x, target.y));
+            echo(
+                &console,
+                format!(
+                    "target {} — {} at ({:.1},{:.1})",
+                    target.key, target.heading, target.x, target.y
+                ),
+            );
             if map.hidden > 0 {
-                echo(&console, format!("NOTE: {} neighbour(s) hidden by cloud — this choice is provisional", map.hidden));
+                echo(
+                    &console,
+                    format!(
+                        "NOTE: {} neighbour(s) hidden by cloud — this choice is provisional",
+                        map.hidden
+                    ),
+                );
             }
 
             // --- get the highlight onto the map hotspot ---
@@ -1139,12 +1190,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Reaching it does NOT pan the map: arrow presses only pan once the highlight is
             // already on the map, and the walk stops the moment it arrives. So the node positions
             // from the dump above are still valid here. Verified rather than assumed, below.
-            let to_map = diggle_solver::win::nav::to_client_point(&win, &input, cw / 2, ch / 2, 40)?;
+            let to_map =
+                diggle_solver::win::nav::to_client_point(&win, &input, cw / 2, ch / 2, 40)?;
             std::thread::sleep(Duration::from_millis(400));
-            echo(&console, format!(
-                "highlight -> {:?} (map hotspot {:?}, on_target {})\n  trail {:?}",
-                to_map.landed, (cw / 2, ch / 2), to_map.on_target, to_map.trail
-            ));
+            echo(
+                &console,
+                format!(
+                    "highlight -> {:?} (map hotspot {:?}, on_target {})\n  trail {:?}",
+                    to_map.landed,
+                    (cw / 2, ch / 2),
+                    to_map.on_target,
+                    to_map.trail
+                ),
+            );
             if !to_map.on_target {
                 echo(&console, "ABORT: could not put the highlight on the map hotspot".into());
                 game.close(Duration::from_secs(15));
@@ -1168,7 +1226,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Kept under TRACK_RADIUS so the patch cannot leave the tracker's search window.
             let cal_ms = 400u64;
             let mut rates = [0f64; 2]; // signed px/ms for Right, then for Down
-            // The patch the calibration PROVED responsive, and where it currently sits.
+                                       // The patch the calibration PROVED responsive, and where it currently sits.
             let mut tracker: Option<(Template, i32, i32)> = None;
             for (axis, vk, sc, name) in
                 [(0usize, VK_RIGHT, SC_RIGHT, "Right"), (1, VK_DOWN, SC_DOWN, "Down")]
@@ -1182,23 +1240,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     input.focus();
                     std::thread::sleep(Duration::from_millis(400));
                 }
-                let (t, nx, ny, d, inl) =
-                    calibrate_and_pick(&win, &input, cw, ch, vk, sc, cal_ms)?;
-                echo(&console, format!(
-                    "  ({name} calibration: foreground before {fg_before}, after {})",
-                    input.has_foreground()
-                ));
+                let (t, nx, ny, d, inl) = calibrate_and_pick(&win, &input, cw, ch, vk, sc, cal_ms)?;
+                echo(
+                    &console,
+                    format!(
+                        "  ({name} calibration: foreground before {fg_before}, after {})",
+                        input.has_foreground()
+                    ),
+                );
                 let along = if axis == 0 { d.0 } else { d.1 };
-                echo(&console, format!(
-                    "calibration: hold {name} {cal_ms}ms -> content moved {d:?} \
+                echo(
+                    &console,
+                    format!(
+                        "calibration: hold {name} {cal_ms}ms -> content moved {d:?} \
                      (patch now at ({nx},{ny}), inliers {inl:.3})"
-                ));
+                    ),
+                );
                 tracker = Some((t, nx, ny));
                 if along.abs() < 20 {
-                    echo(&console, format!(
+                    echo(
+                        &console,
+                        format!(
                         "ABORT: a {cal_ms} ms {name} hold moved the map <20 px on its axis — the \
                          highlight may not really be on the map, or the map is at a pan limit"
-                    ));
+                    ),
+                    );
                     game.close(Duration::from_secs(15));
                     return Ok(());
                 }
@@ -1209,10 +1275,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 target.x as i32 + (rates[0] * cal_ms as f64) as i32,
                 target.y as i32 + (rates[1] * cal_ms as f64) as i32,
             );
-            echo(&console, format!(
-                "rates: Right {:+.3} px/ms, Down {:+.3} px/ms; node now {:?}",
-                rates[0], rates[1], node_at
-            ));
+            echo(
+                &console,
+                format!(
+                    "rates: Right {:+.3} px/ms, Down {:+.3} px/ms; node now {:?}",
+                    rates[0], rates[1], node_at
+                ),
+            );
 
             let mut ok = false;
             for attempt in 1..=5 {
@@ -1248,24 +1317,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 let Some((moved, inl, err)) = track_patch(&win, &tpl, px, py, expect) else {
-                    echo(&console, format!(
-                        "ABORT: no confident match on pan {attempt} (expected {expect:?}) — \
+                    echo(
+                        &console,
+                        format!(
+                            "ABORT: no confident match on pan {attempt} (expected {expect:?}) — \
                          refusing to dead-reckon"
-                    ));
+                        ),
+                    );
                     game.close(Duration::from_secs(15));
                     return Ok(());
                 };
                 node_at = (node_at.0 + moved.0, node_at.1 + moved.1);
                 // Follow the patch to its new home so the next iteration crops it there.
                 tracker = Some((crop_patch(&f, px, py, PATCH), px + moved.0, py + moved.1));
-                echo(&console, format!(
+                echo(
+                    &console,
+                    format!(
                     "  pan {attempt}: wanted {:?}, expected {expect:?}, content moved {moved:?}, \
                      node now {:?} (inliers {inl:.3}, err {err:.1})",
                     (dx, dy), node_at
-                ));
+                ),
+                );
             }
             if !ok {
-                echo(&console, format!("ABORT: node still {:?} from centre", (cw / 2 - node_at.0, ch / 2 - node_at.1)));
+                echo(
+                    &console,
+                    format!(
+                        "ABORT: node still {:?} from centre",
+                        (cw / 2 - node_at.0, ch / 2 - node_at.1)
+                    ),
+                );
                 game.close(Duration::from_secs(15));
                 return Ok(());
             }
@@ -1286,7 +1367,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let selected = pre.region_hash(slot) != post.region_hash(slot);
             echo(&console, format!("Return on the map -> button slot changed: {selected}"));
             if !selected {
-                echo(&console, "ABORT: nothing was selected — the node was not under the cursor".into());
+                echo(
+                    &console,
+                    "ABORT: nothing was selected — the node was not under the cursor".into(),
+                );
                 game.close(Duration::from_secs(15));
                 return Ok(());
             }
@@ -1302,7 +1386,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (ox, oy) = win.client_origin()?;
             echo(&console, format!("Backspace -> highlight at client {:?}", (c.0 - ox, c.1 - oy)));
             let to_travel = diggle_solver::win::nav::to_client_point(&win, &input, 187, 918, 60)?;
-            echo(&console, format!("nav to Travel {:?} on_target {}", to_travel.landed, to_travel.on_target));
+            echo(
+                &console,
+                format!("nav to Travel {:?} on_target {}", to_travel.landed, to_travel.on_target),
+            );
             if !to_travel.on_target {
                 echo(&console, "ABORT: never reached the Travel button; nothing activated".into());
                 game.close(Duration::from_secs(15));
@@ -1317,18 +1404,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match collect(&mut console, &mut mirror, 40)? {
                 Some(a) => {
                     let arrived = a.here_key == target.key;
-                    echo(&console, format!(
-                        "\n[{}] now at {} — {}\nTRAVEL {}: wanted {}, got {}",
-                        a.reason, a.here_key, a.here_heading,
-                        if arrived { "SUCCEEDED" } else { "WENT SOMEWHERE ELSE" },
-                        target.key, a.here_key
-                    ));
+                    echo(
+                        &console,
+                        format!(
+                            "\n[{}] now at {} — {}\nTRAVEL {}: wanted {}, got {}",
+                            a.reason,
+                            a.here_key,
+                            a.here_heading,
+                            if arrived { "SUCCEEDED" } else { "WENT SOMEWHERE ELSE" },
+                            target.key,
+                            a.here_key
+                        ),
+                    );
                 }
-                None => echo(&console, "no arrival dump within 40 s — travel may not have started".into()),
+                None => echo(
+                    &console,
+                    "no arrival dump within 40 s — travel may not have started".into(),
+                ),
             }
 
             let exited = game.close(Duration::from_secs(15));
-            echo(&console, format!("log mirrored to {FRAME_DIR}/travel-log.txt; exited gracefully: {exited}"));
+            echo(
+                &console,
+                format!("log mirrored to {FRAME_DIR}/travel-log.txt; exited gracefully: {exited}"),
+            );
         }
         "overworld" => {
             // The one command that cannot follow the one-shot pattern. LÖVE attaches to its
@@ -1344,7 +1443,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut console = diggle_solver::observe::log::Console::take()?;
 
             let mut game = diggle_solver::game::launch::GameProcess::launch(&cfg, &console)?;
-            echo(&console, format!("launched pid {} — {}", game.pid(), diggle_solver::game::launch::build_command_line(&cfg)));
+            echo(
+                &console,
+                format!(
+                    "launched pid {} — {}",
+                    game.pid(),
+                    diggle_solver::game::launch::build_command_line(&cfg)
+                ),
+            );
             let win = game.wait_for_window(Duration::from_secs(20))?;
             let (cw, ch) = win.client_size()?;
             echo(&console, format!("window up ({cw}x{ch}); settling"));
@@ -1357,9 +1463,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             std::thread::sleep(Duration::from_secs(3));
 
-            let mut mirror = diggle_solver::observe::log::LogMirror::create(Path::new(
-                &format!("{FRAME_DIR}/overworld-log.txt"),
-            ))?;
+            let mut mirror = diggle_solver::observe::log::LogMirror::create(Path::new(&format!(
+                "{FRAME_DIR}/overworld-log.txt"
+            )))?;
 
             // With `mainSaveData` present the game boots to the start menu and prints NOTHING,
             // so the channel looks dead until something makes it talk. Continue -> world load
@@ -1376,10 +1482,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Restart shares this row and eulogizes the run (`heroselect.lua:271`). An
                 // unverified Return here is unrecoverable, so refuse and keep watching: if the
                 // game is already past the menu we will still see dumps.
-                echo(&console, format!(
-                    "REFUSED to press Return: highlight landed at {:?}, not Continue (187,810)",
-                    nav.landed
-                ));
+                echo(
+                    &console,
+                    format!(
+                        "REFUSED to press Return: highlight landed at {:?}, not Continue (187,810)",
+                        nav.landed
+                    ),
+                );
             }
 
             let deadline = std::time::Instant::now() + Duration::from_secs(secs);
@@ -1393,10 +1502,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mirror.write(&lines);
                 for a in diggle_solver::observe::adjacency::parse(&lines) {
                     seen += 1;
-                    let mut out = format!(
-                        "\n[{}] at {} — {}\n",
-                        a.reason, a.here_key, a.here_heading
-                    );
+                    let mut out =
+                        format!("\n[{}] at {} — {}\n", a.reason, a.here_key, a.here_heading);
                     if let Some((k, h)) = &a.subworld {
                         out.push_str(&format!("  in subworld {k} — {h}\n"));
                     }
@@ -1434,10 +1541,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let exited = game.close(Duration::from_secs(15));
-            echo(&console, format!(
-                "\n{seen} dump(s) parsed; log mirrored to {FRAME_DIR}/overworld-log.txt; \
+            echo(
+                &console,
+                format!(
+                    "\n{seen} dump(s) parsed; log mirrored to {FRAME_DIR}/overworld-log.txt; \
                  game exited gracefully: {exited}"
-            ));
+                ),
+            );
         }
         "watch" => {
             let secs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(8);

@@ -50,11 +50,7 @@ fn cursor_screen() -> (i32, i32) {
 /// Conflating them was a real bug that only worked because the window happened to launch at
 /// (0,0) — see design v2 §4.1.
 pub fn to_client_point(
-    win: &GameWindow,
-    input: &PostMessageInput,
-    tx: i32,
-    ty: i32,
-    tolerance: i32,
+    win: &GameWindow, input: &PostMessageInput, tx: i32, ty: i32, tolerance: i32,
 ) -> Result<NavOutcome, crate::Error> {
     let (ox, oy) = win.client_origin()?;
     let target = (ox + tx, oy + ty);

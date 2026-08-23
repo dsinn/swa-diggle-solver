@@ -94,10 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let game_dir: PathBuf = cfg.game_dir.canonicalize()?;
 
     // String/table/math only: the game's data files need them, and nothing here needs io or os.
-    let lua = Lua::new_with(
-        StdLib::STRING | StdLib::TABLE | StdLib::MATH,
-        LuaOptions::default(),
-    )?;
+    let lua = Lua::new_with(StdLib::STRING | StdLib::TABLE | StdLib::MATH, LuaOptions::default())?;
 
     // Both file accessors are confined to the game directory. This harness reads the user's game
     // source and must not be able to wander out of it.
@@ -106,7 +103,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let p = root.join(&rel);
         let ok = p.canonicalize().map(|c| c.starts_with(&root)).unwrap_or(false);
         if !ok {
-            return Err(mlua::Error::runtime(format!("refusing to read outside the game dir: {rel}")));
+            return Err(mlua::Error::runtime(format!(
+                "refusing to read outside the game dir: {rel}"
+            )));
         }
         std::fs::read_to_string(&p).map_err(|e| mlua::Error::runtime(format!("{rel}: {e}")))
     })?;
@@ -146,14 +145,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("burning", "J", vec![("burn", Value::Int(3))]),
         ("gold bg on J", "J", vec![("bg", Value::Str("gold".into()))]),
         ("gold bg on E", "E", vec![("bg", Value::Str("gold".into()))]),
-        ("wood bg + gold border", "E", vec![
-            ("bg", Value::Str("wood".into())),
-            ("border", Value::Str("gold".into())),
-        ]),
-        ("wood bg + iron border", "E", vec![
-            ("bg", Value::Str("wood".into())),
-            ("border", Value::Str("iron".into())),
-        ]),
+        (
+            "wood bg + gold border",
+            "E",
+            vec![("bg", Value::Str("wood".into())), ("border", Value::Str("gold".into()))],
+        ),
+        (
+            "wood bg + iron border",
+            "E",
+            vec![("bg", Value::Str("wood".into())), ("border", Value::Str("iron".into()))],
+        ),
         ("gold border, no bg", "E", vec![("border", Value::Str("gold".into()))]),
         ("carbon 2", "E", vec![("carbon", Value::Int(2))]),
         ("woodornate scoreMult", "E", vec![("bg", Value::Str("woodornate".into()))]),
@@ -185,10 +186,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (k, v) in pairs {
             t.map.insert((*k).to_string(), v.clone());
         }
-        let ours = scorer.tile_score(&Tile {
-            letter: letter.to_string(),
-            quality: Quality::from_extra(&t),
-        });
+        let ours = scorer
+            .tile_score(&Tile { letter: letter.to_string(), quality: Quality::from_extra(&t) });
 
         match theirs {
             Ok(theirs) => {

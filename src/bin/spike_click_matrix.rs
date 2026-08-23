@@ -121,11 +121,8 @@ fn run_one(cfg: &Config, mc: MatrixConfig) -> Result<ConfigResult, Box<dyn std::
 
     reset_sandbox_save()?;
 
-    let env: Vec<(&str, &str)> = if mc.clickthrough_hint {
-        vec![("SDL_MOUSE_FOCUS_CLICKTHROUGH", "1")]
-    } else {
-        vec![]
-    };
+    let env: Vec<(&str, &str)> =
+        if mc.clickthrough_hint { vec![("SDL_MOUSE_FOCUS_CLICKTHROUGH", "1")] } else { vec![] };
     notes.push(format!(
         "Config {}: SDL_MOUSE_FOCUS_CLICKTHROUGH={}, focus_before_click={}",
         mc.name, mc.clickthrough_hint, mc.focus_before_click
@@ -296,8 +293,12 @@ fn run_e(cfg: &Config) -> Result<ConfigResult, Box<dyn std::error::Error>> {
     ));
 
     // --- Try arrow keys in order until one establishes a hotspot highlight. ---
-    let candidates: [(&str, u16, u16); 4] =
-        [("Down", VK_DOWN, SC_DOWN), ("Up", VK_UP, SC_UP), ("Left", VK_LEFT, SC_LEFT), ("Right", VK_RIGHT, SC_RIGHT)];
+    let candidates: [(&str, u16, u16); 4] = [
+        ("Down", VK_DOWN, SC_DOWN),
+        ("Up", VK_UP, SC_UP),
+        ("Left", VK_LEFT, SC_LEFT),
+        ("Right", VK_RIGHT, SC_RIGHT),
+    ];
 
     let mut arrow_that_worked: Option<&str> = None;
     let mut arrow_delta = 0.0f64;
@@ -328,7 +329,9 @@ fn run_e(cfg: &Config) -> Result<ConfigResult, Box<dyn std::error::Error>> {
     }
 
     if let Some(label) = arrow_that_worked {
-        notes.push(format!("Arrow {label} produced a visible change (candidate for a hotspot highlight)."));
+        notes.push(format!(
+            "Arrow {label} produced a visible change (candidate for a hotspot highlight)."
+        ));
     } else {
         notes.push(
             "No arrow key (Down, Up, Left, Right) produced a visible change under the \

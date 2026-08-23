@@ -51,7 +51,9 @@
 //! a live run has shown the interlock behaving.
 
 use crate::win::window::GameWindow;
-use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, GetCursorPos, CURSORINFO, CURSOR_SHOWING};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorInfo, GetCursorPos, CURSORINFO, CURSOR_SHOWING,
+};
 
 /// The pointer's position in SCREEN pixels.
 pub fn position() -> Result<(i32, i32), crate::Error> {
@@ -66,7 +68,8 @@ pub fn position() -> Result<(i32, i32), crate::Error> {
 /// (`utils/input.lua:96-98`), so this is the game's own record of whether a control is selected,
 /// read through the window manager rather than guessed from pixels.
 pub fn is_hidden() -> Result<bool, crate::Error> {
-    let mut info = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
+    let mut info =
+        CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
     unsafe { GetCursorInfo(&mut info) }.map_err(|e| crate::Error::Win32(e.to_string()))?;
     Ok(info.flags != CURSOR_SHOWING)
 }

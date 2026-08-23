@@ -49,7 +49,11 @@ fn tile_luma(frame: &Frame, cx: i32, cy: i32, radius: i32) -> f64 {
             n += 1.0;
         }
     }
-    if n == 0.0 { 0.0 } else { sum / n }
+    if n == 0.0 {
+        0.0
+    } else {
+        sum / n
+    }
 }
 
 fn selected_set(frame: &Frame, centres: &[(i32, i32)], base: &[f64], radius: i32) -> Vec<bool> {
@@ -103,10 +107,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let geom = diggle_solver::geometry::Geometry::from_save(&combat, n).geometry;
     let centres = layout::tile_centres(&geom, cw, ch);
     let radius = (layout::tile_radius(cw, ch) * 0.55).round() as i32;
-    let screen: Vec<(i32, i32)> = centres
-        .iter()
-        .map(|&(x, y)| win.client_to_screen(x, y).unwrap_or((x, y)))
-        .collect();
+    let screen: Vec<(i32, i32)> =
+        centres.iter().map(|&(x, y)| win.client_to_screen(x, y).unwrap_or((x, y))).collect();
     let (px, py) = win.client_to_screen(NEUTRAL.0, NEUTRAL.1)?;
 
     warp_cursor(px, py)?;

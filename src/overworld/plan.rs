@@ -26,8 +26,8 @@
 //! nothing.
 
 use super::{
-    dist_or_far, Place, WorldMap, ANOMALY_KEY, HEART_COST, HEART_FLOOR,
-    SHRINES_BEFORE_THE_ANOMALY, TOUR_CANDIDATE_CAP,
+    dist_or_far, Place, WorldMap, ANOMALY_KEY, HEART_COST, HEART_FLOOR, SHRINES_BEFORE_THE_ANOMALY,
+    TOUR_CANDIDATE_CAP,
 };
 // Doc links only. See the note in `place.rs`: the arguments came across intact rather than being
 // requalified to suit the file layout.
@@ -407,8 +407,8 @@ impl WorldMap {
         let Some(level) = self.places.get(target).and_then(Place::deliberate_fight_level) else {
             return 0;
         };
-        let worth_it = crate::rest::worth_banking_for(level)
-            && crate::rest::bank_is_short(self.well_rested);
+        let worth_it =
+            crate::rest::worth_banking_for(level) && crate::rest::bank_is_short(self.well_rested);
         match worth_it {
             true => crate::rest::stacks_short(self.well_rested),
             false => 0,
@@ -759,9 +759,7 @@ impl WorldMap {
     /// Walks the same region [`WorldMap::access_without_a_fight`] does, so a probe it returns is
     /// reachable on the same terms as the errand that wanted one: no fight to get there.
     fn probe_toward_the_unknown(
-        &self,
-        from: &str,
-        dist: &BTreeMap<String, usize>,
+        &self, from: &str, dist: &BTreeMap<String, usize>,
     ) -> Option<&Place> {
         let costly = |k: &str| {
             self.places.get(k).map(|p| !p.completed && p.may_be_a_fight()).unwrap_or(false)
@@ -928,9 +926,11 @@ impl WorldMap {
                 )
                 .then(a.key.cmp(&b.key))
         });
-        candidates
-            .first()
-            .map(|p| Plan { target: p.key.clone(), reason: Goal::EasiestHostile { level: p.remembered_level() }, steered_by: None })
+        candidates.first().map(|p| Plan {
+            target: p.key.clone(),
+            reason: Goal::EasiestHostile { level: p.remembered_level() },
+            steered_by: None,
+        })
     }
 
     /// The planner proper. `skip_hostile` excludes anywhere a fight is owed, on either axis;
@@ -1040,10 +1040,7 @@ impl WorldMap {
         // tests depend on. **It is no longer ordering anything that matters.**
         let far = |p: &Place| dist.get(&p.key).copied().unwrap_or(usize::MAX);
         sites.sort_by(|(pa, sa), (pb, sb)| {
-            sb.rank()
-                .cmp(&sa.rank())
-                .then(far(pa).cmp(&far(pb)))
-                .then(pa.key.cmp(&pb.key))
+            sb.rank().cmp(&sa.rank()).then(far(pa).cmp(&far(pb))).then(pa.key.cmp(&pb.key))
         });
         sites.first().map(|(p, _)| *p)
     }
@@ -1085,7 +1082,6 @@ impl WorldMap {
                 return Some(Plan { target: p.key.clone(), reason: Goal::Rest, steered_by: None });
             }
         }
-
 
         let anomaly_open = self.anomaly_is_open().unwrap_or(false);
         // A shrine still worth walking to. `Pray` retires on `areaUnused`; `Consecrate` needs
@@ -1329,7 +1325,11 @@ impl WorldMap {
         // route, so this can only ever choose a shrine we can actually walk to.
         if anomaly_open {
             if let Some(p) = pick_shrine() {
-                return Some(Plan { target: p.key.clone(), reason: Goal::Shrine, steered_by: None });
+                return Some(Plan {
+                    target: p.key.clone(),
+                    reason: Goal::Shrine,
+                    steered_by: None,
+                });
             }
         }
 
@@ -1405,11 +1405,7 @@ impl WorldMap {
                 .filter(|p| self.reachable_without_a_fight(here, &p.key))
                 .min_by_key(|p| dist_or_far(&dist, &p.key));
             if let Some(p) = heart {
-                return Some(Plan {
-                    target: p.key.clone(),
-                    reason: Goal::Heart,
-                    steered_by: None,
-                });
+                return Some(Plan { target: p.key.clone(), reason: Goal::Heart, steered_by: None });
             }
             // **"I have not looked" is not "there is nothing there", and the difference is a
             // probe.** The dev's correction, 2026-08-15: the navigator's job is to go and find
@@ -1424,10 +1420,7 @@ impl WorldMap {
             //
             // Still `Goal::Heart`, because that is what the walk is *for*, and a log that said
             // `Explore` here would hide the errand that chose it.
-            if shops
-                .iter()
-                .any(|p| self.access_without_a_fight(here, &p.key) == Access::Unknown)
-            {
+            if shops.iter().any(|p| self.access_without_a_fight(here, &p.key) == Access::Unknown) {
                 if let Some(p) = self.probe_toward_the_unknown(here, &dist) {
                     return Some(Plan {
                         target: p.key.clone(),
@@ -1463,11 +1456,13 @@ impl WorldMap {
         // there for why it is the last thing tried rather than a clause in this condition.
         if self.consecrations() >= SHRINES_BEFORE_THE_ANOMALY {
             if let Some(p) = self.anomaly().filter(|p| ok(p)) {
-                return Some(Plan { target: p.key.clone(), reason: Goal::CloseAnomaly, steered_by: None });
+                return Some(Plan {
+                    target: p.key.clone(),
+                    reason: Goal::CloseAnomaly,
+                    steered_by: None,
+                });
             }
         }
-
-
 
         // Opening the anomaly comes BEFORE shrines, and not only because it is the objective:
         // **consecration is impossible until it is open.** `showConsecrateButton`
@@ -1515,8 +1510,13 @@ impl WorldMap {
                     .then(a.remembered_level().cmp(&b.remembered_level()))
                     .then(a.key.cmp(&b.key))
             });
-            if let Some(p) = candidates.first().filter(|_| !self.gentler_ground_remains(here, &ok)) {
-                return Some(Plan { target: p.key.clone(), reason: Goal::OpenAnomaly, steered_by: None });
+            if let Some(p) = candidates.first().filter(|_| !self.gentler_ground_remains(here, &ok))
+            {
+                return Some(Plan {
+                    target: p.key.clone(),
+                    reason: Goal::OpenAnomaly,
+                    steered_by: None,
+                });
             }
         }
 
@@ -1768,8 +1768,7 @@ impl WorldMap {
         let steered_by =
             steer.then(|| (bearing.clone().unwrap_or_default(), placed, frontier.len()));
         frontier.sort_by(|a, b| {
-            let by_hops =
-                dist.get(&a.key).unwrap_or(&far).cmp(dist.get(&b.key).unwrap_or(&far));
+            let by_hops = dist.get(&a.key).unwrap_or(&far).cmp(dist.get(&b.key).unwrap_or(&far));
             let by_bearing = toward(a).total_cmp(&toward(b));
             a.visited
                 .cmp(&b.visited)
@@ -1793,11 +1792,7 @@ impl WorldMap {
                 // level counts as zero**, which is the same choice for the same reason: no level in
                 // a live heading means no combat, and an unheaded node is what we are here to
                 // reveal. Neither reading makes an unknown node look *worse* than a known fight.
-                .then(
-                    a.remembered_level()
-                        .unwrap_or(0)
-                        .cmp(&b.remembered_level().unwrap_or(0)),
-                )
+                .then(a.remembered_level().unwrap_or(0).cmp(&b.remembered_level().unwrap_or(0)))
                 .then(b.connections.cmp(&a.connections))
                 .then(b.hidden.unwrap_or(0).cmp(&a.hidden.unwrap_or(0)))
                 .then(a.key.cmp(&b.key))
@@ -1811,7 +1806,11 @@ impl WorldMap {
         };
         frontier
             .first()
-            .map(|p| Plan { target: p.key.clone(), reason: reason.clone(), steered_by: steered_by.clone() })
+            .map(|p| Plan {
+                target: p.key.clone(),
+                reason: reason.clone(),
+                steered_by: steered_by.clone(),
+            })
             // **The release for [`SHRINES_BEFORE_THE_ANOMALY`].**
             //
             // Reached only when every branch above declined *and* there is no frontier left to
@@ -1828,9 +1827,11 @@ impl WorldMap {
             // honest ending. A plan it can never satisfy is not the safer alternative — it is the
             // loop guard ending the run four laps later with nothing learned.
             .or_else(|| {
-                self.anomaly()
-                    .filter(|p| ok(p))
-                    .map(|p| Plan { target: p.key.clone(), reason: Goal::CloseAnomaly, steered_by: None })
+                self.anomaly().filter(|p| ok(p)).map(|p| Plan {
+                    target: p.key.clone(),
+                    reason: Goal::CloseAnomaly,
+                    steered_by: None,
+                })
             })
     }
 
@@ -2004,8 +2005,11 @@ impl WorldMap {
             // recalled from the cache reads as level 0 and we hop straight over a fight (#79). A
             // crypt cleared by *this* run still reads 0 and still hops, because there the game is
             // the one saying so — see [`Place::remembered_level`].
-            let gentle =
-                self.places.get(key).map(|p| p.remembered_level().unwrap_or(0) <= 3).unwrap_or(false);
+            let gentle = self
+                .places
+                .get(key)
+                .map(|p| p.remembered_level().unwrap_or(0) <= 3)
+                .unwrap_or(false);
             if !gentle {
                 return false;
             }
@@ -2374,7 +2378,11 @@ mod tests {
         // could buy nothing above now buys eleven.
         let mut m = build(HEART_FLOOR);
         m.bought_the_heart("l11");
-        assert_eq!(m.stacks_to_buy(), 11, "110 gold is eleven rests once nothing is being saved for");
+        assert_eq!(
+            m.stacks_to_buy(),
+            11,
+            "110 gold is eleven rests once nothing is being saved for"
+        );
         assert!(m.wants_a_bed());
 
         // **Being hurt is not subject to any of this.** The ruling ranks two kinds of preparation;
@@ -2518,7 +2526,10 @@ mod tests {
         m.fold(&dump(
             "l10",
             "Trenwick — level 1 crypt",
-            vec![node("shrine1", "Swanland shrine"), node("l4sub9", "Bainton Clump woodland shrine")],
+            vec![
+                node("shrine1", "Swanland shrine"),
+                node("l4sub9", "Bainton Clump woodland shrine"),
+            ],
         ));
         m.here = Some("l10".into());
         m.hell = Some(0.1);
@@ -2588,7 +2599,11 @@ mod tests {
         // map because we only heard of it through save flags.
         let mut m = WorldMap::new();
         ready_for_the_anomaly(&mut m);
-        m.fold(&dump("l39", "Eight Timberland — level 4 forest", vec![node("l29", "Rookdale — level 3 crypt")]));
+        m.fold(&dump(
+            "l39",
+            "Eight Timberland — level 4 forest",
+            vec![node("l29", "Rookdale — level 3 crypt")],
+        ));
         m.entry("start").corrupted = true;
         m.hell = Some(0.1);
         assert_eq!(m.anomaly().map(|p| p.key.as_str()), Some("start"));
@@ -2724,7 +2739,11 @@ mod tests {
     fn a_lost_woods_is_still_used_when_it_is_the_only_way() {
         let mut m = WorldMap::new();
         m.fold(&dump("start", "camp", vec![node("woods", "Mistwood forest")]));
-        m.fold(&dump("woods", "Mistwood forest", vec![node("start", "camp"), node("goal", "Grim Barrow — level 4 crypt")]));
+        m.fold(&dump(
+            "woods",
+            "Mistwood forest",
+            vec![node("start", "camp"), node("goal", "Grim Barrow — level 4 crypt")],
+        ));
         m.here = Some("start".into());
         m.entry("woods").avoid = true;
         // Being swallowed again is bad; standing still forever is worse.
@@ -2734,7 +2753,8 @@ mod tests {
     #[test]
     fn an_avoided_place_is_never_chosen_as_a_destination() {
         let mut m = WorldMap::new();
-        let mut d = dump("start", "camp", vec![node("woods", "Mistwood forest"), node("a", "a meadow")]);
+        let mut d =
+            dump("start", "camp", vec![node("woods", "Mistwood forest"), node("a", "a meadow")]);
         d.hidden = 0;
         m.fold(&d);
         m.entry("woods").avoid = true;
@@ -2779,8 +2799,16 @@ mod tests {
                 node("l10", "Ulrome — level 3 forest"),
             ],
         ));
-        m.fold(&dump("l10", "Ulrome — level 3 forest", vec![node("l4", "Bainton Clump — level 1 forest")]));
-        m.fold(&dump("l4", "Bainton Clump — level 1 forest", vec![node("l11", "Rowlston Covert village")]));
+        m.fold(&dump(
+            "l10",
+            "Ulrome — level 3 forest",
+            vec![node("l4", "Bainton Clump — level 1 forest")],
+        ));
+        m.fold(&dump(
+            "l4",
+            "Bainton Clump — level 1 forest",
+            vec![node("l11", "Rowlston Covert village")],
+        ));
         // Back where the run was when it chose, and hurt enough to want a bed.
         m.fold(&dump("l1", "Weedley Copse crypt", vec![node("l9", "Kelk Wold — level 2 forest")]));
         m.gold = 50;
@@ -2979,8 +3007,8 @@ mod tests {
     fn while_hurt_a_hostile_subworld_is_not_the_way_to_open_the_anomaly() {
         let mut m = hurt_at_l1();
         m.hell = Some(0.0); // anomaly still to be opened
-        // Take resting off the table, so the planner reaches the branch under test rather than
-        // simply walking to the campfire the fixture provides.
+                            // Take resting off the table, so the planner reaches the branch under test rather than
+                            // simply walking to the campfire the fixture provides.
         for p in m.places.values_mut() {
             p.used = true;
         }
@@ -3058,7 +3086,10 @@ mod tests {
         // when the filter started asking the arrival question: it is visited, so `hostile_to_enter`
         // says nothing about it, but its heading carries a level so a fight is still owed. Taking a
         // level 1 forest over a corrupted level 6 village is the point of the whole ranking.
-        assert_eq!(plan.target, "l4", "a preference must not strand the run, nor pick the worst fight");
+        assert_eq!(
+            plan.target, "l4",
+            "a preference must not strand the run, nor pick the worst fight"
+        );
     }
 
     #[test]
@@ -3101,10 +3132,7 @@ mod tests {
         m.fold(&dump(
             "l41",
             "Grimston crossroads",
-            vec![
-                node("l50", "Burtonfields — level 6 crypt"),
-                node("shrine5", "Gembling shrine"),
-            ],
+            vec![node("l50", "Burtonfields — level 6 crypt"), node("shrine5", "Gembling shrine")],
         ));
         // 1/20 -- below half, so `health_is_low` sets the intent however we arrived.
         m.note_health_level(crate::rest::Health { current: 1, max: 20 });
@@ -3213,13 +3241,13 @@ mod tests {
         // `!consecrated` can never be discharged and the shrine stays "outstanding" forever. Praying
         // is the only thing available, and once it is done there is genuinely nothing left there.
         let mut m = WorldMap::new();
-        m.fold(&dump(
-            "shrine1",
-            "Swanland shrine",
-            vec![node("l10", "Trenwick — level 1 crypt")],
-        ));
+        m.fold(&dump("shrine1", "Swanland shrine", vec![node("l10", "Trenwick — level 1 crypt")]));
         m.entry("shrine1").completed = true;
-        m.fold(&dump("l10", "Trenwick — level 1 crypt", vec![node("shrine2", "Foggathorpe shrine")]));
+        m.fold(&dump(
+            "l10",
+            "Trenwick — level 1 crypt",
+            vec![node("shrine2", "Foggathorpe shrine")],
+        ));
 
         // Standing at l10, the unprayed shrine1 next door is a fair target.
         let plan = m.next_target().unwrap();
@@ -3276,10 +3304,7 @@ mod tests {
         let plan = m.next_target();
         if let Some(plan) = plan {
             assert_ne!(plan.reason, Goal::Shrine, "still treating a finished shrine as work");
-            assert!(
-                !plan.target.starts_with("shrine"),
-                "went back to a finished shrine: {plan:?}"
-            );
+            assert!(!plan.target.starts_with("shrine"), "went back to a finished shrine: {plan:?}");
         }
     }
 
@@ -3361,20 +3386,37 @@ mod tests {
         ready_for_the_anomaly(&mut m);
         // Two leaves. Nothing left to reveal at either, so the planner will not explore to them --
         // and they are the only two moves there are.
-        m.fold(&dump("here", "The Wold crossroads", vec![
-            Node { key: "west".into(), heading: "West Field".into(),
-                   x: -100.0, y: 0.0, connections: 1 },
-            Node { key: "east".into(), heading: "East Field".into(),
-                   x: 100.0, y: 0.0, connections: 1 },
-        ]));
+        m.fold(&dump(
+            "here",
+            "The Wold crossroads",
+            vec![
+                Node {
+                    key: "west".into(),
+                    heading: "West Field".into(),
+                    x: -100.0,
+                    y: 0.0,
+                    connections: 1,
+                },
+                Node {
+                    key: "east".into(),
+                    heading: "East Field".into(),
+                    x: 100.0,
+                    y: 0.0,
+                    connections: 1,
+                },
+            ],
+        ));
         // The anomaly as a live run meets it: heard of through `start_first_corrupt_time`, with no
         // heading and no edges, so no route. Its bearing comes from the corrupted blob, which is
         // west of here.
-        m.apply_save(&crate::game::save::parse(
-            "return { overworld = { areaFlags = {
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = {
                  hell = 0.1, start_first_corrupt_time = 12, west_first_corrupt_time = 12,
              } } }",
-        ).unwrap());
+            )
+            .unwrap(),
+        );
 
         assert!(!m.can_route_to("start"), "the fixture must actually have no route");
         let hop = m.next_hop().expect("a step");
@@ -3416,7 +3458,11 @@ mod tests {
         hurt.fuel = 1;
         hurt.note_health_level(crate::rest::Health { current: 3, max: 20 });
         assert!(hurt.wants_rest());
-        assert_ne!(hurt.next_target().expect("a plan").reason, Goal::Chest, "a fight is not a rest");
+        assert_ne!(
+            hurt.next_target().expect("a plan").reason,
+            Goal::Chest,
+            "a fight is not a rest"
+        );
 
         // And an opened one is not a destination at all.
         let mut done = build();
@@ -3434,7 +3480,11 @@ mod tests {
         let village = |k: &str| node(k, "Rowlston Covert village");
         let build = || {
             let mut m = WorldMap::new();
-            m.fold(&dump("here", "camp", vec![village("l11"), node("l4", "Riccall — level 6 crypt")]));
+            m.fold(&dump(
+                "here",
+                "camp",
+                vec![village("l11"), node("l4", "Riccall — level 6 crypt")],
+            ));
             m.here = Some("here".into());
             m.hell = Some(0.1);
             m.gold = HEART_FLOOR;
@@ -3443,7 +3493,11 @@ mod tests {
 
         let m = build();
         let plan = m.next_target().expect("a plan");
-        assert_eq!(plan.reason, Goal::Heart, "the anomaly is open, the gold is there, the road is free");
+        assert_eq!(
+            plan.reason,
+            Goal::Heart,
+            "the anomaly is open, the gold is there, the road is free"
+        );
         assert_eq!(plan.target, "l11");
 
         // **And with the portal shut**, which is the dev's correction of 2026-08-16. The clause
@@ -3462,7 +3516,11 @@ mod tests {
         let mut m = build();
         m.gold = HEART_FLOOR - 1;
         assert_ne!(m.next_target().unwrap().reason, Goal::Heart, "the price alone is not enough");
-        assert_eq!(HEART_FLOOR, HEART_COST + crate::rest::INN_COST, "the reserve is exactly one night");
+        assert_eq!(
+            HEART_FLOOR,
+            HEART_COST + crate::rest::INN_COST,
+            "the reserve is exactly one night"
+        );
 
         // A fight on the way and it is not a detour, it is the fight.
         let mut m = WorldMap::new();
@@ -3643,8 +3701,14 @@ e	l4	l11
 
         // Remembered and uncorrupted: no reason to think it is a fight, and no pessimism about it.
         m.hell = Some(0.1);
-        assert!(!m.get("l4").expect("recalled").may_be_a_fight(), "a remembered name is not a threat");
-        assert!(m.reachable_without_a_fight("here", "l11"), "so the village behind it is a free trip");
+        assert!(
+            !m.get("l4").expect("recalled").may_be_a_fight(),
+            "a remembered name is not a threat"
+        );
+        assert!(
+            m.reachable_without_a_fight("here", "l11"),
+            "so the village behind it is a free trip"
+        );
 
         // The save says otherwise, and the save is read fresh every step.
         m.apply_save(
@@ -3672,12 +3736,16 @@ e	l4	l11
     #[test]
     fn a_shrine_we_can_reach_beats_an_anomaly_we_cannot() {
         let mut m = WorldMap::new();
-        m.fold(&dump("l28", "Enholmes town", vec![
-            node("l27", "Barkerdale village"),
-            node("l19", "Dane village"),
-            node("l49", "Yokefleet — level 6 crypt"),
-            node("shrine6", "Borsea shrine"),
-        ]));
+        m.fold(&dump(
+            "l28",
+            "Enholmes town",
+            vec![
+                node("l27", "Barkerdale village"),
+                node("l19", "Dane village"),
+                node("l49", "Yokefleet — level 6 crypt"),
+                node("shrine6", "Borsea shrine"),
+            ],
+        ));
         // `start` as the run actually held it: heard of through `start_first_corrupt_time`, no
         // heading, no edges. `hell = 0.1` means the portal is open -- see `anomaly_is_open`.
         m.apply_save(&crate::game::save::parse(
@@ -3685,7 +3753,11 @@ e	l4	l11
         ).unwrap());
         m.here = Some("l28".into());
 
-        assert_eq!(m.anomaly().map(|p| p.key.as_str()), Some("start"), "still known for what it is");
+        assert_eq!(
+            m.anomaly().map(|p| p.key.as_str()),
+            Some("start"),
+            "still known for what it is"
+        );
         assert!(!m.can_route_to("start"), "and still nothing we can walk to");
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Shrine, "the branch that can make progress gets its turn");
@@ -3704,17 +3776,34 @@ e	l4	l11
     fn we_explore_toward_the_errand_we_could_not_route_to() {
         let mut m = WorldMap::new();
         ready_for_the_anomaly(&mut m);
-        m.fold(&dump("here", "The Wold crossroads", vec![
-            Node { key: "zwest".into(), heading: "West Field".into(),
-                   x: -100.0, y: 0.0, connections: 3 },
-            Node { key: "aeast".into(), heading: "East Field".into(),
-                   x: 100.0, y: 0.0, connections: 3 },
-        ]));
-        m.apply_save(&crate::game::save::parse(
-            "return { overworld = { areaFlags = {
+        m.fold(&dump(
+            "here",
+            "The Wold crossroads",
+            vec![
+                Node {
+                    key: "zwest".into(),
+                    heading: "West Field".into(),
+                    x: -100.0,
+                    y: 0.0,
+                    connections: 3,
+                },
+                Node {
+                    key: "aeast".into(),
+                    heading: "East Field".into(),
+                    x: 100.0,
+                    y: 0.0,
+                    connections: 3,
+                },
+            ],
+        ));
+        m.apply_save(
+            &crate::game::save::parse(
+                "return { overworld = { areaFlags = {
                  hell = 0.1, start_first_corrupt_time = 12, zwest_first_corrupt_time = 12,
              } } }",
-        ).unwrap());
+            )
+            .unwrap(),
+        );
 
         assert!(!m.can_route_to("start"), "so the anomaly branch yields");
         let plan = m.next_target().unwrap();
@@ -3882,7 +3971,11 @@ e	l4	l11
         // The distinction "incomplete" cannot make: a shrine revealed far from the hell radius and
         // never fought is an ordinary detour, while one the radius reset is the fight to avoid.
         let mut m = WorldMap::new();
-        let mut d = dump("here", "camp", vec![node("s1", "Faraway shrine"), node("l2", "Quiet Glade meadow")]);
+        let mut d = dump(
+            "here",
+            "camp",
+            vec![node("s1", "Faraway shrine"), node("l2", "Quiet Glade meadow")],
+        );
         d.hidden = 1;
         m.fold(&d);
         m.hell = Some(0.1);
@@ -3971,7 +4064,8 @@ e	l4	l11
         let flat = line(false);
         assert_eq!(flat.anomaly(), None, "the control: nothing to end at");
         assert_eq!(
-            flat.best_consecration_order("here", &flat.places.values().collect::<Vec<_>>()).as_deref(),
+            flat.best_consecration_order("here", &flat.places.values().collect::<Vec<_>>())
+                .as_deref(),
             Some("shrine1"),
             "so the rift is what moved the answer, not the ordering by itself"
         );
@@ -4048,8 +4142,11 @@ e	l4	l11
         // Keyed `shrine1` rather than `s1`, because `Consecrate` is gated on `majorShrine` and the
         // game derives that from the key (`world.lua:87-90`) — see [`Place::can_be_consecrated`].
         let mut m = WorldMap::new();
-        let mut d =
-            dump("here", "camp", vec![node("shrine1", "Faraway shrine"), node("l2", "Quiet Glade meadow")]);
+        let mut d = dump(
+            "here",
+            "camp",
+            vec![node("shrine1", "Faraway shrine"), node("l2", "Quiet Glade meadow")],
+        );
         d.hidden = 1;
         m.fold(&d);
         m.hell = Some(0.1);
@@ -4222,7 +4319,10 @@ e	l4	l11
 
         // The route still costs a fight, and we go anyway. Both halves matter: a fixture that had
         // quietly become fight-free would pass this for the wrong reason.
-        assert!(!m.reachable_without_a_fight("here", "shrine2"), "the only way through is the crypt");
+        assert!(
+            !m.reachable_without_a_fight("here", "shrine2"),
+            "the only way through is the crypt"
+        );
         let plan = m.next_target().unwrap();
         assert_eq!(plan.reason, Goal::Shrine);
         assert_eq!(plan.target, "shrine2");
@@ -4293,7 +4393,11 @@ e	l4	l11
 
         // And an unlooked road never upgrades a *known* fight into a maybe: the crypt on the only
         // recorded route is still a crypt.
-        assert_eq!(m.access_without_a_fight("here", "l49"), Access::Blocked, "the fight is not in doubt");
+        assert_eq!(
+            m.access_without_a_fight("here", "l49"),
+            Access::Blocked,
+            "the fight is not in doubt"
+        );
     }
 
     /// On `Unknown`, the heart errand walks to the unlooked road instead of abandoning the errand.
@@ -4496,7 +4600,10 @@ e	l4	l11
         m.fold(&dump(
             "here",
             "camp",
-            vec![node("shrine2", "Gransmoor shrine"), node("l39", "Eight Timberland — level 4 forest")],
+            vec![
+                node("shrine2", "Gransmoor shrine"),
+                node("l39", "Eight Timberland — level 4 forest"),
+            ],
         ));
         m.hell = Some(0.0);
         // **What this measures changed on 2026-08-16 and the game fact behind it did not.**
@@ -4527,7 +4634,8 @@ e	l4	l11
         // `far` is two, behind an already-exhausted `through`.
         let mut m = WorldMap::new();
         m.fold(&dump("here", "camp", vec![node("near", "a meadow"), node("through", "b meadow")]));
-        let mut done = dump("through", "b meadow", vec![node("here", "camp"), node("far", "c meadow")]);
+        let mut done =
+            dump("through", "b meadow", vec![node("here", "camp"), node("far", "c meadow")]);
         done.hidden = 0;
         m.fold(&done);
         m.here = Some("here".into());
@@ -4592,7 +4700,11 @@ e	l4	l11
         m.hell = Some(0.1);
         m.entry(ANOMALY_KEY).completed_corrupt = true;
         // Everything is visited, nothing hides neighbours, the anomaly is beaten: no target.
-        assert_eq!(m.next_target(), None, "walking on would be pointless, and saying so is the answer");
+        assert_eq!(
+            m.next_target(),
+            None,
+            "walking on would be pointless, and saying so is the answer"
+        );
     }
 
     /// The log names the fight the bank is being kept for, and the two have to switch off together.
@@ -4835,7 +4947,11 @@ e	l4	l11
         // way `min_by_key` breaks it, so this asserts the distance rather than which of the pair.
         ready_for_the_anomaly(&mut m);
         let plan = m.next_target().expect("a target");
-        assert_eq!(plan.reason, Goal::Shrine, "free ones are left, so the branch does not fall through");
+        assert_eq!(
+            plan.reason,
+            Goal::Shrine,
+            "free ones are left, so the branch does not fall through"
+        );
         assert_ne!(plan.target, "shrine5", "twelve hops, and every one of them past a fight");
         assert_eq!(d.get(plan.target.as_str()), Some(&42), "the pair the 1519Z run actually took");
     }

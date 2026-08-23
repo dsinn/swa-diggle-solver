@@ -132,7 +132,9 @@ const BOARD_CHANGE_WAIT: Duration = Duration::from_millis(1500);
 ///
 /// Length is part of it: a board that lost a tile is a different board, and every index after the
 /// gap now means something else.
-fn board_differs(now: &[crate::observe::board::Tile], planned: &[crate::observe::board::Tile]) -> bool {
+fn board_differs(
+    now: &[crate::observe::board::Tile], planned: &[crate::observe::board::Tile],
+) -> bool {
     now != planned
 }
 
@@ -292,7 +294,8 @@ impl Fight<'_> {
         let mut finished = false;
         // When `combatSaveData` first became unreadable, cleared on every successful read.
         let mut unreadable_since: Option<Instant> = None;
-        let mut peak_health: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut peak_health: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
         // Everything below asks "since this fight began", never "ever". A driver reuses one [`Feed`]
         // across fights, and the previous fight's `Item selection:` is still in the buffer — matching
         // it would send us to collect a reward that was taken minutes ago.
@@ -328,7 +331,14 @@ impl Fight<'_> {
                 Err(_) => {
                     // A reward screen is the common next thing, but not the only one.
                     if feed.seen_since(began, "Item selection:") {
-                        return self.take_reward(feed, keys, log, turns, deadline, self.player_is_hurt());
+                        return self.take_reward(
+                            feed,
+                            keys,
+                            log,
+                            turns,
+                            deadline,
+                            self.player_is_hurt(),
+                        );
                     }
                     // Not proof of anything yet: see `SAVE_SETTLE`. Give the rewrite time to finish
                     // and the reward screen time to announce itself.
@@ -398,7 +408,14 @@ impl Fight<'_> {
                         }
                     }
                     if feed.seen_since(began, "Item selection:") {
-                        return self.take_reward(feed, keys, log, turns, deadline, self.player_is_hurt());
+                        return self.take_reward(
+                            feed,
+                            keys,
+                            log,
+                            turns,
+                            deadline,
+                            self.player_is_hurt(),
+                        );
                     }
                     std::thread::sleep(crate::timing::POLL_SAVE);
                 }
@@ -471,9 +488,9 @@ impl Fight<'_> {
     }
 
     fn play_turn(
-        &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, cs: &Table, turns: usize,
-        peak_health: &mut std::collections::HashMap<String, i64>, murder_backoff: &mut i64,
-        last_seen_at: &mut (i64, i64), select_failures: &mut usize,
+        &self, feed: &mut Feed, keys: &PostMessageInput, log: &mut String, cs: &Table,
+        turns: usize, peak_health: &mut std::collections::HashMap<String, i64>,
+        murder_backoff: &mut i64, last_seen_at: &mut (i64, i64), select_failures: &mut usize,
     ) -> Result<Option<Outcome>, crate::Error> {
         let tiles = tiles_of(cs);
         if tiles.is_empty() {
@@ -531,7 +548,11 @@ impl Fight<'_> {
         let armour_room = {
             let now = cs.int_at("rpg.player.armour");
             let max = cs.int_at("rpg.player.maxHealth").map(|m| {
-                if cs.path("rpg.player.gearFlags.maxArmourHalved").is_some() { m / 2 } else { m }
+                if cs.path("rpg.player.gearFlags.maxArmourHalved").is_some() {
+                    m / 2
+                } else {
+                    m
+                }
             });
             match (now, max) {
                 (Some(a), Some(m)) => a < m,
@@ -597,14 +618,16 @@ impl Fight<'_> {
                 // So the ceiling stops at 2 and the floor at 1: the narrowest honest band is "deal
                 // exactly 1". If even that is refused as murder, no further lowering can help and
                 // the backoff is the wrong tool for whatever is happening.
-                let dropped = (below - *murder_backoff).max(crate::search::MIN_MEANINGFUL_DAMAGE + 1);
+                let dropped =
+                    (below - *murder_backoff).max(crate::search::MIN_MEANINGFUL_DAMAGE + 1);
                 goal = Goal::Scare {
                     need: need.min(dropped - 1).max(crate::search::MIN_MEANINGFUL_DAMAGE),
                     below: dropped,
                 };
                 log.push_str(&format!(
                     "  aiming {} lower after a murder warning: {goal:?}
-", murder_backoff
+",
+                    murder_backoff
                 ));
             }
         }
@@ -637,8 +660,7 @@ impl Fight<'_> {
         // "the game scored the word higher than we did" from "the enemy was already dying".
         let statuses = crate::lexica::Lexica::statuses_from_save(cs);
         if !statuses.is_empty() {
-            let mut shown: Vec<String> =
-                statuses.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            let mut shown: Vec<String> = statuses.iter().map(|(k, v)| format!("{k}={v}")).collect();
             shown.sort();
             log.push_str(&format!("  {name} statuses: {}\n", shown.join(" ")));
         }
@@ -653,10 +675,7 @@ impl Fight<'_> {
         // Unknown counts as **room available**, the opposite of how unknown health is treated when
         // deciding whether to fight. The asymmetry is deliberate: guessing wrong about health can
         // end the save, while guessing wrong here costs a slightly worse word.
-        let picking = crate::pick::Context {
-            target: self.letters.target(tiles.len()),
-            prefs,
-        };
+        let picking = crate::pick::Context { target: self.letters.target(tiles.len()), prefs };
         let out = search::search(self.dict, self.scorer, &tiles, &geom, &mods, goal, &picking, 8);
         let letters: String = tiles.iter().map(|t| t.letter.as_str()).collect();
         let Some(found) = out.choice_for(goal).cloned() else {
@@ -938,8 +957,10 @@ impl Fight<'_> {
                     // So the case says its own name now. A modal we could not dismiss is the one
                     // situation where the board genuinely is not there to be typed on, and it is
                     // distinguishable from a misread threshold precisely because we watched it fail.
-                    log.push_str("  the murder warning would not clear — the board is behind it
-");
+                    log.push_str(
+                        "  the murder warning would not clear — the board is behind it
+",
+                    );
                     return Ok(Some(Outcome::BoardNeverSettled { turns }));
                 }
                 *murder_backoff += 1;
@@ -1004,7 +1025,8 @@ impl Fight<'_> {
     /// A click would also have to wait out the 0.625s fade before the plaque is solid enough to
     /// aim at; the key is live the moment the dialog is announced.
     fn back_out_of_murder(
-        &self, keys: &PostMessageInput, log: &mut String, board: &Board, placed: &crate::combat::Placed,
+        &self, keys: &PostMessageInput, log: &mut String, board: &Board,
+        placed: &crate::combat::Placed,
     ) -> Result<bool, crate::Error> {
         for attempt in 1..=MURDER_CANCEL_TRIES {
             keys.focus();
@@ -1046,9 +1068,7 @@ impl Fight<'_> {
     ///
     /// Only reached when the band is already at minimum damage; see [`nothing_left_to_lower`] for
     /// why a kill is preferred to replaying the same word.
-    fn accept_murder(
-        &self, keys: &PostMessageInput, log: &mut String,
-    ) -> Result<(), crate::Error> {
+    fn accept_murder(&self, keys: &PostMessageInput, log: &mut String) -> Result<(), crate::Error> {
         for attempt in 1..=MURDER_CANCEL_TRIES {
             keys.focus();
             keys.press_key(VK_SPACE, SC_SPACE)?;
@@ -1262,13 +1282,16 @@ impl Fight<'_> {
         // watching for it, and `seen_since` would then wait out its whole timeout for a line that
         // had already arrived.
         let mark = feed.mark();
-        match crate::itemchoice::choose(self.win, feed, keys, &self.game_dir, log, deadline, hurt)? {
+        match crate::itemchoice::choose(self.win, feed, keys, &self.game_dir, log, deadline, hurt)?
+        {
             crate::itemchoice::Chosen::Took(key) => {
                 return self.after_confirm(feed, keys, log, turns, deadline, Some(key), mark);
             }
             other => {
-                log.push_str(&format!("  no reward taken: {other:?}
-"));
+                log.push_str(&format!(
+                    "  no reward taken: {other:?}
+"
+                ));
                 self.shot("reward-not-taken");
                 return Ok(Outcome::Cleared { turns, reward: None });
             }
@@ -1370,7 +1393,8 @@ impl Fight<'_> {
     }
 
     fn shot(&self, name: &str) {
-        if let (Some(dir), Ok(f)) = (self.frames.as_ref(), crate::win::capture::capture_window(self.win))
+        if let (Some(dir), Ok(f)) =
+            (self.frames.as_ref(), crate::win::capture::capture_window(self.win))
         {
             let _ = f.write_png(&dir.join(format!("{name}.png")));
         }
@@ -1394,9 +1418,7 @@ impl Fight<'_> {
 /// The dropped quality mattered too: a wood or gold tile scored as an ordinary letter, so even a
 /// board that happened to parse to the right length would have been mis-scored.
 fn tiles_of(save: &Table) -> Vec<crate::observe::board::Tile> {
-    save.table_at("tileboard")
-        .map(crate::observe::board::tiles_from)
-        .unwrap_or_default()
+    save.table_at("tileboard").map(crate::observe::board::tiles_from).unwrap_or_default()
 }
 
 /// One line per turn: how many tiles the dump carried, and the shape we read it against.
@@ -1603,11 +1625,10 @@ mod tileboard_tests {
     /// the per-turn proof that it was.
     #[test]
     fn the_depleted_l1_board_was_ragged_and_the_census_says_so() {
-        let save =
-            crate::game::save::load(std::path::Path::new(
-                "tests/fixtures/combatSaveData-l1-depleted.lua",
-            ))
-            .expect("fixture loads");
+        let save = crate::game::save::load(std::path::Path::new(
+            "tests/fixtures/combatSaveData-l1-depleted.lua",
+        ))
+        .expect("fixture loads");
         let tiles = tiles_of(&save);
         let resolved = crate::geometry::Geometry::from_save(&save, tiles.len());
         assert_eq!(tiles.len(), 10, "ten tiles left on a sixteen-slot board");
@@ -1660,9 +1681,7 @@ mod tileboard_tests {
 /// The player's side of the killing-blow decision, from `combatSaveData`.
 ///
 /// Returns `None` when nothing about overkill matters, so the search keeps its ordinary goal.
-fn player_state(
-    cs: &Table, mods: &crate::search::Modifiers,
-) -> Option<crate::search::PlayerState> {
+fn player_state(cs: &Table, mods: &crate::search::Modifiers) -> Option<crate::search::PlayerState> {
     let current = cs.int_at("rpg.player.health")?;
     let max = cs.int_at("rpg.player.maxHealth")?;
     let status = |k: &str| cs.path(&format!("rpg.player.statusEffects.{k}")).is_some();

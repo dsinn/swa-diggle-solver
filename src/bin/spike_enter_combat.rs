@@ -187,10 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     keys.focus();
     std::thread::sleep(Duration::from_millis(400));
-    keys.press_key(
-        diggle_solver::win::input::VK_SPACE,
-        diggle_solver::win::input::SC_SPACE,
-    )?;
+    keys.press_key(diggle_solver::win::input::VK_SPACE, diggle_solver::win::input::SC_SPACE)?;
     log.push_str("sent Space (Start)\n");
 
     // A fight is under way once the game writes a combat save. That file is the handover to

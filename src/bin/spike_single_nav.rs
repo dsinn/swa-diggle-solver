@@ -99,7 +99,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let (dx, dy) = (START.0 - c.0, START.1 - c.1);
         let (vk, sc, name) = if dx.abs() >= dy.abs() {
-            if dx > 0 { (VK_RIGHT, SC_RIGHT, "Right") } else { (VK_LEFT, SC_LEFT, "Left") }
+            if dx > 0 {
+                (VK_RIGHT, SC_RIGHT, "Right")
+            } else {
+                (VK_LEFT, SC_LEFT, "Left")
+            }
         } else if dy > 0 {
             (VK_DOWN, SC_DOWN, "Down")
         } else {

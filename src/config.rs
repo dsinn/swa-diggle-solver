@@ -158,7 +158,9 @@ pub fn run_args(args: &[String], click_default: bool) -> Result<RunArgs, String>
                 // Capped, because a mistyped delay is silent in exactly the way the flags above are:
                 // the run sits there looking launched. Ten minutes is far past any recorder.
                 if secs > 600 {
-                    return Err(format!("--delay {secs} is longer than ten minutes; that is a typo"));
+                    return Err(format!(
+                        "--delay {secs} is longer than ten minutes; that is a typo"
+                    ));
                 }
                 out.hold_off = std::time::Duration::from_secs(secs);
             }
@@ -182,10 +184,8 @@ mod tests {
         // The defaulted field must not change what an existing config.toml does. Photographing
         // every click costs a full-window capture per click; turning that on by accident would slow
         // every fight and nothing in the log would say why.
-        let cfg: Config = toml::from_str(
-            "game_dir = \"g\"\nlovec_path = \"l\"\nrun_minutes = 0\n",
-        )
-        .expect("a config without the flag still parses");
+        let cfg: Config = toml::from_str("game_dir = \"g\"\nlovec_path = \"l\"\nrun_minutes = 0\n")
+            .expect("a config without the flag still parses");
         assert!(!cfg.debug_click_frames);
     }
 
@@ -242,17 +242,16 @@ mod tests {
 
     #[test]
     fn the_last_flag_wins_so_a_shell_alias_can_be_overridden() {
-        assert!(!run_args(&args(&["--click-frames", "--no-click-frames"]), false)
-            .unwrap()
-            .click_frames);
+        assert!(
+            !run_args(&args(&["--click-frames", "--no-click-frames"]), false).unwrap().click_frames
+        );
     }
 
     #[test]
     fn the_flag_can_be_turned_on_from_the_file() {
-        let cfg: Config = toml::from_str(
-            "game_dir = \"g\"\nlovec_path = \"l\"\ndebug_click_frames = true\n",
-        )
-        .expect("parses");
+        let cfg: Config =
+            toml::from_str("game_dir = \"g\"\nlovec_path = \"l\"\ndebug_click_frames = true\n")
+                .expect("parses");
         assert!(cfg.debug_click_frames);
     }
 

@@ -203,7 +203,8 @@ impl RestData {
     fn from_table(t: &Table) -> Self {
         // Anything that is neither nil nor `false` is truthy in Lua, which is exactly what
         // `doingEvent` needs: it arrives as a quoted `"function: 0x…"` when a dream is queued.
-        let truthy = |k: &str| !matches!(t.get(k), None | Some(Value::Nil) | Some(Value::Bool(false)));
+        let truthy =
+            |k: &str| !matches!(t.get(k), None | Some(Value::Nil) | Some(Value::Bool(false)));
         RestData {
             can_rest: truthy("canRest"),
             health_need: t.int_at("healthNeed").unwrap_or(0),
@@ -390,7 +391,8 @@ Rest data = {
 
     #[test]
     fn nothing_to_gain_is_no_presses() {
-        let full = RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
+        let full =
+            RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
         assert_eq!(presses_needed(&full, 763, 0), 0);
         let refused =
             RestData { can_rest: false, health_need: 19, health_give: 6, ..Default::default() };
@@ -410,7 +412,8 @@ Rest data = {
     /// standing in the way.
     #[test]
     fn stacks_are_bought_at_full_health() {
-        let full = RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
+        let full =
+            RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
         assert_eq!(presses_needed(&full, 763, 0), 0, "nothing wanted, nothing pressed — as before");
         assert_eq!(presses_needed(&full, 763, 5), 5, "five stacks short is five presses");
         // Sixteen is the level 8 anomaly's whole bank, from empty.
@@ -453,7 +456,8 @@ Rest data = {
     /// The two together: once the want is spent, the press count is zero and the visit ends.
     #[test]
     fn a_satisfied_bank_stops_the_visit_rather_than_running_to_the_ceiling() {
-        let full = RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
+        let full =
+            RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
         let (gold, short) = still_wanted(641, 11, 11);
         assert_eq!(
             presses_needed(&full, gold, short),
@@ -466,7 +470,8 @@ Rest data = {
     /// The purse still caps it, and the floor is still the inn's own.
     #[test]
     fn gold_caps_the_bank_exactly_as_it_caps_the_bar() {
-        let full = RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
+        let full =
+            RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
         assert_eq!(presses_needed(&full, 30, 16), 3, "three rests is what thirty gold buys");
         assert_eq!(
             presses_needed(&full, crate::rest::INN_COST - 1, 16),
@@ -493,7 +498,8 @@ Rest data = {
             "a full restock wants {} presses and the cap is {MAX_PRESSES}",
             crate::rest::stacks_short(0)
         );
-        let full = RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
+        let full =
+            RestData { can_rest: true, health_need: 0, health_give: 6, ..Default::default() };
         assert_eq!(presses_needed(&full, 10_000, 500), MAX_PRESSES, "and it is still a ceiling");
     }
 

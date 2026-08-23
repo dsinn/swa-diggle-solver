@@ -251,7 +251,9 @@ pub const fn answer_for(screen: Screen) -> Answer {
 pub fn precheck(screen: Screen) -> Option<Stop> {
     match answer_for(screen) {
         Answer::Unanswered => Some(Stop::Unanswered(screen)),
-        Answer::Escape | Answer::Fight | Answer::Bespoke | Answer::Elsewhere(_) | Answer::Map => None,
+        Answer::Escape | Answer::Fight | Answer::Bespoke | Answer::Elsewhere(_) | Answer::Map => {
+            None
+        }
     }
 }
 
@@ -316,7 +318,11 @@ mod tests {
         // Every escape's screen must be in the list, which is the cheapest way to notice the list
         // going stale in the direction that matters.
         for e in ESCAPES {
-            assert!(Screen::ALL.contains(&e.screen), "{:?} is escapable but not in Screen::ALL", e.screen);
+            assert!(
+                Screen::ALL.contains(&e.screen),
+                "{:?} is escapable but not in Screen::ALL",
+                e.screen
+            );
         }
     }
 

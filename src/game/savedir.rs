@@ -21,7 +21,9 @@ pub fn unfused(appdata: &Path) -> PathBuf {
 /// path matching how we launch the game — true for Diggle's normal `lovec.exe`
 /// launch. The directory need not exist yet: LOVE creates it on first save, and
 /// on a clean unfused run it genuinely will not exist until then.
-pub fn locate(override_dir: Option<PathBuf>, expect_unfused: bool) -> Result<PathBuf, crate::Error> {
+pub fn locate(
+    override_dir: Option<PathBuf>, expect_unfused: bool,
+) -> Result<PathBuf, crate::Error> {
     if let Some(dir) = override_dir {
         return Ok(dir);
     }

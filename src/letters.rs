@@ -112,7 +112,8 @@ fn read_row(line: &str) -> Option<(char, f64)> {
     if !letter.is_ascii_uppercase() {
         return None;
     }
-    let weight: f64 = rest.trim().trim_end_matches(',').trim_end_matches('}').trim().parse().ok()?;
+    let weight: f64 =
+        rest.trim().trim_end_matches(',').trim_end_matches('}').trim().parse().ok()?;
     Some((letter, weight))
 }
 
@@ -258,9 +259,9 @@ mod tests {
         let t = w.target(16);
         // Sixteen `Q`s is the worst board the alphabet allows; a spread of common letters is not.
         let awful = counts_of(std::iter::repeat("Q").take(16));
-        let decent = counts_of(
-            ["E", "A", "I", "S", "O", "R", "N", "T", "L", "C", "U", "D", "P", "M", "G", "H"],
-        );
+        let decent = counts_of([
+            "E", "A", "I", "S", "O", "R", "N", "T", "L", "C", "U", "D", "P", "M", "G", "H",
+        ]);
         assert!(
             t.deviation(&decent) < t.deviation(&awful),
             "decent {} should beat awful {}",
@@ -288,7 +289,11 @@ mod tests {
         assert_eq!(ash.iter().sum::<usize>(), 2, "and nothing else");
 
         let qu = counts_of(["QU"]);
-        assert_eq!((qu[at('Q')], qu[at('U')]), (1, 1), "a QU is a Q and the U that makes it usable");
+        assert_eq!(
+            (qu[at('Q')], qu[at('U')]),
+            (1, 1),
+            "a QU is a Q and the U that makes it usable"
+        );
 
         // Three characters, for the suffix tiles that do not exist here yet.
         let ing = counts_of(["ING"]);

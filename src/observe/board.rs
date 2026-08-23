@@ -72,8 +72,17 @@ pub struct Quality {
 ///
 /// `destroy` and `bg2`/`fg` style keys are presentation or scheduling, not score. Listing them
 /// explicitly means a genuinely new key still shows up in [`Quality::unmodelled`].
-const HANDLED: &[&str] =
-    &["bg", "border", "ligature", "burn", "carbon", "unselectable", "destroy", "itemSource", "itemModifier"];
+const HANDLED: &[&str] = &[
+    "bg",
+    "border",
+    "ligature",
+    "burn",
+    "carbon",
+    "unselectable",
+    "destroy",
+    "itemSource",
+    "itemModifier",
+];
 
 impl Quality {
     pub fn from_extra(extra: &Table) -> Self {
@@ -229,10 +238,7 @@ pub fn parse_dumps(lines: &[String]) -> Vec<BoardDump> {
         };
         // `Player turn N start;` — the number is the only digits before the marker.
         let head = &lines[i][..marker_at];
-        let turn: u32 = head
-            .split_whitespace()
-            .find_map(|w| w.parse().ok())
-            .unwrap_or(0);
+        let turn: u32 = head.split_whitespace().find_map(|w| w.parse().ok()).unwrap_or(0);
 
         // Collect from the opening brace to the matching close. Depth-counted, because a special
         // tile opens a nested table.

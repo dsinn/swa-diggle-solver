@@ -183,9 +183,9 @@ Shop inventory = {
         stock = 2,
     },
 }"
-            .lines()
-            .map(str::to_string)
-            .collect()
+        .lines()
+        .map(str::to_string)
+        .collect()
     }
 
     #[test]

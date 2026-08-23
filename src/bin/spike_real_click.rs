@@ -60,10 +60,7 @@ const REPORT: &str = "spike-frames-live/real-click-report.md";
 
 /// Reads the log until a dump arrives. Returns the last one seen.
 fn collect(
-    console: &mut Console,
-    mirror: &mut LogMirror,
-    reader: &mut adjacency::Reader,
-    secs: u64,
+    console: &mut Console, mirror: &mut LogMirror, reader: &mut adjacency::Reader, secs: u64,
 ) -> Result<Option<adjacency::Adjacency>, Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(secs);
     while Instant::now() < deadline {
@@ -143,7 +140,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     warp_cursor(sx, sy)?;
     std::thread::sleep(Duration::from_millis(700));
     let after_hover = capture_window(&win)?;
-    let hover_changed = before_hover.diff_fraction(&after_hover, Region { nx: 0.0, ny: 0.0, nw: 1.0, nh: 1.0 });
+    let hover_changed =
+        before_hover.diff_fraction(&after_hover, Region { nx: 0.0, ny: 0.0, nw: 1.0, nh: 1.0 });
     let landed = {
         let mut p = windows::Win32::Foundation::POINT::default();
         unsafe {
@@ -155,8 +153,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "## Control 1 — the game sees the cursor\n\ncursor landed at screen {landed:?} \
          (wanted ({sx},{sy}))\nframe changed by {hover_changed:.4} after the warp\n\n\
          **{}**\n\n",
-        if hover_changed > 0.002 { "CHANGED — motion is reaching the game" }
-        else { "NO VISIBLE CHANGE — injected motion may not be reaching the game" }
+        if hover_changed > 0.002 {
+            "CHANGED — motion is reaching the game"
+        } else {
+            "NO VISIBLE CHANGE — injected motion may not be reaching the game"
+        }
     ));
 
     // ---- CONTROL 2: does a real click select the node? ----

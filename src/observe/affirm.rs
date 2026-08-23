@@ -256,12 +256,8 @@ impl ButtonArt {
         let (cx, cy) = button_center(spec, w, h);
         let (tw, th) = ((spec.w * s).round() as i32, (spec.h * s).round() as i32);
         let (x0, y0) = (cx - tw / 2 - origin.0, cy - th / 2 - origin.1);
-        let bounds = Some((
-            x0 - SEARCH_SLACK,
-            y0 - SEARCH_SLACK,
-            x0 + SEARCH_SLACK,
-            y0 + SEARCH_SLACK,
-        ));
+        let bounds =
+            Some((x0 - SEARCH_SLACK, y0 - SEARCH_SLACK, x0 + SEARCH_SLACK, y0 + SEARCH_SLACK));
 
         let mut scored: Vec<(State, f64)> = Vec::with_capacity(4);
         for (state, tpl) in [

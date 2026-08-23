@@ -247,7 +247,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             attempt_log.push_str(&format!(
                 "attempt {attempt}: cursor before Return = ({}, {}), in_start_rect={}\n",
-                cb.x, cb.y, in_start_rect(cb.x, cb.y)
+                cb.x,
+                cb.y,
+                in_start_rect(cb.x, cb.y)
             ));
             if !in_start_rect(cb.x, cb.y) {
                 attempt_log.push_str(&format!(
@@ -320,7 +322,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut clusters_desc = String::new();
     for c in &clusters {
         let (label, dist) = nearest_label(c.0, c.1);
-        clusters_desc.push_str(&format!("- ({}, {}) -- nearest known: {} (dist {:.1})\n", c.0, c.1, label, dist));
+        clusters_desc.push_str(&format!(
+            "- ({}, {}) -- nearest known: {} (dist {:.1})\n",
+            c.0, c.1, label, dist
+        ));
     }
 
     let sequence_desc = match found_at {
@@ -350,10 +355,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          threshold: {return_threshold:.4}\n\
          reacted (left the start menu): {return_reacted}\n\
          before/after frames (last attempt): {before_bmp} -> {after_bmp}\n",
-        initial_cursor.x, initial_cursor.y,
-        cursor_before_return.0, cursor_before_return.1,
-        cursor_after_keyup.0, cursor_after_keyup.1,
-        cursor_after_return.0, cursor_after_return.1,
+        initial_cursor.x,
+        initial_cursor.y,
+        cursor_before_return.0,
+        cursor_before_return.1,
+        cursor_after_keyup.0,
+        cursor_after_keyup.1,
+        cursor_after_return.0,
+        cursor_after_return.1,
     );
 
     std::fs::File::create(format!("{FRAMES_DIR}/report.md"))?.write_all(report.as_bytes())?;

@@ -30,11 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
 /// quoting has to be ours to control: the exe path and game directory contain spaces, the flags
 /// must not be quoted.
 pub fn build_command_line(cfg: &Config) -> String {
-    format!(
-        "\"{}\" \"{}\" --verbose --console",
-        cfg.lovec_path.display(),
-        cfg.game_dir.display()
-    )
+    format!("\"{}\" \"{}\" --verbose --console", cfg.lovec_path.display(), cfg.game_dir.display())
 }
 
 pub struct GameProcess {
@@ -55,12 +51,8 @@ impl GameProcess {
     pub fn launch(cfg: &Config, _console: &Console) -> Result<Self, crate::Error> {
         crate::win::process::refuse_if_running("lovec.exe", &[])?;
 
-        let exe: Vec<u16> = cfg
-            .lovec_path
-            .to_string_lossy()
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let exe: Vec<u16> =
+            cfg.lovec_path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
         let mut cmdline: Vec<u16> =
             build_command_line(cfg).encode_utf16().chain(std::iter::once(0)).collect();
 
@@ -139,8 +131,8 @@ impl GameProcess {
                 let _ = PostMessageW(w.hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
             }
         }
-        let exited =
-            unsafe { WaitForSingleObject(self.handle, timeout.as_millis() as u32) } == WAIT_OBJECT_0;
+        let exited = unsafe { WaitForSingleObject(self.handle, timeout.as_millis() as u32) }
+            == WAIT_OBJECT_0;
         if !exited {
             self.kill();
         }

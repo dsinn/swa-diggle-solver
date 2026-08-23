@@ -269,7 +269,11 @@ mod tests {
         e.insert("bleedWeak".to_string(), 1.0);
         assert_eq!(status_tick(&e, WeaponBonus::default(), Some(20)), 5, "bleed doubles to 2");
         e.insert("toxinImmune".to_string(), 1.0);
-        assert_eq!(status_tick(&e, WeaponBonus::default(), Some(20)), 2, "toxin contributes nothing");
+        assert_eq!(
+            status_tick(&e, WeaponBonus::default(), Some(20)),
+            2,
+            "toxin contributes nothing"
+        );
         assert!(
             deferred_status_model(&e, &Weapon::default()).is_none(),
             "Weak and Immune are modelled, not deferred"

@@ -210,11 +210,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (`overworld.lua:1514`). Nothing is printed, so a frame diff over that strip is the only
     // instrument available — and it is load-bearing rather than a nicety, because of what comes
     // next.
-    let floor = diggle_solver::observe::settle::sample_noise_floor(
-        &win,
-        6,
-        Duration::from_millis(150),
-    )?;
+    let floor =
+        diggle_solver::observe::settle::sample_noise_floor(&win, 6, Duration::from_millis(150))?;
     park(&win);
     std::thread::sleep(Duration::from_millis(300));
     let before = diggle_solver::win::capture::capture_window(&win)?;
@@ -254,10 +251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let keys = diggle_solver::win::input::PostMessageInput::new(win);
     keys.focus();
     std::thread::sleep(Duration::from_millis(200));
-    keys.press_key(
-        diggle_solver::win::input::VK_SPACE,
-        diggle_solver::win::input::SC_SPACE,
-    )?;
+    keys.press_key(diggle_solver::win::input::VK_SPACE, diggle_solver::win::input::SC_SPACE)?;
 
     // --- wait for whatever answers ---
     // An arrival dump means we moved. An event means something intercepted us and the overworld is
@@ -293,7 +287,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         handled_event = true;
                     }
                     None => {
-                        log.push_str("  **left alone**: more than one real choice, no policy yet\n");
+                        log.push_str(
+                            "  **left alone**: more than one real choice, no policy yet\n",
+                        );
                         break;
                     }
                 }

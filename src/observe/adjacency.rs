@@ -244,9 +244,8 @@ pub fn parse(lines: &[String]) -> Vec<Adjacency> {
             if let Some(to) = rest_after_label(t, "heading to:").and_then(key_and_rest) {
                 a.exits.push(Exit { x, y, to_key: to.0, to_heading: to.1 });
             } else if let Some((key, heading)) = pending.take() {
-                let connections = after_label(t, "connections:")
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .unwrap_or(0);
+                let connections =
+                    after_label(t, "connections:").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
                 a.nodes.push(Node { key, heading, x, y, connections });
             }
             continue;

@@ -49,7 +49,11 @@ fn tile_luma(frame: &Frame, cx: i32, cy: i32, radius: i32) -> f64 {
             n += 1.0;
         }
     }
-    if n == 0.0 { 0.0 } else { sum / n }
+    if n == 0.0 {
+        0.0
+    } else {
+        sum / n
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

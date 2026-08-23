@@ -47,9 +47,9 @@ mod pace;
 pub use pace::{walk_budget, Ground};
 mod place;
 mod plan;
-pub use plan::{Access, Goal, Hop, Plan};
 pub use frame::{Frame, InsideFrame, ScreenScale, FRAME_TOLERANCE};
 pub use place::{Arrival, Place, Risk};
+pub use plan::{Access, Goal, Hop, Plan};
 
 /// The map cache's format marker, and the reason it is versioned at all.
 ///
@@ -1077,11 +1077,8 @@ impl WorldMap {
             // The key is built by the game as `parent.key..'_path_to_'..k` (`overworldview.lua:1043`),
             // so the suffix is the overworld node on the other side.
             let prefix = format!("{container}_path_to_");
-            self.entered_from = a
-                .here_key
-                .strip_prefix(&prefix)
-                .filter(|k| !k.is_empty())
-                .map(str::to_string);
+            self.entered_from =
+                a.here_key.strip_prefix(&prefix).filter(|k| !k.is_empty()).map(str::to_string);
             // A fresh crossing decides its own door. Re-entering a subworld is the one moment the
             // world is allowed to have changed under us — `subworld::Rules::edges_survive_reentry`
             // exists because the interior can re-roll — so a commitment made on the last visit is
@@ -1148,8 +1145,11 @@ impl WorldMap {
         match a.subworld.as_ref().map(|(k, _)| k.as_str()) {
             Some(c) if self.inside_frame.container.as_deref() == Some(c) => {}
             Some(c) => {
-                self.inside_frame =
-                    InsideFrame { container: Some(c.to_string()), pos: BTreeMap::new(), scale: Some(1.0) }
+                self.inside_frame = InsideFrame {
+                    container: Some(c.to_string()),
+                    pos: BTreeMap::new(),
+                    scale: Some(1.0),
+                }
             }
             None => self.inside_frame = InsideFrame::default(),
         }
@@ -1323,7 +1323,8 @@ impl WorldMap {
                 // **The value is read, and it is not always `true`.** A road cut by corruption stays
                 // in the table carrying `false`; only the locations are removed outright. Iterating
                 // the keys alone could not tell those apart.
-                if value.as_bool() == Some(false) || matches!(value, crate::game::save::Value::Nil) {
+                if value.as_bool() == Some(false) || matches!(value, crate::game::save::Value::Nil)
+                {
                     continue;
                 }
                 if let Some(base) = key.strip_suffix("_corrupt") {
@@ -1375,7 +1376,10 @@ impl WorldMap {
                     let base = format!("overworld.areaFlags.{village}_shops.generalStoreStock");
                     save.table_at(&base).is_some()
                         && save
-                            .int_at(&format!("{base}.inventoryHash.{}.stock", crate::shopplay::HEART))
+                            .int_at(&format!(
+                                "{base}.inventoryHash.{}.stock",
+                                crate::shopplay::HEART
+                            ))
                             .unwrap_or(0)
                             <= 0
                 })
@@ -2044,13 +2048,8 @@ impl WorldMap {
     /// any of this existed.
     pub fn can_travel_direct(&self, a: &str, b: &str) -> bool {
         let done = |k: &str| self.places.get(k).map(|p| p.completed).unwrap_or(false);
-        let adjacent = self
-            .places
-            .get(a)
-            .map(|p| p.neighbours.contains(b))
-            .unwrap_or(false);
-        adjacent
-            && (done(a) || done(b) || done(&exit_node_key(a, b)) || done(&exit_node_key(b, a)))
+        let adjacent = self.places.get(a).map(|p| p.neighbours.contains(b)).unwrap_or(false);
+        adjacent && (done(a) || done(b) || done(&exit_node_key(a, b)) || done(&exit_node_key(b, a)))
     }
 
     /// The furthest node along our own route to `to` that we may select and travel to in one press.
@@ -2113,9 +2112,7 @@ impl WorldMap {
     /// Shared by [`WorldMap::far_hop`] and [`WorldMap::far_hop_inside`], which differ only in
     /// `stop_at` — the question "is this intermediate node one we must not stride past?". Keeping one
     /// walker means the two can never disagree about the *route*, only about where to get off it.
-    fn far_chain_all(
-        &self, from: &str, to: &str, stop_at: &dyn Fn(&Place) -> bool,
-    ) -> Vec<String> {
+    fn far_chain_all(&self, from: &str, to: &str, stop_at: &dyn Fn(&Place) -> bool) -> Vec<String> {
         if from == to {
             return Vec::new();
         }
@@ -2265,8 +2262,7 @@ impl WorldMap {
         // **Pass 2 must not be removed.** A subworld can have no road at all between here and the
         // destination, and a run that refuses every route has stalled — which is worse than any
         // single bad step.
-        let passes: [&dyn Fn(&Place) -> bool; 2] =
-            [&|p: &Place| !p.is_paved(), &|_: &Place| false];
+        let passes: [&dyn Fn(&Place) -> bool; 2] = [&|p: &Place| !p.is_paved(), &|_: &Place| false];
         for avoid in passes {
             if let Some(step) = self.step_avoiding(from, to, shun, avoid) {
                 return Some(step);
@@ -2343,17 +2339,16 @@ impl WorldMap {
     }
 
     fn entry(&mut self, key: &str) -> &mut Place {
-        self.places.entry(key.to_string()).or_insert_with(|| Place {
-            key: key.to_string(),
-            ..Default::default()
-        })
+        self.places
+            .entry(key.to_string())
+            .or_insert_with(|| Place { key: key.to_string(), ..Default::default() })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::fixtures::*;
+    use super::*;
     use crate::observe::adjacency::{Exit, Node};
 
     /// **The 1828Z stop, which was a full-health run refusing a level 2 crypt.**
@@ -2382,7 +2377,10 @@ mod tests {
         m.apply_save(&save(5, 20));
         let carried = m.health().expect("read");
         assert_eq!((carried.current, carried.max), (5, 20));
-        assert!(crate::rest::health_is_low(carried), "5 of 20 is genuinely too hurt to pick a fight");
+        assert!(
+            crate::rest::health_is_low(carried),
+            "5 of 20 is genuinely too hurt to pick a fight"
+        );
 
         // The inn, then the heart. `drive` logged both of these and kept neither.
         m.apply_save(&save(20, 20));
@@ -2434,7 +2432,8 @@ mod tests {
         let read = |status: &str| {
             let mut m = WorldMap::new();
             m.apply_save(
-                &crate::game::save::parse(&format!("return {{ player = {{ {status} }} }}")).unwrap(),
+                &crate::game::save::parse(&format!("return {{ player = {{ {status} }} }}"))
+                    .unwrap(),
             );
             m.well_rested
         };
@@ -2505,8 +2504,14 @@ mod tests {
         // adjacent — which `apply_save` has parsed into an edge since long before the roster
         // existed. So a shrine whose road has been flagged arrives routable, and one whose road has
         // not arrives as a name. Both are worth having and only the second needed writing.
-        assert!(m.can_route_to("shrine1"), "the road flag names the edge, so this one can be reached");
-        assert!(m.can_route_to("l4"), "and the control: the vantage point really does route somewhere");
+        assert!(
+            m.can_route_to("shrine1"),
+            "the road flag names the edge, so this one can be reached"
+        );
+        assert!(
+            m.can_route_to("l4"),
+            "and the control: the vantage point really does route somewhere"
+        );
 
         // The plaza, the subnode and the road are not shrines in the roster's sense. The plaza and
         // subnode belong to a shrine already counted; the road is the mistake `roads_done` exists to
@@ -2632,8 +2637,13 @@ mod tests {
         // The only place the container's neighbourhood is ever learned. We travel onto a village and
         // step straight inside, so no surface dump is taken standing on it.
         let mut m = WorldMap::new();
-        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post", vec![],
-            vec![exit("l7"), exit("l1"), exit("l18"), exit("l4"), exit("l19")]));
+        m.fold(&inside_dump(
+            "l10",
+            "l10sub6",
+            "Ulrome guard post",
+            vec![],
+            vec![exit("l7"), exit("l1"), exit("l18"), exit("l4"), exit("l19")],
+        ));
         let l10 = m.get("l10").expect("container");
         for k in ["l7", "l1", "l18", "l4", "l19"] {
             assert!(l10.neighbours.contains(k), "l10 should know it borders {k}");
@@ -2648,8 +2658,13 @@ mod tests {
         // village was a revolving door.
         let mut m = WorldMap::new();
         m.fold(&dump("l19", "Gipsyville crypt", vec![node("l10", "Ulrome — level 6 village")]));
-        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post", vec![],
-            vec![exit("l19"), exit("l7")]));
+        m.fold(&inside_dump(
+            "l10",
+            "l10sub6",
+            "Ulrome guard post",
+            vec![],
+            vec![exit("l19"), exit("l7")],
+        ));
         // l19 -> l10 -> l7 is now a path, so l7 is two hops from where we entered rather than absent.
         //
         // Both hops cost [`CROSSING`], because nothing in this fixture has been cleared and no road
@@ -2666,8 +2681,13 @@ mod tests {
         // Otherwise a stale entrance would go on biasing exit choice in the *next* subworld.
         let mut m = WorldMap::new();
         m.fold(&dump("l19", "Gipsyville crypt", vec![node("l10", "Ulrome — level 6 village")]));
-        m.fold(&inside_dump("l10", "l10_path_to_l19", "Road to Gipsyville crypt", vec![],
-            vec![exit("l19")]));
+        m.fold(&inside_dump(
+            "l10",
+            "l10_path_to_l19",
+            "Road to Gipsyville crypt",
+            vec![],
+            vec![exit("l19")],
+        ));
         assert_eq!(m.entered_from.as_deref(), Some("l19"));
         m.fold(&dump("l7", "Greenoak Backwoods campfire", vec![]));
         assert_eq!(m.entered_from, None);
@@ -2683,7 +2703,11 @@ mod tests {
     #[test]
     fn folding_records_both_ends_of_an_edge() {
         let mut m = WorldMap::new();
-        m.fold(&dump("start", "Cottam campfire", vec![node("l1", "Weedley Copse — level 0 crypt")]));
+        m.fold(&dump(
+            "start",
+            "Cottam campfire",
+            vec![node("l1", "Weedley Copse — level 0 crypt")],
+        ));
         assert!(m.get("start").unwrap().neighbours.contains("l1"));
         assert!(m.get("l1").unwrap().neighbours.contains("start"));
         // We have stood on start, but only heard about l1.
@@ -2703,7 +2727,11 @@ mod tests {
     #[test]
     fn visiting_later_upgrades_what_we_know_without_losing_edges() {
         let mut m = WorldMap::new();
-        m.fold(&dump("start", "Cottam campfire", vec![node("l1", "Weedley Copse — level 0 crypt")]));
+        m.fold(&dump(
+            "start",
+            "Cottam campfire",
+            vec![node("l1", "Weedley Copse — level 0 crypt")],
+        ));
         let mut second = dump("l1", "Weedley Copse — level 0 crypt", vec![node("l2", "far field")]);
         second.hidden = 2;
         m.fold(&second);
@@ -2720,7 +2748,10 @@ mod tests {
         m.fold(&dump(
             "start",
             "camp",
-            vec![node("l4", "Grim Barrow — level 4 crypt"), node("l1", "Weedley Copse — level 0 crypt")],
+            vec![
+                node("l4", "Grim Barrow — level 4 crypt"),
+                node("l1", "Weedley Copse — level 0 crypt"),
+            ],
         ));
         assert_eq!(m.get("l4").unwrap().level(), Some(4));
         assert!(m.get("l4").unwrap().triggers_anomaly());
@@ -2735,7 +2766,11 @@ mod tests {
         // `world_evil.lua:16` requires `not location.parentNode`. This is the case that would
         // otherwise send the run into a forest or mausoleum expecting an anomaly that cannot fire.
         let mut m = WorldMap::new();
-        let mut inside = dump("f1", "Deep Wood — level 4 crypt", vec![node("f2", "Deeper Wood — level 5 crypt")]);
+        let mut inside = dump(
+            "f1",
+            "Deep Wood — level 4 crypt",
+            vec![node("f2", "Deeper Wood — level 5 crypt")],
+        );
         inside.subworld = Some(("forest".into(), "Lost Woods".into()));
         m.fold(&inside);
         assert_eq!(m.get("f1").unwrap().parent.as_deref(), Some("forest"));
@@ -2777,7 +2812,11 @@ mod tests {
         // The portal is not always `start` -- that is one generator's doing. Wherever a dump names
         // an `anomaly`, that is the answer and the prior must not override it.
         let mut m = WorldMap::new();
-        m.fold(&dump("here", "camp", vec![node("start", "Cottam campfire"), node("rift", "The Maw anomaly")]));
+        m.fold(&dump(
+            "here",
+            "camp",
+            vec![node("start", "Cottam campfire"), node("rift", "The Maw anomaly")],
+        ));
         m.hell = Some(0.1);
         assert_eq!(m.anomaly().map(|p| p.key.as_str()), Some("rift"));
         assert!(!m.anomaly_is_assumed(), "a heading confirmed it");
@@ -2810,7 +2849,11 @@ mod tests {
         )
         .unwrap();
         let mut m = WorldMap::new();
-        m.fold(&dump("start", "camp", vec![node("l4", "Mistwood forest"), node("l7", "a village")]));
+        m.fold(&dump(
+            "start",
+            "camp",
+            vec![node("l4", "Mistwood forest"), node("l7", "a village")],
+        ));
         m.apply_save(&save);
         assert!(m.get("l4").unwrap().avoid, "l4 swallowed us once");
         assert!(!m.get("l7").unwrap().avoid, "an _explored flag is not a lost woods");
@@ -2829,7 +2872,8 @@ mod tests {
     /// two scales exactly as a v1 file does. See [`CACHE_VERSION`].
     #[test]
     fn an_old_cache_keeps_its_edges_and_drops_its_positions() {
-        let v1 = "# diggle map cache v1\np\tl9\tSaltagh Park forest\t100\t200\t3\t0\t\ne\tl9\tl19\n";
+        let v1 =
+            "# diggle map cache v1\np\tl9\tSaltagh Park forest\t100\t200\t3\t0\t\ne\tl9\tl19\n";
         for old in ["v1", "v2"] {
             let text = v1.replacen("v1", old, 1);
             let mut m = WorldMap::new();
@@ -2855,9 +2899,8 @@ mod tests {
     /// disagreement `registration` exists to refuse.
     #[test]
     fn a_cache_that_arrives_after_we_have_placed_something_keeps_only_the_shape() {
-        let text = format!(
-            "{CACHE_VERSION}\np\tl9\tSaltagh Park forest\t100\t200\t3\t0\t\ne\tl9\tl19\n"
-        );
+        let text =
+            format!("{CACHE_VERSION}\np\tl9\tSaltagh Park forest\t100\t200\t3\t0\t\ne\tl9\tl19\n");
 
         // Nothing placed yet: this is the startup case, and it takes the positions.
         let mut early = WorldMap::new();
@@ -2867,8 +2910,15 @@ mod tests {
 
         // A frame of our own, from this run's own dump. Now the same file is structure only.
         let mut late = WorldMap::new();
-        late.fold(&fixtures::dump("l1", "camp", vec![fixtures::node_at("l2", "camp", 500.0, 500.0)]));
-        assert!(late.any_placed(), "the fixture must actually place something, or this proves nothing");
+        late.fold(&fixtures::dump(
+            "l1",
+            "camp",
+            vec![fixtures::node_at("l2", "camp", 500.0, 500.0)],
+        ));
+        assert!(
+            late.any_placed(),
+            "the fixture must actually place something, or this proves nothing"
+        );
         assert!(late.absorb_cache_structure(&text) > 0, "the edges are the point of reading it");
         assert!(late.get("l9").unwrap().neighbours.contains("l19"), "the shape is always safe");
         assert_eq!(late.get("l9").unwrap().heading, "Saltagh Park forest", "and so is a name");
@@ -2917,14 +2967,23 @@ mod tests {
         // The wait was the visible half — `pace::tests::a_route_through_an_unplaced_node_cannot_be_priced`
         // has that, and it can only ever make a run slower. This half is the one that does not heal:
         // the coordinates were on disk, and after a lap they are not.
-        let remembered = format!(
-            "{CACHE_VERSION}\np\tl43\tGilridding crypt\t1823\t529\t5\t0\t\ne\tl43\tl44\n"
-        );
+        let remembered =
+            format!("{CACHE_VERSION}\np\tl43\tGilridding crypt\t1823\t529\t5\t0\t\ne\tl43\tl44\n");
         let mut structure_only = WorldMap::new();
-        structure_only.fold(&fixtures::dump("far", "camp", vec![fixtures::node_at("n", "camp", 1.0, 1.0)]));
-        assert!(structure_only.any_placed(), "the premise: a frame of our own, so positions are refused");
+        structure_only.fold(&fixtures::dump(
+            "far",
+            "camp",
+            vec![fixtures::node_at("n", "camp", 1.0, 1.0)],
+        ));
+        assert!(
+            structure_only.any_placed(),
+            "the premise: a frame of our own, so positions are refused"
+        );
         structure_only.absorb_cache_structure(&remembered);
-        assert!(structure_only.get("l43").unwrap().neighbours.contains("l44"), "the shape survives");
+        assert!(
+            structure_only.get("l43").unwrap().neighbours.contains("l44"),
+            "the shape survives"
+        );
 
         let written = structure_only.cache_text();
         assert!(
@@ -3129,15 +3188,23 @@ mod tests {
     fn two_dumps_of_different_places_agree_on_one_map() {
         let mut m = WorldMap::new();
         // First dump defines the frame: `a` at (100, 100), `b` at (200, 100).
-        m.fold(&dump("here", "Somewhere", vec![
-            Node { key: "a".into(), heading: "A".into(), x: 100.0, y: 100.0, connections: 2 },
-            Node { key: "b".into(), heading: "B".into(), x: 200.0, y: 100.0, connections: 2 },
-        ]));
+        m.fold(&dump(
+            "here",
+            "Somewhere",
+            vec![
+                Node { key: "a".into(), heading: "A".into(), x: 100.0, y: 100.0, connections: 2 },
+                Node { key: "b".into(), heading: "B".into(), x: 200.0, y: 100.0, connections: 2 },
+            ],
+        ));
         // Walk to `a` and pan: every number shifts by (+50, -30). `b` is the node in common.
-        m.fold(&dump("a", "A", vec![
-            Node { key: "b".into(), heading: "B".into(), x: 250.0, y: 70.0, connections: 2 },
-            Node { key: "c".into(), heading: "C".into(), x: 350.0, y: 70.0, connections: 2 },
-        ]));
+        m.fold(&dump(
+            "a",
+            "A",
+            vec![
+                Node { key: "b".into(), heading: "B".into(), x: 250.0, y: 70.0, connections: 2 },
+                Node { key: "c".into(), heading: "C".into(), x: 350.0, y: 70.0, connections: 2 },
+            ],
+        ));
         // `c` is 100 beyond `b` in the second frame, so 300 in the first — the pan cancels.
         assert_eq!(m.get("c").unwrap().pos, Some((300.0, 100.0)), "registered through `b`");
         assert_eq!(m.gap("a", "c").map(|d| d as i64), Some(200), "and distances survive the pan");
@@ -3268,19 +3335,31 @@ mod tests {
         m.absorb_cache(&format!(
             "{CACHE_VERSION}\np\ta\tA\t100\t100\t2\t0\t\np\tb\tB\t200\t100\t2\t0\t\n"
         ));
-        assert_eq!(m.get("a").unwrap().pos, Some((100.0, 100.0)), "the premise: positions restored");
+        assert_eq!(
+            m.get("a").unwrap().pos,
+            Some((100.0, 100.0)),
+            "the premise: positions restored"
+        );
 
         // One anchor and a cache-supplied frame: this dump cannot say what the units are worth, and
         // half of it being right is not good enough for a position that never changes again.
-        m.fold(&dump("n1", "Somewhere", vec![node_at("a", "A", 50.0, 50.0), node_at("d", "D", 150.0, 50.0)]));
+        m.fold(&dump(
+            "n1",
+            "Somewhere",
+            vec![node_at("a", "A", 50.0, 50.0), node_at("d", "D", 150.0, 50.0)],
+        ));
         assert_eq!(m.get("d").unwrap().pos, None, "assuming 1.0 here is assuming last run's zoom");
 
         // And the moment a dump carries two, the scale is measured and everything proceeds.
-        m.fold(&dump("n2", "Somewhere", vec![
-            node_at("a", "A", 50.0, 50.0),
-            node_at("b", "B", 100.0, 50.0),
-            node_at("d", "D", 150.0, 50.0),
-        ]));
+        m.fold(&dump(
+            "n2",
+            "Somewhere",
+            vec![
+                node_at("a", "A", 50.0, 50.0),
+                node_at("b", "B", 100.0, 50.0),
+                node_at("d", "D", 150.0, 50.0),
+            ],
+        ));
         assert_eq!(m.get("d").unwrap().pos, Some((300.0, 100.0)));
     }
 
@@ -3288,9 +3367,19 @@ mod tests {
     #[test]
     fn a_subworld_dump_places_nothing() {
         let mut m = WorldMap::new();
-        m.fold(&inside_dump("l9", "l9sub1", "Saltagh Park road",
-            vec![Node { key: "l9sub2".into(), heading: "road".into(), x: 5.0, y: 5.0, connections: 2 }],
-            vec![exit("l19")]));
+        m.fold(&inside_dump(
+            "l9",
+            "l9sub1",
+            "Saltagh Park road",
+            vec![Node {
+                key: "l9sub2".into(),
+                heading: "road".into(),
+                x: 5.0,
+                y: 5.0,
+                connections: 2,
+            }],
+            vec![exit("l19")],
+        ));
         assert_eq!(m.get("l9sub2").unwrap().pos, None, "zoomMult is unchecked inside a subworld");
     }
 
@@ -3305,17 +3394,41 @@ mod tests {
     #[test]
     fn corruption_points_at_an_anomaly_we_have_never_seen() {
         let mut m = WorldMap::new();
-        m.fold(&dump("here", "The Wold crossroads", vec![
-            Node { key: "west".into(), heading: "West Field".into(),
-                   x: -100.0, y: 0.0, connections: 3 },
-            Node { key: "east".into(), heading: "East Field".into(),
-                   x: 100.0, y: 0.0, connections: 3 },
-            // Two corrupted nodes, both well to the west. `start` itself is never dumped.
-            Node { key: "c1".into(), heading: "Burnt Hollow — level 6 crypt".into(),
-                   x: -480.0, y: -40.0, connections: 2 },
-            Node { key: "c2".into(), heading: "Ashen Reach — level 6 forest".into(),
-                   x: -520.0, y: 40.0, connections: 2 },
-        ]));
+        m.fold(&dump(
+            "here",
+            "The Wold crossroads",
+            vec![
+                Node {
+                    key: "west".into(),
+                    heading: "West Field".into(),
+                    x: -100.0,
+                    y: 0.0,
+                    connections: 3,
+                },
+                Node {
+                    key: "east".into(),
+                    heading: "East Field".into(),
+                    x: 100.0,
+                    y: 0.0,
+                    connections: 3,
+                },
+                // Two corrupted nodes, both well to the west. `start` itself is never dumped.
+                Node {
+                    key: "c1".into(),
+                    heading: "Burnt Hollow — level 6 crypt".into(),
+                    x: -480.0,
+                    y: -40.0,
+                    connections: 2,
+                },
+                Node {
+                    key: "c2".into(),
+                    heading: "Ashen Reach — level 6 forest".into(),
+                    x: -520.0,
+                    y: 40.0,
+                    connections: 2,
+                },
+            ],
+        ));
         for k in ["c1", "c2"] {
             m.entry(k).corrupted = true;
         }
@@ -3385,11 +3498,17 @@ mod tests {
     #[test]
     fn a_corrupted_node_stops_being_complete_and_its_roads_stop_being_walkable() {
         let complete = |body: &str| {
-            crate::game::save::parse(&format!("return {{ overworld = {{ completedAreas = {{ {body} }} }} }}"))
-                .unwrap()
+            crate::game::save::parse(&format!(
+                "return {{ overworld = {{ completedAreas = {{ {body} }} }} }}"
+            ))
+            .unwrap()
         };
         let mut m = WorldMap::new();
-        m.fold(&dump("l10", "Ulrome — level 6 village", vec![node("l7", "Greenoak Backwoods campfire")]));
+        m.fold(&dump(
+            "l10",
+            "Ulrome — level 6 village",
+            vec![node("l7", "Greenoak Backwoods campfire")],
+        ));
 
         m.apply_save(&complete("l10 = true, l10_path_to_l7 = true"));
         assert!(m.places.get("l10").unwrap().completed);
@@ -3559,10 +3678,29 @@ mod tests {
                 "here",
                 "Saltagh Park crossroads",
                 vec![
-                    node("road1", if road_fights { "Saltagh Park — level 4 road" } else { "Saltagh Park road" }),
-                    node("wood1", if wood_fights { "Saltagh Park — level 4 forest" } else { "Saltagh Park forest" }),
+                    node(
+                        "road1",
+                        if road_fights {
+                            "Saltagh Park — level 4 road"
+                        } else {
+                            "Saltagh Park road"
+                        },
+                    ),
+                    node(
+                        "wood1",
+                        if wood_fights {
+                            "Saltagh Park — level 4 forest"
+                        } else {
+                            "Saltagh Park forest"
+                        },
+                    ),
                 ],
-                vec![Exit { x: 0.0, y: 0.0, to_key: "l19".into(), to_heading: "Dane village".into() }],
+                vec![Exit {
+                    x: 0.0,
+                    y: 0.0,
+                    to_key: "l19".into(),
+                    to_heading: "Dane village".into(),
+                }],
             ));
             for k in ["road1", "wood1"] {
                 m.entry(k).neighbours.insert("exit".into());
@@ -3698,7 +3836,11 @@ mod tests {
         assert_eq!(l13.base_level, Some(2), "but the fight it was is banked");
         // And while the game is still saying `free`, that is the answer we give — the live heading
         // outranks the bank. See [`Place::remembered_level`].
-        assert_eq!(l13.remembered_level(), None, "a live heading wins, including when it is silent");
+        assert_eq!(
+            l13.remembered_level(),
+            None,
+            "a live heading wins, including when it is silent"
+        );
 
         // Across the file, into a run that has never heard of this crypt.
         let text = lived.cache_text();
@@ -3721,7 +3863,11 @@ mod tests {
         let mut without = WorldMap::new();
         without.absorb_cache(&old);
         let blind = without.get("l13").expect("the cache still carries it");
-        assert_eq!(blind.remembered_level(), None, "the control is vacuous: it never lost the level");
+        assert_eq!(
+            blind.remembered_level(),
+            None,
+            "the control is vacuous: it never lost the level"
+        );
         assert!(!blind.may_be_a_fight(), "the fault #79 reported, reproduced");
     }
 
@@ -3754,7 +3900,9 @@ mod tests {
         // `_first_corrupt_time` marks the reset; the `_shop` variant is a different suffix and must
         // not be mistaken for a location key of its own.
         assert!(m.get("shrine9").unwrap().corrupted);
-        assert!(m.get("shrine9_first_corrupt_time").is_none(), "no phantom place from the shop flag");
+        assert!(
+            m.get("shrine9_first_corrupt_time").is_none(),
+            "no phantom place from the shop flag"
+        );
     }
-
 }

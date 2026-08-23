@@ -25,7 +25,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     m.apply_save(&save);
 
     println!("standing at {:?}", m.here());
-    println!("gold {}  wants_rest {}  wants_a_heart {}", m.gold(), m.wants_rest(), m.wants_a_heart());
+    println!(
+        "gold {}  wants_rest {}  wants_a_heart {}",
+        m.gold(),
+        m.wants_rest(),
+        m.wants_a_heart()
+    );
     println!("anomaly {:?} open {:?}", m.anomaly().map(|p| p.key.clone()), m.anomaly_is_open());
     println!("plan     {:?}", m.next_target());
     println!("next hop {:?}", m.next_hop());

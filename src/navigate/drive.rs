@@ -41,8 +41,10 @@ pub fn drive(
     // game is deleting it, which is the moment a reward is confirmed or postgame is dismissed.
     // Nothing is in flight here.
     if fight.combat_path.is_file() {
-        r.log.push_str("0. resuming a fight already in progress
-");
+        r.log.push_str(
+            "0. resuming a fight already in progress
+",
+        );
         // **Sit still for eight seconds before touching anything.**
         //
         // Resuming drops us into a fight the game is still opening. On 2026-08-12 that meant a boss
@@ -63,14 +65,28 @@ pub fn drive(
         std::thread::sleep(RESUME_SETTLE);
         r.log.push_str(&format!("  waited {RESUME_SETTLE:?} for the fight to finish opening\n"));
         let mut fl = String::new();
-        let outcome =
-            fight.run(&mut r.feed, &r.keys, &mut fl, deadline.min(Instant::now() + Duration::from_secs(300)));
-        r.log.push_str(&fl.lines().map(|l| format!("    {l}
-")).collect::<String>());
+        let outcome = fight.run(
+            &mut r.feed,
+            &r.keys,
+            &mut fl,
+            deadline.min(Instant::now() + Duration::from_secs(300)),
+        );
+        r.log.push_str(
+            &fl.lines()
+                .map(|l| {
+                    format!(
+                        "    {l}
+"
+                    )
+                })
+                .collect::<String>(),
+        );
         match outcome {
             Ok(o) if o.cleared() => {
-                r.log.push_str(&format!("  resumed fight finished: {o:?}
-"));
+                r.log.push_str(&format!(
+                    "  resumed fight finished: {o:?}
+"
+                ));
                 let now = r.apply_save();
                 if let Some((b, a)) = previous_health.advance(now) {
                     r.map.note_health(b, a);
@@ -290,9 +306,9 @@ pub fn drive(
         if screen == crate::act::Screen::Shrine {
             r.apply_save();
             let here = r.map.here().map(str::to_string);
-            if let Some(key) = here.filter(|k| {
-                r.map.worth_consecrating_here(k) && !r.shrines_tried.contains(k)
-            }) {
+            if let Some(key) =
+                here.filter(|k| r.map.worth_consecrating_here(k) && !r.shrines_tried.contains(k))
+            {
                 r.log.push_str(&format!(
                     "  the fight left us on `{key}`'s shrine screen — consecrating here rather \
                      than walking back in\n"
@@ -348,11 +364,8 @@ pub fn drive(
             // identical. The plain template is asked first because it is the ordinary case; the
             // highlighted one exists because arriving through the options menu — the skip's own
             // route — leaves the button lit, and that state had no template until it stalled a run.
-            let mut hit = crate::act::click_exact(
-                r.win,
-                &crate::act::CONTINUE,
-                crate::act::CONTINUE_PRESENT,
-            );
+            let mut hit =
+                crate::act::click_exact(r.win, &crate::act::CONTINUE, crate::act::CONTINUE_PRESENT);
             if hit.is_err() {
                 hit = crate::act::click_exact(
                     r.win,
@@ -362,16 +375,20 @@ pub fn drive(
             }
             match hit {
                 Ok(q) => {
-                    r.log.push_str(&format!("{step}. resumed from the main menu ({q:.4})
-"));
+                    r.log.push_str(&format!(
+                        "{step}. resumed from the main menu ({q:.4})
+"
+                    ));
                     std::thread::sleep(crate::timing::AFTER_RESUME);
                     r.pump();
                 }
                 // Deliberately not a stop. The next iteration re-identifies and tries again, which is
                 // exactly what turns a highlighted button into an ordinary one.
                 Err(e) => {
-                    r.log.push_str(&format!("{step}. main menu, Continue refused: {e}
-"));
+                    r.log.push_str(&format!(
+                        "{step}. main menu, Continue refused: {e}
+"
+                    ));
                     std::thread::sleep(crate::timing::BEFORE_RETRY);
                 }
             }
@@ -409,8 +426,10 @@ pub fn drive(
                 &crate::act::PREGAME_START,
                 crate::act::PREGAME_START_PRESENT,
             ) {
-                Ok(q) => r.log.push_str(&format!("{step}. pregame — started the encounter ({q:.4})
-")),
+                Ok(q) => r.log.push_str(&format!(
+                    "{step}. pregame — started the encounter ({q:.4})
+"
+                )),
                 Err(e) => return Stop::Failed(format!("pregame Start refused: {e}")),
             }
             r.park();
@@ -434,10 +453,14 @@ pub fn drive(
         if r.pending_cinematic {
             r.pending_cinematic = false;
             match skip_cinematic(r) {
-                Ok(()) => r.log.push_str(&format!("{step}. skipped the anomaly cinematic
-")),
-                Err(e) => r.log.push_str(&format!("{step}. could not skip the cinematic: {e}
-")),
+                Ok(()) => r.log.push_str(&format!(
+                    "{step}. skipped the anomaly cinematic
+"
+                )),
+                Err(e) => r.log.push_str(&format!(
+                    "{step}. could not skip the cinematic: {e}
+"
+                )),
             }
             continue;
         }
@@ -465,8 +488,10 @@ pub fn drive(
         // Asked here, in the loop, rather than only where a fight happens to end — same reason
         // dialogue and lore detection live here rather than at a village gate.
         if crate::itemchoice::on_screen(r.win) {
-            r.log.push_str(&format!("{step}. a `Choose one:` screen is up
-"));
+            r.log.push_str(&format!(
+                "{step}. a `Choose one:` screen is up
+"
+            ));
             let mut il = String::new();
             let picked = crate::itemchoice::choose(
                 r.win,
@@ -479,12 +504,22 @@ pub fn drive(
                 // boon is worth nothing at full health.
                 r.map.is_hurt(),
             );
-            r.log.push_str(&il.lines().map(|l| format!("    {l}
-")).collect::<String>());
+            r.log.push_str(
+                &il.lines()
+                    .map(|l| {
+                        format!(
+                            "    {l}
+"
+                        )
+                    })
+                    .collect::<String>(),
+            );
             match picked {
                 Ok(crate::itemchoice::Chosen::Took(key)) => {
-                    r.log.push_str(&format!("  took **{key}**
-"));
+                    r.log.push_str(&format!(
+                        "  took **{key}**
+"
+                    ));
                     // The screen closes into whatever built it -- a postgame after a fight, the map
                     // after a shop -- so let the next pass work out where we are rather than
                     // assuming. It is dismissed; that was the blocking part.
@@ -530,8 +565,10 @@ pub fn drive(
             ));
         }
         if waited.found() {
-            r.log.push_str(&format!("{step}. a fight is waiting to be finished
-"));
+            r.log.push_str(&format!(
+                "{step}. a fight is waiting to be finished
+"
+            ));
             let mut fl = String::new();
             let outcome = fight.run(
                 &mut r.feed,
@@ -539,11 +576,21 @@ pub fn drive(
                 &mut fl,
                 deadline.min(Instant::now() + Duration::from_secs(300)),
             );
-            r.log.push_str(&fl.lines().map(|l| format!("    {l}
-")).collect::<String>());
+            r.log.push_str(
+                &fl.lines()
+                    .map(|l| {
+                        format!(
+                            "    {l}
+"
+                        )
+                    })
+                    .collect::<String>(),
+            );
             match outcome {
-                Ok(o) if o.cleared() => r.log.push_str(&format!("  {o:?}
-")),
+                Ok(o) if o.cleared() => r.log.push_str(&format!(
+                    "  {o:?}
+"
+                )),
                 Ok(o) if o.fatal() => return Stop::Died(format!("{o:?}")),
                 Ok(o) if o.stop_requested() => return Stop::Requested,
                 Ok(other) => return Stop::Fought(format!("{other:?}")),
@@ -737,8 +784,7 @@ pub fn drive(
             // sanity test as a locate-me's answer, because a free dump is not a trustworthy one —
             // that invariant is the point of the note above, and a settled dump drawing a camera
             // somewhere impossible is exactly as wrong however it was come by.
-            let free =
-                r.settled_dump_in_hand().filter(|a| !camera_is_lost(&a.nodes, cw, ch));
+            let free = r.settled_dump_in_hand().filter(|a| !camera_is_lost(&a.nodes, cw, ch));
             if let Some(a) = free {
                 r.recentre_misses = 0;
                 r.log.push_str(&format!(
@@ -747,37 +793,37 @@ pub fn drive(
                 ));
                 a
             } else {
-            match r.recentre().filter(|a| !camera_is_lost(&a.nodes, cw, ch)) {
-                Some(a) => {
-                    r.recentre_misses = 0;
-                    a
-                }
-                // **Not a stop on the first miss.** A failed locate-me means "no map answered", and
-                // the commonest reason by far is that a screen is still arriving — the run that
-                // produced this branch stopped on a stats history page caught mid-fade, with the
-                // previous screen's furniture still drawn over the top of it. Giving up on the first
-                // look diagnoses a transition as a dead end.
-                //
-                // So: wait a second and go round again. Going round is what matters more than the
-                // second — it re-runs `identify` at the top of the loop, which is where a screen
-                // that is not the map gets recognised and handled. Retrying the probe in place would
-                // only ask the same question of the same wrong screen.
-                None => {
-                    r.recentre_misses += 1;
-                    if r.recentre_misses <= RECENTRE_RETRIES {
-                        r.log.push_str(&format!(
-                            "{step}. no pan dump — waiting for a transition (miss {} of {})\n",
-                            r.recentre_misses, RECENTRE_RETRIES
-                        ));
-                        std::thread::sleep(crate::timing::BEFORE_RETRY);
-                        continue;
+                match r.recentre().filter(|a| !camera_is_lost(&a.nodes, cw, ch)) {
+                    Some(a) => {
+                        r.recentre_misses = 0;
+                        a
                     }
-                    return Stop::Failed(format!(
-                        "no pan dump after locate-me, {} times over",
-                        r.recentre_misses
-                    ));
+                    // **Not a stop on the first miss.** A failed locate-me means "no map answered", and
+                    // the commonest reason by far is that a screen is still arriving — the run that
+                    // produced this branch stopped on a stats history page caught mid-fade, with the
+                    // previous screen's furniture still drawn over the top of it. Giving up on the first
+                    // look diagnoses a transition as a dead end.
+                    //
+                    // So: wait a second and go round again. Going round is what matters more than the
+                    // second — it re-runs `identify` at the top of the loop, which is where a screen
+                    // that is not the map gets recognised and handled. Retrying the probe in place would
+                    // only ask the same question of the same wrong screen.
+                    None => {
+                        r.recentre_misses += 1;
+                        if r.recentre_misses <= RECENTRE_RETRIES {
+                            r.log.push_str(&format!(
+                                "{step}. no pan dump — waiting for a transition (miss {} of {})\n",
+                                r.recentre_misses, RECENTRE_RETRIES
+                            ));
+                            std::thread::sleep(crate::timing::BEFORE_RETRY);
+                            continue;
+                        }
+                        return Stop::Failed(format!(
+                            "no pan dump after locate-me, {} times over",
+                            r.recentre_misses
+                        ));
+                    }
                 }
-            }
             }
         };
         let here = r.map.here().unwrap_or("?").to_string();
@@ -1146,8 +1192,10 @@ pub fn drive(
                 // **Which errand are we standing on?** The two share this branch because reaching
                 // them is identical; what happens next is not.
                 if r.map.get(at).map(|p| p.is_general_store()).unwrap_or(false) {
-                    r.log.push_str(&format!("{step}. at **{at}** in `{container}` - the general store
-"));
+                    r.log.push_str(&format!(
+                        "{step}. at **{at}** in `{container}` - the general store
+"
+                    ));
                     // The same press as every other area button, and now confirmed by *which screen
                     // arrived* rather than by the screen having changed. `Shop` sits in the slot
                     // `Visit` and `Combat` share (`village.lua:312-320`), so it is the same press
@@ -1160,8 +1208,10 @@ pub fn drive(
                         &[crate::act::Screen::Shop],
                     ) {
                         r.map.abandon(at);
-                        r.log.push_str("  the shop did not open - writing the store off
-");
+                        r.log.push_str(
+                            "  the shop did not open - writing the store off
+",
+                        );
                         continue;
                     }
                     // The console is the instrument here, not the screen: the pump is what carries
@@ -1172,19 +1222,25 @@ pub fn drive(
                     // **The game told us the stock; the layout tells us where it is drawn.**
                     // Neither is a guess and neither is a template — see `crate::shopplay`.
                     let inv = crate::shopplay::inventory(r.feed.lines());
-                    r.log.push_str(&format!("  the store lists {} items
-", inv.len()));
+                    r.log.push_str(&format!(
+                        "  the store lists {} items
+",
+                        inv.len()
+                    ));
                     let bought = match crate::shopplay::index_of(&inv, crate::shopplay::HEART) {
                         None => {
-                            r.log.push_str("  no `healthBuff` in stock — nothing to buy here
-");
+                            r.log.push_str(
+                                "  no `healthBuff` in stock — nothing to buy here
+",
+                            );
                             false
                         }
                         // **Paged to first, then placed.** `page_the_shop_to` returns the offset it
                         // actually reached rather than the one it wanted, so a press that did not
                         // take leaves `slot_at` unable to place the item — and the `None` arm below
                         // refuses, exactly as it did when paging did not exist at all.
-                        Some(i) => match crate::shopplay::slot_at(r.win, i, page_the_shop_to(r, i)) {
+                        Some(i) => match crate::shopplay::slot_at(r.win, i, page_the_shop_to(r, i))
+                        {
                             // There is no confirmation dialogue on this screen, so a slot we cannot
                             // place is a purchase of whatever else is sitting in it. That was the
                             // whole reason paging was left out, and it is still the answer when
@@ -1232,8 +1288,10 @@ pub fn drive(
                                         want > 0
                                     }
                                     Err(e) => {
-                                        r.log.push_str(&format!("  could not aim at it: {e}
-"));
+                                        r.log.push_str(&format!(
+                                            "  could not aim at it: {e}
+"
+                                        ));
                                         false
                                     }
                                 }
@@ -1835,7 +1893,9 @@ pub fn drive(
                 // in and an early frame is identical to the map it replaced. The fight branch's own
                 // recovery covers this case; here it is enough to fall through and let the arrival
                 // wait below decide, since a fight that did open will change `here` when it ends.
-                r.log.push_str("  the Combat press showed no movement — waiting to see what arrived\n");
+                r.log.push_str(
+                    "  the Combat press showed no movement — waiting to see what arrived\n",
+                );
             } else {
                 let _ = r.click_area_button("Travel (subworld)");
             }
@@ -1895,15 +1955,14 @@ pub fn drive(
             // units apart and took 11.4 s. The fit in `pace.rs` is paired, which is what exposed the
             // difference between end-to-end distance and distance actually walked.
             //
-            let landing: Option<String> = far_inside.as_ref().map(|(k, _)| k.clone()).or_else(|| {
-                match &mv {
-                    Crossing::Step { to, .. } | Crossing::Probe { to, .. } | Crossing::Seek { to } => {
-                        Some(to.clone())
-                    }
+            let landing: Option<String> =
+                far_inside.as_ref().map(|(k, _)| k.clone()).or_else(|| match &mv {
+                    Crossing::Step { to, .. }
+                    | Crossing::Probe { to, .. }
+                    | Crossing::Seek { to } => Some(to.clone()),
                     Crossing::Leave { to } => Some(to.clone()),
                     _ => None,
-                }
-            });
+                });
             // **Sized to this walk**, not to the longest walk in the game. See
             // [`crate::overworld::walk_budget`]: an interior leg is priced flat because the interior
             // frame has its own scale and 576 measured steps show distance does not predict them, so
@@ -1919,7 +1978,8 @@ pub fn drive(
                 Crossing::Leave { .. } => Ground::Transition,
                 _ => Ground::Inside,
             };
-            let legs = landing.as_deref().and_then(|k| r.map.walk_legs(&here, k)).unwrap_or_default();
+            let legs =
+                landing.as_deref().and_then(|k| r.map.walk_legs(&here, k)).unwrap_or_default();
             let budget = crate::overworld::walk_budget(&legs, r.turbo_snail, ground);
             r.log.push_str(&format!(
                 "  allowing {:.0}s for {} leg(s){}
@@ -2290,9 +2350,8 @@ pub fn drive(
                 Some(h) => !r.map.can_step(&here, &h.step),
                 None => true,
             };
-        if let Some(p) = place
-            .as_ref()
-            .filter(|p| p.has_combat() && !p.completed && must_fight_here)
+        if let Some(p) =
+            place.as_ref().filter(|p| p.has_combat() && !p.completed && must_fight_here)
         {
             // The anomaly is fought like anything else. It is level 8 against a character that came
             // straight here, so losing is the likely outcome — and finding out how badly is the
@@ -2352,8 +2411,9 @@ pub fn drive(
             // is a cursor for the delta rule and nothing else, and reading it as *current* is how a
             // full-health run refused a level 2 crypt at a remembered 5/20.
             let now = r.map.health();
-            let too_hurt =
-                now.map(crate::rest::health_is_low).unwrap_or(true) && !enterable && !must_clear_here;
+            let too_hurt = now.map(crate::rest::health_is_low).unwrap_or(true)
+                && !enterable
+                && !must_clear_here;
             if too_hurt && !is_anomaly {
                 let hp = now
                     .map(|h| format!("{}/{}", h.current, h.max))
@@ -2543,7 +2603,8 @@ pub fn drive(
                         break;
                     }
                     let s = crate::act::identify(r.win);
-                    if matches!(s, crate::act::Screen::Pregame | crate::act::Screen::CombatEntered) {
+                    if matches!(s, crate::act::Screen::Pregame | crate::act::Screen::CombatEntered)
+                    {
                         opened = Some(s);
                         break;
                     }
@@ -2555,7 +2616,9 @@ pub fn drive(
                 if let Some(s) = opened {
                     let how = match diff_saw_it {
                         true => String::new(),
-                        false => " — the diff saw nothing and the press had landed after all".into(),
+                        false => {
+                            " — the diff saw nothing and the press had landed after all".into()
+                        }
                     };
                     r.log.push_str(&format!("  `Combat` opened {s:?}{how}\n"));
                     if attempt > 1 {
@@ -2749,7 +2812,8 @@ pub fn drive(
         //
         // The destination is named separately only when it is not the step itself, which on a
         // routed journey is most of them and is exactly the case the question was about.
-        let named = |key: &str| match r.map.get(key).map(|p| p.heading.clone()).unwrap_or_default() {
+        let named = |key: &str| match r.map.get(key).map(|p| p.heading.clone()).unwrap_or_default()
+        {
             h if h.trim().is_empty() => String::new(),
             h => format!(" *{h}*"),
         };
@@ -2784,8 +2848,10 @@ pub fn drive(
         ) {
             // Both shapes of exploring, because the silent one is the interesting one: a `RouteTo`
             // with nothing to aim by is a hop that knows its errand and is walking at random.
-            r.log.push_str("  not steered — exploring by hops alone
-");
+            r.log.push_str(
+                "  not steered — exploring by hops alone
+",
+            );
         }
         // What this hop is *for*, so that arriving there is recognised as arriving. See
         // [`Run::committed_to`].
@@ -2951,7 +3017,8 @@ pub fn drive(
             r.hop_misses = 0;
         }
         if r.combat_expected && !arrived {
-            r.log.push_str("  an event started a fight on the way — handing back to the observer\n");
+            r.log
+                .push_str("  an event started a fight on the way — handing back to the observer\n");
             continue;
         }
         // **Short of the named node is progress, not failure.** An event on the way pauses the walk

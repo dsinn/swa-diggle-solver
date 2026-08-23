@@ -70,7 +70,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     // Deliberately shorter than any harness timeout wrapping this: a spike killed from outside
     // never writes its report, and the stale one on disk then reads as the current result.
-    let outcome = fight.run(&mut feed, &keys, &mut log, Instant::now() + Duration::from_secs(150))?;
+    let outcome =
+        fight.run(&mut feed, &keys, &mut log, Instant::now() + Duration::from_secs(150))?;
     log.push_str(&format!("\n## Result\n\n{outcome:?}\n"));
 
     game.close(Duration::from_secs(15));

@@ -45,7 +45,6 @@ const NEUTRAL: (i32, i32) = (300, 300);
 /// Attempts at selecting an item before giving up.
 const PICK_ATTEMPTS: usize = 3;
 
-
 /// One item on offer: its key, and where the game says it is drawn.
 pub type Offer = (String, i32, i32);
 
@@ -193,8 +192,7 @@ pub const PREFERRED_KINDS: &[&str] = &["passive", "gear"];
 /// [`crate::items`]) as well as one that is genuinely a potion, and both deserve the same answer:
 /// take it only if nothing better is offered.
 pub fn rank(kind: Option<&str>) -> usize {
-    kind.and_then(|k| PREFERRED_KINDS.iter().position(|p| *p == k))
-        .unwrap_or(PREFERRED_KINDS.len())
+    kind.and_then(|k| PREFERRED_KINDS.iter().position(|p| *p == k)).unwrap_or(PREFERRED_KINDS.len())
 }
 
 /// Parses the offers out of the latest `Item selection:` block.
@@ -226,7 +224,8 @@ pub fn offers(lines: &[String]) -> Vec<Offer> {
         if parts.len() < 4 {
             break; // the block has ended
         }
-        let (Ok(x), Ok(y)) = (parts[parts.len() - 2].parse(), parts[parts.len() - 1].parse()) else {
+        let (Ok(x), Ok(y)) = (parts[parts.len() - 2].parse(), parts[parts.len() - 1].parse())
+        else {
             break;
         };
         out.push((parts[0].to_string(), x, y));
@@ -314,7 +313,9 @@ pub fn choose(
     let catalogue = match crate::items::Catalogue::load(game_dir) {
         Ok(c) => Some(c),
         Err(e) => {
-            log.push_str(&format!("  could not read the item catalogue ({e}); picking at random\n"));
+            log.push_str(&format!(
+                "  could not read the item catalogue ({e}); picking at random\n"
+            ));
             None
         }
     };
@@ -356,9 +357,7 @@ pub fn choose(
                 0 => by_kind,
                 _ => by_kind
                     .into_iter()
-                    .filter(|(k, _, _)| {
-                        boon_on(k).map(|b| b.worth(hurt)).unwrap_or(0) == top
-                    })
+                    .filter(|(k, _, _)| boon_on(k).map(|b| b.worth(hurt)).unwrap_or(0) == top)
                     .collect(),
             }
         }
@@ -525,7 +524,11 @@ mod tests {
         assert!(rank(Some("passive")) < rank(Some("gear")));
         assert!(rank(Some("gear")) < rank(Some("consumable")));
         assert_eq!(rank(Some("potion")), rank(Some("scroll")), "unusable kinds tie");
-        assert_eq!(rank(None), rank(Some("potion")), "an unreadable kind is no worse than a potion");
+        assert_eq!(
+            rank(None),
+            rank(Some("potion")),
+            "an unreadable kind is no worse than a potion"
+        );
     }
 
     /// The screen we actually met, keys and all: gloves are `passive`, the idol is `gear`, and the
@@ -539,8 +542,7 @@ mod tests {
             _ => Some("consumable"),
         };
         let best = offered.iter().map(|k| rank(kind(k))).min().unwrap();
-        let short: Vec<&str> =
-            offered.iter().copied().filter(|k| rank(kind(k)) == best).collect();
+        let short: Vec<&str> = offered.iter().copied().filter(|k| rank(kind(k)) == best).collect();
         assert_eq!(short, vec!["armourLeatherGloves"]);
     }
 

@@ -212,7 +212,9 @@ impl WordSource for Baked {
             5 => include_str!("../data/shrine-guesses-5.txt"),
             6 => include_str!("../data/shrine-guesses-6.txt"),
             7 => include_str!("../data/shrine-guesses-7.txt"),
-            _ => return Err(crate::Error::Config(format!("no shrine guesses for length {length}"))),
+            _ => {
+                return Err(crate::Error::Config(format!("no shrine guesses for length {length}")))
+            }
         };
         let mut list = WordList::new(length);
         list.extend(text, length)?;
@@ -241,7 +243,9 @@ impl WordList {
                 continue;
             }
             if w.len() != length || !w.bytes().all(|b| b.is_ascii_lowercase()) {
-                return Err(crate::Error::Config(format!("bad word {w:?} in a length-{length} list")));
+                return Err(crate::Error::Config(format!(
+                    "bad word {w:?} in a length-{length} list"
+                )));
             }
             self.data.extend_from_slice(w.as_bytes());
         }
@@ -508,7 +512,8 @@ impl Solver {
     pub fn propose(&self) -> Option<String> {
         // Nothing has been ruled out yet, so this is the precomputed opener.
         if self.history.is_empty() {
-            if let Some(&(_, _, w)) = OPENERS.iter().find(|&&(l, b, _)| l == self.length && b == self.band)
+            if let Some(&(_, _, w)) =
+                OPENERS.iter().find(|&&(l, b, _)| l == self.length && b == self.band)
             {
                 return Some(w.to_string());
             }
@@ -556,7 +561,8 @@ impl Solver {
 
         let mut best: Option<(u32, usize)> = None;
         for &gi in &pool {
-            let Some(total) = self.solve_cost(&live, gi, depth, &pool, &mut memo, &mut nodes) else {
+            let Some(total) = self.solve_cost(&live, gi, depth, &pool, &mut memo, &mut nodes)
+            else {
                 continue;
             };
             if best.is_none_or(|(b, _)| total < b) {
@@ -569,13 +575,8 @@ impl Solver {
     /// Total guesses to finish every word in `live` if we play `gi` now, or `None` if that cannot be
     /// done within `depth`.
     fn solve_cost(
-        &self,
-        live: &[u32],
-        gi: usize,
-        depth: usize,
-        pool: &[usize],
-        memo: &mut HashMap<(Vec<u32>, usize), Option<u32>>,
-        nodes: &mut usize,
+        &self, live: &[u32], gi: usize, depth: usize, pool: &[usize],
+        memo: &mut HashMap<(Vec<u32>, usize), Option<u32>>, nodes: &mut usize,
     ) -> Option<u32> {
         let g = self.guesses.get(gi);
         let win = solved(self.length);
@@ -601,12 +602,8 @@ impl Solver {
 
     /// Cheapest total over all guesses for this candidate set, within `depth`.
     fn best_cost(
-        &self,
-        live: &[u32],
-        depth: usize,
-        pool: &[usize],
-        memo: &mut HashMap<(Vec<u32>, usize), Option<u32>>,
-        nodes: &mut usize,
+        &self, live: &[u32], depth: usize, pool: &[usize],
+        memo: &mut HashMap<(Vec<u32>, usize), Option<u32>>, nodes: &mut usize,
     ) -> Option<u32> {
         match live.len() {
             0 => return Some(0),
@@ -891,9 +888,8 @@ mod tests {
                 "wild {len} should be exactly easy plus hard"
             );
 
-            let guesses = Baked
-                .guesses(len)
-                .unwrap_or_else(|e| panic!("guesses {len} did not load: {e}"));
+            let guesses =
+                Baked.guesses(len).unwrap_or_else(|e| panic!("guesses {len} did not load: {e}"));
             assert!(!guesses.is_empty(), "guesses {len} loaded empty");
             assert_eq!(guesses.length(), len, "guesses {len} has the wrong width");
         }

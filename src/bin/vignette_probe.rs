@@ -42,9 +42,8 @@ const RINGS: usize = 8;
 
 fn load(path: &Path) -> Result<Frame, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut rdr = png::Decoder::new(file)
-        .read_info()
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut rdr =
+        png::Decoder::new(file).read_info().map_err(|e| format!("{}: {e}", path.display()))?;
     let mut buf = vec![0; rdr.output_buffer_size()];
     let info = rdr.next_frame(&mut buf).map_err(|e| format!("{}: {e}", path.display()))?;
     let n = info.color_type.samples();
@@ -180,7 +179,10 @@ fn main() -> Result<(), String> {
     // A ramp only matters if the recognised rects are on the wrong end of it. `origin` is the exact
     // top-left `score_exact` compares at, so this is the region that decides each read.
     println!("\nper button, over its exact template rect at `origin`:");
-    println!("{:<28} {:>12} {:>8} {:>9} {:>9} {:>8}", "button", "origin", "radius", "hurt", "control", "delta");
+    println!(
+        "{:<28} {:>12} {:>8} {:>9} {:>9} {:>8}",
+        "button", "origin", "radius", "hurt", "control", "delta"
+    );
     println!("{}", "-".repeat(80));
     let mut rows: Vec<(f64, String)> = Vec::new();
     for b in act::ALL {
@@ -230,7 +232,10 @@ fn main() -> Result<(), String> {
     // frames, so the number is the signal's actual survival rate rather than a proxy for it.
     if !rects.is_empty() {
         println!("\ncandidate regions, hurt vs control:");
-        println!("{:<24} {:>8} {:>9} {:>9} {:>8} {:>9}", "rect", "radius", "hurt", "control", "delta", "inliers");
+        println!(
+            "{:<24} {:>8} {:>9} {:>9} {:>8} {:>9}",
+            "rect", "radius", "hurt", "control", "delta", "inliers"
+        );
         println!("{}", "-".repeat(72));
         for (label, (x0, y0, x1, y1)) in &rects {
             let r = radius(&hurt, (x0 + x1) / 2, (y0 + y1) / 2);

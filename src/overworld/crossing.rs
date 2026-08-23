@@ -285,8 +285,7 @@ impl WorldMap {
                 .map(|p| p.triggers_anomaly())
                 .unwrap_or(false);
         let opens_the_portal = |to: &str| {
-            gentle_doors_only
-                && self.places.get(to).map(|p| p.triggers_anomaly()).unwrap_or(false)
+            gentle_doors_only && self.places.get(to).map(|p| p.triggers_anomaly()).unwrap_or(false)
         };
         if gentle_doors_only {
             note.push_str("; gentle doors only");
@@ -459,7 +458,9 @@ impl WorldMap {
         let live: Vec<&crate::observe::adjacency::Exit> = exits
             .iter()
             .filter(|e| {
-                parent.map(|p| !self.abandoned.contains(&exit_node_key(p, &e.to_key))).unwrap_or(true)
+                parent
+                    .map(|p| !self.abandoned.contains(&exit_node_key(p, &e.to_key)))
+                    .unwrap_or(true)
             })
             .collect();
         let mut ranked: Vec<&crate::observe::adjacency::Exit> =
@@ -555,14 +556,16 @@ impl WorldMap {
     /// is *also* a child of the container, so "outside the subworld" would have missed it. It is that
     /// one target **is a door of this container and is not the one we committed to**, which is a
     /// direct contradiction rather than a wandering, and the only shape of target that can be one.
-    fn committed_exit(&self, parent: &str, errand: Option<&Goal>, target: Option<&str>) -> Option<String> {
+    fn committed_exit(
+        &self, parent: &str, errand: Option<&Goal>, target: Option<&str>,
+    ) -> Option<String> {
         let (to, goal) = self.crossing_to.as_ref()?;
         if errand != Some(goal) || self.abandoned.contains(&exit_node_key(parent, to)) {
             return None;
         }
         let committed = exit_node_key(parent, to);
-        let contradicted = target
-            .is_some_and(|t| t.starts_with(&format!("{parent}_path_to_")) && t != committed);
+        let contradicted =
+            target.is_some_and(|t| t.starts_with(&format!("{parent}_path_to_")) && t != committed);
         match contradicted {
             true => None,
             false => Some(to.clone()),
@@ -595,7 +598,6 @@ impl WorldMap {
     pub fn cross_toward(&mut self, exits: &[crate::observe::adjacency::Exit]) -> Option<Crossing> {
         let parent = self.inside()?.to_string();
         let here = self.here.as_deref()?.to_string();
-
 
         // Where inside this subworld are we trying to get to?
         //
@@ -803,9 +805,11 @@ impl WorldMap {
             // out is where we are trying to get to, just not by that door.
             !exits_elsewhere.contains(k)
                 && !self.abandoned.contains(k)
-                && self.places.get(k).map(|p| {
-                    !p.avoid && !(self.wants_rest && p.is_chest() && !p.completed)
-                }).unwrap_or(true)
+                && self
+                    .places
+                    .get(k)
+                    .map(|p| !p.avoid && !(self.wants_rest && p.is_chest() && !p.completed))
+                    .unwrap_or(true)
         };
 
         // **The steer used to be here, and #57 folded it into the ranking below.**
@@ -930,7 +934,11 @@ impl WorldMap {
                     // Squared throughout — it orders the same as the distance and takes no root.
                     // Clamped rather than cast blind: a NaN or an absurd coordinate must sort last,
                     // not wrap to zero and win.
-                    if g.is_finite() && g >= 0.0 { g.min(u64::MAX as f64 - 1.0) as u64 } else { u64::MAX }
+                    if g.is_finite() && g >= 0.0 {
+                        g.min(u64::MAX as f64 - 1.0) as u64
+                    } else {
+                        u64::MAX
+                    }
                 }
                 _ => u64::MAX,
             }
@@ -1434,9 +1442,9 @@ impl WorldMap {
         if !self.places.get(container).map(|p| p.trades()).unwrap_or(true) {
             return None;
         }
-        self.places
-            .values()
-            .find(|p| inside_container(p, container) && p.is_inn() && !self.abandoned.contains(&p.key))
+        self.places.values().find(|p| {
+            inside_container(p, container) && p.is_inn() && !self.abandoned.contains(&p.key)
+        })
     }
 
     /// Which of the reasons a [`Crossing::Seek`] has no destination, for the log to say so.
@@ -1498,10 +1506,9 @@ impl WorldMap {
         if !self.places.get(container).map(|p| p.has_an_inn() && p.trades()).unwrap_or(false) {
             return false;
         }
-        !self
-            .places
-            .values()
-            .any(|p| p.parent.as_deref() == Some(container) && p.is_inn() && self.abandoned.contains(&p.key))
+        !self.places.values().any(|p| {
+            p.parent.as_deref() == Some(container) && p.is_inn() && self.abandoned.contains(&p.key)
+        })
     }
 
     /// Does an unfinished fight on this node forbid stepping off it?
@@ -1766,9 +1773,17 @@ mod tests {
     #[test]
     fn an_interior_shrine_is_reached_through_its_container_not_targeted_directly() {
         let mut m = WorldMap::new();
-        m.fold(&dump("l10", "Trenwick crossroads", vec![node("l4", "Bainton Clump — level 1 forest")]));
+        m.fold(&dump(
+            "l10",
+            "Trenwick crossroads",
+            vec![node("l4", "Bainton Clump — level 1 forest")],
+        ));
         // Standing in the forest teaches us the subnode and its parent, the way arrival does.
-        m.fold(&dump("l4sub9", "Bainton Clump woodland shrine", vec![node("l4sub3", "Bainton Clump road")]));
+        m.fold(&dump(
+            "l4sub9",
+            "Bainton Clump woodland shrine",
+            vec![node("l4sub3", "Bainton Clump road")],
+        ));
         m.entry("l4sub9").parent = Some("l4".into());
         m.entry("l4sub3").parent = Some("l4".into());
         m.entry("l4").subworld_container = true;
@@ -1835,8 +1850,20 @@ mod tests {
                 vec![house("a"), house("b")],
                 vec![exit("l59")],
             ));
-            m.fold(&inside_dump("l48", "a", "Rowlston house", vec![node("xrd", "Rowlston crossroads"), house("f1")], vec![exit("l59")]));
-            m.fold(&inside_dump("l48", "b", "Rowlston house", vec![node("xrd", "Rowlston crossroads"), house("f2")], vec![exit("l59")]));
+            m.fold(&inside_dump(
+                "l48",
+                "a",
+                "Rowlston house",
+                vec![node("xrd", "Rowlston crossroads"), house("f1")],
+                vec![exit("l59")],
+            ));
+            m.fold(&inside_dump(
+                "l48",
+                "b",
+                "Rowlston house",
+                vec![node("xrd", "Rowlston crossroads"), house("f2")],
+                vec![exit("l59")],
+            ));
             m.here = Some("xrd".into());
             m
         };
@@ -1847,7 +1874,10 @@ mod tests {
             Crossing::Probe { to, .. } | Crossing::Seek { to } => to.clone(),
             other => panic!("expected a probe, got {other:?}"),
         };
-        assert!(step_one == "a" || step_one == "b", "the walk sets off toward a frontier: {step_one}");
+        assert!(
+            step_one == "a" || step_one == "b",
+            "the walk sets off toward a frontier: {step_one}"
+        );
 
         // Take the step, and let the far side of the village suddenly look richer — a dump naming
         // the rival's neighbours is all it takes. This is the re-ranking that used to turn the walk
@@ -1919,7 +1949,8 @@ mod tests {
         // The step taken is toward whichever frontier was chosen, so a one-hop `dead` would BE the
         // step. Reaching `far` has to go through `mid`.
         match m.cross_toward(&[]) {
-            Some(Crossing::Step { to, .. }) | Some(Crossing::Probe { to, .. })
+            Some(Crossing::Step { to, .. })
+            | Some(Crossing::Probe { to, .. })
             | Some(Crossing::Seek { to }) => assert_eq!(
                 to, "mid",
                 "the six-way crossroads is worth the extra hop; `dead` is nearer and teaches us two"
@@ -1984,7 +2015,8 @@ mod tests {
         assert_eq!(m.placed_now("l9_path_to_l59"), None, "the door has no position this step");
 
         match m.cross_toward(&[exit("l59")]) {
-            Some(Crossing::Step { to, .. }) | Some(Crossing::Probe { to, .. })
+            Some(Crossing::Step { to, .. })
+            | Some(Crossing::Probe { to, .. })
             | Some(Crossing::Seek { to }) => assert_eq!(
                 to, "dead",
                 "with a destination, nearest first — `far` teaches more and is a hop further out"
@@ -2002,11 +2034,21 @@ mod tests {
         m.fold(&dump("l19", "Gipsyville crypt", vec![node("l10", "Ulrome — level 6 village")]));
         // Entering lands on the entrance ROAD first -- this is the real sequence, and taking the
         // previous `here` instead recorded the container and disabled the rule entirely.
-        m.fold(&inside_dump("l10", "l10_path_to_l19", "Road to Gipsyville crypt",
-            vec![node("l10sub6", "Ulrome guard post")], vec![exit("l19")]));
+        m.fold(&inside_dump(
+            "l10",
+            "l10_path_to_l19",
+            "Road to Gipsyville crypt",
+            vec![node("l10sub6", "Ulrome guard post")],
+            vec![exit("l19")],
+        ));
         assert_eq!(m.entered_from.as_deref(), Some("l19"), "the road names where it came from");
-        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post",
-            vec![node("l10_path_to_l19", "Road to Gipsyville crypt")], vec![exit("l19")]));
+        m.fold(&inside_dump(
+            "l10",
+            "l10sub6",
+            "Ulrome guard post",
+            vec![node("l10_path_to_l19", "Road to Gipsyville crypt")],
+            vec![exit("l19")],
+        ));
         // Offered the entrance and one unexplored way on, take the unexplored one.
         let chosen = m.exit_toward(&[exit("l19"), exit("l7")]);
         assert_eq!(chosen, Some("l7".into()), "should head somewhere new, not back out");
@@ -2018,8 +2060,13 @@ mod tests {
         // to move.
         let mut m = WorldMap::new();
         m.fold(&dump("l19", "Gipsyville crypt", vec![node("l10", "Ulrome — level 6 village")]));
-        m.fold(&inside_dump("l10", "l10_path_to_l19", "Road to Gipsyville crypt",
-            vec![node("l10sub6", "Ulrome guard post")], vec![exit("l19")]));
+        m.fold(&inside_dump(
+            "l10",
+            "l10_path_to_l19",
+            "Road to Gipsyville crypt",
+            vec![node("l10sub6", "Ulrome guard post")],
+            vec![exit("l19")],
+        ));
         assert_eq!(m.exit_toward(&[exit("l19")]), Some("l19".into()));
     }
 
@@ -2042,13 +2089,30 @@ mod tests {
     fn a_cleared_node_steps_toward_the_exit_one_hop_at_a_time() {
         let mut m = WorldMap::new();
         // Learn the interior: sub6 -> sub7 -> the road out.
-        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post",
-            vec![node("l10sub7", "Ulrome east guard post")], vec![exit("l19")]));
-        m.fold(&inside_dump("l10", "l10sub7", "Ulrome east guard post",
-            vec![node("l10sub6", "Ulrome guard post"), node("l10_path_to_l19", "Road to Gipsyville")],
-            vec![exit("l19")]));
-        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post",
-            vec![node("l10sub7", "Ulrome east guard post")], vec![exit("l19")]));
+        m.fold(&inside_dump(
+            "l10",
+            "l10sub6",
+            "Ulrome guard post",
+            vec![node("l10sub7", "Ulrome east guard post")],
+            vec![exit("l19")],
+        ));
+        m.fold(&inside_dump(
+            "l10",
+            "l10sub7",
+            "Ulrome east guard post",
+            vec![
+                node("l10sub6", "Ulrome guard post"),
+                node("l10_path_to_l19", "Road to Gipsyville"),
+            ],
+            vec![exit("l19")],
+        ));
+        m.fold(&inside_dump(
+            "l10",
+            "l10sub6",
+            "Ulrome guard post",
+            vec![node("l10sub7", "Ulrome east guard post")],
+            vec![exit("l19")],
+        ));
         // Not a jump to the exit — the neighbour on the way to it. Clicking the exit itself is what
         // moved the screen 0.015 and stalled a live run.
         assert_eq!(
@@ -2076,9 +2140,16 @@ mod tests {
         let mut m = WorldMap::new();
         // No route to any exit: the state that leaves crossing to the frontier walk. Both
         // neighbours are named and neither is stood on, so both are frontiers.
-        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post",
-            vec![node("l10sub7", "Ulrome east guard post"), node("l10sub8", "Ulrome south guard post")],
-            vec![exit("l19")]));
+        m.fold(&inside_dump(
+            "l10",
+            "l10sub6",
+            "Ulrome guard post",
+            vec![
+                node("l10sub7", "Ulrome east guard post"),
+                node("l10sub8", "Ulrome south guard post"),
+            ],
+            vec![exit("l19")],
+        ));
         let chosen = match m.cross_toward(&[exit("l19")]) {
             Some(Crossing::Probe { to, .. }) | Some(Crossing::Seek { to }) => to,
             other => panic!("the premise: a frontier is probed, got {other:?}"),
@@ -2101,8 +2172,13 @@ mod tests {
     #[test]
     fn standing_on_the_road_out_means_leave() {
         let mut m = WorldMap::new();
-        m.fold(&inside_dump("l10", "l10_path_to_l19", "Road to Gipsyville crypt",
-            vec![node("l10sub7", "Ulrome east guard post")], vec![exit("l19")]));
+        m.fold(&inside_dump(
+            "l10",
+            "l10_path_to_l19",
+            "Road to Gipsyville crypt",
+            vec![node("l10sub7", "Ulrome east guard post")],
+            vec![exit("l19")],
+        ));
         assert_eq!(m.cross_toward(&[exit("l19")]), Some(Crossing::Leave { to: "l19".into() }));
     }
 
@@ -2111,8 +2187,13 @@ mod tests {
         // The normal early state: fog reveals one hop, so on arrival there is no route to anywhere.
         // Refusing here is what left a run standing in a village with nothing to do.
         let mut m = WorldMap::new();
-        m.fold(&inside_dump("l10", "l10sub6", "Ulrome guard post",
-            vec![node("l10sub7", "Ulrome east guard post")], vec![exit("l19")]));
+        m.fold(&inside_dump(
+            "l10",
+            "l10sub6",
+            "Ulrome guard post",
+            vec![node("l10sub7", "Ulrome east guard post")],
+            vec![exit("l19")],
+        ));
         assert_eq!(
             m.cross_toward(&[exit("l19")]),
             Some(Crossing::Probe { to: "l10sub7".into(), toward: "l10_path_to_l19".into() })
@@ -2133,7 +2214,11 @@ mod tests {
         use crate::observe::adjacency::Exit;
         let mut m = WorldMap::new();
         // Outside: goal — near — container, and a far dead end.
-        m.fold(&dump("near", "a road", vec![node("goal", "Grim Barrow — level 4 crypt"), node("cave", "a forest")]));
+        m.fold(&dump(
+            "near",
+            "a road",
+            vec![node("goal", "Grim Barrow — level 4 crypt"), node("cave", "a forest")],
+        ));
         m.fold(&dump("far", "elsewhere", vec![node("cave", "a forest")]));
         let mut inside = dump("cavesub1", "a clearing", vec![]);
         inside.subworld = Some(("cave".into(), "a forest".into()));
@@ -2142,7 +2227,11 @@ mod tests {
             Exit { x: 0.0, y: 0.0, to_key: "near".into(), to_heading: "a road".into() },
         ];
         m.fold(&inside);
-        assert_eq!(m.exit_toward(&inside.exits).as_deref(), Some("near"), "the exit that gets us closer");
+        assert_eq!(
+            m.exit_toward(&inside.exits).as_deref(),
+            Some("near"),
+            "the exit that gets us closer"
+        );
     }
 
     /// **The console says it first, and the save only confirms it hours later.**
@@ -2234,10 +2323,7 @@ mod tests {
         m.entry("l10sub11").completed = false;
 
         // Healthy: the fight underfoot is the only way onward, and we take it.
-        assert_eq!(
-            m.cross_toward(&exits),
-            Some(Crossing::Fight { at: "l10sub11".into() })
-        );
+        assert_eq!(m.cross_toward(&exits), Some(Crossing::Fight { at: "l10sub11".into() }));
 
         // Hurt: the same answer. Stepping back to `l10sub10` is still legal -- it is complete, and
         // that is what used to be taken -- but the crossing no longer offers it, because a detour
@@ -2262,26 +2348,48 @@ mod tests {
     #[test]
     fn a_door_we_cannot_route_to_still_says_which_way_to_go() {
         let door = Exit {
-            x: 1479.0, y: -130.0,
-            to_key: "l1".into(), to_heading: "Cowlam — level 7 crypt".into(),
+            x: 1479.0,
+            y: -130.0,
+            to_key: "l1".into(),
+            to_heading: "Cowlam — level 7 crypt".into(),
         };
         let at = |key: &str, x: f64, y: f64| Node {
-            key: key.into(), heading: "Dotterel Hedge house".into(), x, y, connections: 4,
+            key: key.into(),
+            heading: "Dotterel Hedge house".into(),
+            x,
+            y,
+            connections: 4,
         };
         let mut m = WorldMap::new();
         // One step inside. No measure yet, so this dump is the frontier walk's -- see `cross_toward`.
-        m.fold(&inside_dump("l2", "l2sub7", "Dotterel Hedge house",
+        m.fold(&inside_dump(
+            "l2",
+            "l2sub7",
+            "Dotterel Hedge house",
             vec![at("l2sub13", 926.0, 413.0), at("l2sub4", 840.0, 636.0)],
-            vec![door.clone()]));
-        assert!(matches!(m.cross_toward(&[door.clone()]), Some(Crossing::Probe { .. })),
-            "nothing to descend on until a move has been measured");
+            vec![door.clone()],
+        ));
+        assert!(
+            matches!(m.cross_toward(&[door.clone()]), Some(Crossing::Probe { .. })),
+            "nothing to descend on until a move has been measured"
+        );
 
         // Arrived at `l2sub13`, which the dump above placed -- so the measure rolls forward.
-        m.fold(&inside_dump("l2", "l2sub13", "Dotterel Hedge chapel",
-            vec![at("l2sub12", 1045.0, 679.0), at("l2sub22", 1300.0, 100.0), at("l2sub7", 700.0, 700.0)],
-            vec![door.clone()]));
-        assert!(m.first_step_toward("l2sub13", "l2_path_to_l1", false).is_none(),
-            "the door has no edges, which is the whole predicament");
+        m.fold(&inside_dump(
+            "l2",
+            "l2sub13",
+            "Dotterel Hedge chapel",
+            vec![
+                at("l2sub12", 1045.0, 679.0),
+                at("l2sub22", 1300.0, 100.0),
+                at("l2sub7", 700.0, 700.0),
+            ],
+            vec![door.clone()],
+        ));
+        assert!(
+            m.first_step_toward("l2sub13", "l2_path_to_l1", false).is_none(),
+            "the door has no edges, which is the whole predicament"
+        );
 
         // **The aim survived #57 even though the arm did not.** This asserted a `Crossing::Steer`
         // until then; the door's printed position is now the `doorward` term in the frontier
@@ -2295,7 +2403,10 @@ mod tests {
         match m.cross_toward(&[door]) {
             Some(Crossing::Probe { to, toward }) => {
                 assert_eq!(toward, "l2_path_to_l1");
-                assert_eq!(to, "l2sub22", "toward the door; `l2sub12` is nearer the front of the alphabet");
+                assert_eq!(
+                    to, "l2sub22",
+                    "toward the door; `l2sub12` is nearer the front of the alphabet"
+                );
             }
             other => panic!("expected the walk to head doorward, got {other:?}"),
         }
@@ -2320,28 +2431,44 @@ mod tests {
     #[test]
     fn a_steer_does_not_walk_back_into_the_node_the_probe_just_left() {
         let door = Exit {
-            x: 1479.0, y: -130.0,
-            to_key: "l43".into(), to_heading: "Wold Newton — level 4 crypt".into(),
+            x: 1479.0,
+            y: -130.0,
+            to_key: "l43".into(),
+            to_heading: "Wold Newton — level 4 crypt".into(),
         };
         let at = |key: &str, x: f64, y: f64| Node {
-            key: key.into(), heading: "Upton Braken house".into(), x, y, connections: 4,
+            key: key.into(),
+            heading: "Upton Braken house".into(),
+            x,
+            y,
+            connections: 4,
         };
 
         let mut m = WorldMap::new();
         // Standing on the plaza, which sits close to the door. Nothing measured yet, so this is the
         // frontier walk — and it steps *away*, to somewhere that can still teach us something.
-        m.fold(&inside_dump("l63", "l63_plaza", "Upton Braken plaza",
+        m.fold(&inside_dump(
+            "l63",
+            "l63_plaza",
+            "Upton Braken plaza",
             vec![at("l63xrd", 200.0, 900.0), at("l63sub3", 260.0, 940.0)],
-            vec![door.clone()]));
+            vec![door.clone()],
+        ));
         let away = m.cross_toward(&[door.clone()]);
-        assert!(matches!(away, Some(Crossing::Probe { .. }) | Some(Crossing::Seek { .. })),
-            "the frontier walk goes first, got {away:?}");
+        assert!(
+            matches!(away, Some(Crossing::Probe { .. }) | Some(Crossing::Seek { .. })),
+            "the frontier walk goes first, got {away:?}"
+        );
 
         // Arrived at the crossroads. The plaza is now much the nearest thing to the door, and
         // stepping back to it is an improvement by every measure the steer has.
-        m.fold(&inside_dump("l63", "l63xrd", "Upton Braken crossroads",
+        m.fold(&inside_dump(
+            "l63",
+            "l63xrd",
+            "Upton Braken crossroads",
             vec![at("l63_plaza", 1400.0, -100.0), at("l63sub3", 260.0, 940.0)],
-            vec![door.clone()]));
+            vec![door.clone()],
+        ));
 
         // **And there is now only one arm to answer.** Before #57 this had to accept either a steer
         // that had learned not to go back, or a hand-down to the frontier walk. With the steer folded
@@ -2349,7 +2476,9 @@ mod tests {
         // its neighbours named, so `nothing_left_to_reveal` retires it, and being the nearest thing
         // to the door no longer buys it a second look.
         let step = m.cross_toward(&[door]).and_then(|c| match c {
-            Crossing::Step { to, .. } | Crossing::Probe { to, .. } | Crossing::Seek { to } => Some(to),
+            Crossing::Step { to, .. } | Crossing::Probe { to, .. } | Crossing::Seek { to } => {
+                Some(to)
+            }
             _ => None,
         });
         assert_ne!(step.as_deref(), Some("l63_plaza"), "that is the node we were just standing on");
@@ -2369,21 +2498,36 @@ mod tests {
     #[test]
     fn a_pocket_pointing_away_from_the_door_is_still_walked_out_of() {
         let door = Exit {
-            x: 1479.0, y: -130.0,
-            to_key: "l1".into(), to_heading: "Cowlam — level 7 crypt".into(),
+            x: 1479.0,
+            y: -130.0,
+            to_key: "l1".into(),
+            to_heading: "Cowlam — level 7 crypt".into(),
         };
         let at = |key: &str, x: f64, y: f64| Node {
-            key: key.into(), heading: "Dotterel Hedge house".into(), x, y, connections: 4,
+            key: key.into(),
+            heading: "Dotterel Hedge house".into(),
+            x,
+            y,
+            connections: 4,
         };
         let mut m = WorldMap::new();
-        m.fold(&inside_dump("l2", "l2sub7", "Dotterel Hedge house",
-            vec![at("l2sub13", 926.0, 413.0)], vec![door.clone()]));
+        m.fold(&inside_dump(
+            "l2",
+            "l2sub7",
+            "Dotterel Hedge house",
+            vec![at("l2sub13", 926.0, 413.0)],
+            vec![door.clone()],
+        ));
         m.cross_toward(&[door.clone()]);
         // Standing on `l2sub13`, and every way on is further from the door than it was: a pocket
         // pointing the wrong way, which straight-line distance cannot see coming.
-        m.fold(&inside_dump("l2", "l2sub13", "Dotterel Hedge chapel",
+        m.fold(&inside_dump(
+            "l2",
+            "l2sub13",
+            "Dotterel Hedge chapel",
             vec![at("l2sub12", 200.0, 900.0), at("l2sub9", 150.0, 1000.0)],
-            vec![door.clone()]));
+            vec![door.clone()],
+        ));
         match m.cross_toward(&[door]) {
             Some(Crossing::Probe { .. }) | Some(Crossing::Seek { .. }) => {}
             other => panic!("expected the walk to carry on rather than stall, got {other:?}"),
@@ -2408,10 +2552,11 @@ mod tests {
         m.fold(&Adjacency {
             subworld: Some(("e1".into(), "Howden Timberland — level 2 lost woods".into())),
             exits: Vec::new(),
-            ..dump("e1sub69", "Howden Timberland forest", vec![
-                leaf("e1sub67"),
-                node("e1sub75", "Howden Timberland forest"),
-            ])
+            ..dump(
+                "e1sub69",
+                "Howden Timberland forest",
+                vec![leaf("e1sub67"), node("e1sub75", "Howden Timberland forest")],
+            )
         });
         assert!(m.get("e1sub67").unwrap().nothing_left_to_reveal());
         assert!(!m.get("e1sub75").unwrap().nothing_left_to_reveal());
@@ -2541,7 +2686,10 @@ mod tests {
             )
             .unwrap(),
         );
-        assert!(m.wants_a_heart(), "294 gold is over the floor, so the errand is live in principle");
+        assert!(
+            m.wants_a_heart(),
+            "294 gold is over the floor, so the errand is live in principle"
+        );
         assert!(m.heart_is_spent("l32"), "and the save says that shelf is bare");
 
         // The question the crossing asks, and the question the surface asks, must not disagree about
@@ -2612,29 +2760,32 @@ mod tests {
         // This used to answer `Some("c")` on the reasoning "up to it, never through it". That is
         // only defensible when the node is the next ordinary step anyway; several hops along it
         // commits the run to a fight nothing chose.
-        let mut shut = chain(
-            "a = true, b = true, c = true, d = true",
-            vec![("c", "Crockey — level 5 crypt")],
-        );
+        let mut shut =
+            chain("a = true, b = true, c = true, d = true", vec![("c", "Crockey — level 5 crypt")]);
         shut.hell = Some(0.0);
         assert_eq!(shut.far_hop("a", "d"), None, "stops short of it, and never lands on it");
 
         // **And with the portal already open.** The old guard was `shut && triggers_anomaly()`, so
         // this case chained straight through a level 5 crypt. A fight we did not choose is a fight
         // we did not choose whether or not the anomaly is open.
-        let mut open = chain(
-            "a = true, b = true, c = true, d = true",
-            vec![("c", "Crockey — level 5 crypt")],
-        );
+        let mut open =
+            chain("a = true, b = true, c = true, d = true", vec![("c", "Crockey — level 5 crypt")]);
         open.hell = Some(0.1);
-        assert_eq!(open.far_hop("a", "d"), None, "the portal's state is not what makes it dangerous");
+        assert_eq!(
+            open.far_hop("a", "d"),
+            None,
+            "the portal's state is not what makes it dangerous"
+        );
 
         // A level *3* node is ordinary ground and the chain runs the whole way, which is what keeps
         // this a rule about danger rather than a rule against headings.
         assert_eq!(
-            chain("a = true, b = true, c = true, d = true", vec![("c", "Rookdale — level 3 crypt")])
-                .far_hop("a", "d")
-                .as_deref(),
+            chain(
+                "a = true, b = true, c = true, d = true",
+                vec![("c", "Rookdale — level 3 crypt")]
+            )
+            .far_hop("a", "d")
+            .as_deref(),
             Some("d")
         );
     }
@@ -2651,11 +2802,9 @@ mod tests {
         // Inn -> two crossroads -> the road out, the walk that prompted this.
         let town = |cleared: &str, headings: Vec<(&str, &str)>| {
             let mut m = WorldMap::default();
-            for (a, b) in [
-                ("l25sub2", "l25xrd1"),
-                ("l25xrd1", "l25xrd2"),
-                ("l25xrd2", "l25_path_to_l4"),
-            ] {
+            for (a, b) in
+                [("l25sub2", "l25xrd1"), ("l25xrd1", "l25xrd2"), ("l25xrd2", "l25_path_to_l4")]
+            {
                 m.entry(a).neighbours.insert(b.into());
                 m.entry(b).neighbours.insert(a.into());
             }
@@ -2913,7 +3062,10 @@ mod tests {
                 "l9",
                 "l9sub1",
                 "Saltagh Park road",
-                vec![node("l9sub4", "Saltagh Park road"), node(shrine_at, "Saltagh Park woodland shrine")],
+                vec![
+                    node("l9sub4", "Saltagh Park road"),
+                    node(shrine_at, "Saltagh Park woodland shrine"),
+                ],
                 vec![exit("l19")],
             ));
             m
@@ -2941,7 +3093,10 @@ mod tests {
             "l9",
             "l9sub4",
             "Saltagh Park road",
-            vec![node("l9sub1", "Saltagh Park road"), node("l9sub2", "Saltagh Park woodland shrine")],
+            vec![
+                node("l9sub1", "Saltagh Park road"),
+                node("l9sub2", "Saltagh Park woodland shrine"),
+            ],
             vec![],
         ));
         far.fold(&inside_dump(
@@ -2978,7 +3133,10 @@ mod tests {
             "shrine7",
             "shrine7sub3",
             "Cottam Boscage road",
-            vec![node("shrine7sub1", "Cottam Boscage road"), node("shrine7_plaza", "Cottam Boscage shrine")],
+            vec![
+                node("shrine7sub1", "Cottam Boscage road"),
+                node("shrine7_plaza", "Cottam Boscage shrine"),
+            ],
             vec![],
         ));
         m.fold(&inside_dump(
@@ -2993,9 +3151,16 @@ mod tests {
         ));
 
         let hops = m.hops_from("shrine7sub1");
-        assert_eq!(hops.get("shrine7sub2").copied(), Some(1), "the premise: the minor one is nearer");
+        assert_eq!(
+            hops.get("shrine7sub2").copied(),
+            Some(1),
+            "the premise: the minor one is nearer"
+        );
         assert_eq!(hops.get("shrine7_plaza").copied(), Some(2), "and the plaza is further out");
-        assert!(m.get("shrine7_plaza").unwrap().can_be_consecrated(), "and it is the one that counts");
+        assert!(
+            m.get("shrine7_plaza").unwrap().can_be_consecrated(),
+            "and it is the one that counts"
+        );
 
         assert_eq!(
             m.shrine_inside("shrine7").map(|p| p.key.as_str()),
@@ -3023,14 +3188,18 @@ mod tests {
             "shrine7",
             "shrine7sub1",
             "Cottam Boscage road",
-            vec![node("shrine7sub2", "Cottam Boscage road"), node("shrine7_path_to_l55", "Road to Wetwang")],
+            vec![
+                node("shrine7sub2", "Cottam Boscage road"),
+                node("shrine7_path_to_l55", "Road to Wetwang"),
+            ],
             vec![exit("l55")],
         ));
 
         assert!(m.seeking_a_shrine("shrine7"), "the plaza is fogged, so we are still looking");
         assert_eq!(m.shrine_inside("shrine7"), None, "the premise: there is nothing found yet");
         match m.cross_toward(&[exit("l55")]) {
-            Some(Crossing::Step { to, .. }) | Some(Crossing::Probe { to, .. })
+            Some(Crossing::Step { to, .. })
+            | Some(Crossing::Probe { to, .. })
             | Some(Crossing::Seek { to }) => assert_ne!(
                 to, "shrine7_path_to_l55",
                 "we came for the shrine and have not seen it; the road out is not the answer"
@@ -3059,7 +3228,10 @@ mod tests {
         assert!(!m.seeking_a_shrine("l9"), "an ordinary forest promises no shrine");
         let mut given_up = WorldMap::new();
         given_up.abandon("shrine7_plaza");
-        assert!(!given_up.seeking_a_shrine("shrine7"), "we tried; the fog is not what is hiding it");
+        assert!(
+            !given_up.seeking_a_shrine("shrine7"),
+            "we tried; the fog is not what is hiding it"
+        );
     }
 
     /// A shrine inside a forest is an errand, not something to walk past. — the dev, 2026-08-17
@@ -3215,7 +3387,11 @@ mod tests {
             "camp",
             vec![node("l4", "Grim Barrow — level 4 crypt"), node("mid", "Quiet Glade meadow")],
         ));
-        m.fold(&dump("mid", "Quiet Glade meadow", vec![node("start", "camp"), node("far", "Dane meadow")]));
+        m.fold(&dump(
+            "mid",
+            "Quiet Glade meadow",
+            vec![node("start", "camp"), node("far", "Dane meadow")],
+        ));
         m.here = Some("start".into());
         m.entry("mid").visited = true;
         m.entry("mid").hidden = Some(0);
@@ -3250,7 +3426,10 @@ mod tests {
         two_fights.fold(&dump(
             "start",
             "camp",
-            vec![node("deep", "Yokefleet — level 5 crypt"), node("deeper", "Cowlam — level 9 crypt")],
+            vec![
+                node("deep", "Yokefleet — level 5 crypt"),
+                node("deeper", "Cowlam — level 9 crypt"),
+            ],
         ));
         two_fights.here = Some("start".into());
         assert!(
@@ -3287,14 +3466,28 @@ mod tests {
             m.fold(&dump(
                 "start",
                 "Cottam campfire",
-                vec![node("l39", "Eight Timberland — level 4 forest"), node("l60", "Asselby — level 7 crypt")],
+                vec![
+                    node("l39", "Eight Timberland — level 4 forest"),
+                    node("l60", "Asselby — level 7 crypt"),
+                ],
             ));
-            m.fold(&dump("l39", "Eight Timberland — level 4 forest", vec![node("l52", "Stillingfleet village")]));
-            m.fold(&dump("l60", "Asselby — level 7 crypt", vec![node("l52", "Stillingfleet village")]));
+            m.fold(&dump(
+                "l39",
+                "Eight Timberland — level 4 forest",
+                vec![node("l52", "Stillingfleet village")],
+            ));
+            m.fold(&dump(
+                "l60",
+                "Asselby — level 7 crypt",
+                vec![node("l52", "Stillingfleet village")],
+            ));
             m.fold(&dump(
                 "l52",
                 "Stillingfleet village",
-                vec![node("l39", "Eight Timberland — level 4 forest"), node("l60", "Asselby — level 7 crypt")],
+                vec![
+                    node("l39", "Eight Timberland — level 4 forest"),
+                    node("l60", "Asselby — level 7 crypt"),
+                ],
             ));
             m.fold(&inside_dump(
                 "l52",
@@ -3339,7 +3532,11 @@ mod tests {
         // measurement takes it back — which is what keeps this from becoming the override that
         // walked a run away from the anomaly on 2026-08-16.
         let mut nearer = build();
-        nearer.fold(&dump("l39", "Eight Timberland — level 4 forest", vec![node("start", "Cottam campfire")]));
+        nearer.fold(&dump(
+            "l39",
+            "Eight Timberland — level 4 forest",
+            vec![node("start", "Cottam campfire")],
+        ));
         nearer.entry("l60").neighbours.remove("start");
         nearer.entry("start").neighbours.remove("l60");
         assert_eq!(
@@ -3355,9 +3552,21 @@ mod tests {
             let mut m = WorldMap::new();
             ready_for_the_anomaly(&mut m);
             // The road walked in: start -> l19 -> l39 -> l52, and l60 hanging off l52.
-            m.fold(&dump("start", "Cottam campfire", vec![node("l19", "Gipsyville — level 2 crypt")]));
-            m.fold(&dump("l19", "Gipsyville — level 2 crypt", vec![node("l39", "Eight Timberland — level 4 forest")]));
-            m.fold(&dump("l39", "Eight Timberland — level 4 forest", vec![node("l52", "Stillingfleet village")]));
+            m.fold(&dump(
+                "start",
+                "Cottam campfire",
+                vec![node("l19", "Gipsyville — level 2 crypt")],
+            ));
+            m.fold(&dump(
+                "l19",
+                "Gipsyville — level 2 crypt",
+                vec![node("l39", "Eight Timberland — level 4 forest")],
+            ));
+            m.fold(&dump(
+                "l39",
+                "Eight Timberland — level 4 forest",
+                vec![node("l52", "Stillingfleet village")],
+            ));
             m.fold(&dump(
                 "l52",
                 "Stillingfleet village",
@@ -3404,9 +3613,16 @@ mod tests {
         m.fold(&dump(
             "l19",
             "Gipsyville — level 2 crypt",
-            vec![node("f1", "Frontier — level 1 forest"), node("l39", "Eight Timberland — level 2 forest")],
+            vec![
+                node("f1", "Frontier — level 1 forest"),
+                node("l39", "Eight Timberland — level 2 forest"),
+            ],
         ));
-        m.fold(&dump("l39", "Eight Timberland — level 2 forest", vec![node("l9", "Saltagh Park — level 1 forest")]));
+        m.fold(&dump(
+            "l39",
+            "Eight Timberland — level 2 forest",
+            vec![node("l9", "Saltagh Park — level 1 forest")],
+        ));
         m.fold(&dump(
             "l9",
             "Saltagh Park — level 1 forest",
@@ -3415,7 +3631,13 @@ mod tests {
                 node("l60", "Asselby — level 2 crypt"),
             ],
         ));
-        m.fold(&inside_dump("l9", "l9sub1", "Saltagh clearing", vec![], vec![exit("l39"), exit("l60")]));
+        m.fold(&inside_dump(
+            "l9",
+            "l9sub1",
+            "Saltagh clearing",
+            vec![],
+            vec![exit("l39"), exit("l60")],
+        ));
         m.entered_from = Some("l39".into());
         m.hell = Some(0.0);
         m.gold = 0;
@@ -3519,9 +3741,16 @@ mod tests {
     fn the_heart_errand_walks_to_the_general_store() {
         let mut m = WorldMap::new();
         m.fold(&dump("here", "camp", vec![node("l11", "Rowlston Covert village")]));
-        m.fold(&inside_dump("l11", "l11sub1", "Rowlston Covert road",
-            vec![node("l11sub2", "Rowlston Covert general store"), node("l11sub3", "Rowlston Covert house")],
-            vec![]));
+        m.fold(&inside_dump(
+            "l11",
+            "l11sub1",
+            "Rowlston Covert road",
+            vec![
+                node("l11sub2", "Rowlston Covert general store"),
+                node("l11sub3", "Rowlston Covert house"),
+            ],
+            vec![],
+        ));
         m.hell = Some(0.1);
         m.gold = HEART_FLOOR;
 
@@ -3534,9 +3763,17 @@ mod tests {
         }
 
         // Standing on it, the crossing is over and the errand begins.
-        m.fold(&inside_dump("l11", "l11sub2", "Rowlston Covert general store",
-            vec![node("l11sub1", "Rowlston Covert road")], vec![]));
-        assert!(matches!(m.cross_toward(&[]), Some(Crossing::Arrive { .. })), "arrived at the counter");
+        m.fold(&inside_dump(
+            "l11",
+            "l11sub2",
+            "Rowlston Covert general store",
+            vec![node("l11sub1", "Rowlston Covert road")],
+            vec![],
+        ));
+        assert!(
+            matches!(m.cross_toward(&[]), Some(Crossing::Arrive { .. })),
+            "arrived at the counter"
+        );
 
         // And once bought, the village stops being an errand at all.
         m.bought_the_heart("l11");
@@ -3563,19 +3800,36 @@ mod tests {
     fn walking_away_from_the_door_does_not_reopen_the_ground_in_front_of_it() {
         let mut m = WorldMap::new();
         let door = crate::observe::adjacency::Exit {
-            x: 0.0, y: 0.0, to_key: "l36".into(), to_heading: "Wawne crypt".into(),
+            x: 0.0,
+            y: 0.0,
+            to_key: "l36".into(),
+            to_heading: "Wawne crypt".into(),
         };
         let near = |k: &str, x: f64, conn: u32| Node {
-            key: k.into(), heading: "Fosholme Growth road".into(), x, y: 0.0, connections: conn,
+            key: k.into(),
+            heading: "Fosholme Growth road".into(),
+            x,
+            y: 0.0,
+            connections: conn,
         };
 
         // In along the road. `l40sub24` is two-way and both its roads get named, so once we have
         // stood on it there is nothing left there.
-        m.fold(&inside_dump("l40", "l40sub17", "Fosholme Growth road",
-            vec![near("l40sub24", 100.0, 2)], vec![door.clone()]));
+        m.fold(&inside_dump(
+            "l40",
+            "l40sub17",
+            "Fosholme Growth road",
+            vec![near("l40sub24", 100.0, 2)],
+            vec![door.clone()],
+        ));
         m.crossing_to = Some(("l36".into(), Goal::Explore));
-        m.fold(&inside_dump("l40", "l40sub24", "Fosholme Growth road",
-            vec![near("l40sub17", 500.0, 3), near("l40sub25", 300.0, 3)], vec![door.clone()]));
+        m.fold(&inside_dump(
+            "l40",
+            "l40sub24",
+            "Fosholme Growth road",
+            vec![near("l40sub17", 500.0, 3), near("l40sub25", 300.0, 3)],
+            vec![door.clone()],
+        ));
         assert!(
             m.get("l40sub24").unwrap().nothing_left_to_reveal(),
             "the premise: two declared roads and both named"
@@ -3584,10 +3838,17 @@ mod tests {
         // Out to the far node, which has a road onward we have never walked. `l40sub24` sits between
         // us and the door and is much the nearest thing to it — exactly the shape that used to
         // re-open — while `l40sub30` is further from the door and still has something to give.
-        m.fold(&inside_dump("l40", "l40sub25", "Fosholme Growth road",
-            vec![near("l40sub24", 100.0, 2), near("l40sub30", 900.0, 3)], vec![door.clone()]));
+        m.fold(&inside_dump(
+            "l40",
+            "l40sub25",
+            "Fosholme Growth road",
+            vec![near("l40sub24", 100.0, 2), near("l40sub30", 900.0, 3)],
+            vec![door.clone()],
+        ));
         let step = m.cross_toward(&[door]).and_then(|c| match c {
-            Crossing::Step { to, .. } | Crossing::Probe { to, .. } | Crossing::Seek { to } => Some(to),
+            Crossing::Step { to, .. } | Crossing::Probe { to, .. } | Crossing::Seek { to } => {
+                Some(to)
+            }
             _ => None,
         });
         assert_eq!(
@@ -3628,8 +3889,7 @@ mod tests {
         let door = |to: &str| Exit { x: 0.0, y: 0.0, to_key: to.into(), to_heading: "".into() };
 
         let mut m = WorldMap::default();
-        for (a, b) in
-            [("e2", "l20"), ("e2", "l38"), ("e2", "l41"), ("l20", "l25"), ("l41", "l25")]
+        for (a, b) in [("e2", "l20"), ("e2", "l38"), ("e2", "l41"), ("l20", "l25"), ("l41", "l25")]
         {
             m.entry(a).neighbours.insert(b.into());
             m.entry(b).neighbours.insert(a.into());
@@ -3655,7 +3915,10 @@ mod tests {
             .expect("three doors is not no doors");
         assert_eq!(chosen, "l20", "the cleared level 2 crypt, not the unfought level 5 one");
         assert_eq!(why.why(), "nearest to the target", "and by ranking, not by falling back");
-        assert!(note.contains("gentle doors only"), "the log must say the rule was in force: {note}");
+        assert!(
+            note.contains("gentle doors only"),
+            "the log must say the rule was in force: {note}"
+        );
     }
 
     /// The level 4 rule at a door, where it costs something.
@@ -3840,7 +4103,10 @@ mod tests {
         let (chosen, why, _) = m
             .choose_exit(&[door("shrine7"), door("l40"), door("l57")])
             .expect("three doors is not no doors");
-        assert_eq!(chosen, "l57", "the door that leads to the shrine, not the one that is merely safe");
+        assert_eq!(
+            chosen, "l57",
+            "the door that leads to the shrine, not the one that is merely safe"
+        );
         assert_eq!(why.why(), "nearest to the target", "and it was ranked, not fallen back on");
     }
 
@@ -3898,7 +4164,11 @@ mod tests {
         m.note_health_level(crate::rest::Health { current: 1, max: 20 });
         assert!(!m.can_route_to("l19"), "no edge joins the interior to the surface");
         let plan = m.next_target().unwrap();
-        assert_eq!(plan.reason, Goal::Rest, "the exits are the route, and `cross_toward` walks them");
+        assert_eq!(
+            plan.reason,
+            Goal::Rest,
+            "the exits are the route, and `cross_toward` walks them"
+        );
         // `l1`, the village. `l19` is a campfire, nearer and free, and not a rest site until
         // arriving at one does something — see `rest::CAMPFIRE_REST_IS_BUILT`.
         assert_eq!(plan.target, "l1");
@@ -3988,7 +4258,11 @@ mod tests {
         assert_eq!(door, "l1", "the fixture's stable choice — see the test above");
 
         let held = |target: &str| m.committed_exit("l9", Some(&goal), Some(target));
-        assert_eq!(held("l9sub1").as_deref(), Some("l1"), "wandering inside is not a contradiction");
+        assert_eq!(
+            held("l9sub1").as_deref(),
+            Some("l1"),
+            "wandering inside is not a contradiction"
+        );
         assert_eq!(held("l9_path_to_l1").as_deref(), Some("l1"), "asking for the door we hold");
         assert_eq!(held("l9_path_to_l19"), None, "the other door — this is the `l4` loop");
         assert_eq!(
@@ -4033,7 +4307,12 @@ mod tests {
         // corrupted crypt, and was robbed of all 763 gold by a highwayman on the way.
         let exits = vec![
             Exit { x: 0.0, y: 0.0, to_key: "l19".into(), to_heading: "Dane village".into() },
-            Exit { x: 0.0, y: 0.0, to_key: "l1".into(), to_heading: "Cowlam — level 7 crypt".into() },
+            Exit {
+                x: 0.0,
+                y: 0.0,
+                to_key: "l1".into(),
+                to_heading: "Cowlam — level 7 crypt".into(),
+            },
         ];
         let mut m = WorldMap::new();
         m.fold(&inside_dump(
@@ -4100,7 +4379,10 @@ mod tests {
         );
         match m.cross_toward(&[exit("l19"), exit("l7")]) {
             Some(Crossing::Step { toward, .. }) | Some(Crossing::Probe { toward, .. }) => {
-                assert!(toward.starts_with("l10_path_to_"), "heading out, not to the bar: {toward}");
+                assert!(
+                    toward.starts_with("l10_path_to_"),
+                    "heading out, not to the bar: {toward}"
+                );
             }
             other => panic!("expected an exit crossing, got {other:?}"),
         }
@@ -4482,28 +4764,43 @@ mod tests {
     #[test]
     fn a_forest_with_no_door_in_sight_still_follows_the_road() {
         let mut m = WorldMap::new();
-        m.fold(&inside_dump("l9", "l9sub22", "Saltagh Park road",
+        m.fold(&inside_dump(
+            "l9",
+            "l9sub22",
+            "Saltagh Park road",
             vec![
                 node("l9sub7", "Saltagh Park forest"),
                 node("l9sub21", "Saltagh Park forest"),
                 node("l9sub10", "Saltagh Park crossroads"),
             ],
-            vec![]));
-        m.fold(&inside_dump("l9", "l9sub10", "Saltagh Park crossroads",
+            vec![],
+        ));
+        m.fold(&inside_dump(
+            "l9",
+            "l9sub10",
+            "Saltagh Park crossroads",
             vec![node("l9sub22", "Saltagh Park road"), node("l9sub12", "Saltagh Park road")],
-            vec![]));
-        m.fold(&inside_dump("l9", "l9sub22", "Saltagh Park road",
+            vec![],
+        ));
+        m.fold(&inside_dump(
+            "l9",
+            "l9sub22",
+            "Saltagh Park road",
             vec![
                 node("l9sub7", "Saltagh Park forest"),
                 node("l9sub21", "Saltagh Park forest"),
                 node("l9sub10", "Saltagh Park crossroads"),
             ],
-            vec![]));
+            vec![],
+        ));
 
         // **The positive controls.** This has to be the arm under test, and the two candidates have
         // to genuinely disagree — otherwise the assertion passes for a reason it never states.
         assert_eq!(m.searching_for("l9"), Searching::Exit, "a forest has no errand to hide");
-        assert!(m.get("l9sub21").expect("brush").is_paved() == false, "the near candidate is brush");
+        assert!(
+            m.get("l9sub21").expect("brush").is_paved() == false,
+            "the near candidate is brush"
+        );
         assert!(m.get("l9sub12").expect("road").is_paved(), "the far candidate is road");
 
         match m.cross_toward(&[]) {
@@ -4527,26 +4824,39 @@ mod tests {
     /// two hops off through the crossroads.
     #[test]
     fn exploring_a_forest_also_sticks_to_the_road() {
-        let exits = vec![Exit { x: 0.0, y: 0.0, to_key: "l19".into(), to_heading: "Dane village".into() }];
+        let exits =
+            vec![Exit { x: 0.0, y: 0.0, to_key: "l19".into(), to_heading: "Dane village".into() }];
         let mut m = WorldMap::new();
-        m.fold(&inside_dump("l9", "l9sub22", "Saltagh Park road",
+        m.fold(&inside_dump(
+            "l9",
+            "l9sub22",
+            "Saltagh Park road",
             vec![
                 node("l9sub7", "Saltagh Park forest"),
                 node("l9sub21", "Saltagh Park forest"),
                 node("l9sub10", "Saltagh Park crossroads"),
             ],
-            exits.clone()));
+            exits.clone(),
+        ));
         // The crossroads has been walked; the road beyond it has not.
-        m.fold(&inside_dump("l9", "l9sub10", "Saltagh Park crossroads",
+        m.fold(&inside_dump(
+            "l9",
+            "l9sub10",
+            "Saltagh Park crossroads",
             vec![node("l9sub22", "Saltagh Park road"), node("l9sub12", "Saltagh Park road")],
-            exits.clone()));
-        m.fold(&inside_dump("l9", "l9sub22", "Saltagh Park road",
+            exits.clone(),
+        ));
+        m.fold(&inside_dump(
+            "l9",
+            "l9sub22",
+            "Saltagh Park road",
             vec![
                 node("l9sub7", "Saltagh Park forest"),
                 node("l9sub21", "Saltagh Park forest"),
                 node("l9sub10", "Saltagh Park crossroads"),
             ],
-            exits.clone()));
+            exits.clone(),
+        ));
 
         // Nearest-first says `l9sub21` at one hop. The rule says the road at two.
         match m.cross_toward(&exits) {
@@ -4598,10 +4908,17 @@ mod tests {
     #[test]
     fn a_crossing_with_a_shrine_errand_heads_for_the_shrine() {
         let at = |key: &str, heading: &str, x: f64, y: f64| Node {
-            key: key.into(), heading: heading.into(), x, y, connections: 3,
+            key: key.into(),
+            heading: heading.into(),
+            x,
+            y,
+            connections: 3,
         };
         let door = Exit {
-            x: 1500.0, y: 1500.0, to_key: "l5".into(), to_heading: "Dalton Copse village".into(),
+            x: 1500.0,
+            y: 1500.0,
+            to_key: "l5".into(),
+            to_heading: "Dalton Copse village".into(),
         };
         let mut m = WorldMap::new();
         m.fold(&inside_dump(
@@ -4627,7 +4944,10 @@ mod tests {
         // exit would take it — which is what makes this fixture able to fail.
         match m.cross_toward(&[door]) {
             Some(Crossing::Step { to, toward }) => {
-                assert_eq!(toward, "shrine1sub2", "the errand is the destination, not the road out");
+                assert_eq!(
+                    toward, "shrine1sub2",
+                    "the errand is the destination, not the road out"
+                );
                 assert_eq!(to, "shrine1sub2");
             }
             other => panic!("expected a step to the shrine, got {other:?}"),
@@ -4712,8 +5032,10 @@ mod tests {
             return;
         };
         let made = decisions_the_run_made(&report);
-        let found: Vec<_> =
-            made.iter().flat_map(|(c, d)| reciprocated(d).into_iter().map(move |p| (c, p))).collect();
+        let found: Vec<_> = made
+            .iter()
+            .flat_map(|(c, d)| reciprocated(d).into_iter().map(move |p| (c, p)))
+            .collect();
         println!("the run's own bounces: {found:?}");
         // Named exactly, not merely counted. This scraper came back empty twice for reasons that
         // had nothing to do with the crossing — first by not knowing the word `steering`, which is
@@ -4769,21 +5091,29 @@ mod tests {
         let mut m = WorldMap::new();
         // Walked in along the road, and the road carries on past `l40sub17` into ground we have not
         // seen — which is what makes a paved frontier exist at all.
-        m.fold(&inside_dump("l40", "l40sub17", "Fosholme Growth road",
+        m.fold(&inside_dump(
+            "l40",
+            "l40sub17",
+            "Fosholme Growth road",
             vec![
                 node_at("l40sub25", "Fosholme Growth road", 0.0, 0.0),
                 node_at("l40sub13", "Fosholme Growth road", 1400.0, 200.0),
             ],
-            vec![door.clone()]));
+            vec![door.clone()],
+        ));
         m.crossing_to = Some(("l36".into(), Goal::Explore));
 
         // Now standing on `l40sub25`, having been 600 from the door at the nearest.
-        m.fold(&inside_dump("l40", "l40sub25", "Fosholme Growth road",
+        m.fold(&inside_dump(
+            "l40",
+            "l40sub25",
+            "Fosholme Growth road",
             vec![
                 node_at("l40sub24", "Fosholme Growth — level 5 grave", 802.0, 65.0),
                 node_at("l40sub17", "Fosholme Growth road", 1102.0, 125.0),
             ],
-            vec![door.clone()]));
+            vec![door.clone()],
+        ));
         // The fixture has to be the one that used to fail: the grave genuinely is nearer the door.
         let to_door = |k: &str| {
             let (x, y) = m.placed_now(k).expect("placed");
@@ -4793,7 +5123,9 @@ mod tests {
         assert!(to_door("l40sub24") < to_door("l40sub17"), "the shortcut is the shorter line");
 
         let step = m.cross_toward(&[door]).and_then(|c| match c {
-            Crossing::Step { to, .. } | Crossing::Probe { to, .. } | Crossing::Seek { to } => Some(to),
+            Crossing::Step { to, .. } | Crossing::Probe { to, .. } | Crossing::Seek { to } => {
+                Some(to)
+            }
             _ => None,
         });
         assert_eq!(
@@ -4835,7 +5167,10 @@ mod tests {
         m.fold(&dump(
             "l62",
             "Fangfoss Chaparral — level 7 spider forest",
-            vec![at("l57", "Harswell Coppice — level 6 spider forest", -200.0), at("l40", "Fosholme road", 200.0)],
+            vec![
+                at("l57", "Harswell Coppice — level 6 spider forest", -200.0),
+                at("l40", "Fosholme road", 200.0),
+            ],
         ));
         m.entry("l40").completed = true;
         // Both doors have been stood on, so neither is a frontier and `Explore` has nothing to
@@ -4855,12 +5190,19 @@ mod tests {
             )
             .unwrap(),
         );
-        assert_eq!(m.get("l57").map(|p| p.risk()), Some(Risk::Corrupt), "the fixture must disagree");
+        assert_eq!(
+            m.get("l57").map(|p| p.risk()),
+            Some(Risk::Corrupt),
+            "the fixture must disagree"
+        );
         assert_eq!(m.get("l40").map(|p| p.risk()), Some(Risk::Free));
 
         let doors = [door("l57"), door("l40")];
         let (going, why, _) = m.choose_exit(&doors).expect("two doors");
-        assert_eq!(going, "l57", "toward the anomaly, through the corruption, because that is where it is");
+        assert_eq!(
+            going, "l57",
+            "toward the anomaly, through the corruption, because that is where it is"
+        );
         assert_eq!(why.why(), "safest, and toward the anomaly");
 
         // Hurt, and the same map answers the other way.

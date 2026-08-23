@@ -173,7 +173,10 @@ mod agreement_tests {
         let asked = Shift { dx: 0.0, dy: -300.0 };
         assert!(Shift { dx: 0.0, dy: -40.0 }.agrees_with(asked), "short is clamping, not error");
         assert!(Shift { dx: 0.0, dy: 0.0 }.agrees_with(asked), "and nothing at all is the bound");
-        assert!(Shift { dx: 9.0, dy: -40.0 }.agrees_with(asked), "a little cross-axis slop is fine");
+        assert!(
+            Shift { dx: 9.0, dy: -40.0 }.agrees_with(asked),
+            "a little cross-axis slop is fine"
+        );
         // The wrong way, by more than the slack, is not clamping.
         assert!(!Shift { dx: 0.0, dy: 120.0 }.agrees_with(asked), "backwards is not a short pull");
     }
@@ -238,8 +241,19 @@ mod tests {
         // Exits drift with everything else -- they are drawn from the same offset -- so a correction
         // that fixed only the nodes would leave the way out wrong.
         let d = dump_with(
-            vec![Node { key: "l10_plaza".into(), heading: "Ulrome well".into(), x: 1183.0, y: 679.0, connections: 7 }],
-            vec![Exit { x: 213.0, y: 18.0, to_key: "l19".into(), to_heading: "Gipsyville crypt".into() }],
+            vec![Node {
+                key: "l10_plaza".into(),
+                heading: "Ulrome well".into(),
+                x: 1183.0,
+                y: 679.0,
+                connections: 7,
+            }],
+            vec![Exit {
+                x: 213.0,
+                y: 18.0,
+                to_key: "l19".into(),
+                to_heading: "Gipsyville crypt".into(),
+            }],
         );
         let c = corrected(&d, Shift { dx: 42.0, dy: 21.0 });
         assert_eq!((c.nodes[0].x, c.nodes[0].y), (1225.0, 700.0));
@@ -345,10 +359,8 @@ pub fn variance(t: &Template) -> f64 {
 pub fn measure(
     after: &Frame, patch: &Template, taken_at: (i32, i32), expected: Shift, radius: i32,
 ) -> Option<Shift> {
-    let (ex, ey) = (
-        taken_at.0 + expected.dx.round() as i32,
-        taken_at.1 + expected.dy.round() as i32,
-    );
+    let (ex, ey) =
+        (taken_at.0 + expected.dx.round() as i32, taken_at.1 + expected.dy.round() as i32);
     let bounds = Some((ex - radius, ey - radius, ex + radius, ey + radius));
     let m = super::template::find_at_scale_in(after, patch, 1.0, 1, bounds)?;
     (m.inliers >= MIN_INLIERS)

@@ -79,7 +79,10 @@ pub fn restore(store: &Path, name: &str, save_dir: &Path) -> Result<(), crate::E
     refuse_if_game_running(save_dir)?;
     let src = store.join(sanitize(name));
     if !src.is_dir() {
-        return Err(crate::Error::Config(format!("no checkpoint named {name:?} in {}", store.display())));
+        return Err(crate::Error::Config(format!(
+            "no checkpoint named {name:?} in {}",
+            store.display()
+        )));
     }
     std::fs::create_dir_all(save_dir)?;
     for f in KNOWN {
@@ -164,14 +167,12 @@ pub fn describe(dir: &Path) -> String {
         return "unreadable mainSaveData".into();
     };
     let loc = t.str_at("overworld.playerLocation").unwrap_or("?");
-    let completed = t
-        .table_at("overworld.completedAreas")
-        .map(|c| c.map.len())
-        .unwrap_or(0);
+    let completed = t.table_at("overworld.completedAreas").map(|c| c.map.len()).unwrap_or(0);
     // `hell` is the anomaly gate: nonzero means it has already opened and the trigger is spent.
     // Read as a FLOAT — `hellOpens` sets it to 0.1, and `as_int` reports that as absent, which had
     // this printing `hell=unset` for a world whose anomaly was wide open.
-    let hell = t.table_at("overworld.areaFlags").and_then(|f| f.get("hell").and_then(|v| v.as_f64()));
+    let hell =
+        t.table_at("overworld.areaFlags").and_then(|f| f.get("hell").and_then(|v| v.as_f64()));
     let mid_fight = dir.join("combatSaveData").is_file();
     format!(
         "at {loc}, {completed} areas complete, anomaly {}, {}",
@@ -214,7 +215,9 @@ fn describe_hell(hell: Option<f64>) -> String {
 }
 
 fn sanitize(name: &str) -> String {
-    name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect()
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect()
 }
 
 /// Refuses while the game runs — **but only for a directory the game could be writing.**
@@ -330,7 +333,10 @@ mod tests {
 
         let removed = clear(&dir).expect("the sandbox should be clearable");
         assert!(removed.contains(&"persistentSaveData".to_string()), "unlocks must go too");
-        assert!(removed.contains(&"saveStats".to_string()), "and the history that seeds hero select");
+        assert!(
+            removed.contains(&"saveStats".to_string()),
+            "and the history that seeds hero select"
+        );
         assert!(removed.contains(&"screenshots".to_string()), "and whatever else was in there");
 
         let left: Vec<String> = std::fs::read_dir(&dir)
@@ -364,7 +370,10 @@ mod tests {
     fn the_running_game_guard_covers_the_save_the_game_writes() {
         let appdata = Path::new(r"C:\Users\x\AppData\Roaming");
         assert!(is_under(appdata, &crate::game::savedir::unfused(appdata)), "Diggle's sandbox");
-        assert!(is_under(appdata, &crate::game::savedir::fused(appdata)), "and the real Steam save");
+        assert!(
+            is_under(appdata, &crate::game::savedir::fused(appdata)),
+            "and the real Steam save"
+        );
         assert!(is_under(appdata, appdata), "the root counts as inside itself");
 
         // A copy of the sandbox made somewhere else is not a save any game is writing, whatever it

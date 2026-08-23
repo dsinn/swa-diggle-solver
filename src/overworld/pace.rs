@@ -199,7 +199,10 @@ mod tests {
         // `c` is a known neighbour of `b` that has never been printed with a position of its own,
         // which is the ordinary state of anything a hop beyond where we have stood.
         assert_eq!(m.walk_legs("a", "c"), None);
-        assert_eq!(walk_budget(&m.walk_legs("a", "c").unwrap_or_default(), false, Ground::Surface), CEILING);
+        assert_eq!(
+            walk_budget(&m.walk_legs("a", "c").unwrap_or_default(), false, Ground::Surface),
+            CEILING
+        );
     }
 
     /// **The first hop after entering a subworld is still priced**, because inside, the leg is the
@@ -209,13 +212,7 @@ mod tests {
     #[test]
     fn an_interior_hop_is_priced_even_though_we_do_not_know_where_we_are_standing() {
         let mut m = WorldMap::new();
-        m.fold(&inside_dump(
-            "l9",
-            "a",
-            "",
-            vec![node("b", "")],
-            Vec::new(),
-        ));
+        m.fold(&inside_dump("l9", "a", "", vec![node("b", "")], Vec::new()));
         assert!(
             m.inside().is_some(),
             "the fixture has to put us inside, or this tests the surface path"
@@ -251,7 +248,6 @@ mod tests {
         place(&mut m, "a", (0.0, 0.0), &["b"]);
         assert_eq!(m.walk_legs("a", "a"), Some(Vec::new()));
     }
-
 
     /// The fitted model, at both ends of the range it was fitted over.
     ///

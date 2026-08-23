@@ -111,7 +111,10 @@ fn the_pregame_a_run_stopped_on_is_recognisable() {
     // indistinguishable and the second template pointless.
     for f in ["pregame-hot.png", "pregame-hot-2.png"] {
         let cold = score_at_origin(&PREGAME_START, f).unwrap();
-        assert!(cold < PREGAME_START_PRESENT, "{f}: resting template scored {cold:.4} on a hot button");
+        assert!(
+            cold < PREGAME_START_PRESENT,
+            "{f}: resting template scored {cold:.4} on a hot button"
+        );
     }
 }
 
@@ -140,7 +143,10 @@ fn a_highlighted_start_is_still_the_pregame() {
     // And the hot template must not claim a resting button, or the two would be one.
     for f in ["pregame-graveyard.png", "pregame-graveyard-2.png"] {
         let cold = score_at_origin(&PREGAME_START_HOT, f).unwrap();
-        assert!(cold < PREGAME_START_PRESENT, "{f}: hot template scored {cold:.4} on a resting button");
+        assert!(
+            cold < PREGAME_START_PRESENT,
+            "{f}: hot template scored {cold:.4} on a resting button"
+        );
     }
     eprintln!("PREGAME_START_HOT: source {hot:.4}, independent {other:.4}");
 }
@@ -249,7 +255,9 @@ fn the_combat_hud_is_told_apart_from_every_screen_that_is_not_a_fight() {
 
     // The gap is the finding, so it is asserted rather than trusted. Every one of these is a
     // screen the navigator can legitimately be sitting on, and none may read as a fight.
-    for name in ["16-selected.png", "post-crypt.png", "reward-selected.png", "overworld-campfire.png"] {
+    for name in
+        ["16-selected.png", "post-crypt.png", "reward-selected.png", "overworld-campfire.png"]
+    {
         let q = score(&COMBAT_HUD, name).unwrap();
         assert!(q < COMBAT_HUD_PRESENT, "{name} scored {q:.4}, at or above the threshold");
         // Not merely under the bar — nowhere near it. A non-combat screen creeping up towards
@@ -280,8 +288,12 @@ fn the_combat_hud_reads_the_same_in_a_different_biome() {
     assert!(crypt >= COMBAT_HUD_PRESENT, "the crypt frame scored {crypt:.4}");
 
     // And nothing else claims that frame, so `identify` reaching it returns `CombatEntered`.
-    assert!(score(&COMBAT_FINISH, "combat-forest-turn1.png").unwrap_or(0.0) < COMBAT_FINISH_PRESENT);
-    assert!(score(&CHARACTER_STATS, "combat-forest-turn1.png").unwrap_or(0.0) < CHARACTER_STATS_PRESENT);
+    assert!(
+        score(&COMBAT_FINISH, "combat-forest-turn1.png").unwrap_or(0.0) < COMBAT_FINISH_PRESENT
+    );
+    assert!(
+        score(&CHARACTER_STATS, "combat-forest-turn1.png").unwrap_or(0.0) < CHARACTER_STATS_PRESENT
+    );
 }
 
 /// The class-unlock screen must not read as hero select. **Both layers are asserted.**

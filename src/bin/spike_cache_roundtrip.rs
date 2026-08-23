@@ -70,7 +70,9 @@ fn main() {
         }
     }
     let added = after.keys().filter(|k| !before.contains_key(*k)).count();
-    println!("\nmissing {missing}, invented {added}, positions lost {lost}, rows differing {differ}");
+    println!(
+        "\nmissing {missing}, invented {added}, positions lost {lost}, rows differing {differ}"
+    );
     println!(
         "VERDICT: {}",
         match (missing, added, lost, differ) {

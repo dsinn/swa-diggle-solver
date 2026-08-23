@@ -107,8 +107,7 @@ fn take_own_console() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn open_console_handle(
-    name: &str,
-    sa: Option<&SECURITY_ATTRIBUTES>,
+    name: &str, sa: Option<&SECURITY_ATTRIBUTES>,
 ) -> Result<HANDLE, Box<dyn std::error::Error>> {
     let w = wide(name);
     Ok(unsafe {
@@ -158,8 +157,7 @@ fn spawn_detached(exe: &str, cmdline: &str) -> Result<(u32, HANDLE), Box<dyn std
 /// Phase 1 only: a child whose stdout is EXPLICITLY our console screen buffer. `cmd.exe` has
 /// no console hack of its own, so it needs the handles named for it.
 fn spawn_with_console_handles(
-    exe: &str,
-    cmdline: &str,
+    exe: &str, cmdline: &str,
 ) -> Result<(u32, HANDLE), Box<dyn std::error::Error>> {
     let sa = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -200,9 +198,7 @@ fn spawn_with_console_handles(
 /// Phase 4 only: stdout to an anonymous pipe, reproducing the original (buffered) channel.
 /// Returns everything the child wrote, read to EOF after it exits.
 fn run_capturing_pipe(
-    exe: &str,
-    cmdline: &str,
-    settle: Duration,
+    exe: &str, cmdline: &str, settle: Duration,
 ) -> Result<(bool, String), Box<dyn std::error::Error>> {
     let sa = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -275,7 +271,8 @@ fn close_gracefully(pid: u32, handle: HANDLE, timeout: Duration) -> bool {
             let _ = PostMessageW(w.hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
         }
     }
-    let exited = unsafe { WaitForSingleObject(handle, timeout.as_millis() as u32) } == WAIT_OBJECT_0;
+    let exited =
+        unsafe { WaitForSingleObject(handle, timeout.as_millis() as u32) } == WAIT_OBJECT_0;
     if !exited {
         unsafe {
             let _ = TerminateProcess(handle, 0);
@@ -328,9 +325,7 @@ fn cursor() -> (i32, i32) {
 /// the report and where it landed, in client space.
 fn nav_to(
     win: &diggle_solver::win::window::GameWindow,
-    input: &diggle_solver::win::input::PostMessageInput,
-    tx: i32,
-    ty: i32,
+    input: &diggle_solver::win::input::PostMessageInput, tx: i32, ty: i32,
 ) -> Result<(bool, (i32, i32), String), Box<dyn std::error::Error>> {
     const VK_DOWN: u16 = 0x28;
     const SC_DOWN: u16 = 0x50;
@@ -355,7 +350,11 @@ fn nav_to(
             break;
         }
         let (vk, sc) = if dx.abs() >= dy.abs() {
-            if dx > 0 { (VK_RIGHT, SC_RIGHT) } else { (VK_LEFT, SC_LEFT) }
+            if dx > 0 {
+                (VK_RIGHT, SC_RIGHT)
+            } else {
+                (VK_LEFT, SC_LEFT)
+            }
         } else if dy > 0 {
             (VK_DOWN, SC_DOWN)
         } else {
@@ -449,7 +448,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let before3 = scrape().unwrap_or_default();
     let base3 = nonblank(&before3);
     let (game_pid, game_handle) = spawn_detached(&lovec, &game_line)?;
-    log.push_str(&format!("launched pid {game_pid}, DETACHED_PROCESS, no STARTF_USESTDHANDLES\n\n"));
+    log.push_str(&format!(
+        "launched pid {game_pid}, DETACHED_PROCESS, no STARTF_USESTDHANDLES\n\n"
+    ));
 
     // CONTROL 3: prove it RAN. Silence from a process that never started is uninterpretable --
     // exactly what invalidated the original ConPTY verdict.
@@ -462,7 +463,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::thread::sleep(Duration::from_millis(250));
     }
     match window_after {
-        Some(ms) => log.push_str(&format!("window appeared after ~{ms} ms — **CONTROL 3: PASS**\n\n")),
+        Some(ms) => {
+            log.push_str(&format!("window appeared after ~{ms} ms — **CONTROL 3: PASS**\n\n"))
+        }
         None => log.push_str("**CONTROL 3: FAIL** — no window in 15 s; verdict INVALID\n\n"),
     }
 
@@ -521,7 +524,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(w) = diggle_solver::win::window::find_by_pid(game_pid) {
         if let Ok(f) = diggle_solver::win::capture::capture_window(&w) {
             let _ = f.write_bmp(Path::new(SHOT));
-            log.push_str(&format!("\nwindow screenshot: `{SHOT}` (check for a LÖVE error screen)\n"));
+            log.push_str(&format!(
+                "\nwindow screenshot: `{SHOT}` (check for a LÖVE error screen)\n"
+            ));
         }
     }
 

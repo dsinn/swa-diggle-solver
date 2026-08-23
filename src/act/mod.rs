@@ -318,7 +318,8 @@ fn template_path(name: &str) -> PathBuf {
 pub fn score_exact(win: &GameWindow, button: &Button) -> Result<f64, crate::Error> {
     let tpl = cached_template(button)?;
     let (ox, oy) = button.origin;
-    let frame = crate::win::capture::capture_client_rect(win, ox, oy, tpl.width as i32, tpl.height as i32)?;
+    let frame =
+        crate::win::capture::capture_client_rect(win, ox, oy, tpl.width as i32, tpl.height as i32)?;
     // The frame is exactly template-sized, so there is one candidate offset and this is a direct
     // comparison — reusing the matcher rather than hand-rolling one keeps alpha handling identical.
     Ok(find_at_scale_in(&frame, &tpl, 1.0, 1, None).map(|m| m.inliers).unwrap_or(0.0))
@@ -543,9 +544,7 @@ pub fn click(win: &GameWindow, button: &Button) -> Result<f64, crate::Error> {
 /// So the distinction that matters is **"not there yet" versus "not there"**, and only waiting can
 /// tell them apart. Returns the match quality, or errors if the button never appears.
 pub fn click_when_ready(
-    win: &GameWindow,
-    button: &Button,
-    timeout: std::time::Duration,
+    win: &GameWindow, button: &Button, timeout: std::time::Duration,
 ) -> Result<f64, crate::Error> {
     let deadline = std::time::Instant::now() + timeout;
     let started = std::time::Instant::now();

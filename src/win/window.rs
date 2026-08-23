@@ -69,7 +69,7 @@ mod tests {
     }
 }
 
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT, TRUE, FALSE};
+use windows::Win32::Foundation::{BOOL, FALSE, HWND, LPARAM, POINT, RECT, TRUE};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClientRect, GetWindowThreadProcessId, IsWindowVisible,

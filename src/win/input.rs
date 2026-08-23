@@ -153,14 +153,7 @@ fn mouse_event(flags: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_F
     INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
-            mi: MOUSEINPUT {
-                dx: 0,
-                dy: 0,
-                mouseData: 0,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: 0,
-            },
+            mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 },
         },
     }
 }
@@ -331,7 +324,9 @@ pub fn drag_in(
 ///
 /// `GA_ROOT` because `WindowFromPoint` returns the deepest child under the point, which for a LOVE
 /// window is not necessarily the HWND we hold.
-pub fn click_at_in(win: &crate::win::window::GameWindow, x: i32, y: i32) -> Result<(), crate::Error> {
+pub fn click_at_in(
+    win: &crate::win::window::GameWindow, x: i32, y: i32,
+) -> Result<(), crate::Error> {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
     let under = unsafe { GetAncestor(WindowFromPoint(POINT { x, y }), GA_ROOT) };
@@ -351,10 +346,7 @@ pub fn click_at_in(win: &crate::win::window::GameWindow, x: i32, y: i32) -> Resu
 /// guard, so only ever aim it at a node the log has just reported as adjacent.
 pub fn inject_left_click(count: usize) -> Result<(), crate::Error> {
     for i in 0..count {
-        let events = [
-            mouse_event(MOUSEEVENTF_LEFTDOWN),
-            mouse_event(MOUSEEVENTF_LEFTUP),
-        ];
+        let events = [mouse_event(MOUSEEVENTF_LEFTDOWN), mouse_event(MOUSEEVENTF_LEFTUP)];
         let sent = unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) };
         if sent != events.len() as u32 {
             return Err(crate::Error::Win32(format!(
@@ -527,10 +519,7 @@ impl PostMessageInput {
     /// acceleration. Distance travelled is therefore a function of HOLD DURATION, and
     /// `press_extended_key`'s fixed 60 ms cannot express it.
     pub fn hold_extended_key(
-        &self,
-        vk: u16,
-        scancode: u16,
-        dur: Duration,
+        &self, vk: u16, scancode: u16, dur: Duration,
     ) -> Result<(), crate::Error> {
         let sc = scancode as isize;
         const EXTENDED: isize = 0x0100_0000;

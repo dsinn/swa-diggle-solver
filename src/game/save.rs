@@ -189,9 +189,7 @@ fn eval(source: &str, lenient: bool) -> Result<Table, crate::Error> {
     let value: mlua::Value = lua.load(source).eval()?;
     match convert(value, lenient)? {
         Value::Table(t) => Ok(t),
-        other => Err(crate::Error::Config(format!(
-            "source did not return a table, got {other:?}"
-        ))),
+        other => Err(crate::Error::Config(format!("source did not return a table, got {other:?}"))),
     }
 }
 
@@ -352,10 +350,7 @@ return {
         // A save is data. If one ever calls out to the runtime, that is a signal worth failing on,
         // not something to execute.
         let err = parse(r#"return { x = os.time() }"#).unwrap_err();
-        assert!(
-            format!("{err}").contains("lua"),
-            "expected a Lua error, got: {err}"
-        );
+        assert!(format!("{err}").contains("lua"), "expected a Lua error, got: {err}");
     }
 
     #[test]

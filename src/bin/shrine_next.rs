@@ -35,7 +35,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{length} letters, {band:?}, {} candidates", solver.remaining());
 
     for arg in args {
-        let (guess, pattern) = arg.split_once(':').ok_or(format!("expected guess:pattern, got {arg:?}"))?;
+        let (guess, pattern) =
+            arg.split_once(':').ok_or(format!("expected guess:pattern, got {arg:?}"))?;
         if guess.len() != length {
             return Err(format!("{guess:?} is not {length} letters").into());
         }

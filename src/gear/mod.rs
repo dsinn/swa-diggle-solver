@@ -44,7 +44,7 @@ pub mod facts;
 pub mod table;
 pub mod weapon;
 
-pub use facts::{FightFacts, Facts};
+pub use facts::{Facts, FightFacts};
 pub use table::{Dict, Fact, ModifierSpec, MODIFIERS};
 pub use weapon::{status_tick, Weapon, WeaponBonus};
 
@@ -338,7 +338,8 @@ mod tests {
     #[test]
     fn only_worn_quills_are_counted() {
         let gear = Gear::from_pairs(&[("wordScoreBonusQuillCount", 1.0)]);
-        let a = gear.compile().apply(&facts_for("CAT"), &FightFacts { turn: 1, ..Default::default() });
+        let a =
+            gear.compile().apply(&facts_for("CAT"), &FightFacts { turn: 1, ..Default::default() });
         assert_eq!(a.pre_add, 0.0, "no quill contributors worn, so the tally is zero");
     }
 

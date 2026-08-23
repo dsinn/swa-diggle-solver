@@ -300,12 +300,8 @@ fn rule(card: &Card) -> Verdict {
     }
     // A `Prefer` marker only holds if no class that shares it is also on show. `hench` starts on
     // the warrior and the woodsman alike; `trappingKit` is what tells them apart.
-    let shared = MARKERS
-        .iter()
-        .any(|m| matches!(m.means, Means::Shared(_)) && card.has(m.item));
-    let preferred = MARKERS
-        .iter()
-        .any(|m| matches!(m.means, Means::Prefer(_)) && card.has(m.item));
+    let shared = MARKERS.iter().any(|m| matches!(m.means, Means::Shared(_)) && card.has(m.item));
+    let preferred = MARKERS.iter().any(|m| matches!(m.means, Means::Prefer(_)) && card.has(m.item));
     if preferred && !shared {
         return Verdict::Preferred;
     }
@@ -566,7 +562,10 @@ mod tests {
     fn no_class_starts_without_a_passive() {
         let Some(starts) = starting_passives() else { return };
         for (class, passives) in &starts {
-            assert!(!passives.is_empty(), "the {class} would draw its Boons row where Passives goes");
+            assert!(
+                !passives.is_empty(),
+                "the {class} would draw its Boons row where Passives goes"
+            );
         }
     }
 }

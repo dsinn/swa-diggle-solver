@@ -80,7 +80,9 @@ pub(super) fn container_heading(parent: &str) -> &'static str {
     }
 }
 
-pub(super) fn inside_dump(parent: &str, here: &str, heading: &str, nodes: Vec<Node>, exits: Vec<Exit>) -> Adjacency {
+pub(super) fn inside_dump(
+    parent: &str, here: &str, heading: &str, nodes: Vec<Node>, exits: Vec<Exit>,
+) -> Adjacency {
     Adjacency {
         subworld: Some((parent.into(), container_heading(parent).into())),
         exits,
@@ -96,9 +98,17 @@ pub(super) fn exit(to: &str) -> Exit {
 pub(super) fn two_routes() -> WorldMap {
     let mut m = WorldMap::new();
     m.fold(&dump("start", "camp", vec![node("woods", "Mistwood forest"), node("a", "a meadow")]));
-    m.fold(&dump("woods", "Mistwood forest", vec![node("start", "camp"), node("goal", "Grim Barrow — level 4 crypt")]));
+    m.fold(&dump(
+        "woods",
+        "Mistwood forest",
+        vec![node("start", "camp"), node("goal", "Grim Barrow — level 4 crypt")],
+    ));
     m.fold(&dump("a", "a meadow", vec![node("start", "camp"), node("b", "b meadow")]));
-    m.fold(&dump("b", "b meadow", vec![node("a", "a meadow"), node("goal", "Grim Barrow — level 4 crypt")]));
+    m.fold(&dump(
+        "b",
+        "b meadow",
+        vec![node("a", "a meadow"), node("goal", "Grim Barrow — level 4 crypt")],
+    ));
     m.here = Some("start".into());
     m
 }
@@ -115,7 +125,10 @@ pub(super) fn hurt_at_l1() -> WorldMap {
             node("l4", "Bainton Clump — level 1 forest"),
         ],
     ));
-    m.note_health(crate::rest::Health { current: 12, max: 12 }, crate::rest::Health { current: 7, max: 12 });
+    m.note_health(
+        crate::rest::Health { current: 12, max: 12 },
+        crate::rest::Health { current: 7, max: 12 },
+    );
     // Enough for a bed and well under `HEART_FLOOR`, so the errand under test is the only one
     // live. The campfire in this fixture is deliberately kept: it is the real island's shape, and
     // since `CAMPFIRE_REST_IS_BUILT` went false it is also the thing that must *not* be chosen.
@@ -137,23 +150,38 @@ pub(super) fn hurt_at_l1() -> WorldMap {
 /// a test that expects the errand to change the door is testing something.
 pub(super) fn a_forest_with_two_doors() -> (WorldMap, Exit, Exit) {
     let dane = Exit { x: 0.0, y: 0.0, to_key: "l19".into(), to_heading: "Dane campfire".into() };
-    let cowlam =
-        Exit { x: 0.0, y: 0.0, to_key: "l1".into(), to_heading: "Cowlam village".into() };
+    let cowlam = Exit { x: 0.0, y: 0.0, to_key: "l1".into(), to_heading: "Cowlam village".into() };
     let both = vec![dane.clone(), cowlam.clone()];
     let mut m = WorldMap::new();
     m.fold(&dump("start", "The Wold portal", vec![node("l9", "Saltagh Park — level 1 forest")]));
-    m.fold(&inside_dump("l9", "l9sub0", "Saltagh Park crossroads",
+    m.fold(&inside_dump(
+        "l9",
+        "l9sub0",
+        "Saltagh Park crossroads",
         vec![node("l9sub1", "Saltagh Park road"), node("l9sub2", "Saltagh Park road")],
-        both.clone()));
-    m.fold(&inside_dump("l9", "l9sub1", "Saltagh Park road",
+        both.clone(),
+    ));
+    m.fold(&inside_dump(
+        "l9",
+        "l9sub1",
+        "Saltagh Park road",
         vec![node("l9sub0", "Saltagh Park crossroads"), node("l9_path_to_l19", "Road to Dane")],
-        both.clone()));
-    m.fold(&inside_dump("l9", "l9sub2", "Saltagh Park road",
+        both.clone(),
+    ));
+    m.fold(&inside_dump(
+        "l9",
+        "l9sub2",
+        "Saltagh Park road",
         vec![node("l9sub0", "Saltagh Park crossroads"), node("l9_path_to_l1", "Road to Cowlam")],
-        both.clone()));
-    m.fold(&inside_dump("l9", "l9sub0", "Saltagh Park crossroads",
+        both.clone(),
+    ));
+    m.fold(&inside_dump(
+        "l9",
+        "l9sub0",
+        "Saltagh Park crossroads",
         vec![node("l9sub1", "Saltagh Park road"), node("l9sub2", "Saltagh Park road")],
-        both.clone()));
+        both.clone(),
+    ));
     // Enough for a bed. The two doors are a campfire and a village, and since
     // `rest::CAMPFIRE_REST_IS_BUILT` went false only the village can answer a rest — so without
     // this the fixture has no rest errand at all and the tests below test nothing.
@@ -168,17 +196,24 @@ pub(super) fn a_forest_with_two_doors() -> (WorldMap, Exit, Exit) {
 /// neighbours and printed every exit as `Hidden location`, because `thickFog = true`.
 pub(super) fn a_lost_woods() -> WorldMap {
     let mut m = WorldMap::new();
-    m.fold(&dump("l12", "Standing — level 2 crypt",
-        vec![node("e1", "Howden Timberland — level 2 forest")]));
+    m.fold(&dump(
+        "l12",
+        "Standing — level 2 crypt",
+        vec![node("e1", "Howden Timberland — level 2 forest")],
+    ));
     m.fold(&Adjacency {
         subworld: Some(("e1".into(), "Howden Timberland — level 2 lost woods".into())),
         exits: Vec::new(),
         hidden_exits: 3,
-        ..dump("e1_plaza", "Howden Timberland forest", vec![
-            node("e1sub1", "Howden Timberland — level 2 chest"),
-            node("e1sub2", "Howden Timberland forest"),
-            node("e1sub3", "Howden Timberland crossroads"),
-        ])
+        ..dump(
+            "e1_plaza",
+            "Howden Timberland forest",
+            vec![
+                node("e1sub1", "Howden Timberland — level 2 chest"),
+                node("e1sub2", "Howden Timberland forest"),
+                node("e1sub3", "Howden Timberland crossroads"),
+            ],
+        )
     });
     m
 }
@@ -230,7 +265,10 @@ pub(super) fn enthorpe() -> WorldMap {
         "l32",
         "l32sub1",
         "Enthorpe house",
-        vec![room("l32_path_to_l7", "Somewhere l7 crossroads", 400.0), room("l32sub2", "Enthorpe house", 600.0)],
+        vec![
+            room("l32_path_to_l7", "Somewhere l7 crossroads", 400.0),
+            room("l32sub2", "Enthorpe house", 600.0),
+        ],
         doors(100.0),
     ));
     // And another. This is the dump that learns where the inn is.

@@ -133,9 +133,10 @@ fn scan(
         // `craft = { type = 'x' }` off the enclosing item.
         if depth >= 1 {
             if let Some(Some(k)) = openers.get((depth - 1) as usize) {
-                for (field, out) in
-                    [(string_field(&line, "type"), &mut *kinds), (string_field(&line, "icon"), &mut *icons)]
-                {
+                for (field, out) in [
+                    (string_field(&line, "type"), &mut *kinds),
+                    (string_field(&line, "icon"), &mut *icons),
+                ] {
                     if let Some(v) = field {
                         let e = out.entry(k.clone()).or_insert((depth, v.clone()));
                         if depth < e.0 {
@@ -523,9 +524,10 @@ mod tests {
                 };
                 let indent = l.len() - l.trim_start().len();
                 // The owner is the nearest line above that is outdented from this one.
-                let owner = lines[..i].iter().rev().find(|p| {
-                    !p.trim().is_empty() && p.len() - p.trim_start().len() < indent
-                });
+                let owner = lines[..i]
+                    .iter()
+                    .rev()
+                    .find(|p| !p.trim().is_empty() && p.len() - p.trim_start().len() < indent);
                 let Some(owner) = owner.map(|o| o.trim()) else { continue };
                 match opens_table(owner) {
                     Some(key) => {

@@ -103,11 +103,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         si.lpAttributeList = attrs;
 
         // Quote the exe and game dir: both contain spaces on this machine.
-        let cmdline = format!(
-            "\"{}\" \"{}\" --verbose",
-            cfg.lovec_path.display(),
-            cfg.game_dir.display()
-        );
+        let cmdline =
+            format!("\"{}\" \"{}\" --verbose", cfg.lovec_path.display(), cfg.game_dir.display());
         let mut cmd: Vec<u16> = cmdline.encode_utf16().collect();
         cmd.push(0);
 

@@ -41,6 +41,7 @@ use std::path::Path;
 use std::time::Duration;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE};
+use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
@@ -48,7 +49,6 @@ use windows::Win32::System::Console::{
     AllocConsole, FreeConsole, GetConsoleScreenBufferInfo, ReadConsoleOutputCharacterW,
     SetConsoleScreenBufferSize, CONSOLE_SCREEN_BUFFER_INFO, COORD,
 };
-use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::System::Threading::{
     CreateProcessW, TerminateProcess, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
     STARTF_USESTDHANDLES, STARTUPINFOW,
@@ -83,8 +83,7 @@ fn take_own_console() -> Result<(), Box<dyn std::error::Error>> {
 /// inheritable, and pass them in. This also pins the property under test -- the child's stdout
 /// is unambiguously a character device, which is what should make the CRT line-buffer.
 fn spawn_on_our_console(
-    exe: &str,
-    cmdline: &str,
+    exe: &str, cmdline: &str,
 ) -> Result<(u32, HANDLE), Box<dyn std::error::Error>> {
     let sa = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -123,8 +122,7 @@ fn spawn_on_our_console(
 }
 
 fn open_console_handle(
-    name: &str,
-    sa: &SECURITY_ATTRIBUTES,
+    name: &str, sa: &SECURITY_ATTRIBUTES,
 ) -> Result<HANDLE, Box<dyn std::error::Error>> {
     let w = wide(name);
     Ok(unsafe {
@@ -208,8 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log.push_str("## Phase 1 - positive control (cmd.exe on our console)\n\n");
 
     // No quoting around the /c payload: cmd would treat the quoted string as a program name.
-    let control_line =
-        format!(r"C:\Windows\System32\cmd.exe /c echo {NEEDLE_A} & echo {NEEDLE_B}");
+    let control_line = format!(r"C:\Windows\System32\cmd.exe /c echo {NEEDLE_A} & echo {NEEDLE_B}");
     let (control_pid, control_handle) =
         spawn_on_our_console(r"C:\Windows\System32\cmd.exe", &control_line)?;
     std::thread::sleep(Duration::from_millis(1500));

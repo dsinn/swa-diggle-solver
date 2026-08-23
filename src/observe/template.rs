@@ -83,10 +83,7 @@ impl Template {
             (ct, bd) => return Err(format!("unsupported PNG format {ct:?}/{bd:?}").into()),
         };
 
-        let name = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         Ok(Template { name, width: info.width, height: info.height, rgba })
     }
 
@@ -162,10 +159,7 @@ pub fn inliers_between(a: &crate::win::capture::Frame, b: &crate::win::capture::
 /// overworld location layer (`worldUtils.setLocationTypeImageFilters(..., 'linear',
 /// 'nearest')` in overworld/generators/world.lua), so nearest matches how it is drawn.
 pub fn find_at_scale(
-    frame: &crate::win::capture::Frame,
-    tpl: &Template,
-    scale: f64,
-    step: i32,
+    frame: &crate::win::capture::Frame, tpl: &Template, scale: f64, step: i32,
 ) -> Option<Match> {
     find_at_scale_in(frame, tpl, scale, step, None)
 }
@@ -175,10 +169,7 @@ pub fn find_at_scale(
 /// affordable — and step=1 matters for pixel art, where being one pixel off misaligns every
 /// edge in the sprite and collapses the score.
 pub fn find_at_scale_in(
-    frame: &crate::win::capture::Frame,
-    tpl: &Template,
-    scale: f64,
-    step: i32,
+    frame: &crate::win::capture::Frame, tpl: &Template, scale: f64, step: i32,
     bounds: Option<(i32, i32, i32, i32)>,
 ) -> Option<Match> {
     let tw = ((tpl.width as f64) * scale).round() as i32;
@@ -265,10 +256,7 @@ pub fn find_at_scale_in(
 /// cannot show whether the match is *distinctive*. Comparing the best against the runner-up
 /// is what distinguishes "found it" from "this template matches flat ground everywhere".
 pub fn sweep(
-    frame: &crate::win::capture::Frame,
-    tpl: &Template,
-    scales: &[f64],
-    step: i32,
+    frame: &crate::win::capture::Frame, tpl: &Template, scales: &[f64], step: i32,
 ) -> Vec<Match> {
     sweep_in(frame, tpl, scales, step, None)
 }
@@ -278,16 +266,11 @@ pub fn sweep(
 /// matching requires — a coarse step misaligns every edge and cannot distinguish "the
 /// rendering differs from the file" from "we never tested the right offset".
 pub fn sweep_in(
-    frame: &crate::win::capture::Frame,
-    tpl: &Template,
-    scales: &[f64],
-    step: i32,
+    frame: &crate::win::capture::Frame, tpl: &Template, scales: &[f64], step: i32,
     bounds: Option<(i32, i32, i32, i32)>,
 ) -> Vec<Match> {
-    let mut out: Vec<Match> = scales
-        .iter()
-        .filter_map(|s| find_at_scale_in(frame, tpl, *s, step, bounds))
-        .collect();
+    let mut out: Vec<Match> =
+        scales.iter().filter_map(|s| find_at_scale_in(frame, tpl, *s, step, bounds)).collect();
     out.sort_by(|a, b| {
         b.inliers
             .partial_cmp(&a.inliers)
@@ -356,7 +339,10 @@ mod tests {
     #[test]
     fn mismatched_sizes_read_as_different_rather_than_panicking() {
         // A resized window mid-check must invalidate the reference, not crash a live fight.
-        assert_eq!(inliers_between(&solid_frame(10, 10, 0, 0, 0), &solid_frame(20, 10, 0, 0, 0)), 0.0);
+        assert_eq!(
+            inliers_between(&solid_frame(10, 10, 0, 0, 0), &solid_frame(20, 10, 0, 0, 0)),
+            0.0
+        );
     }
 
     /// A template painted into the frame must be found exactly, with zero error.
@@ -401,7 +387,7 @@ mod tests {
     fn transparent_pixels_are_excluded_from_the_score() {
         let frame = solid_frame(20, 20, 0, 0, 0); // black
         let mut tpl = square_template(4, 255, 255, 255, 0); // white, transparent
-        // Make the top-left pixel opaque black -- the only pixel that may be scored.
+                                                            // Make the top-left pixel opaque black -- the only pixel that may be scored.
         tpl.rgba[0] = 0;
         tpl.rgba[1] = 0;
         tpl.rgba[2] = 0;

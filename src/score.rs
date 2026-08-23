@@ -231,8 +231,7 @@ impl Scorer {
             (Some(m), Some(b)) => m * MAT_BORDER_RATIO + b * (1.0 - MAT_BORDER_RATIO),
             (m, b) => m.unwrap_or(1.0) + b.unwrap_or(0.0),
         };
-        if let Some(add) =
-            tile.quality.ligature.as_deref().and_then(|l| self.ligature_bonus.get(l))
+        if let Some(add) = tile.quality.ligature.as_deref().and_then(|l| self.ligature_bonus.get(l))
         {
             score += add;
         }
@@ -244,8 +243,7 @@ impl Scorer {
     /// Only correct when the tiles really are plain; [`Scorer::score_typed`] is what the search uses,
     /// because it knows which tiles the word will actually consume.
     pub fn score_word(&self, word: &str) -> i64 {
-        let tiles: Vec<Tile> =
-            word.chars().map(|c| Tile::plain(&c.to_string())).collect();
+        let tiles: Vec<Tile> = word.chars().map(|c| Tile::plain(&c.to_string())).collect();
         self.score_typed(&tiles, word.chars().count(), 1.0)
     }
 
@@ -302,7 +300,9 @@ impl Scorer {
 ///
 /// Both are file-locals under a table of functions, so the literal is cut at the module's own
 /// `return` and a data-only return is appended.
-fn load_default_material(game_dir: &Path) -> Result<(HashMap<String, String>, HashMap<String, f64>), crate::Error> {
+fn load_default_material(
+    game_dir: &Path,
+) -> Result<(HashMap<String, String>, HashMap<String, f64>), crate::Error> {
     let path = game_dir.join("rpg/effects/material/default.lua");
     let src = std::fs::read_to_string(&path)?;
     let cut = src.find("\nreturn").ok_or_else(|| {
@@ -515,7 +515,8 @@ mod tests {
         // tile has no border at all and takes the additive branch, which is why plain letters score
         // exactly their material.
         let Some(s) = scorer() else { return };
-        let t = with("E", &[("bg", Value::Str("wood".into())), ("border", Value::Str("gold".into()))]);
+        let t =
+            with("E", &[("bg", Value::Str("wood".into())), ("border", Value::Str("gold".into()))]);
         // wood(1)*0.75 + gold border(10)*0.25 = 3.25
         assert!((s.tile_score(&t) - 3.25).abs() < 1e-9, "got {}", s.tile_score(&t));
     }
@@ -525,7 +526,8 @@ mod tests {
         // `rpg/effects/border/iron.lua` declares no score, so it takes the additive branch and adds
         // nothing. This is also why plain tiles -- which carry no border key -- score cleanly.
         let Some(s) = scorer() else { return };
-        let t = with("E", &[("bg", Value::Str("wood".into())), ("border", Value::Str("iron".into()))]);
+        let t =
+            with("E", &[("bg", Value::Str("wood".into())), ("border", Value::Str("iron".into()))]);
         assert_eq!(s.tile_score(&t), 1.0);
     }
 

@@ -816,7 +816,10 @@ impl Place {
                 || self.type_is("general store")
                 || self.type_is("inn")
                 || self.type_is("apothecary")
-                || self.type_is("chapel") => 2,
+                || self.type_is("chapel") =>
+            {
+                2
+            }
             _ => return 0,
         };
         allowed.saturating_sub(self.looted)
@@ -883,8 +886,16 @@ impl Place {
 
     /// The heading half of [`Place::is_container`], which is where the reasoning lives.
     fn heading_says_container(&self) -> bool {
-        const NOUNS: &[&str] =
-            &["village", "town", "hamlet", "forest", "bandit camp", "graveyard", "mausoleum", "church"];
+        const NOUNS: &[&str] = &[
+            "village",
+            "town",
+            "hamlet",
+            "forest",
+            "bandit camp",
+            "graveyard",
+            "mausoleum",
+            "church",
+        ];
         self.parent.is_none() && NOUNS.iter().any(|t| self.type_is(t))
     }
 
@@ -1045,7 +1056,6 @@ impl Place {
         }
         None
     }
-
 
     /// ## There was an `opens_the_anomaly` here, and the state it existed for cannot happen
     ///
@@ -1233,8 +1243,10 @@ mod tests {
     #[test]
     fn a_heading_says_whether_there_is_a_subworld_behind_it() {
         let surface = |heading: &str| Place { heading: heading.into(), ..Default::default() };
-        let inside = |heading: &str, parent: &str| {
-            Place { heading: heading.into(), parent: Some(parent.into()), ..Default::default() }
+        let inside = |heading: &str, parent: &str| Place {
+            heading: heading.into(),
+            parent: Some(parent.into()),
+            ..Default::default()
         };
 
         // The four `subworld` declarations, in every name their heading can take.
@@ -1262,7 +1274,8 @@ mod tests {
         assert!(!inside("Ulrome — level 6 house", "l10").is_container());
 
         // The old flag still wins on its own: proved from inside beats any heading.
-        let proved = Place { subworld_container: true, ..surface("Weedley Copse — level 0 crypt") };
+        let proved =
+            Place { subworld_container: true, ..surface("Weedley Copse — level 0 crypt") };
         assert!(proved.is_container());
     }
 
@@ -1302,8 +1315,11 @@ mod tests {
         assert_eq!(at("Rowlston Covert village").deliberate_fight_level(), None);
 
         // A cleared crypt is not a fight at all any more.
-        let done =
-            Place { heading: "Riccall — level 6 crypt".into(), completed: true, ..Default::default() };
+        let done = Place {
+            heading: "Riccall — level 6 crypt".into(),
+            completed: true,
+            ..Default::default()
+        };
         assert_eq!(done.deliberate_fight_level(), None);
     }
 
@@ -1316,7 +1332,11 @@ mod tests {
             corrupted: true,
             ..Default::default()
         };
-        assert_eq!(seen.deliberate_fight_level(), Some(6), "a heading we have beats any assumption");
+        assert_eq!(
+            seen.deliberate_fight_level(),
+            Some(6),
+            "a heading we have beats any assumption"
+        );
 
         // The state a resumed run actually holds: flags survive, the heading does not. This is the
         // absence recorded at `Place::is_shrine`, which cost two runs on 2026-08-14.
@@ -1358,7 +1378,10 @@ mod tests {
             p.can_be_consecrated()
         };
         assert!(consecratable("shrine1", "Gripthorpe Brush shrine"), "the overworld node itself");
-        assert!(consecratable("shrine1_plaza", "Gripthorpe Brush shrine"), "promoted to its parent");
+        assert!(
+            consecratable("shrine1_plaza", "Gripthorpe Brush shrine"),
+            "promoted to its parent"
+        );
         assert!(
             !consecratable("shrine1sub1", "Gripthorpe Brush woodland shrine"),
             "a woodland shrine inside a shrine's own forest — the one the run of 2026-08-17 stopped at"
@@ -1378,7 +1401,10 @@ mod tests {
         );
         let mut rebuilt = Place::default();
         rebuilt.key = "shrine2".into();
-        assert!(rebuilt.can_be_consecrated(), "and an unheaded major shrine must still read as one");
+        assert!(
+            rebuilt.can_be_consecrated(),
+            "and an unheaded major shrine must still read as one"
+        );
     }
 
     /// The heading alone answers "does arriving cost a fight", because the game builds it that way.
@@ -1388,7 +1414,11 @@ mod tests {
         // `AreaHeading` omits the level exactly when `locationHasCombat` is false
         // (`overworldview.lua:383-392`). Real headings, and the two that matter most:
         assert_eq!(free("Gembling shrine").arrival(), Arrival::Free, "uncorrupted shrine");
-        assert_eq!(free("Wetwang wizards' tower").arrival(), Arrival::Free, "competeOnVisit = true");
+        assert_eq!(
+            free("Wetwang wizards' tower").arrival(),
+            Arrival::Free,
+            "competeOnVisit = true"
+        );
         assert_eq!(free("Cottam campfire").arrival(), Arrival::Free);
         assert_eq!(free("Ulrome village").arrival(), Arrival::Free);
         // And carries it exactly when a fight is owed.
@@ -1445,8 +1475,16 @@ mod tests {
     fn a_forest_outranks_a_crypt_when_everything_costs_a_fight() {
         // The dev's ranking, and the one place it changes an outcome. Both are level 6, so the old
         // level-only sort split them by key -- `c1` before `f1`, the wrong way round.
-        let crypt = Place { key: "c1".into(), heading: "Yokefleet — level 6 crypt".into(), ..Default::default() };
-        let forest = Place { key: "f1".into(), heading: "Asselby Bush — level 6 forest".into(), ..Default::default() };
+        let crypt = Place {
+            key: "c1".into(),
+            heading: "Yokefleet — level 6 crypt".into(),
+            ..Default::default()
+        };
+        let forest = Place {
+            key: "f1".into(),
+            heading: "Asselby Bush — level 6 forest".into(),
+            ..Default::default()
+        };
         assert!(forest.risk() < crypt.risk());
 
         // The full order, safest first. `Unseen` sits below the known fights because being unable to
@@ -1458,7 +1496,11 @@ mod tests {
         // Corruption is read ahead of the heading, because it rewrites the level upward without
         // touching the type name (`world.lua:499-502`).
         let corrupt_forest = Place { corrupted: true, ..forest.clone() };
-        assert_eq!(corrupt_forest.risk(), Risk::Corrupt, "still says 'forest'; is not one any more");
+        assert_eq!(
+            corrupt_forest.risk(),
+            Risk::Corrupt,
+            "still says 'forest'; is not one any more"
+        );
         // Cleared is free on every axis, corruption included.
         assert_eq!(Place { completed: true, ..corrupt_forest }.risk(), Risk::Free);
     }
@@ -1522,9 +1564,15 @@ mod tests {
         // And the rule it is exempted from still holds everywhere else: `l12`'s neighbour `e1` is a
         // surface forest we have not entered, which is exactly the gamble the rule prices.
         let mut surface = WorldMap::new();
-        surface.fold(&dump("l12", "Standing — level 2 crypt",
-            vec![node("e1", "Howden Timberland — level 2 forest")]));
-        assert!(surface.get("e1").unwrap().hostile_to_enter(), "an unentered forest still might be");
+        surface.fold(&dump(
+            "l12",
+            "Standing — level 2 crypt",
+            vec![node("e1", "Howden Timberland — level 2 forest")],
+        ));
+        assert!(
+            surface.get("e1").unwrap().hostile_to_enter(),
+            "an unentered forest still might be"
+        );
     }
 
     /// **A chest at a dead end is still worth the two steps.** Task #16.
@@ -1578,7 +1626,8 @@ mod tests {
         let town = Place { heading: "Enholmes town".into(), ..Default::default() };
         let village = Place { heading: "Rowlston Covert village".into(), ..Default::default() };
         let hamlet = Place { heading: "Wetwang hamlet".into(), ..Default::default() };
-        let forest = Place { heading: "Bursall Hedge — level 2 forest".into(), ..Default::default() };
+        let forest =
+            Place { heading: "Bursall Hedge — level 2 forest".into(), ..Default::default() };
         for p in [&town, &village] {
             assert!(p.is_settlement(), "{} is somewhere to walk into", p.heading);
             assert_eq!(p.stocks_a_heart(), p.is_settlement(), "one question, not two");
@@ -1653,7 +1702,10 @@ mod tests {
         // The function forms read `location.corrupt` themselves, so for them corruption *is* the
         // fight — `locations/village.lua:63-70`. This is the half that must not move.
         assert!(!m.entry("l5").completes_on_visit());
-        assert!(m.entry("l5").may_be_a_fight(), "a corrupted village is exactly what it looks like");
+        assert!(
+            m.entry("l5").may_be_a_fight(),
+            "a corrupted village is exactly what it looks like"
+        );
 
         // **The parent gate**, which is not caution: `generators/forest.lua:103-131` gives its own
         // crossroads `competeOnVisit = subnodeIsPeaceful`, and an interior one can print a level a

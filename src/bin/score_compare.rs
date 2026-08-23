@@ -264,9 +264,7 @@ fn main() {
         let cost = if n == 0 {
             "UNMEASURED - no positive control in corpus".to_string()
         } else {
-            format!(
-                "free: {n} positive control(s), worst exact margin +{margin:.4} over threshold"
-            )
+            format!("free: {n} positive control(s), worst exact margin +{margin:.4} over threshold")
         };
         println!("{:<28} {:>10.4} {:>14.4} {:>8}  {cost}", b.name, max_d, present_d, n);
     }

@@ -181,9 +181,7 @@ impl Event {
             // written for and it stays available; what may not happen is reaching the end of the
             // options and settling on the one the game tags `[Murderer]`. If that leaves nothing,
             // the caller reports an unanswered event, which is recoverable — the alternative is not.
-            .or_else(|| {
-                self.choices.iter().find(|c| starts_combat(&c.text) && !murderous(&c.text))
-            })
+            .or_else(|| self.choices.iter().find(|c| starts_combat(&c.text) && !murderous(&c.text)))
     }
 }
 
@@ -337,11 +335,27 @@ pub fn murderous(text: &str) -> bool {
 
 pub fn harmful(text: &str) -> bool {
     const WORDS: &[&str] = &[
-        "kill", "murder", "slay", "attack", "strike", "stab", "shoot", "execute", "behead",
-        "sacrifice", "rob", "steal", "loot", "burn", "betray", "threaten", "extort",
+        "kill",
+        "murder",
+        "slay",
+        "attack",
+        "strike",
+        "stab",
+        "shoot",
+        "execute",
+        "behead",
+        "sacrifice",
+        "rob",
+        "steal",
+        "loot",
+        "burn",
+        "betray",
+        "threaten",
+        "extort",
     ];
     let t = text.to_ascii_lowercase();
-    let words: Vec<&str> = t.split(|c: char| !c.is_ascii_alphabetic()).filter(|w| !w.is_empty()).collect();
+    let words: Vec<&str> =
+        t.split(|c: char| !c.is_ascii_alphabetic()).filter(|w| !w.is_empty()).collect();
     words.iter().enumerate().any(|(i, w)| {
         WORDS.contains(w) && !reads_as_a_noun(words.get(i.wrapping_sub(1)).copied(), i)
     })
@@ -484,7 +498,10 @@ Choices = {
         let e = parse_events(&lines(STUMP)).pop().expect("the event parses");
         // What actually happened: `harmful` has no "cut", so the moral screen passed it through and
         // the run started a fight it could not win.
-        assert!(!harmful("[Combat] - Cut it down."), "the moral screen is not the one that catches this");
+        assert!(
+            !harmful("[Combat] - Cut it down."),
+            "the moral screen is not the one that catches this"
+        );
         assert_eq!(e.safe_choice().unwrap().text, "[Combat] - Cut it down.");
 
         // Hurt: take the way out instead.
@@ -706,7 +723,11 @@ Choices = {
             title: "Injured paladin at Youlthorpe crypt".into(),
             text: String::new(),
             choices: vec![
-                Choice { text: "[Combat] - \"Blood. The book hungers for blood.\"".into(), x: 960, y: 675 },
+                Choice {
+                    text: "[Combat] - \"Blood. The book hungers for blood.\"".into(),
+                    x: 960,
+                    y: 675,
+                },
                 Choice { text: "Tell them you'll rush back with aid.".into(), x: 960, y: 729 },
             ],
         };
@@ -735,11 +756,18 @@ Choices = {
             title: "Woodsman in Bempton Silva".into(),
             text: String::new(),
             choices: vec![
-                Choice { text: "[Combat] - \"The book hungers for blood.\"".into(), x: 960, y: 594 },
+                Choice {
+                    text: "[Combat] - \"The book hungers for blood.\"".into(),
+                    x: 960,
+                    y: 594,
+                },
                 Choice { text: "\"What are you selling?\"".into(), x: 960, y: 648 },
             ],
         };
-        assert_eq!(ev.safe_choice_avoiding_combat(false).unwrap().text, "\"What are you selling?\"");
+        assert_eq!(
+            ev.safe_choice_avoiding_combat(false).unwrap().text,
+            "\"What are you selling?\""
+        );
     }
 
     /// **The other side of the dev's ruling, and the half that is easy to break by accident.**
@@ -751,14 +779,14 @@ Choices = {
     #[test]
     fn the_fights_the_dev_named_are_still_taken() {
         for ok in [
-            "[Combat] - Cut it down.",                    // hidden_path.lua:27, the crossroads' tree
+            "[Combat] - Cut it down.", // hidden_path.lua:27, the crossroads' tree
             "[Combat][Curse] - \"I have a way with wood.\"", // :49
             "[Combat][Curse] - \"The trees are after me!\"", // :76
-            "[Combat] - 'Sling' it.",                     // :148
-            "[Combat] - \"No, your life\"",               // highwaymen.lua:53
-            "[Combat] - \"I'd rather die\"",              // :58
-            "[Combat] - Rush in to defend.",              // village_attack.lua:214
-            "[Combat] - Defend the village.",             // recalled.lua:39
+            "[Combat] - 'Sling' it.",  // :148
+            "[Combat] - \"No, your life\"", // highwaymen.lua:53
+            "[Combat] - \"I'd rather die\"", // :58
+            "[Combat] - Rush in to defend.", // village_attack.lua:214
+            "[Combat] - Defend the village.", // recalled.lua:39
         ] {
             assert!(!murderous(ok), "{ok} is a fight, not a murder");
             assert!(starts_combat(ok), "{ok} should still read as a fight");
@@ -880,7 +908,11 @@ Choices = {
             text: String::new(),
             choices: vec![
                 Choice { text: "[-500g] - Get two random gear items.".into(), x: 960, y: 432 },
-                Choice { text: "[-300g] - Pick one of two random gear items.".into(), x: 960, y: 486 },
+                Choice {
+                    text: "[-300g] - Pick one of two random gear items.".into(),
+                    x: 960,
+                    y: 486,
+                },
                 Choice { text: "[-200g] - Get one random gear item.".into(), x: 960, y: 540 },
                 Choice { text: "Leave.".into(), x: 960, y: 594 },
             ],

@@ -421,9 +421,7 @@ const VISIT_ATTEMPTS: usize = 3;
 /// both are at (1733, 972), the far side of the screen. The collision is with `Go back`, which is
 /// the more dangerous one, and the reason that note is now corrected rather than merely deleted.)
 fn open_the_shrine(
-    win: &crate::win::window::GameWindow,
-    input: &dyn crate::win::input::Input,
-    log: &mut String,
+    win: &crate::win::window::GameWindow, input: &dyn crate::win::input::Input, log: &mut String,
 ) -> Result<bool, crate::Error> {
     open_the_shrine_within(win, input, log, VISIT_OPENS_WITHIN)
 }
@@ -435,9 +433,7 @@ fn open_the_shrine(
 /// zero budget skips the loop entirely rather than pressing blind and not looking — a press we will
 /// not watch is worse than no press, because it can still land somewhere.
 fn open_the_shrine_within(
-    win: &crate::win::window::GameWindow,
-    input: &dyn crate::win::input::Input,
-    log: &mut String,
+    win: &crate::win::window::GameWindow, input: &dyn crate::win::input::Input, log: &mut String,
     watch_for: std::time::Duration,
 ) -> Result<bool, crate::Error> {
     if watch_for.is_zero() {
@@ -455,7 +451,10 @@ fn open_the_shrine_within(
         if opened.found() {
             log.push_str(&match attempt {
                 1 => "  shrine: entered\n".to_string(),
-                n => format!("  shrine: entered on press {n} — the overworld swallowed the first {}\n", n - 1),
+                n => format!(
+                    "  shrine: entered on press {n} — the overworld swallowed the first {}\n",
+                    n - 1
+                ),
             });
             return Ok(true);
         }
@@ -551,9 +550,7 @@ pub struct Played {
 /// honest report for "one of them is false" is a logged score, not a failure — the run has better
 /// things to do than stop over an unclaimed bonus.
 fn claim_blessing(
-    win: &crate::win::window::GameWindow,
-    out: &mut Played,
-    wait: std::time::Duration,
+    win: &crate::win::window::GameWindow, out: &mut Played, wait: std::time::Duration,
 ) -> Result<bool, crate::Error> {
     let found =
         crate::act::wait_for(win, &crate::act::SHRINE_PRAY, crate::act::SHRINE_PRAY_PRESENT, wait);
@@ -600,9 +597,7 @@ fn claim_blessing(
 /// false and `showPrayButton`'s last conjunct fails. `claim_blessing` reports that as a score and
 /// moves on, which is why this asks unconditionally instead of trying to predict it.
 fn spend_the_solve(
-    win: &crate::win::window::GameWindow,
-    input: &dyn crate::win::input::Input,
-    out: &mut Played,
+    win: &crate::win::window::GameWindow, input: &dyn crate::win::input::Input, out: &mut Played,
     wait: std::time::Duration,
 ) -> Result<(), crate::Error> {
     use std::time::Duration;
@@ -624,7 +619,11 @@ fn spend_the_solve(
         return Ok(());
     }
     let slot = found.score.unwrap_or(found.best);
-    crate::act::click_exact(win, &crate::act::SHRINE_CONSECRATE, crate::act::SHRINE_CONSECRATE_PRESENT)?;
+    crate::act::click_exact(
+        win,
+        &crate::act::SHRINE_CONSECRATE,
+        crate::act::SHRINE_CONSECRATE_PRESENT,
+    )?;
     // The whole shrine screen going away is the game's own acknowledgement of the press — a far
     // stronger signal than watching a slot swap in place, which this project has been fooled by.
     out.consecrated = crate::act::wait_until_gone(
@@ -633,7 +632,8 @@ fn spend_the_solve(
         crate::act::SHRINE_GOBACK_PRESENT,
         Duration::from_secs(8),
     );
-    out.log.push_str(&format!("  shrine: consecrated={} (slot scored {slot:.4})\n", out.consecrated));
+    out.log
+        .push_str(&format!("  shrine: consecrated={} (slot scored {slot:.4})\n", out.consecrated));
     if !out.consecrated {
         return Ok(());
     }
@@ -770,9 +770,7 @@ fn spend_the_solve(
 /// (This note used to name `Consecrate` and `Pray` as the buttons underneath. That was wrong — both
 /// sit at (1733, 972), the far side of the screen. The hazard is `Go back`.)
 pub fn play(
-    win: &crate::win::window::GameWindow,
-    input: &dyn crate::win::input::Input,
-    anomaly_open: bool,
+    win: &crate::win::window::GameWindow, input: &dyn crate::win::input::Input, anomaly_open: bool,
     already_open: bool,
 ) -> Result<Played, crate::Error> {
     use crate::shrine::{max_guesses, show, solved, Baked, Band, Solver};
@@ -982,9 +980,7 @@ pub fn play(
     //    Matching `Pray`'s artwork against an active `Consecrate` scores ~0.856 against a 0.92
     //    threshold, so asking the wrong question here reads as "no button" and abandons the blessing.
     if out.solved.is_some() && anomaly_open {
-        out.log.push_str(
-            "  shrine: portal is open, so the solve yields `Consecrate` first\n",
-        );
+        out.log.push_str("  shrine: portal is open, so the solve yields `Consecrate` first\n");
         spend_the_solve(win, input, &mut out, Duration::from_secs(6))?;
     } else if out.solved.is_some() {
         claim_blessing(win, &mut out, Duration::from_secs(6))?;
@@ -1069,8 +1065,7 @@ pub struct Consecrated {
 /// by re-reading afterwards — `overworld:save()` runs in the beam's `onDecay` callback (`:281`), so
 /// it is not instant, which is the standing save-flush caveat rather than a failure.
 pub fn consecrate(
-    win: &crate::win::window::GameWindow,
-    input: &dyn crate::win::input::Input,
+    win: &crate::win::window::GameWindow, input: &dyn crate::win::input::Input,
 ) -> Result<Consecrated, crate::Error> {
     use std::time::Duration;
 
@@ -1214,7 +1209,11 @@ mod tests {
         assert_eq!(classify((34, 124, 34)), Some(Colour::Green), "green under 'a'");
         assert_eq!(classify((25, 141, 25)), Some(Colour::Green), "green under 't', a thin glyph");
         assert_eq!(classify((146, 124, 34)), Some(Colour::Yellow), "yellow under 'a'");
-        assert_eq!(classify((175, 143, 16)), Some(Colour::Yellow), "yellow under 'i', thinner still");
+        assert_eq!(
+            classify((175, 143, 16)),
+            Some(Colour::Yellow),
+            "yellow under 'i', thinner still"
+        );
         for grey in [(82, 82, 82), (77, 77, 77), (65, 65, 65), (83, 82, 83), (70, 70, 70)] {
             assert_eq!(classify(grey), Some(Colour::Grey), "grey {grey:?}");
         }
@@ -1227,7 +1226,11 @@ mod tests {
         assert_eq!(classify((130, 155, 82)), None, "empty over grass -- looks green, is not");
         assert_eq!(classify((126, 152, 84)), None, "empty over grass, another column");
         assert_eq!(classify((152, 172, 163)), None, "empty over distant hills");
-        assert_eq!(classify((206, 215, 197)), None, "empty over bright sky -- neutral but not dark");
+        assert_eq!(
+            classify((206, 215, 197)),
+            None,
+            "empty over bright sky -- neutral but not dark"
+        );
         assert_eq!(classify((174, 190, 176)), None, "empty over pale sky");
         assert_eq!(classify((224, 229, 206)), None, "the brightest empty tile measured");
     }
@@ -1242,7 +1245,10 @@ mod tests {
             + (a_yellow.1 - i_yellow.1).pow(2)
             + (a_yellow.2 - i_yellow.2).pow(2)) as f64)
             .sqrt();
-        assert!(d > 35.0, "two real yellows are {d:.1} apart, so absolute distance is the wrong tool");
+        assert!(
+            d > 35.0,
+            "two real yellows are {d:.1} apart, so absolute distance is the wrong tool"
+        );
         assert_eq!(classify((146, 124, 34)), classify((175, 143, 16)));
     }
 
@@ -1265,7 +1271,9 @@ mod tests {
     }
 
     /// Paints every pixel of the tile at `(row, col)` a flat colour.
-    fn paint(px: &mut Vec<(i32, i32, (u8, u8, u8))>, l: &Layout, row: usize, col: usize, c: (u8, u8, u8)) {
+    fn paint(
+        px: &mut Vec<(i32, i32, (u8, u8, u8))>, l: &Layout, row: usize, col: usize, c: (u8, u8, u8),
+    ) {
         let (cx, cy) = l.tile_center(row, col);
         let r = l.tile / 2;
         for dy in -r..=r {
@@ -1340,7 +1348,10 @@ mod tests {
         }
         for (i, &(la, a0, a1)) in spans.iter().enumerate() {
             for &(lb, b0, b1) in &spans[i + 1..] {
-                assert!(a1 < b0 || b1 < a0, "length {la} box {a0}..{a1} overlaps {lb} box {b0}..{b1}");
+                assert!(
+                    a1 < b0 || b1 < a0,
+                    "length {la} box {a0}..{a1} overlaps {lb} box {b0}..{b1}"
+                );
             }
         }
     }
@@ -1370,7 +1381,11 @@ mod tests {
             }
         }
         let after = frame_of(&px, 1920, 1080);
-        assert_eq!(infer_length(&before, &after, 1920, 1080), None, "a uniform 3/255 shift is not a letter");
+        assert_eq!(
+            infer_length(&before, &after, 1920, 1080),
+            None,
+            "a uniform 3/255 shift is not a letter"
+        );
     }
 
     #[test]

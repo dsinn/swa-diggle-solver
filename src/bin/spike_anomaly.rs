@@ -77,7 +77,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::thread::sleep(Duration::from_secs(3));
     let keys = diggle_solver::win::input::PostMessageInput::new(win);
 
-    if diggle_solver::act::click_when_ready(&win, &diggle_solver::act::CONTINUE, Duration::from_secs(30)).is_err() {
+    if diggle_solver::act::click_when_ready(
+        &win,
+        &diggle_solver::act::CONTINUE,
+        Duration::from_secs(30),
+    )
+    .is_err()
+    {
         log.push_str("ABORT: no Continue\n");
         return finish(&mut game, &log);
     }
@@ -170,8 +176,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::thread::sleep(Duration::from_millis(300));
         feed.pump();
         if let Some(ev) = event::parse_events(feed.since(mark)).pop() {
-            log.push_str(&format!("\n## Event\n\n**{}**\n\n{}\n\nchoices: {:?}\n", ev.title, ev.text,
-                ev.choices.iter().map(|c| &c.text).collect::<Vec<_>>()));
+            log.push_str(&format!(
+                "\n## Event\n\n**{}**\n\n{}\n\nchoices: {:?}\n",
+                ev.title,
+                ev.text,
+                ev.choices.iter().map(|c| &c.text).collect::<Vec<_>>()
+            ));
             seen_event = Some(ev.title.clone());
             // A single forced Continue -- `world_evil.lua:26-29`.
             if let Some(c) = ev.continue_choice().or_else(|| ev.safe_choice()) {
@@ -248,7 +258,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log.push_str(&format!("screen changed by {moved:.3} after Escape\n"));
     let _ = after_opts.write_png(Path::new("spike-frames-live/anomaly-options.png"));
     if moved < 0.05 {
-        log.push_str("**Escape did nothing** — interaction is probably disabled during the beams\n");
+        log.push_str(
+            "**Escape did nothing** — interaction is probably disabled during the beams\n",
+        );
         return finish(&mut game, &log);
     }
 
@@ -263,7 +275,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|f| f.write_png(Path::new("spike-frames-live/anomaly-mainmenu.png")));
     log.push_str("clicked Menu\n");
 
-    if diggle_solver::act::click_when_ready(&win, &diggle_solver::act::CONTINUE, Duration::from_secs(30)).is_err() {
+    if diggle_solver::act::click_when_ready(
+        &win,
+        &diggle_solver::act::CONTINUE,
+        Duration::from_secs(30),
+    )
+    .is_err()
+    {
         log.push_str("ABORT: no Continue on the main menu\n");
         return finish(&mut game, &log);
     }
