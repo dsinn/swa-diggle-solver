@@ -15,6 +15,38 @@
 #
 # ## Why each one
 #
+# ## 120 was tried, and it is worse. Do not re-propose it without new evidence
+#
+# Same measurement, same three files' worth of settings, only the width moved:
+#
+#   max_width = 100    3,537 lines move   (5.6%)
+#   max_width = 110    3,444 lines move   (5.4%)
+#   max_width = 120    4,351 lines move   (6.9%)
+#
+# Widening *increases* the disagreement, which is the opposite of the intuition. The repo is written
+# to 100, so a wider budget does not stop rustfmt breaking lines — it starts rustfmt **joining**
+# lines that are deliberately broken. 110 is a wash and not worth the churn of finding out.
+#
+# There is a second reason and it is the one that settles it. The doc comments here are the primary
+# artifact, they are hand-wrapped to 100, and rustfmt does not touch them (`wrap_comments` is off by
+# default and should stay off). Code at 120 beside prose at 100 reads badly and drifts further every
+# time someone writes to the new budget.
+#
+# 100 is also rustfmt's own default and the Rust ecosystem's norm; 120 is the convention of other
+# languages' tooling.
+#
+# ## Over half of what is left is us, not rustfmt
+#
+# Of the 3,537 lines that move at `max_width = 100`, **1,916 are in hunks containing a line that is
+# genuinely over 100 columns** — 2,355 such lines exist in `src/`. Those are not a style
+# disagreement; they are rustfmt correcting the file. The real disagreement is nearer 1,600 lines,
+# or 2.5% of the tree.
+#
+# The rest of that taxonomy — "rustfmt joins", "rustfmt splits", "reshaped" — is approximate and
+# should not be quoted: it comes from diffing line lists, which mispairs hunks. One example it
+# produced (an enum variant supposedly being exploded one field per line) turned out on inspection to
+# be a mispairing and not a thing rustfmt does at all under these settings.
+#
 # `max_width` is not the interesting setting and was never the problem — the repo already writes to
 # 100 columns, measured: the 95th percentile line is exactly 100 and only 1.19% run past 101. It is
 # set explicitly anyway, because it is the number every heuristic below is a fraction of.
