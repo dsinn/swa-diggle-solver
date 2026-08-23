@@ -874,6 +874,12 @@ impl WorldMap {
         // explore and choosing how to get there cannot disagree.
         let hops = self.distances(&here);
         let exit_prefix = format!("{parent}_path_to_");
+        // **What a blind search is blind *for***, which is what decides the ranking below.
+        //
+        // The dev, 2026-08-23, on their two rulings: *degree for the inn or store, and distance
+        // (only if known) for the exit*. Computed here rather than in the key because the closure
+        // below already holds a borrow of `self.places`.
+        let searching = self.searching_for(&parent);
         // **Where the door is, for the ranking below** — task #57, and the whole of the steer folded
         // into one term.
         //
@@ -966,11 +972,12 @@ impl WorldMap {
                     // at each fork — the dev's *don't backtrack until our current branch is done*.
                     // Degree decides between nodes equally near and equally doorward.
                     //
-                    // *Searching for something the fog hides* — an inn we have not found, with
-                    // nowhere at all to head for. Degree first, which is the rule of 2026-08-15 and
-                    // the village that *got searched a cul-de-sac at a time*. `doorward` is
-                    // `u64::MAX` for every candidate here, so it drops out and this is exactly the
-                    // key that rule was given.
+                    // *Searching for something the fog hides* — an inn, a store or a shrine we
+                    // have not found, with nowhere at all to head for. Degree first, which is the
+                    // rule of 2026-08-15 and the village that *got searched a cul-de-sac at a
+                    // time*. `doorward` is `u64::MAX` for every candidate here, so it drops out and
+                    // this is exactly the key that rule was given. **A fogged search for the way
+                    // out is not in this group** — see the `searching` switch below.
                     //
                     // ## #81: this was `door_now.is_some()`, and that is not the same question
                     //
@@ -996,8 +1003,47 @@ impl WorldMap {
                     // Inverted rather than wrapped in `Reverse` so both orderings are one type.
                     let near = *d as u64;
                     let teaches = u64::MAX - unrevealed as u64;
-                    let (lead, trail) =
-                        match dest.is_some() { true => (near, teaches), false => (teaches, near) };
+                    // ## #100: `dest.is_some()` was a proxy for the question, and it got one case
+                    // wrong
+                    //
+                    // The dev, 2026-08-23, settling the two rulings that had been read as a
+                    // contradiction: *degree for the inn or store, and distance (only if known) for
+                    // the exit*. They are two errands, not two opinions about one errand.
+                    //
+                    // `dest.is_some()` separates *having somewhere to head for* from *searching
+                    // blind*, which is almost the same cut and differs on exactly one case:
+                    // **searching blind for the exit**. A fogged crossing has no `dest` — an empty
+                    // exits list is fog, not a dead end — so it fell into the degree-first ordering
+                    // written for the village, and degree is a global measure: the best frontier by
+                    // degree can be anywhere, so the walk abandons the branch it is on. That is the
+                    // Wressle Wood fault of #81 exactly, in the one branch #81's fix could not
+                    // reach, because #81 replaced `door_now` with `dest` and a fogged crossing has
+                    // neither.
+                    //
+                    // So the cut is now the errand itself, [`WorldMap::searching_for`], and it says
+                    // what the dev said:
+                    //
+                    // - **`Inn`, `Store`, `Shrine`** — something hidden *inside*, with nowhere at
+                    //   all to head for. Degree first: the rule of 2026-08-15 and the village that
+                    //   *got searched a cul-de-sac at a time*. `doorward` is `u64::MAX` for every
+                    //   candidate here, so it drops out and this is exactly the key that rule was
+                    //   given.
+                    // - **`Exit`** — a way out, seen or not. Nearest first, so the search expands
+                    //   outward from where we stand and does not backtrack until the branch is
+                    //   done, which is the ruling of 2026-08-22.
+                    //
+                    // **A lost woods is the case this most changes, and it is the case it was
+                    // wanted for.** Its exits are the one thing in it that stays paved — `paveRoads
+                    // = false` with `paveInsetRoads = true` (`lost_woods.lua:8-9`), and the rename
+                    // at `forest.lua:653-659` leaves the `out_road_edge` approach corridors as the
+                    // only paved nodes in the interior. `is_paved` leads this key, so the walk
+                    // already prefers those corridors; leading with `near` behind it is *stick to
+                    // the path you are on*, where degree was licensing a jump to the far side of
+                    // the woods. The dev, 2026-08-23: *find the path and stick to it.*
+                    let (lead, trail) = match dest.is_none() && searching != Searching::Exit {
+                        true => (teaches, near),
+                        false => (near, teaches),
+                    };
                     (!p.is_paved(), lead, doorward(p), trail, &p.key)
                 })
             })
@@ -4037,6 +4083,86 @@ mod tests {
     /// The live case is `Store`. Inside Boreas on 2026-08-23, on a `Heart` errand with the general
     /// store unrevealed, twelve steps printed *no way out of `l59` in sight* — and the search ended
     /// by finding the shop, which is what it had been for all along.
+    /// **#100, and the two rulings it was read as a contradiction between.**
+    ///
+    /// The dev, 2026-08-23: *degree for the inn or store, and distance (only if known) for the
+    /// exit.* One map, one standing position, one pair of candidates — and the only thing that
+    /// differs between the two halves is what the run is looking for.
+    ///
+    /// `l10sub2` is one hop away with a single unrevealed connection. `l10sub9` is two hops away
+    /// with five. Degree wants the far one; distance wants the near one; `is_paved` is deliberately
+    /// true for both, so the term above them cannot decide it.
+    ///
+    /// **Neither half has an exit in the dump**, which is the state this is about: an empty exits
+    /// list is fog, not a dead end, so `dest` is `None` in both and the old `dest.is_some()` cut
+    /// sent both to degree.
+    #[test]
+    fn a_fogged_search_ranks_by_what_it_is_searching_for() {
+        // Two hops of interior, folded from the far end so the far node is known but unvisited.
+        let woods = |gold: i64, health: i64| {
+            let mut m = WorldMap::new();
+            m.fold(&dump("l19", "Gipsyville crypt", vec![node("l10", "Ulrome village")]));
+            // From `l10sub3`, which names the six-way node beyond it.
+            m.fold(&inside_dump(
+                "l10",
+                "l10sub3",
+                "Ulrome road",
+                vec![
+                    Node { connections: 6, ..node("l10sub9", "Ulrome road") },
+                    node("l10sub1", "Ulrome road"),
+                ],
+                vec![],
+            ));
+            // And back to where we stand, which names the two-way node beside us.
+            m.fold(&inside_dump(
+                "l10",
+                "l10sub1",
+                "Ulrome road",
+                vec![node("l10sub2", "Ulrome road"), node("l10sub3", "Ulrome road")],
+                vec![],
+            ));
+            m.apply_save(
+                &crate::game::save::parse(&format!("return {{ player = {{ gold = {gold} }} }}"))
+                    .unwrap(),
+            );
+            m.note_health_level(crate::rest::Health { current: health, max: 20 });
+            m
+        };
+
+        // **The positive controls.** Both candidates are frontier, both paved, and the two terms
+        // genuinely disagree — without this the test could pass on a map where only one node was
+        // ever eligible.
+        let m = woods(HEART_FLOOR, 20);
+        for k in ["l10sub2", "l10sub9"] {
+            let p = m.get(k).expect(k);
+            assert!(p.is_paved(), "{k} must be paved, or `is_paved` decides this and not the key");
+            assert!(!p.visited, "{k} must still be frontier");
+        }
+        assert_eq!(m.get("l10sub2").unwrap().connections, 2, "one unrevealed connection");
+        assert_eq!(m.get("l10sub9").unwrap().connections, 6, "five unrevealed connections");
+
+        // **Searching a village for a store the fog hides.** Degree leads, so the six-way node two
+        // hops out wins and the first step is toward it. The rule of 2026-08-15.
+        let mut shopping = woods(HEART_FLOOR, 20);
+        assert_eq!(shopping.searching_for("l10"), Searching::Store);
+        let step = match shopping.cross_toward(&[]) {
+            Some(Crossing::Seek { to }) | Some(Crossing::Probe { to, .. }) => to,
+            other => panic!("expected a search, got {other:?}"),
+        };
+        assert_eq!(step, "l10sub3", "toward the six-way node, which is what a search is for");
+
+        // **The same woods with nothing to buy: now it is a crossing, and the way out is what we
+        // are looking for.** Nearest first, so the branch at our feet is finished before a richer
+        // one further off is opened. The ruling of 2026-08-22, and *find the path and stick to it*.
+        let mut crossing = woods(HEART_FLOOR - 1, 20);
+        assert_eq!(crossing.searching_for("l10"), Searching::Exit);
+        let step = match crossing.cross_toward(&[]) {
+            Some(Crossing::Seek { to }) | Some(Crossing::Probe { to, .. }) => to,
+            other => panic!("expected a search, got {other:?}"),
+        };
+        assert_eq!(step, "l10sub2", "the near branch, not the rich one two hops away");
+    }
+
     #[test]
     fn a_search_with_no_destination_says_which_of_the_four_it_is() {
         // A village with no inn and no store drawn yet, which is the state all three village
