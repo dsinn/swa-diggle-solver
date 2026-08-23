@@ -269,6 +269,30 @@ pub struct Fight<'a> {
     pub click_frames: Option<PathBuf>,
 }
 
+/// The two states in which `Finish` is live.
+///
+/// `rpg.lua:564` is `activeIf = stateIs'WaitPhase' or stateIs'SmokebombWaitPhase'`, and three
+/// places here need the same pair: the arm that plays them, the arm that presses early, and the
+/// check that a press *left* one. Written once so those cannot drift — a smokebomb ending that
+/// only two of the three recognised would press a button and then fail to notice it worked.
+/// Did our `Finish` press end the fight, or did the game simply move on by itself?
+///
+/// The distinction only started mattering when the animating arm could reach the press — from a
+/// `WaitPhase` baseline any change is ours, but from `EnemyDying` the game reaches `WaitPhase` on
+/// its own, and reading that as success would send the run off to collect a reward from a fight it
+/// had not ended.
+///
+/// `Finish`'s handler is `rpgview.setState'EndingPhase'` (`rpg.lua:565-572`), so what a press
+/// produces is a state that is **no longer a wait phase**. That is the test, and it is the same
+/// test from either baseline.
+fn press_took_effect(before: &str, after: &str) -> bool {
+    after != before && !is_wait_phase(after)
+}
+
+fn is_wait_phase(state: &str) -> bool {
+    matches!(state, "WaitPhase" | "SmokebombWaitPhase")
+}
+
 impl Fight<'_> {
     /// Plays the fight through to the overworld.
     ///
@@ -400,7 +424,7 @@ impl Fight<'_> {
             }
 
             match state.as_str() {
-                "WaitPhase" | "SmokebombWaitPhase" => {
+                s if is_wait_phase(s) => {
                     if !finished {
                         match self.finish(feed, log, &state)? {
                             true => finished = true,
@@ -438,8 +462,54 @@ impl Fight<'_> {
                 }
                 _ => {
                     // PlayerPreTurn, EnemyTurn, EnemyDying: the game is animating, and PlayerTurn
-                    // only begins once the board is static. Waiting on the save is enough.
-                    std::thread::sleep(crate::timing::POLL_ARRIVAL);
+                    // only begins once the board is static.
+                    //
+                    // **When the enemy is already dead, spend that wait looking at the button.**
+                    //
+                    // The dev, 2026-08-23: *when we believe the encounter to be finished, I suggest
+                    // polling for inliers and clicking; make sure there is validation on both sides
+                    // of the input as usual.* Right, and the first answer to it was wrong: it said a
+                    // template watch would fire into a press the game swallows, on the strength of
+                    // `Finish` being *drawn* while inactive (`rpg.lua:563-564`). It is drawn — as a
+                    // **different sprite**. `button.lua:7` loads a separate `-inactive` image and
+                    // `:128`/`:162` draw it with the label at half alpha, and this very file had
+                    // already measured the gap: **0.8380 inactive against 1.0000 active**.
+                    // [`crate::act::COMBAT_FINISH_ACTIVE`] is the bar built on that, one function
+                    // away.
+                    //
+                    // So an active match is not a guess about the phase. It is a direct read of
+                    // `activeIf`, which is `stateIs'WaitPhase' or stateIs'SmokebombWaitPhase'`
+                    // (`rpg.lua:564`) — the same predicate the save reports, taken from the thing
+                    // that renders it. `rpg:save()` runs on item use, hint use, turn end and the
+                    // wait phases, so the save gets there too; this cannot be later, and it skips
+                    // the remainder of a 300 ms sleep that was going to end in the same click.
+                    //
+                    // The sleep *becomes* the poll, so a pass with nothing live costs what it
+                    // always did. `finish` is called only once the button is live, and a `false`
+                    // from it here means "not yet" and never `FinishRefused` — that verdict
+                    // belongs to the wait-phase arm, which has the save's word for it.
+                    let dead = cs.int_at("rpg.enemy.health").is_some_and(|h| h <= 0);
+                    match dead && !finished {
+                        false => std::thread::sleep(crate::timing::POLL_ARRIVAL),
+                        true => {
+                            let live = crate::act::wait_for(
+                                self.win,
+                                &crate::act::COMBAT_FINISH,
+                                crate::act::COMBAT_FINISH_ACTIVE,
+                                crate::timing::POLL_ARRIVAL,
+                            );
+                            if live.found() {
+                                log.push_str(&format!(
+                                    "  the enemy is down and `Finish` has gone live ({:.4}) in \
+                                     {state:?} — pressing without waiting for the save\n",
+                                    live.best
+                                ));
+                                if self.finish(feed, log, &state)? {
+                                    finished = true;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1214,6 +1284,32 @@ impl Fight<'_> {
                 return Ok(false);
             }
         }
+        // **The button itself, on every press and not only the zero-health one.**
+        //
+        // The dev, 2026-08-23: *make sure there is validation on both sides of the input as usual.*
+        // The half below the click has always been here; this is the half above it, and it used to
+        // run only when `rpg.player.health` came back at or below zero. There is no reason the
+        // other path deserves less: an active match is a direct read of `activeIf`
+        // (`rpg.lua:564`), it separates 1.0000 from an inactive 0.8380, and in the ordinary
+        // `WaitPhase` case it costs one look, because the button is already live.
+        //
+        // It is also what makes the animating arm safe to press from at all — see there.
+        let live = crate::act::wait_for(
+            self.win,
+            &crate::act::COMBAT_FINISH,
+            crate::act::COMBAT_FINISH_ACTIVE,
+            Duration::from_secs(6),
+        );
+        if !live.found() {
+            log.push_str(&format!(
+                "  **not clicking (0.9,0.9)**: `Finish` never went active — best {:.4} over {} \
+                 looks (need {:.2})\n",
+                live.best,
+                live.looks,
+                crate::act::COMBAT_FINISH_ACTIVE
+            ));
+            return Ok(false);
+        }
         let _ = crate::observe::settle::wait_for_quiescence(self.win, 0.02, Duration::from_secs(6));
         let (fx, fy) = self.win.button_center(&FINISH)?;
         let (sx, sy) = self.win.client_to_screen(fx, fy)?;
@@ -1231,8 +1327,16 @@ impl Fight<'_> {
                     return Ok(true);
                 }
                 if let Ok(now) = save::load(&self.combat_path) {
-                    if now.str_at("rpg.player.turnState").unwrap_or("") != state {
-                        log.push_str("  Finish took effect\n");
+                    // **Left the wait phase**, not merely "changed". `Finish`'s own handler is
+                    // `rpgview.setState'EndingPhase'` (`rpg.lua:565-572`), so success is the state
+                    // leaving the phase that made the button live. Plain inequality was safe while
+                    // this could only be entered from `WaitPhase`; now that the animating arm can
+                    // reach it, a baseline of `EnemyDying` would count the game's own arrival at
+                    // `WaitPhase` as our press taking effect, and the run would walk off to collect
+                    // a reward from a fight it had not ended.
+                    let now = now.str_at("rpg.player.turnState").unwrap_or("").to_string();
+                    if press_took_effect(state, &now) {
+                        log.push_str(&format!("  Finish took effect ({state:?} -> {now:?})\n"));
                         return Ok(true);
                     }
                 } else {
@@ -1719,6 +1823,22 @@ fn player_state(cs: &Table, mods: &crate::search::Modifiers) -> Option<crate::se
 
 #[cfg(test)]
 mod tests {
+
+    /// **The game reaching `WaitPhase` on its own is not our press taking effect** — which is
+    /// the false positive the early press would otherwise have introduced, and the expensive kind:
+    /// it does not fail, it walks off to collect a reward from a fight still in progress.
+    #[test]
+    fn only_leaving_the_wait_phase_counts_as_the_press_landing() {
+        assert!(!press_took_effect("EnemyDying", "WaitPhase"), "the game got there by itself");
+        assert!(!press_took_effect("EnemyDying", "SmokebombWaitPhase"), "and by itself again");
+        assert!(press_took_effect("EnemyDying", "EndingPhase"), "`Finish` sets EndingPhase");
+        assert!(press_took_effect("WaitPhase", "EndingPhase"), "the ordinary path, unchanged");
+        assert!(!press_took_effect("WaitPhase", "WaitPhase"), "nothing has happened yet");
+        assert!(
+            !press_took_effect("WaitPhase", "SmokebombWaitPhase"),
+            "still waiting, however it got there"
+        );
+    }
     use super::*;
 
     #[test]
