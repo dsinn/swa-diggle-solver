@@ -289,6 +289,11 @@ const SELECT_RETRIES: usize = 3;
 /// actually score. The retry above is what makes the weak check survivable in the meantime: a miss
 /// that slips through now costs one arrival wait rather than the run.
 const SELECT_MOVED: f64 = 0.01;
+/// How much of the whole screen must change before an area-button press counts as landed.
+///
+/// Named because [`Run::click_area_button`] now weighs against it several times rather than once,
+/// and a bar that is sampled repeatedly is one a reader has to be able to find.
+const AREA_BUTTON_MOVED: f64 = 0.05;
 // A landmark-matching drift correction lived here: lift a textured patch when a dump is adopted,
 // find it again before each click, and shift the coordinate by however far the map had moved. It
 // worked, and it was the wrong tool. The search cost is the search area times the template — around
@@ -804,7 +809,7 @@ impl Run<'_> {
             if Instant::now() >= by {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(150));
+            std::thread::sleep(crate::timing::POLL_BRISK);
         }
     }
 
@@ -909,7 +914,7 @@ impl Run<'_> {
         if crate::win::input::drag_in(self.win, from, to, 8).is_err() {
             return None;
         }
-        std::thread::sleep(Duration::from_millis(300));
+        std::thread::sleep(crate::timing::MAP_DRAG_APPLIED);
 
         let after = crate::win::capture::capture_window(self.win).ok()?;
         // Search generously: the clamp can swallow most of the requested movement, so the patch may
@@ -1211,7 +1216,7 @@ impl Run<'_> {
             if Instant::now() >= deadline {
                 return false;
             }
-            std::thread::sleep(Duration::from_millis(400));
+            std::thread::sleep(crate::timing::POLL_SAVE);
         }
     }
 
@@ -1423,9 +1428,20 @@ impl Run<'_> {
             let Ok((ex, ey)) = self.win.client_to_screen(cx, cy) else { continue };
             let _ = self.tap("locate-me: clicking empty map", ex, ey);
             self.park();
-            std::thread::sleep(Duration::from_millis(500));
-            self.pump();
-            let slot = self.read_slot(&affirm::SHOW_AREA_BUTTONS);
+            // Watched rather than waited out, for the reason [`Run::click_area_button`] gives at
+            // length: the arrow is drawn on the frame after the click, and the test for it is a
+            // *crop* — so sampling it costs almost nothing and the dissolve is only how long we are
+            // prepared to keep asking. A candidate that is not an empty map point still costs the
+            // whole of it, exactly as before.
+            let by = Instant::now() + crate::timing::SCREEN_DISSOLVE;
+            let slot = loop {
+                std::thread::sleep(crate::timing::POLL_SELECT);
+                self.pump();
+                let slot = self.read_slot(&affirm::SHOW_AREA_BUTTONS);
+                if slot.state.is_ready() || Instant::now() >= by {
+                    break slot;
+                }
+            };
             self.log.push_str(&format!(
                 "  locate-me slot after clicking empty map at ({cx},{cy}): {:?} (score {:.2})\n",
                 slot.state, slot.score
@@ -1468,7 +1484,7 @@ impl Run<'_> {
             }
             let by = Instant::now() + Duration::from_secs(12);
             while Instant::now() < by {
-                std::thread::sleep(Duration::from_millis(250));
+                std::thread::sleep(crate::timing::POLL_SCREEN);
                 self.pump();
                 if self.dumps > before {
                     if let Some(a) = self.latest.as_ref().filter(|a| a.reason.contains("pan")) {
@@ -1598,6 +1614,92 @@ impl Run<'_> {
         self.inputs += 1;
         self.log.push_str(&format!("  input {}: click ({sx},{sy}) — {why}\n", self.inputs));
         click_at_in(self.win, sx, sy).is_ok()
+    }
+
+    /// Click a node on the map, then **watch** the area-button strip until it changes.
+    ///
+    /// Returns the fraction of the strip that moved, for the caller to weigh against
+    /// [`SELECT_MOVED`] exactly as it always has.
+    ///
+    /// ## Why this is a poll and was a 900 ms sleep
+    ///
+    /// The dev, 2026-08-23: *it's the main navigator driver loop where I think we can save the most
+    /// time.* This is that loop's largest fixed cost — a hop pays it once to select and, when the
+    /// crossing arm is the one running, again — and none of it was ever the game's.
+    ///
+    /// **Selecting a node is instantaneous.** `core:mousereleased` (`overworldview.lua:1472`)
+    /// compares `mousePressedOn` against what is under the cursor and sets the selection; there is
+    /// no animation, no mode change, and — checked against a whole run's console — **no printed
+    /// line**, the three reasons a dump carries being only `World loaded`, `Arrived at location` and
+    /// `Screen pan finished`. So the console cannot answer this and the strip is the only witness.
+    /// It is repainted from `getAreaButtons` on the next frame.
+    ///
+    /// The old shape sampled that witness **once, 900 ms later**. This samples it every
+    /// [`crate::timing::POLL_SELECT`] and stops at the first frame that shows the change, keeping
+    /// the same 900 ms as the deadline — so a selection that fails costs exactly what it used to and
+    /// one that works costs a tenth of it.
+    ///
+    /// ## Two things make the poll affordable
+    ///
+    /// [`crate::win::capture::capture_window`] is `PrintWindow` with `PW_RENDERFULLCONTENT`, which
+    /// asks the game to re-render the whole client area; polling *that* would have cost more than
+    /// the sleep it replaced — see the note on cropping in poll loops. [`capture_client_rect`] is a
+    /// `BitBlt` of one rectangle, and [`AREA_BUTTONS`] is 45% by 18% of the window, so each sample
+    /// reads about a twelfth of the pixels by the cheaper of the two paths.
+    ///
+    /// The crop is *exactly* [`AREA_BUTTONS`], so `diff_fraction` over the whole cropped frame is
+    /// the same quantity the full-window call produced, and [`SELECT_MOVED`] did not have to move.
+    ///
+    /// If the rectangle cannot be established or the first capture fails, this falls back to what it
+    /// replaced: sleep the whole budget and diff two full windows. Losing the optimisation must not
+    /// mean losing the selection.
+    fn select_and_watch(&mut self, why: &str, sx: i32, sy: i32) -> f64 {
+        use crate::win::capture::{capture_client_rect, capture_window, Region};
+        const WHOLE: Region = Region { nx: 0.0, ny: 0.0, nw: 1.0, nh: 1.0 };
+        let budget = crate::timing::AFTER_SELECT;
+
+        let rect = self.win.client_size().ok().map(|(cw, ch)| {
+            (
+                (AREA_BUTTONS.nx * cw as f64) as i32,
+                (AREA_BUTTONS.ny * ch as f64) as i32,
+                (AREA_BUTTONS.nw * cw as f64) as i32,
+                (AREA_BUTTONS.nh * ch as f64) as i32,
+            )
+        });
+        let cropped = rect.and_then(|(x, y, w, h)| {
+            capture_client_rect(self.win, x, y, w, h).ok().map(|f| (f, (x, y, w, h)))
+        });
+
+        let Some((before, (x, y, w, h))) = cropped else {
+            // The old path, verbatim, for a window we could not crop.
+            let before = crate::win::capture::capture_window(self.win).ok();
+            let _ = self.tap(why, sx, sy);
+            std::thread::sleep(budget);
+            self.pump();
+            let after = capture_window(self.win).ok();
+            return match (before, after) {
+                (Some(b), Some(a)) => b.diff_fraction(&a, AREA_BUTTONS),
+                _ => 0.0,
+            };
+        };
+
+        let _ = self.tap(why, sx, sy);
+        let deadline = Instant::now() + budget;
+        let mut moved = 0.0;
+        loop {
+            std::thread::sleep(crate::timing::POLL_SELECT);
+            if let Ok(now) = capture_client_rect(self.win, x, y, w, h) {
+                moved = before.diff_fraction(&now, WHOLE);
+                if moved > SELECT_MOVED {
+                    break;
+                }
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+        }
+        self.pump();
+        moved
     }
 
     /// Send a key, and record what it was for. See [`Run::tap`].
@@ -1871,7 +1973,7 @@ impl Run<'_> {
             if Instant::now() >= by {
                 return false;
             }
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(crate::timing::POLL_CONSOLE);
         }
     }
 
@@ -2159,7 +2261,7 @@ impl Run<'_> {
                 // Off the plaque before anything reads this corner again — the next look is either
                 // this function on the screen behind, or `identify`.
                 self.park();
-                std::thread::sleep(Duration::from_millis(600));
+                std::thread::sleep(crate::timing::SCREEN_DISSOLVE);
                 self.pump();
                 true
             }
@@ -2231,7 +2333,7 @@ impl Run<'_> {
         // The event fires two seconds into the update loop (`ui/rest.lua:414-419`) and then
         // transitions for another 2.5 (`overworld/events/rested.lua:18`). Clicking before that
         // would land on the rest screen we are still looking at.
-        std::thread::sleep(Duration::from_secs(5));
+        std::thread::sleep(crate::timing::REST_DREAM);
         let by = Instant::now() + Duration::from_secs(60);
         loop {
             if self.wait_for_line(mark, crate::innplay::ENTERED, Duration::from_secs(2)) {
@@ -2269,12 +2371,49 @@ impl Run<'_> {
             return Err("click failed".into());
         }
         self.park();
-        std::thread::sleep(Duration::from_millis(1000));
-        self.pump();
-        let after = crate::win::capture::capture_window(self.win)?;
-        let moved = before.diff_fraction(&after, crate::observe::settle::FULL);
+        // **Watched, not waited out — this is the most-repeated wait in a run.**
+        //
+        // The dev, 2026-08-23: *it's the main navigator driver loop where I think we can save the
+        // most time.* The 0547Z report pressed an area button **151 times**, 103 of them `Travel`,
+        // and every one of them paid a flat second before anything looked.
+        //
+        // None of that second came from the game. Pressing `Travel` runs `core.travelTo`
+        // (`overworldview.lua:1394-1400`), which sets a path and lets `love.update` walk it — so the
+        // screen starts changing on the next frame and there is no transition to sit out. What the
+        // second was really covering is that the *test* is expensive: `capture_window` is
+        // `PrintWindow` with `PW_RENDERFULLCONTENT` over the whole client area.
+        //
+        // So the deadline stays exactly where it was and only the sampling changes. The decision is
+        // untouched — the same `before` frame, the same [`crate::observe::settle::FULL`] region and
+        // the same [`AREA_BUTTON_MOVED`] bar — and a press that never lands still costs what it
+        // always did.
+        let deadline = Instant::now() + crate::timing::AFTER_AREA_BUTTON;
+        let (mut moved, mut looked) = (0.0, false);
+        let mut failure = None;
+        loop {
+            std::thread::sleep(crate::timing::POLL_SCREEN);
+            self.pump();
+            match crate::win::capture::capture_window(self.win) {
+                Ok(after) => {
+                    looked = true;
+                    moved = before.diff_fraction(&after, crate::observe::settle::FULL);
+                    if moved > AREA_BUTTON_MOVED {
+                        break;
+                    }
+                }
+                Err(e) => failure = Some(e),
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+        }
+        // Every look failing is a broken window rather than an unmoved screen, and the two want
+        // opposite things of the caller — so that case keeps the error it used to raise.
+        if !looked {
+            return Err(failure.map(Box::from).unwrap_or_else(|| "no capture succeeded".into()));
+        }
         self.log.push_str(&format!("  clicked {what}: screen moved {moved:.3}\n"));
-        Ok(moved > 0.05)
+        Ok(moved > AREA_BUTTON_MOVED)
     }
 
     /// Presses the area slot and does not report success until the overworld is **actually behind
@@ -2372,7 +2511,7 @@ impl Run<'_> {
             self.park();
             let deadline = Instant::now() + LEAVE_LANDS_WITHIN;
             while Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(150));
+                std::thread::sleep(crate::timing::POLL_BRISK);
                 // Pumped first, and every time round: the console is the thing being waited on, not
                 // a courtesy read on the way out.
                 self.pump();
@@ -2477,7 +2616,7 @@ impl Run<'_> {
         }
         self.zoomed_out = true;
         self.keys.focus();
-        std::thread::sleep(Duration::from_millis(120));
+        std::thread::sleep(crate::timing::FOCUS_SETTLE);
         if self.keys.press_extended_key(VK_NEXT, SC_NEXT).is_err() {
             self.log.push_str("  could not press pagedown to zoom out\n");
             return false;
@@ -2489,7 +2628,7 @@ impl Run<'_> {
         self.map.zoom_changed();
         // The zoom is lerped rather than snapped (`zoomMult` toward `targetZoomMul` at `dt*10`,
         // `:1091`), so this waits for the animation rather than the keystroke.
-        std::thread::sleep(Duration::from_millis(900));
+        std::thread::sleep(crate::timing::MAP_ZOOM_SETTLED);
         self.pump();
         self.positions_stale_at = self.dumps;
         self.needs_recentre = true;
@@ -2555,7 +2694,7 @@ impl Run<'_> {
                 self.log.push_str(&format!("  no settled dump within {within:?}; {why}\n"));
                 return None;
             }
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(crate::timing::POLL_SCREEN);
         }
     }
 
@@ -2643,9 +2782,9 @@ impl Run<'_> {
             // button fingerprint is a better readiness signal than stillness ever was: it says the
             // control is painted and live, and the re-read after the press says whether it took.
             self.keys.focus();
-            std::thread::sleep(Duration::from_millis(150));
+            std::thread::sleep(crate::timing::FOCUS_SETTLE);
             let _ = self.tap_key("clearing a text screen: space", VK_SPACE, SC_SPACE);
-            std::thread::sleep(Duration::from_millis(700));
+            std::thread::sleep(crate::timing::AFTER_SCREEN_PRESS);
             self.pump();
             // **A second lore line means a second screen, not a failed press.** The game prints one
             // per screen and they arrive in runs — entering Ulrome printed two at once — so the
@@ -2794,7 +2933,7 @@ impl Run<'_> {
                 return false;
             }
             self.park();
-            std::thread::sleep(Duration::from_millis(700));
+            std::thread::sleep(crate::timing::AFTER_SCREEN_PRESS);
             self.pump();
             let now = self.affirmative();
             if !now.state.is_ready() {
@@ -3039,7 +3178,7 @@ impl Run<'_> {
                 let before = crate::win::capture::capture_window(self.win).ok();
                 let _ = self.tap("dismiss: centre of the screen", cx, cy);
                 self.park();
-                std::thread::sleep(Duration::from_millis(900));
+                std::thread::sleep(crate::timing::AFTER_SELECT);
                 self.pump();
                 if verifiable {
                     match crate::act::event_plaque_score(self.win, options) {
@@ -3098,7 +3237,7 @@ impl Run<'_> {
                     let before = crate::win::capture::capture_window(self.win).ok();
                     let _ = self.tap("answering an event choice", sx, sy);
                     self.park();
-                    std::thread::sleep(Duration::from_millis(700));
+                    std::thread::sleep(crate::timing::AFTER_SCREEN_PRESS);
                     self.pump();
                     // The shop's own backdrop is a full-screen shelf, so leaving moves most of the
                     // window. A weak proxy, and said to be one — the strong check would be a

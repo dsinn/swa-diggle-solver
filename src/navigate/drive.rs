@@ -159,7 +159,7 @@ pub fn drive(
                 // rather than once, because the warp follows the screen: whatever arrives during
                 // these four seconds may grab the pointer again on the way in.
                 r.park();
-                std::thread::sleep(Duration::from_millis(150));
+                std::thread::sleep(crate::timing::POLL_BRISK);
                 r.pump();
                 screen = crate::act::identify(r.win);
                 if screen != crate::act::Screen::Unknown {
@@ -322,7 +322,7 @@ pub fn drive(
             match crate::act::click_exact(r.win, esc.button, esc.threshold) {
                 Ok(q) => {
                     r.park();
-                    std::thread::sleep(Duration::from_millis(900));
+                    std::thread::sleep(crate::timing::AFTER_SCREEN_PRESS);
                     r.pump();
                     r.log.push_str(&format!("  left {} ({q:.4})\n", esc.what));
                 }
@@ -343,7 +343,7 @@ pub fn drive(
         // eulogises the run — but a refusal is a reason to look again, not to stop.
         if screen == crate::act::Screen::MainMenu {
             r.park();
-            std::thread::sleep(Duration::from_millis(600));
+            std::thread::sleep(crate::timing::AFTER_SCREEN_PRESS);
             r.pump();
             // Both renderings, same origin and same click: whichever matches, the action is
             // identical. The plain template is asked first because it is the ordinary case; the
@@ -365,7 +365,7 @@ pub fn drive(
                 Ok(q) => {
                     r.log.push_str(&format!("{step}. resumed from the main menu ({q:.4})
 "));
-                    std::thread::sleep(Duration::from_millis(1500));
+                    std::thread::sleep(crate::timing::AFTER_RESUME);
                     r.pump();
                 }
                 // Deliberately not a stop. The next iteration re-identifies and tries again, which is
@@ -373,7 +373,7 @@ pub fn drive(
                 Err(e) => {
                     r.log.push_str(&format!("{step}. main menu, Continue refused: {e}
 "));
-                    std::thread::sleep(Duration::from_secs(1));
+                    std::thread::sleep(crate::timing::BEFORE_RETRY);
                 }
             }
             continue;
@@ -389,7 +389,7 @@ pub fn drive(
             ) {
                 Ok(q) => {
                     r.park();
-                    std::thread::sleep(Duration::from_millis(900));
+                    std::thread::sleep(crate::timing::AFTER_SCREEN_PRESS);
                     r.pump();
                     r.log.push_str(&format!("  dismissed a class unlock ({q:.4})\n"));
                 }
@@ -423,7 +423,7 @@ pub fn drive(
             ) {
                 return Stop::Failed("clicked pregame Start but it is still on screen".into());
             }
-            std::thread::sleep(Duration::from_millis(800));
+            std::thread::sleep(crate::timing::AFTER_SCREEN_PRESS);
             r.pump();
             continue;
         }
@@ -489,7 +489,7 @@ pub fn drive(
                     // The screen closes into whatever built it -- a postgame after a fight, the map
                     // after a shop -- so let the next pass work out where we are rather than
                     // assuming. It is dismissed; that was the blocking part.
-                    std::thread::sleep(Duration::from_millis(800));
+                    std::thread::sleep(crate::timing::AFTER_SCREEN_PRESS);
                     r.pump();
                 }
                 Ok(other) => {
@@ -749,7 +749,7 @@ pub fn drive(
                             "{step}. no pan dump — waiting for a transition (miss {} of {})\n",
                             r.recentre_misses, RECENTRE_RETRIES
                         ));
-                        std::thread::sleep(Duration::from_secs(1));
+                        std::thread::sleep(crate::timing::BEFORE_RETRY);
                         continue;
                     }
                     return Stop::Failed(format!(
@@ -1145,7 +1145,7 @@ pub fn drive(
                     }
                     // The console is the instrument here, not the screen: the pump is what carries
                     // `Opened shop UI` and the inventory behind it.
-                    std::thread::sleep(Duration::from_millis(1200));
+                    std::thread::sleep(crate::timing::AFTER_MODE_CHANGE);
                     r.pump();
 
                     // **The game told us the stock; the layout tells us where it is drawn.**
@@ -1205,7 +1205,7 @@ pub fn drive(
                                     Ok((sx, sy)) => {
                                         for _ in 0..want {
                                             let _ = r.tap("shop: buying a heart", sx, sy);
-                                            std::thread::sleep(Duration::from_millis(700));
+                                            std::thread::sleep(crate::timing::AFTER_SCREEN_PRESS);
                                         }
                                         r.pump();
                                         want > 0
@@ -1224,7 +1224,7 @@ pub fn drive(
                     // end of the same bar, measured off the frame this screen was first captured on.
                     if let Ok((bx, by)) = r.win.client_to_screen(1755, 916) {
                         let _ = r.tap("shop: paging the shelf", bx, by);
-                        std::thread::sleep(Duration::from_millis(900));
+                        std::thread::sleep(crate::timing::AFTER_SHOP_PRESS);
                         r.pump();
                     }
 
@@ -1766,9 +1766,16 @@ pub fn drive(
             let Ok((ax, ay)) = r.win.client_to_screen(at.0 as i32, at.1 as i32) else {
                 return Stop::Failed("coordinate conversion failed".into());
             };
-            let _ = r.tap(&format!("crossing: select for {what}"), ax, ay);
-            std::thread::sleep(Duration::from_millis(900));
-            r.pump();
+            // The same watch the travel arm uses. Nothing here weighs the fraction — the slot read
+            // below is this arm's test — but the strip changing is still what says the click landed,
+            // so waiting for it is what makes the read worth taking.
+            let moved = r.select_and_watch(&format!("crossing: select for {what}"), ax, ay);
+            if moved <= SELECT_MOVED {
+                r.log.push_str(&format!(
+                    "  the area strip moved {moved:.4} after selecting for {what} — reading the                      slot anyway
+"
+                ));
+            }
             // **`Travel` is not always what is on offer, and pressing it when it is not stalls the
             // run in silence.**
             //
@@ -1899,7 +1906,7 @@ pub fn drive(
             let mut by = Instant::now() + budget;
             let mut arrived = false;
             while Instant::now() < by && !arrived && !r.combat_expected {
-                std::thread::sleep(Duration::from_millis(300));
+                std::thread::sleep(crate::timing::POLL_ARRIVAL);
                 r.pump();
                 // **Anything we handle pushes the deadline out.** The budget prices *walking*; a lore
                 // screen or a merchant pauses the walk for as long as we take to answer, which no
@@ -2205,7 +2212,7 @@ pub fn drive(
                                 entered = true;
                                 break;
                             }
-                            std::thread::sleep(Duration::from_millis(200));
+                            std::thread::sleep(crate::timing::POLL_CONSOLE);
                         }
                         if entered {
                             if attempt > 1 {
@@ -2473,7 +2480,7 @@ pub fn drive(
                         opened = Some(s);
                         break;
                     }
-                    std::thread::sleep(Duration::from_millis(250));
+                    std::thread::sleep(crate::timing::POLL_SCREEN);
                 }
                 if entered_instead {
                     break;
@@ -2751,19 +2758,12 @@ pub fn drive(
             }
         }
         for attempt in 1..=SELECT_RETRIES {
-            let Ok(before) = crate::win::capture::capture_window(r.win) else {
-                return Stop::Failed("capture failed".into());
-            };
             let Ok((sx, sy)) = r.win.client_to_screen(at.0, at.1) else {
                 return Stop::Failed("coordinate conversion failed".into());
             };
-            let _ = r.tap(&format!("travel: select `{}`", hop.step), sx, sy);
-            std::thread::sleep(Duration::from_millis(900));
-            r.pump();
-            let Ok(after) = crate::win::capture::capture_window(r.win) else {
-                return Stop::Failed("capture failed".into());
-            };
-            let moved = before.diff_fraction(&after, AREA_BUTTONS);
+            // Watched rather than waited out — [`Run::select_and_watch`] has the argument, and the
+            // fraction it hands back is the same one this line has always weighed.
+            let moved = r.select_and_watch(&format!("travel: select `{}`", hop.step), sx, sy);
             if moved > SELECT_MOVED {
                 selected = true;
                 break;
@@ -2832,7 +2832,7 @@ pub fn drive(
             ));
         }
         r.keys.focus();
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(crate::timing::FOCUS_SETTLE);
         if !r.tap_key(&format!("travel: press Travel for `{}`", hop.step), VK_SPACE, SC_SPACE) {
             return Stop::Failed("could not send Travel".into());
         }
@@ -2861,7 +2861,7 @@ pub fn drive(
         // an empty affirmative slot and then timed out; `CombatEntered` was named on the next pass
         // of the outer loop, which is where the answer had been all along.
         while Instant::now() < by && !arrived && !r.combat_expected {
-            std::thread::sleep(Duration::from_millis(300));
+            std::thread::sleep(crate::timing::POLL_ARRIVAL);
             r.pump();
             // Text before options here too. Arrival is detected from an adjacency dump, and a lore
             // screen holds that dump back — so without this the loop would spin out its full 60 s

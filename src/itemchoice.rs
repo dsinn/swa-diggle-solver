@@ -296,7 +296,7 @@ pub fn choose(
         if !found.is_empty() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(crate::timing::POLL_CONSOLE);
     }
     if found.is_empty() {
         log.push_str("  item screen up but no offers in the feed; nothing to click\n");
@@ -402,7 +402,7 @@ pub fn choose(
     for attempt in 1..=PICK_ATTEMPTS {
         click_at(sx, sy)?;
         park(win);
-        std::thread::sleep(Duration::from_millis(600));
+        std::thread::sleep(crate::timing::SCREEN_DISSOLVE);
         let live = !nothing_picked(win);
         log.push_str(&format!(
             "  attempt {attempt}: Confirm {}\n",
@@ -421,7 +421,7 @@ pub fn choose(
     // `activeIf = selection`, so it cannot fire before something is selected — the guard is the
     // game's own, and we have just confirmed the condition it tests.
     keys.focus();
-    std::thread::sleep(Duration::from_millis(300));
+    std::thread::sleep(crate::timing::FOCUS_SETTLE);
     keys.press_key(VK_SPACE, SC_SPACE)?;
     Ok(Chosen::Took(key))
 }

@@ -36,12 +36,12 @@ pub(super) fn skip_cinematic(r: &mut Run) -> Result<(), String> {
     let before = crate::win::capture::capture_window(r.win)
         .map_err(|e| format!("capture before Escape: {e}"))?;
     r.keys.focus();
-    std::thread::sleep(Duration::from_millis(300));
+    std::thread::sleep(crate::timing::FOCUS_SETTLE);
     if !r.tap_key("skipping the cinematic: escape", VK_ESCAPE, SC_ESCAPE) {
         return Err("Escape failed".to_string());
     }
     r.park();
-    std::thread::sleep(Duration::from_millis(1200));
+    std::thread::sleep(crate::timing::AFTER_MODE_CHANGE);
     r.pump();
     let after = crate::win::capture::capture_window(r.win)
         .map_err(|e| format!("capture after Escape: {e}"))?;
@@ -56,7 +56,7 @@ pub(super) fn skip_cinematic(r: &mut Run) -> Result<(), String> {
         r.win.client_to_screen(1657, 38).map_err(|e| format!("Menu coords: {e}"))?;
     crate::win::input::click_at(mx, my).map_err(|e| format!("Menu click: {e}"))?;
     r.park();
-    std::thread::sleep(Duration::from_millis(1500));
+    std::thread::sleep(crate::timing::AFTER_MODE_CHANGE);
     r.pump();
 
     // Park before scoring, or we fingerprint our own cursor. The click that opened this menu leaves
@@ -71,7 +71,7 @@ pub(super) fn skip_cinematic(r: &mut Run) -> Result<(), String> {
     // required of it here.
     if let Ok((px, py)) = r.win.client_to_screen(NEUTRAL.0, NEUTRAL.1) {
         let _ = crate::win::input::warp_cursor(px, py);
-        std::thread::sleep(Duration::from_millis(400));
+        std::thread::sleep(crate::timing::HOVER_DWELL);
     }
 
     // Verified, not blind: this slot reads `Restart` when it is not `Continue`, and `Restart`
@@ -82,7 +82,7 @@ pub(super) fn skip_cinematic(r: &mut Run) -> Result<(), String> {
         crate::act::CONTINUE_PRESENT,
     )
     .map_err(|e| format!("no Continue on the main menu: {e}"))?;
-    std::thread::sleep(Duration::from_millis(1500));
+    std::thread::sleep(crate::timing::AFTER_RESUME);
     r.pump();
     Ok(())
 }
@@ -136,7 +136,7 @@ pub(super) fn page_the_shop_to(r: &mut Run, index: usize) -> usize {
             return at;
         }
         r.park();
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(crate::timing::SCREEN_DISSOLVE);
         let Some(after) = shot(r) else {
             r.log.push_str("  could not photograph the shelf after paging\n");
             return at;
@@ -210,7 +210,7 @@ fn pick_a_champion(r: &mut Run, game_dir: &Path) -> Result<i32, String> {
             break;
         }
         r.log.push_str("  no card recognised — the screen may still be drawing\n");
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(crate::timing::SCREEN_DISSOLVE);
     }
 
     if cards.is_empty() {
@@ -275,7 +275,7 @@ pub fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
     }
     r.log.push_str("  the menu cleared\n");
     // Whatever comes next needs a moment to draw before anything is clicked on it.
-    std::thread::sleep(Duration::from_millis(1200));
+    std::thread::sleep(crate::timing::AFTER_MODE_CHANGE);
 
     // Hero select is CLICK-to-choose, not Return-to-accept.
     //
@@ -337,11 +337,11 @@ pub fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
     // when the release is handled — so the dwell before the click is what makes it real, and not
     // parking before the read-back is what stops us erasing it again.
     warp_cursor(sx, sy).map_err(|e| format!("cannot move the cursor to the card: {e}"))?;
-    std::thread::sleep(Duration::from_millis(400));
+    std::thread::sleep(crate::timing::HOVER_DWELL);
     if !r.tap("hero select: the champion card", sx, sy) {
         return Err("click on the champion card failed".into());
     }
-    std::thread::sleep(Duration::from_millis(700));
+    std::thread::sleep(crate::timing::AFTER_SCREEN_PRESS);
 
     // Read back: the confirm button only exists once `selectedIndex` is set
     // (`ui/heroselect.lua:333`), so its appearance IS the proof that the click selected something.
@@ -384,7 +384,7 @@ pub fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
         return Err("clicked confirm but hero select is still up — the press did not take".into());
     }
     r.log.push_str("  hero select cleared\n");
-    std::thread::sleep(Duration::from_millis(1200));
+    std::thread::sleep(crate::timing::AFTER_MODE_CHANGE);
 
     let deadline = Instant::now() + Duration::from_secs(120);
     for i in 1..=MAX_RETURNS {
@@ -441,9 +441,9 @@ pub fn start_new_run(r: &mut Run, game_dir: &Path) -> Result<(), String> {
             r.log.push_str("  unlock screens present — this profile has unlocks pending\n");
         }
         r.keys.focus();
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(crate::timing::FOCUS_SETTLE);
         let _ = r.tap_key("hero select: confirm", VK_RETURN, SC_RETURN);
-        std::thread::sleep(Duration::from_millis(900));
+        std::thread::sleep(crate::timing::AFTER_SCREEN_PRESS);
     }
     Err(format!("never reached the overworld after {MAX_RETURNS} Returns"))
 }

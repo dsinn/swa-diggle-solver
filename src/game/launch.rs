@@ -120,7 +120,7 @@ impl GameProcess {
                     self.pid
                 )));
             }
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(crate::timing::POLL_LAUNCH);
         }
         Err(crate::Error::Win32(format!(
             "game (pid {}) opened no window within {:?}",

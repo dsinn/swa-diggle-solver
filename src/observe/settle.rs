@@ -36,7 +36,7 @@ pub fn wait_for_quiescence(
     let start = Instant::now();
     let mut prev = capture_window(win)?;
     loop {
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(crate::timing::POLL_QUIESCENCE);
         let next = capture_window(win)?;
         if prev.diff_fraction(&next, FULL) <= floor.max(0.001) {
             return Ok(next);

@@ -865,7 +865,7 @@ pub fn play(
         // Cheap to be wrong about in this direction: a letter that has not rendered yet moves all
         // four candidate boxes equally, `infer_length` declines rather than guesses, and the retry
         // loop takes another sample. Being slow here would have been paid on every shrine.
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(crate::timing::TILE_REDRAW);
         let after = capture_window(win)?;
         length = infer_length(&before, &after, cw, ch);
         // Always undo the probe letter, whether or not it was recognised.
@@ -880,7 +880,7 @@ pub fn play(
         // fails safe; this one fails silent. The retry loop cannot catch it either, since a
         // confident wrong answer ends the loop.
         input.press_key(crate::win::input::VK_BACK, crate::win::input::SC_BACK)?;
-        std::thread::sleep(Duration::from_millis(34));
+        std::thread::sleep(crate::timing::KEYSTROKE_GAP);
         if let Some(n) = length {
             out.log.push_str(&format!("  shrine: {n}-letter word (probe attempt {attempt})\n"));
             break;
@@ -928,7 +928,7 @@ pub fn play(
         // outright unless the row holds exactly `wordLength` characters, so a dropped letter leaves
         // the guess uncommitted and the row never colours — which `read_row` already reports as a
         // timeout rather than misreading.
-        std::thread::sleep(Duration::from_millis(34));
+        std::thread::sleep(crate::timing::KEYSTROKE_GAP);
         input.press_key(crate::win::input::VK_RETURN, crate::win::input::SC_RETURN)?;
 
         // Read → act → re-read: the row is not readable the instant Enter goes out, and `read_row`
@@ -936,7 +936,7 @@ pub fn play(
         let deadline = Instant::now() + Duration::from_secs(6);
         let mut pattern = None;
         while Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(crate::timing::POLL_SCREEN);
             let frame = capture_window(win)?;
             if let Some(p) = read_row(&frame, &layout, turn) {
                 pattern = Some(p);
@@ -956,7 +956,7 @@ pub fn play(
                 // Same 34 ms, same reason: `remove` (`shrineview.lua:227-231`) trims one character
                 // per press with no animation to wait out, so the only requirement is that the game
                 // sees each press as its own event rather than coalescing them.
-                std::thread::sleep(Duration::from_millis(34));
+                std::thread::sleep(crate::timing::KEYSTROKE_GAP);
             }
             break;
         };

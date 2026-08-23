@@ -361,7 +361,7 @@ pub fn wait_for(
         if std::time::Instant::now() >= deadline {
             return WaitResult { score: None, best, looks, faults };
         }
-        std::thread::sleep(std::time::Duration::from_millis(120));
+        std::thread::sleep(crate::timing::POLL_BUTTON);
     }
 }
 
@@ -505,7 +505,7 @@ pub fn wait_until_gone(
             Ok(q) if q < threshold => return true,
             _ => {}
         }
-        std::thread::sleep(std::time::Duration::from_millis(120));
+        std::thread::sleep(crate::timing::POLL_BUTTON);
     }
     false
 }
@@ -583,7 +583,7 @@ pub fn click_when_ready(
                 button.name, button.search
             )));
         }
-        std::thread::sleep(std::time::Duration::from_millis(400));
+        std::thread::sleep(crate::timing::POLL_LOCATE);
     };
     let (sx, sy) = win.client_to_screen(button.click.0, button.click.1)?;
     // One batched, position-carrying, game-checked click. The old warp -> sleep(250) -> positionless

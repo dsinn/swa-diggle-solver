@@ -29,6 +29,7 @@ pub mod shrineplay;
 pub mod subworld;
 pub mod buyer;
 pub mod tables;
+pub mod timing;
 pub mod tower;
 pub mod typist;
 pub mod win;

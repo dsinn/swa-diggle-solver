@@ -334,7 +334,7 @@ impl Fight<'_> {
                     // and the reward screen time to announce itself.
                     let since = *unreadable_since.get_or_insert(Instant::now());
                     if since.elapsed() < SAVE_SETTLE {
-                        std::thread::sleep(Duration::from_millis(150));
+                        std::thread::sleep(crate::timing::POLL_BRISK);
                         continue;
                     }
                     log.push_str(&format!(
@@ -400,7 +400,7 @@ impl Fight<'_> {
                     if feed.seen_since(began, "Item selection:") {
                         return self.take_reward(feed, keys, log, turns, deadline, self.player_is_hurt());
                     }
-                    std::thread::sleep(Duration::from_millis(400));
+                    std::thread::sleep(crate::timing::POLL_SAVE);
                 }
                 "PlayerTurn" => {
                     turns += 1;
@@ -422,7 +422,7 @@ impl Fight<'_> {
                 _ => {
                     // PlayerPreTurn, EnemyTurn, EnemyDying: the game is animating, and PlayerTurn
                     // only begins once the board is static. Waiting on the save is enough.
-                    std::thread::sleep(Duration::from_millis(300));
+                    std::thread::sleep(crate::timing::POLL_ARRIVAL);
                 }
             }
 
@@ -466,7 +466,7 @@ impl Fight<'_> {
             if Instant::now() >= deadline {
                 return false;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(crate::timing::POLL_BOARD);
         }
     }
 
@@ -477,7 +477,7 @@ impl Fight<'_> {
     ) -> Result<Option<Outcome>, crate::Error> {
         let tiles = tiles_of(cs);
         if tiles.is_empty() {
-            std::thread::sleep(Duration::from_millis(300));
+            std::thread::sleep(crate::timing::POLL_ARRIVAL);
             return Ok(None);
         }
         let health = cs.int_at("rpg.enemy.health").unwrap_or(0);
@@ -851,9 +851,9 @@ impl Fight<'_> {
         };
         *select_failures = 0;
         self.park();
-        std::thread::sleep(Duration::from_millis(150));
+        std::thread::sleep(crate::timing::FOCUS_SETTLE);
         keys.focus();
-        std::thread::sleep(Duration::from_millis(150));
+        std::thread::sleep(crate::timing::FOCUS_SETTLE);
         keys.press_key(VK_SPACE, SC_SPACE)?;
         log.push_str("  selected and submitted\n");
 
@@ -876,7 +876,7 @@ impl Fight<'_> {
         let mut read_errors = 0usize;
         let mut last = String::new();
         while Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(crate::timing::POLL_SCREEN);
             feed.pump();
             if feed.seen_since(mark, "Item selection:") {
                 break;
@@ -1086,7 +1086,7 @@ impl Fight<'_> {
             if Instant::now() >= deadline {
                 return Ok(false);
             }
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(crate::timing::POLL_SCREEN);
         }
     }
 
@@ -1204,7 +1204,7 @@ impl Fight<'_> {
             self.park();
             let until = Instant::now() + Duration::from_secs(4);
             while Instant::now() < until {
-                std::thread::sleep(Duration::from_millis(250));
+                std::thread::sleep(crate::timing::POLL_SCREEN);
                 feed.pump();
                 if feed.seen_since(mark, "Item selection:") {
                     log.push_str("  Finish took effect\n");
@@ -1319,7 +1319,7 @@ impl Fight<'_> {
         let until = deadline.min(Instant::now() + Duration::from_secs(20));
         let (mut postgame, mut how) = (false, "");
         while Instant::now() < until && !postgame {
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(crate::timing::POLL_SCREEN);
             feed.pump();
             if feed.seen_since(mark, "Postgame screen:") {
                 postgame = true;
@@ -1339,7 +1339,7 @@ impl Fight<'_> {
         if postgame {
             // Postgame's Continue is `affirmative` -> `goBack()`, guarded by `activeIf = backMode`.
             keys.focus();
-            std::thread::sleep(Duration::from_millis(300));
+            std::thread::sleep(crate::timing::FOCUS_SETTLE);
             if keys.press_key(VK_SPACE, SC_SPACE).is_err() {
                 log.push_str("  could not send Space to the postgame\n");
                 return false;
@@ -1350,7 +1350,7 @@ impl Fight<'_> {
             let gone_by = Instant::now() + Duration::from_secs(6);
             let mut gone = false;
             while Instant::now() < gone_by && !gone {
-                std::thread::sleep(Duration::from_millis(250));
+                std::thread::sleep(crate::timing::POLL_SCREEN);
                 gone = !matches!(
                     crate::act::score_exact(self.win, &crate::act::POSTGAME_CONTINUE),
                     Ok(q) if q >= crate::act::POSTGAME_CONTINUE_PRESENT

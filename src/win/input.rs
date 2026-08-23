@@ -102,7 +102,7 @@ pub fn travel_cursor_in(
         if sent != 1 {
             return Err(crate::Error::Win32("SendInput refused a move event".into()));
         }
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(crate::timing::CURSOR_STEP);
     }
     Ok(())
 }
@@ -300,9 +300,9 @@ pub fn drag_in(
     };
 
     send(&[mv(from.0, from.1)?])?;
-    std::thread::sleep(Duration::from_millis(40));
+    std::thread::sleep(crate::timing::HOVER_BEFORE_PRESS);
     send(&[mouse_event(MOUSEEVENTF_LEFTDOWN)])?;
-    std::thread::sleep(Duration::from_millis(60));
+    std::thread::sleep(crate::timing::CLICK_HOLD);
     for i in 1..=steps {
         let t = i as f64 / steps as f64;
         let x = from.0 as f64 + (to.0 - from.0) as f64 * t;
@@ -310,9 +310,9 @@ pub fn drag_in(
         send(&[mv(x.round() as i32, y.round() as i32)?])?;
         // The game integrates these per frame; delivering them faster than it renders just gets
         // them coalesced into one delta, which defeats the point of stepping.
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(crate::timing::CURSOR_STEP);
     }
-    std::thread::sleep(Duration::from_millis(60));
+    std::thread::sleep(crate::timing::CLICK_HOLD);
     send(&[mouse_event(MOUSEEVENTF_LEFTUP)])?;
     Ok(())
 }
@@ -364,7 +364,7 @@ pub fn inject_left_click(count: usize) -> Result<(), crate::Error> {
         }
         if i + 1 < count {
             // Inside the OS double-click time, or the game sees two separate single clicks.
-            std::thread::sleep(Duration::from_millis(60));
+            std::thread::sleep(crate::timing::CLICK_HOLD);
         }
     }
     Ok(())
@@ -489,7 +489,7 @@ impl PostMessageInput {
             unsafe {
                 let _ = PostMessageW(self.win.hwnd, WM_CHAR, WPARAM(ch as usize), LPARAM(1));
             }
-            std::thread::sleep(Duration::from_millis(40));
+            std::thread::sleep(crate::timing::TYPE_GAP);
         }
         Ok(())
     }
@@ -554,7 +554,7 @@ impl PostMessageInput {
         let up = LPARAM((sc << 16) | (0xC000_0001u32 as isize) | EXTENDED);
         unsafe {
             let _ = PostMessageW(self.win.hwnd, WM_KEYDOWN, WPARAM(vk as usize), down);
-            std::thread::sleep(Duration::from_millis(60));
+            std::thread::sleep(crate::timing::CLICK_HOLD);
             let _ = PostMessageW(self.win.hwnd, WM_KEYUP, WPARAM(vk as usize), up);
         }
         Ok(())
@@ -570,7 +570,7 @@ impl Input for PostMessageInput {
         let up = LPARAM((sc << 16) | (0xC000_0001u32 as isize));
         unsafe {
             let _ = PostMessageW(self.win.hwnd, WM_KEYDOWN, WPARAM(vk as usize), down);
-            std::thread::sleep(Duration::from_millis(60));
+            std::thread::sleep(crate::timing::CLICK_HOLD);
             let _ = PostMessageW(self.win.hwnd, WM_KEYUP, WPARAM(vk as usize), up);
         }
         Ok(())
@@ -581,9 +581,9 @@ impl Input for PostMessageInput {
     fn click(&self, x: i32, y: i32) -> Result<(), crate::Error> {
         unsafe {
             let _ = PostMessageW(self.win.hwnd, WM_MOUSEMOVE, WPARAM(0), LPARAM(pack_xy(x, y)));
-            std::thread::sleep(Duration::from_millis(150));
+            std::thread::sleep(crate::timing::POSTED_HOVER);
             let _ = PostMessageW(self.win.hwnd, WM_LBUTTONDOWN, WPARAM(1), LPARAM(pack_xy(x, y)));
-            std::thread::sleep(Duration::from_millis(80));
+            std::thread::sleep(crate::timing::POSTED_HOLD);
             let _ = PostMessageW(self.win.hwnd, WM_LBUTTONUP, WPARAM(0), LPARAM(pack_xy(x, y)));
         }
         Ok(())
