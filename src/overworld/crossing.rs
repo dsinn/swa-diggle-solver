@@ -4466,6 +4466,54 @@ mod tests {
         }
     }
 
+    /// **And it still follows the road when there is no door to head for**, which is the arm #100
+    /// added and the one the older test above cannot reach.
+    ///
+    /// The dev, 2026-08-23: *I'd like to stay on the paved path for regular forests, not just the
+    /// lost woods.* `is_paved` leads this key for every subworld and always has — what #100 changed
+    /// is the pair of terms **below** it, and a fogged forest is the case where that pair is now
+    /// ordered differently than it was. So the road rule needs a guard in this arm too, or the next
+    /// change to the ordering can quietly cost it.
+    ///
+    /// The same node as the test above, verbatim from `spike-run-raw.log:635-645`, with one thing
+    /// taken away: **no exits in the dump**, which is fog rather than a dead end. `dest` is `None`,
+    /// `searching_for` is `Exit`, and distance leads — so the brush one hop away is exactly what
+    /// would win if paved were not above it.
+    #[test]
+    fn a_forest_with_no_door_in_sight_still_follows_the_road() {
+        let mut m = WorldMap::new();
+        m.fold(&inside_dump("l9", "l9sub22", "Saltagh Park road",
+            vec![
+                node("l9sub7", "Saltagh Park forest"),
+                node("l9sub21", "Saltagh Park forest"),
+                node("l9sub10", "Saltagh Park crossroads"),
+            ],
+            vec![]));
+        m.fold(&inside_dump("l9", "l9sub10", "Saltagh Park crossroads",
+            vec![node("l9sub22", "Saltagh Park road"), node("l9sub12", "Saltagh Park road")],
+            vec![]));
+        m.fold(&inside_dump("l9", "l9sub22", "Saltagh Park road",
+            vec![
+                node("l9sub7", "Saltagh Park forest"),
+                node("l9sub21", "Saltagh Park forest"),
+                node("l9sub10", "Saltagh Park crossroads"),
+            ],
+            vec![]));
+
+        // **The positive controls.** This has to be the arm under test, and the two candidates have
+        // to genuinely disagree — otherwise the assertion passes for a reason it never states.
+        assert_eq!(m.searching_for("l9"), Searching::Exit, "a forest has no errand to hide");
+        assert!(m.get("l9sub21").expect("brush").is_paved() == false, "the near candidate is brush");
+        assert!(m.get("l9sub12").expect("road").is_paved(), "the far candidate is road");
+
+        match m.cross_toward(&[]) {
+            Some(Crossing::Seek { to }) | Some(Crossing::Probe { to, .. }) => {
+                assert_eq!(to, "l9sub10", "toward the unwalked road, not into the brush next door");
+            }
+            other => panic!("expected a fogged search along the road, got {other:?}"),
+        }
+    }
+
     /// Exploring a forest follows the road too, even when brush is nearer.
     ///
     /// **The live case, 2026-08-08.** Crossing `l9` toward `l9_path_to_l19`, which was never on the
