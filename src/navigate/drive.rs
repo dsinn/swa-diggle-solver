@@ -693,10 +693,32 @@ pub fn drive(
             // the miss and retry than aim at a moving view. See [`Run::needs_recentre`].
             if r.needs_recentre {
                 let (cw, ch) = r.win.client_size().unwrap_or((1920, 1080));
+                // **Ask whether the camera has already settled itself, before paying to settle it.**
+                //
+                // The dev, on the 2211Z run: *same with the first combat node of the Huggate Wald
+                // forest.* The flag was raised by the `l19` fight two steps earlier and honoured
+                // here, because this branch is the only place that reads it — so it survived the
+                // whole surface walk and fired inside `l28`, where the arrival's own
+                // `centreScreenOnPlayer` had already run and printed `Screen pan finished`.
+                //
+                // `settled_dump` is the right question and not merely a cheaper one: it gates on
+                // `dump_is_usable(self.dumps, self.positions_stale_at)`, and `positions_stale_at` is
+                // stamped by the same line that raises this flag. So a settled dump it accepts is by
+                // construction **newer than the disturbance**, which is exactly what the flag is
+                // asking about. A pan that finished after the fight handed the map back settles the
+                // camera whoever started it.
+                //
+                // Costs one pump when it succeeds, and the `settled_dump` below then finds the same
+                // dump. Nothing here is a fallback — if no fresh dump has landed we still spend the
+                // locate-me rather than aim at a moving view. See [`Run::needs_recentre`].
+                //
                 // `recentre` leaves its answer in `latest`, which is where `settled_dump` reads
                 // from, so there is nothing to carry across by hand. The flag clears only on
                 // success: a locate-me that did not take has settled nothing.
-                if r.recentre().is_some_and(|a| !camera_is_lost(&a.nodes, cw, ch)) {
+                let already = r
+                    .settled_dump(Duration::ZERO)
+                    .is_some_and(|a| !camera_is_lost(&a.nodes, cw, ch));
+                if already || r.recentre().is_some_and(|a| !camera_is_lost(&a.nodes, cw, ch)) {
                     r.needs_recentre = false;
                     r.dump_misses = 0;
                 }

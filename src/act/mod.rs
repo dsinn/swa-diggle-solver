@@ -282,7 +282,11 @@ pub fn identify(win: &GameWindow) -> Screen {
     // Asked before the generic back-plaque checks below, for the reason written above them: a shop
     // has its own back arrow, and a test that answers "there is a way out of here" must never
     // pre-empt one that answers "what is this screen for".
-    if over(&SHOP_SELL, SHOP_SELL_PRESENT) {
+    //
+    // **Both words at that anchor.** `Sell` and `Inventory` are one slot switched on `canSellTo`
+    // (`shop.lua:188-200`), so a shop that does not buy is still a shop; see [`SHOP_INVENTORY`] for
+    // the run this cost. Same bar for both, because it is the same plank.
+    if over(&SHOP_SELL, SHOP_SELL_PRESENT) || over(&SHOP_INVENTORY, SHOP_SELL_PRESENT) {
         return Screen::Shop;
     }
     if over(&SHRINE_GOBACK, SHRINE_GOBACK_PRESENT) {

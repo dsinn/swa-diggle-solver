@@ -1055,6 +1055,33 @@ pub const SHOP_SELL: Button = Button {
 /// the game's chrome — if one turns up, this needs re-measuring against it rather than lowering.
 pub const SHOP_SELL_PRESENT: f64 = 0.90;
 
+/// The **same plank** as [`SHOP_SELL`], reading `Inventory`, which is what a shop that does not buy
+/// puts there.
+
+/// `shop.lua:188-200` defines the two at one anchor and switches them on `canSellTo`:
+///
+/// ```lua
+/// require'ui.elements.button'('Sell',      0.5, 0.85, { xOffset = -2.768, showIf = function() return canSellTo end }),
+/// require'ui.elements.button'('Inventory', 0.5, 0.85, { xOffset = -2.768, showIf = function() return not canSellTo end }),
+/// ```
+///
+/// **This cost a run.** The `Woodsman` at `Bempton Silva road` sells and does not buy, so his shop
+/// drew `Inventory`; [`SHOP_SELL`] scored **0.8061** against its 0.90 bar, `identify` answered
+/// `Unknown`, and the driver hunted for a map that was not there until it gave up
+/// (2211Z, 2026-08-23). The plank artwork is identical and only the word differs, which is exactly
+/// why it scores high enough to look like noise rather than a different screen.
+///
+/// **Third time for this shape.** `Reveal`/`Teleport` share the tower's slot
+/// ([`crate::tower::REVEAL`]) and the overworld's `(0, 0.85)` has done it before
+/// ([`crate::observe::affirm::SHOW_AREA_BUTTONS`]). There the hazard is pressing the wrong one;
+/// here it is failing to recognise the screen at all. A shared anchor with a `showIf` switch is
+/// worth checking for whenever a fingerprint is a plank with a word on it.
+///
+/// Cut from `spike-frames-live/gave-up.png`, the frame that run stopped on, at the identical rect
+/// [`SHOP_SELL`] uses.
+pub const SHOP_INVENTORY: Button =
+    Button { name: "shop Inventory", template: "shop-inventory.png", ..SHOP_SELL };
+
 pub const SHRINE_GOBACK: Button = Button {
     name: "shrine Go back",
     template: "shrine-goback.png",
@@ -1383,6 +1410,7 @@ pub const ALL: &[&Button] = &[
     &SHRINE_CONSECRATE,
     &SHRINE_GOBACK,
     &SHOP_SELL,
+    &SHOP_INVENTORY,
     &STATS_BACK,
     &HEROSELECT_HEADER,
     &UNLOCK_CONTINUE,

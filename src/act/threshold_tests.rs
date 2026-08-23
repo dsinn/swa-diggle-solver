@@ -80,6 +80,54 @@ fn score_at_origin(button: &Button, name: &str) -> Option<f64> {
     find_at_scale_in(&crop(&f, rect), &tpl, 1.0, 1, None).map(|m| m.inliers)
 }
 
+/// **A shop that does not buy is still a shop**, and until 2026-08-23 we could not see one.
+///
+/// `Sell` and `Inventory` are one plank at one anchor, switched on `canSellTo`
+/// (`shop.lua:188-200`). The `Woodsman` at `Bempton Silva road` sells and does not buy, so his shop
+/// drew `Inventory`, `identify` answered `Unknown`, and the 2211Z run gave up hunting for a map that
+/// was not there.
+///
+/// Measured both ways round, because a fingerprint that fires on the wrong shop is no better than
+/// one that misses the right one: each word must clear the bar on its own frame and miss it on the
+/// other. The gap between them is what says these are two readable words rather than one blurry
+/// plank.
+#[test]
+fn both_words_at_the_shop_plank_are_read_as_a_shop() {
+    let (Some(sell_on_store), Some(inv_on_store)) = (
+        score_at_origin(&SHOP_SELL, "shop-general-store.png"),
+        score_at_origin(&SHOP_INVENTORY, "shop-general-store.png"),
+    ) else {
+        return;
+    };
+    let (Some(sell_on_woodsman), Some(inv_on_woodsman)) = (
+        score_at_origin(&SHOP_SELL, "shop-woodsman.png"),
+        score_at_origin(&SHOP_INVENTORY, "shop-woodsman.png"),
+    ) else {
+        return;
+    };
+
+    assert!(
+        sell_on_store >= SHOP_SELL_PRESENT,
+        "`Sell` on the general store: {sell_on_store:.4} < {SHOP_SELL_PRESENT}"
+    );
+    assert!(
+        inv_on_woodsman >= SHOP_SELL_PRESENT,
+        "`Inventory` on the Woodsman's shop: {inv_on_woodsman:.4} < {SHOP_SELL_PRESENT}"
+    );
+
+    // The other half, and the reason the bug looked like noise: the wrong word scores **high** on
+    // the same plank, because only the lettering differs. `sell_on_woodsman` is the 0.8061 the run
+    // reported at the stop.
+    assert!(
+        sell_on_woodsman < SHOP_SELL_PRESENT,
+        "`Sell` should not read on a shop showing `Inventory`: {sell_on_woodsman:.4}"
+    );
+    assert!(
+        inv_on_store < SHOP_SELL_PRESENT,
+        "`Inventory` should not read on a shop showing `Sell`: {inv_on_store:.4}"
+    );
+}
+
 /// Measures the frame a run stopped on with `Start` plainly on screen.
 ///
 /// 2026-08-14 at `l16sub14`: the run pressed Combat, the screen moved 0.975, and the next look
