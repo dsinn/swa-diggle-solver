@@ -523,8 +523,64 @@ impl Place {
     /// which is the better instruction of the two when the map is fogged. The tile layer agrees and
     /// is not ours to read: `paveRoads = false` with `paveInsetRoads = true`
     /// (`lost_woods.lua:8-9`) means the only tiles actually painted as road are the exit approaches.
+    /// ## An exit road is paved because it is a road, not because of what it leads to
+    ///
+    /// #107. The two suffix tests read the **heading**, and an exit's heading is built from the
+    /// place at the *far end*:
+    ///
+    /// ```lua
+    /// headingFormat = function(location)
+    ///     ...
+    ///     return ('Road to %s %s'):format(target.name, typeName)
+    /// ```
+    /// (`overworld/locations/out_road.lua:60-73`, where `typeName` is the **target's**.) So the
+    /// suffix answers a question about the destination:
+    ///
+    /// ```text
+    /// e1_path_to_l15   Road to Bennington crossroads     -> paved
+    /// l44_path_to_l59  Road to Acklam Backwoods village  -> not paved
+    /// ```
+    ///
+    /// Both are the same kind of thing, and the game says which kind in one line:
+    /// `out_road.lua:15` is `typeName = 'road'`, unconditional. Whether we treat a door as part of
+    /// the road network cannot depend on the name of the place beyond it.
+    ///
+    /// So the key decides it. The dump builds an exit as `parent.key..'_path_to_'..k`
+    /// (`overworldview.lua:1043`), and no other key in the world carries that infix — see
+    /// [`crate::overworld::exit_node_key`], which is the same string from the other direction. That
+    /// also covers an exit we know only from the save, whose heading is empty and which the suffix
+    /// tests could never have matched.
+    ///
+    /// ## Where an exit can reach this at all, since most places that ask never see one
+    ///
+    /// Worth writing down, because the answer is *narrower than it looks* and two of the three sites
+    /// turn out to be unreachable rather than merely unlikely.
+    ///
+    /// - **`cross_toward`'s frontier key**, `(!p.is_paved(), …)`. Exits are filtered out of the
+    ///   frontier — *except the one we are crossing toward*, which is let back in deliberately. So a
+    ///   door can be ranked here, and until now `l44_path_to_l59` sorted **behind every interior
+    ///   road** while `e1_path_to_l15` sorted ahead of them, for no reason but the noun at the far
+    ///   end. This is the site that matters.
+    /// - **`cross_toward`'s last-resort `pick`**, where `usable` drops every exit the dump named
+    ///   except the destination — so an exit reaches the paved pass only when the dump *would not
+    ///   say* where the doors are, which is a lost woods. That is precisely where the note above
+    ///   wants them preferred.
+    /// - **`first_step_toward`**, which cannot be affected: its first pass avoids un-paved nodes as
+    ///   *waypoints*, and an exit is a leaf. Across `world-0` and `world-5`, 104 and 61 exit nodes
+    ///   carry edges and exactly one in each has more than a single one — `e3_path_to_l46` and
+    ///   `e1_path_to_l15`, both lost-woods corridors whose second neighbour is itself an exit. A
+    ///   leaf is never an intermediate step, and `step_avoiding` exempts the destination from every
+    ///   filter in any case.
     pub fn is_paved(&self) -> bool {
-        self.type_is("road") || self.type_is("crossroads")
+        self.is_exit_road() || self.type_is("road") || self.type_is("crossroads")
+    }
+
+    /// The road **out** of a subworld — a door, keyed `<parent>_path_to_<target>`.
+    ///
+    /// By key rather than by heading, for the reason [`Place::is_paved`] sets out at length: the
+    /// heading of one of these describes somewhere else.
+    pub fn is_exit_road(&self) -> bool {
+        self.key.contains("_path_to_")
     }
 
     /// A treasure chest node. `typeName = 'chest'` (`overworld/generators/forest.lua:178`).
@@ -1117,6 +1173,58 @@ mod tests {
     use super::*;
     use crate::overworld::fixtures::*;
     use crate::overworld::WorldMap;
+
+    /// **A door is paved because of what it is, not because of what lies through it.** #107.
+    ///
+    /// `out_road.lua:15` is `typeName = 'road'` with no condition on it, and every one of these is
+    /// the same kind of thing. The headings are real: `e1_path_to_l15` and `l44_path_to_l59` are
+    /// both in `map-cache/world-5.txt`, and before this they disagreed.
+    #[test]
+    fn an_exit_road_is_paved_whatever_the_place_beyond_it_is_called() {
+        let door = |key: &str, heading: &str| Place {
+            key: key.into(),
+            heading: heading.into(),
+            parent: Some(key.split("_path_to_").next().unwrap().into()),
+            ..Default::default()
+        };
+
+        // The two the suffix test used to split, which is the whole bug in two lines.
+        assert!(door("e1_path_to_l15", "Road to Bennington crossroads").is_paved());
+        assert!(door("l44_path_to_l59", "Road to Acklam Backwoods village").is_paved());
+        // And the rest of the nouns a destination can wear, each a heading the game really writes.
+        for heading in [
+            "Road to Youlthorpe - level 5 crypt", // the combat form, `headingFormat`'s other branch
+            "Road to Borsea shrine",
+            "Road to Firby wizards' tower",
+            "Road to Dairy Copse campfire",
+            "Road to nowhere", // `out_road.lua:76`, an exit with no `targetNode`
+        ] {
+            assert!(door("l9_path_to_x", heading).is_paved(), "{heading}");
+        }
+
+        // **The save-only door**, which the suffix test could never have matched: no dump has drawn
+        // it, so it has no heading at all. `world-5.txt` is full of these.
+        assert!(door("l26_path_to_l30", "").is_paved(), "a door we know only from the save");
+
+        // Nothing else moves. The interior is still judged by its own heading.
+        let inside = |heading: &str| Place {
+            key: "l9sub4".into(),
+            heading: heading.into(),
+            parent: Some("l9".into()),
+            ..Default::default()
+        };
+        assert!(inside("Saltagh Park road").is_paved());
+        assert!(inside("Saltagh Park crossroads").is_paved());
+        assert!(!inside("Saltagh Park forest").is_paved());
+        assert!(!inside("Danebury Cover house").is_paved());
+        // The one that started it: a village on the surface is not a road because a road led to it.
+        assert!(!Place {
+            key: "l59".into(),
+            heading: "Acklam Backwoods village".into(),
+            ..Default::default()
+        }
+        .is_paved());
+    }
 
     /// **A village is a container before we have ever been inside one**, which is the whole point.
     ///
