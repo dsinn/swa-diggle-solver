@@ -893,6 +893,35 @@ impl WorldMap {
         // Absent when the destination has no printed position, which is the fogged-inn search: the
         // key below then reduces to what it has always been, so the dev's degree rule of 2026-08-15
         // keeps the village search it was written for.
+        //
+        // ## A subworld exit is **always** placed, and that is a fact about the game rather than
+        // luck
+        //
+        // Worth stating here because the note this file used to carry assumed the opposite. Every
+        // dump lists **every** exit of the subworld — `verboseAdjacencyData` iterates
+        // `parent.connections`, not our neighbours (`overworldview.lua:1041-1051`) — and on entering
+        // a subworld `subworldOnEnterBasics` sets `<key>_explored` on every `out_road`
+        // (`utils/world.lua:884-892`), which is one of the four things that clear
+        // `isCloudCovered` (`:696-706`). So the doors are placed from the first dump onward, before
+        // we have walked to any of them.
+        //
+        // **Measured over every run log in the repo: 3,783 interior dumps, 14,063 exit lines,
+        // 418 hidden — and 409 of those are one lost woods.** The two exceptions are exactly the two
+        // the source names:
+        //
+        // - **`thickFog`**, where that loop is skipped entirely (`:885`). `e3 Nuthill Grove — level
+        //   6 lost woods`, 409 hidden lines over 103 dumps: every exit, every dump.
+        // - **a `secret` exit**, which fails `locationIsVisible` (`overworldview.lua:554-556`) until
+        //   `<key>_revealed` — task #14's tower press. `e5 Shiptonthorpe Weald` printed two exits
+        //   and one `Hidden location` in each of its 9 dumps.
+        //
+        // So inside an ordinary subworld this is `Some`, and a rule that needs to know where the way
+        // out lies does not have to infer it. **It also means an unseen exit needs no prediction**:
+        // the generator does place exits by surface bearing —
+        // `worldUtils.generateSubworldOutroads` (`utils/world.lua:924-943`) puts the road toward `X`
+        // on the interior bounding box in the direction `X` lies from the parent — but that is only
+        // ever needed where the answer is already scrambled, since `lostOrientation` re-rolls the
+        // whole interior through one of eight symmetries on every load (`forest.lua:483-495`).
         let door_now = dest.as_deref().and_then(|d| self.placed_now(d));
         let doorward = |p: &Place| -> u64 {
             match (door_now, self.placed_now(&p.key)) {
