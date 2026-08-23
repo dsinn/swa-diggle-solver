@@ -13,8 +13,6 @@
 # genuine: some of it rustfmt correcting lines that really are over 100 columns, some of it rustfmt
 # expanding compact shapes this codebase writes on purpose.
 #
-# ## Why each one
-#
 # ## 120 was tried, and it is worse. Do not re-propose it without new evidence
 #
 # Same measurement, same three files' worth of settings, only the width moved:
@@ -46,6 +44,8 @@
 # should not be quoted: it comes from diffing line lists, which mispairs hunks. One example it
 # produced (an enum variant supposedly being exploded one field per line) turned out on inspection to
 # be a mispairing and not a thing rustfmt does at all under these settings.
+#
+# ## Why each setting
 #
 # `max_width` is not the interesting setting and was never the problem — the repo already writes to
 # 100 columns, measured: the 95th percentile line is exactly 100 and only 1.19% run past 101. It is
