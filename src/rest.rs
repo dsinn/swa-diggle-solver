@@ -77,6 +77,36 @@ impl Health {
     }
 }
 
+/// The **previous** health reading, kept so the delta rule has something to subtract from.
+///
+/// A newtype rather than an `Option<Health>`, and that is the whole point of it. `drive` used to
+/// carry the bare option, and on 2026-08-23 the too-hurt gate read it as though it were the current
+/// reading: two arms that heal — buying a heart and leaving an inn — logged the new bar and never
+/// assigned it, so the gate was still holding the 5/20 the run came out of a chest fight with. It
+/// refused a level 2 crypt at 24/24 and stopped, and the frame it saved shows six full hearts.
+///
+/// **There is no way to ask this what the health is**, which is the guarantee the comment it
+/// replaced could not give. [`crate::overworld::WorldMap::health`] is the only answer to that
+/// question, and it cannot go stale because `apply_save` writes it on every read.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PreviousHealth(Option<crate::rest::Health>);
+
+impl PreviousHealth {
+    /// Takes the newest reading and hands back the pair the delta rule wants, if both exist.
+    ///
+    /// One call in place of the read-compare-assign the four sites each wrote out, which is how one
+    /// of them came to be missing two of the three steps.
+    pub fn advance(
+        &mut self, now: Option<crate::rest::Health>,
+    ) -> Option<(crate::rest::Health, crate::rest::Health)> {
+        let pair = self.0.zip(now);
+        if now.is_some() {
+            self.0 = now;
+        }
+        pair
+    }
+}
+
 /// Did this node cost enough health to be worth resting off?
 ///
 /// Takes the readings from either side of the node rather than a single "damage" number, because

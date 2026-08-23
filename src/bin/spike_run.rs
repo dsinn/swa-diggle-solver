@@ -336,7 +336,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         r.log.push_str("ABORT: no adjacency dump\n");
         return finish(&mut game, &r.log, r.unflushed(), &archive);
     }
-    let mut health = r.apply_save();
+    let health = r.apply_save();
+    // Seeds the delta cursor only. Anything that wants to know how hurt we *are* asks
+    // `WorldMap::health`, which is why this is no longer an `Option` anyone can misread.
+    let mut previous_health = diggle_solver::rest::PreviousHealth::default();
+    let _ = previous_health.advance(health);
     // **What earlier runs learned, before this one decides where to go.**
     //
     // The save carries which areas are complete and which are corrupted; it does not carry a single
@@ -439,7 +443,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         0 => "no time limit; `.diggle-stop` ends the run\n\n".to_string(),
         m => format!("time limit {m} min; `.diggle-stop` ends the run\n\n"),
     });
-    let stop = drive(&mut r, &fight, &mut health, Instant::now() + budget);
+    let stop = drive(&mut r, &fight, &mut previous_health, Instant::now() + budget);
     r.log.push_str(&format!("\n## Stopped\n\n{stop:?}\n\n"));
 
     // **Before anything else, and on every ending including death.** What a run learned about the

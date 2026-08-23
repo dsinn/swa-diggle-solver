@@ -820,6 +820,22 @@ impl WorldMap {
     /// Called with the health readings from either side of a node. Once set, the intent survives
     /// until [`WorldMap::rested`] clears it — a rest site may be several hops away, and forgetting
     /// on the way would strand us at low health next to the fight we were avoiding.
+    /// **The newest health the save has given us**, which is the only reading anything should act on.
+    ///
+    /// `apply_save` writes this on every read, so it cannot go stale while a run is making calls.
+    /// That is the whole point of it living here: the note above `apply_save`'s assignment records
+    /// the last time this fact was hand-carried and dropped, and the 1828Z run is the second time.
+    ///
+    /// **The 1828Z stop.** `drive` also took a `&mut Option<Health>` and the too-hurt gate read
+    /// *that*. Two arms — buying a heart and leaving an inn — logged `health is now 20/20`,
+    /// `20/24`, `24/24` and never assigned it, so the gate was still holding the 5/20 the run came
+    /// out of a chest fight with. It refused a level 2 crypt at full health and stopped, and the
+    /// frame it saved shows six full hearts. The dev: *TooHurtToFight looks like a real bug; I
+    /// believe the screenshot should show that we were not very hurt.*
+    pub fn health(&self) -> Option<crate::rest::Health> {
+        self.health
+    }
+
     pub fn note_health(&mut self, before: crate::rest::Health, after: crate::rest::Health) {
         if crate::rest::should_rest(before, after) {
             self.wants_rest = true;
@@ -2325,6 +2341,51 @@ mod tests {
     use super::*;
     use super::fixtures::*;
     use crate::observe::adjacency::{Exit, Node};
+
+    /// **The 1828Z stop, which was a full-health run refusing a level 2 crypt.**
+    ///
+    /// The dev, watching it: *TooHurtToFight looks like a real bug; I believe the screenshot should
+    /// show that we were not very hurt.* `gave-up.png` shows six full hearts, and the run's own log
+    /// had printed `health is now 24/24` seventy-seven lines before it stopped at "5/20".
+    ///
+    /// The sequence below is that run's, in the three readings that mattered: out of a chest fight
+    /// at 5/20, an inn, then a heart that raised the ceiling. Every one of them reached
+    /// [`WorldMap::apply_save`]; the two after the fight were logged by arms that never re-plumbed
+    /// the copy `drive` was carrying, and the gate read the copy.
+    ///
+    /// So the assertion is not that the arithmetic works — it is that **the map is the one place
+    /// that cannot be left behind**, which is the argument `apply_save` already makes for itself.
+    #[test]
+    fn health_read_from_the_map_is_the_newest_reading_and_not_the_one_a_caller_kept() {
+        let save = |current: i64, max: i64| {
+            crate::game::save::parse(&format!(
+                "return {{ player = {{ health = {current}, maxHealth = {max} }} }}"
+            ))
+            .expect("the fixture parses")
+        };
+        let mut m = WorldMap::new();
+
+        m.apply_save(&save(5, 20));
+        let carried = m.health().expect("read");
+        assert_eq!((carried.current, carried.max), (5, 20));
+        assert!(crate::rest::health_is_low(carried), "5 of 20 is genuinely too hurt to pick a fight");
+
+        // The inn, then the heart. `drive` logged both of these and kept neither.
+        m.apply_save(&save(20, 20));
+        m.apply_save(&save(20, 24));
+        m.apply_save(&save(24, 24));
+
+        let now = m.health().expect("read");
+        assert_eq!((now.current, now.max), (24, 24), "the map holds the newest reading");
+        assert!(!crate::rest::health_is_low(now), "six full hearts is not too hurt to fight");
+
+        // And the shape of the bug, stated so it cannot come back quietly: the reading a caller
+        // took before the rest still says what it said, and acting on it is the whole defect.
+        assert!(
+            crate::rest::health_is_low(carried) && !crate::rest::health_is_low(now),
+            "the two readings must disagree, or this test proves nothing"
+        );
+    }
 
     /// A promoted shrine is **one** consecration, whichever half of the pair carries the flag.
     ///

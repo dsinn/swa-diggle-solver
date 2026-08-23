@@ -21,7 +21,8 @@
 use super::*;
 
 pub fn drive(
-    r: &mut Run, fight: &Fight, health: &mut Option<crate::rest::Health>, deadline: Instant,
+    r: &mut Run, fight: &Fight, previous_health: &mut crate::rest::PreviousHealth,
+    deadline: Instant,
 ) -> Stop {
     // Are we already in a fight? The save says so outright.
     //
@@ -71,11 +72,10 @@ pub fn drive(
                 r.log.push_str(&format!("  resumed fight finished: {o:?}
 "));
                 let now = r.apply_save();
-                if let (Some(b), Some(a)) = (health.clone(), now) {
+                if let Some((b, a)) = previous_health.advance(now) {
                     r.map.note_health(b, a);
                     r.map.rested(a);
                 }
-                *health = now;
             }
             // Not a stop dressed as success: an unresumable fight is worth reporting as itself, so a
             // run that cannot rejoin says so rather than wandering onto the map path and failing to
@@ -255,11 +255,10 @@ pub fn drive(
                     // Bookkeeping every fight needs. Skipping it is how a run walks out of a fight at
                     // 1/20 and never considers resting, because nothing recorded the loss.
                     let now = r.apply_save();
-                    if let (Some(b), Some(a)) = (health.clone(), now) {
+                    if let Some((b, a)) = previous_health.advance(now) {
                         r.map.note_health(b, a);
                         r.map.rested(a);
                     }
-                    *health = now;
                     continue;
                 }
                 // Reported as a fight that went wrong, not as a map failure. The whole point of this
@@ -551,11 +550,10 @@ pub fn drive(
                 Err(e) => return Stop::Failed(e.to_string()),
             }
             let now = r.apply_save();
-            if let (Some(b), Some(a)) = (*health, now) {
+            if let Some((b, a)) = previous_health.advance(now) {
                 r.map.note_health(b, a);
                 r.map.rested(a);
             }
-            *health = now;
             continue;
         }
 
@@ -578,14 +576,15 @@ pub fn drive(
             match r.handle_event() {
                 Some(title) => {
                     r.log.push_str(&format!("{step}. answered `{title}`\n"));
-                    // Answering the rumble is what *starts* the cinematic, so this is the moment to
-                    // skip it — see `skip_cinematic`.
-                    if title.to_ascii_lowercase().contains("rumble") {
-                        match skip_cinematic(r) {
-                            Ok(()) => r.log.push_str("  skipped the anomaly cinematic\n"),
-                            Err(e) => r.log.push_str(&format!("  cinematic skip failed: {e}\n")),
-                        }
-                    }
+                    // **The skip is not done here**, and used to be — which is why the anomaly
+                    // opening cost two Escapes. The dev, watching the 1828Z run: *when the anomaly
+                    // opened, we did the main menu skip twice, but we only needed it once.*
+                    //
+                    // [`Run::handle_event`] already arms `pending_cinematic` on a rumble title and
+                    // the top of this loop acts on it — see the note there for why that is the
+                    // right place to do it. This arm was the older mechanism, left behind when the
+                    // flag replaced it, and it did not clear the flag, so both fired. `dismissed`
+                    // sends us straight back to the top, which is where the one skip now happens.
                     dismissed = true;
                     break;
                 }
@@ -1266,6 +1265,10 @@ pub fn drive(
                         // from this same file, so the flush has happened.
                         if let Some(h) = r.apply_save() {
                             r.log.push_str(&format!("  health is now {}/{}\n", h.current, h.max));
+                            // **And kept.** Logging a reading and not advancing the cursor is
+                            // what left the delta rule comparing a post-rest bar against a
+                            // pre-fight one.
+                            let _ = previous_health.advance(Some(h));
                         }
                         if r.map.top_up_at(&container) {
                             r.log.push_str(
@@ -1334,6 +1337,9 @@ pub fn drive(
                             Rested::Failed => " (nothing was spent)",
                         }
                     ));
+                    // The reading this arm has always printed and never kept. See the shop arm
+                    // above, and `WorldMap::health` for what reading it as *current* cost.
+                    let _ = previous_health.advance(Some(h));
                 }
                 continue;
             }
@@ -2319,11 +2325,15 @@ pub fn drive(
             // 1/20. Weighing the node's level against health is the better rule and is still not
             // implemented — see the open question on `easiest_hostile`.
             let enterable = p.risk() == crate::overworld::Risk::Forest;
-            let too_hurt = health.map(crate::rest::health_is_low).unwrap_or(true)
-                && !enterable
-                && !must_clear_here;
+            // **Asked of the map, not of the reading carried down this function.** See
+            // [`crate::overworld::WorldMap::health`] for the run this cost: `previous_health` below
+            // is a cursor for the delta rule and nothing else, and reading it as *current* is how a
+            // full-health run refused a level 2 crypt at a remembered 5/20.
+            let now = r.map.health();
+            let too_hurt =
+                now.map(crate::rest::health_is_low).unwrap_or(true) && !enterable && !must_clear_here;
             if too_hurt && !is_anomaly {
-                let hp = health
+                let hp = now
                     .map(|h| format!("{}/{}", h.current, h.max))
                     .unwrap_or_else(|| "unreadable".into());
                 r.log.push_str(&format!(
@@ -2932,11 +2942,10 @@ pub fn drive(
             ));
         }
         let now = r.apply_save();
-        if let (Some(b), Some(a)) = (*health, now) {
+        if let Some((b, a)) = previous_health.advance(now) {
             r.map.note_health(b, a);
             r.map.rested(a);
         }
-        *health = now;
         let _ = Goal::Explore;
     }
     Stop::Exhausted
