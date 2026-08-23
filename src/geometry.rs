@@ -248,7 +248,8 @@ impl Geometry {
         let missing = geometry.corners.iter().filter(|&&c| geometry.flat_of(c).is_none()).count();
         if missing > 0 {
             notes.push(format!(
-                "{missing} of {} corner tiles have fallen off the board; against `resistCornerless`                  the most any word can do is {:.0}% damage",
+                "{missing} of {} corner tiles have fallen off the board; against `resistCornerless` \
+                 the most any word can do is {:.0}% damage",
                 geometry.corners.len(),
                 100.0 * (geometry.corners.len() - missing) as f64 / geometry.corners.len() as f64
             ));

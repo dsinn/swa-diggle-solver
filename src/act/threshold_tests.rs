@@ -631,7 +631,8 @@ fn a_greyed_plank_reads_lower_than_any_live_one() {
     let worst_live = explore.min(visit);
     assert!(
         worst_live > AREA_BUTTON_LIVE,
-        "a live plank must read as live: Explore {explore:.4}, Visit {visit:.4},              gate {AREA_BUTTON_LIVE}"
+        "a live plank must read as live: Explore {explore:.4}, Visit {visit:.4}, \
+         gate {AREA_BUTTON_LIVE}"
     );
     assert!(
         greyed < AREA_BUTTON_LIVE,

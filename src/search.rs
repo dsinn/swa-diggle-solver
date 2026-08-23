@@ -2500,7 +2500,8 @@ mod typeable_count {
         let share = typeable as f64 / total as f64;
         assert!(
             share < 0.05,
-            "{typeable} of {total} ({:.2}%) typeable — if this is no longer a small fraction,              precomputing word facts becomes worth reconsidering",
+            "{typeable} of {total} ({:.2}%) typeable — if this is no longer a small fraction, \
+             precomputing word facts becomes worth reconsidering",
             share * 100.0
         );
     }

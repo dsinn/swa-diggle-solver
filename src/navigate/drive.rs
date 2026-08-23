@@ -788,8 +788,8 @@ pub fn drive(
             if let Some(a) = free {
                 r.recentre_misses = 0;
                 r.log.push_str(&format!(
-                    "{step}. the arrival panned the map itself — using its dump rather than                      asking again
-"
+                    "{step}. the arrival panned the map itself — using its dump rather than \
+                     asking again\n"
                 ));
                 a
             } else {
@@ -1858,8 +1858,8 @@ pub fn drive(
             let moved = r.select_and_watch(&format!("crossing: select for {what}"), ax, ay);
             if moved <= SELECT_MOVED {
                 r.log.push_str(&format!(
-                    "  the area strip moved {moved:.4} after selecting for {what} — reading the                      slot anyway
-"
+                    "  the area strip moved {moved:.4} after selecting for {what} — reading the \
+                     slot anyway\n"
                 ));
             }
             // **`Travel` is not always what is on offer, and pressing it when it is not stalls the
@@ -2451,15 +2451,15 @@ pub fn drive(
                 if !r.map.wants_rest() {
                     r.map.want_rest();
                     r.log.push_str(&format!(
-                        "{step}. **too hurt for `{here}` ({}) at {hp}** — looking for a bed                          before anything else
-",
+                        "{step}. **too hurt for `{here}` ({}) at {hp}** — looking for a bed \
+                         before anything else\n",
                         p.heading
                     ));
                     continue;
                 }
                 r.log.push_str(&format!(
-                    "{step}. `{here}` ({}) at {hp} is hostile and we are hurt, but the planner has                      already been through every safer errand — taking it
-",
+                    "{step}. `{here}` ({}) at {hp} is hostile and we are hurt, but the planner has \
+                     already been through every safer errand — taking it\n",
                     p.heading
                 ));
             }

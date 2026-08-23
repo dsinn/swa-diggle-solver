@@ -484,7 +484,8 @@ pub fn click_exact(win: &GameWindow, button: &Button, threshold: f64) -> Result<
     let q = score_exact(win, button)?;
     if q < threshold {
         return Err(crate::Error::Win32(format!(
-            "refusing to click {}: scored {q:.4}, below {threshold:.2}. The layout may have changed,              or this is not the screen we think it is.",
+            "refusing to click {}: scored {q:.4}, below {threshold:.2}. The layout may have changed, \
+             or this is not the screen we think it is.",
             button.name
         )));
     }

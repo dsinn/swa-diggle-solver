@@ -415,7 +415,8 @@ mod tests {
             .expect("the screen must have a way out or it is a trap");
         assert_eq!(
             entry.button.name, SHRINE_GOBACK.name,
-            "leaving is always safe; pressing `Consecrate` needs a solved word and only the shrine              driver knows that"
+            "leaving is always safe; pressing `Consecrate` needs a solved word and only the shrine \
+             driver knows that"
         );
         assert!(matches!(answer_for(Screen::ShrineConsecrate), Answer::Escape));
     }
