@@ -920,6 +920,20 @@ impl WorldMap {
         self.health.map(|h| !h.is_full()).unwrap_or(false)
     }
 
+    /// **Ask for a bed**, from somewhere that has decided one is needed for a reason health alone
+    /// does not carry.
+    ///
+    /// The health rules set this themselves — [`WorldMap::note_health`] on a costly node and
+    /// `note_health_level` below half. This is for the other case: standing on hostile ground while
+    /// hurt, where the driver would rather the planner went looking for a settlement than that it
+    /// pressed `Combat`. See the gate in `drive` for the dev ruling behind it.
+    ///
+    /// Deliberately one-way. Clearing it is `rested`'s job and happens at full health, which is what
+    /// makes the driver's re-plan loop-free.
+    pub fn want_rest(&mut self) {
+        self.wants_rest = true;
+    }
+
     pub fn wants_rest(&self) -> bool {
         self.wants_rest
     }

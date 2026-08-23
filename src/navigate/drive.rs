@@ -2336,11 +2336,46 @@ pub fn drive(
                 let hp = now
                     .map(|h| format!("{}/{}", h.current, h.max))
                     .unwrap_or_else(|| "unreadable".into());
+                // **Retreat before refusing, because the planner has a retreat and this had not
+                // asked it for one.**
+                //
+                // The dev, 2026-08-23: *when we're truly hurt and land on a crypt, shouldn't we just
+                // go to the nearest settlement with a known safe path rather than outright stalling?
+                // In the case where there is no known safe path, we've already implemented a
+                // searching strategy that avoids combat as much as possible and weighs threat
+                // levels.*
+                //
+                // Both halves already exist, in that order, in `WorldMap::next_errand`: while
+                // `wants_rest` it tries a target that skips hostile ground **and** has a known route,
+                // then one that skips hostile ground without a route, and only then
+                // [`WorldMap::easiest_hostile`] — the gentlest fight there is, ordered by `Risk`
+                // and then remembered level. So the retreat is one flag away, and stopping was
+                // refusing to set it.
+                //
+                // **Which makes the shape of this gate the question, not its threshold.** If
+                // `wants_rest` is already set, all three of those passes have run and *chose this
+                // node*: it is the least bad thing on the map, and refusing it is refusing the
+                // considered answer. Stopping there ends the run just as surely as losing the fight
+                // would, and only one of the two has a chance of not happening.
+                //
+                // So the gate now only fires where it can still help — we are hurt, we are on
+                // hostile ground, and **nobody has yet been asked for a bed**. Setting the flag and
+                // re-planning is loop-free because the flag latches: the next pass either finds the
+                // settlement, or comes back here having found nothing better, and takes the fight.
+                if !r.map.wants_rest() {
+                    r.map.want_rest();
+                    r.log.push_str(&format!(
+                        "{step}. **too hurt for `{here}` ({}) at {hp}** — looking for a bed                          before anything else
+",
+                        p.heading
+                    ));
+                    continue;
+                }
                 r.log.push_str(&format!(
-                    "{step}. **not fighting `{here}` ({}) at {hp}** — stopping instead of dying\n",
+                    "{step}. `{here}` ({}) at {hp} is hostile and we are hurt, but the planner has                      already been through every safer errand — taking it
+",
                     p.heading
                 ));
-                return Stop::TooHurtToFight(format!("{here} ({}) at {hp}", p.heading));
             }
             // **The press is the same; the word is not.** `getLocationButtons` tests
             // `typeData.subworld` before `basicCombatZone` (`overworldview.lua:462-467`), so on a

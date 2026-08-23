@@ -365,11 +365,25 @@ pub enum Stop {
     /// that beat us, and closing the game — and leaves the window foregrounded silently eating
     /// whatever the user types next. A named stop loses nothing and keeps all of it.
     Unanswered(Screen),
-    /// Too hurt to start the fight in front of us, and no rest was found before we got here.
+    /// **Retired 2026-08-23, and no longer produced.** Kept for the account rather than the
+    /// behaviour; delete it once nothing reads old reports.
     ///
-    /// A stop, not a failure: the run is intact and a checkpoint restore is not needed. It is the
-    /// deliberate alternative to [`Stop::Died`], which is what happened the one time this was not
-    /// checked — a run walked from `l41` onto a level-6 crypt at 1/20 and was killed by it.
+    /// It meant: too hurt to start the fight in front of us, and no rest found before we got here.
+    /// A stop rather than a failure — the run intact, no checkpoint restore needed — and the
+    /// deliberate alternative to [`Stop::Died`], which is what happened the one time it was not
+    /// checked: a run walked from `l41` onto a level 6 crypt at 1/20 and was killed by it.
+    ///
+    /// **What replaced it, and why that is not simply less careful.** The dev, 2026-08-23: *when
+    /// we're truly hurt and land on a crypt, shouldn't we just go to the nearest settlement with a
+    /// known safe path rather than outright stalling?* `WorldMap::next_errand` already does exactly
+    /// that while `wants_rest` — safe-and-routed, then safe, then
+    /// [`crate::overworld::WorldMap::easiest_hostile`] — and none of it had been asked. The gate
+    /// now sets the flag and re-plans; if the flag was already set, every safer errand has been
+    /// considered and the node in front of us is the least bad one on the map.
+    ///
+    /// The `l41` death predates `easiest_hostile`, which would have preferred a level 1 forest to
+    /// that level 6 crypt. The trade is real and it is the dev's to make: a stall ends the run for
+    /// certain, and a gentle fight only might.
     TooHurtToFight(String),
     /// The run is going round in circles and has stopped saying so only to itself.
     ///
