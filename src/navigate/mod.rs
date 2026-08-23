@@ -1082,7 +1082,39 @@ impl Run<'_> {
         // Only the *reading* is retried. A world with no cache file must not re-stat it every step
         // for the length of a run, so the flag is set either way once the seed is known.
         self.map_recalled = true;
-        let text = std::fs::read_to_string(&path).ok()?;
+        // **A world with no cache says so, and used to say nothing at all.** #102: the flag above is
+        // set as soon as the *seed* reads, so the `!map_recalled` line `spike_run` prints for a
+        // fresh profile does not cover this — a run whose world simply has no file on disk printed
+        // no `recalled` line and no explanation either. The 2159Z header is the evidence: the cache
+        // had been deleted by hand and the report had a hole where the line belongs, which read as
+        // #95 having broken rather than as an absent file.
+        //
+        // Logged here rather than at the call site because there are two call sites — startup and
+        // every later `apply_save` — and this is the one place that knows which of the two silences
+        // it is. Once only, since the flag is already set.
+        //
+        // The two failures are separated because they are different work: a world we have never
+        // mapped is ordinary and self-repairing, and a file we cannot read is a machine to go and
+        // look at.
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.log.push_str(&format!(
+                    "no map remembered for this world — nothing at `{}`, so this run begins blind
+",
+                    path.display()
+                ));
+                return None;
+            }
+            Err(e) => {
+                self.log.push_str(&format!(
+                    "the map for this world is on disk and unreadable — `{}`: {e}
+",
+                    path.display()
+                ));
+                return None;
+            }
+        };
         let positioned = !self.map.any_placed();
         let edges = match positioned {
             true => self.map.absorb_cache(&text),
