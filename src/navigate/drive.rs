@@ -27,6 +27,27 @@ use super::*;
 /// that has eaten three validated presses is not going to yield to a fourth.
 const LEAVE_SHOP_TRIES: usize = 3;
 
+/// How many times an [`ESCAPES`] press may be refused **on the same screen** before the run stops.
+///
+/// Three, like [`LEAVE_SHOP_TRIES`] and for the same reason, with one extra of its own: a refusal
+/// here is a *measurement*, not a swallowed press. `click_exact` scored the plaque and found it
+/// below the bar, so the screen either has not finished arriving or is no longer the screen we
+/// named — and both of those resolve on their own within a frame or two. What does not resolve on
+/// its own is a layout that has genuinely changed, and three consecutive readings distinguish them.
+const ESCAPE_TRIES: usize = 3;
+
+/// How many times running this escape has now been refused, given what was refused before.
+///
+/// Split out so the counting rule can be tested without a window, which is the whole of what makes
+/// the retry safe: it must **not** reset merely because the screen we could not leave is still the
+/// screen we cannot leave, and it must not carry a count from one screen onto another.
+fn refusals_after(before: Option<(crate::act::Screen, usize)>, now: crate::act::Screen) -> usize {
+    match before {
+        Some((was, n)) if was == now => n + 1,
+        _ => 1,
+    }
+}
+
 pub fn drive(
     r: &mut Run, fight: &Fight, previous_health: &mut crate::rest::PreviousHealth,
     deadline: Instant,
@@ -110,6 +131,11 @@ pub fn drive(
             Err(e) => return Stop::Failed(format!("could not resume the fight: {e}")),
         }
     }
+
+    // The screen whose [`ESCAPES`] press was last refused, and how many times running. Lives out
+    // here because the retry is a `continue`: the count has to survive the iteration that could not
+    // leave, or every attempt is the first attempt and the limit never arrives. See [`ESCAPE_TRIES`].
+    let mut escape_refusals: Option<(crate::act::Screen, usize)> = None;
 
     for step in 1.. {
         // **Every step, at the top.** Placed before the exits below rather than after the step's
@@ -410,15 +436,53 @@ pub fn drive(
         }
         // Every dead end that is left by pressing one button. See [`ESCAPES`] for which, and why
         // each is in the list.
+        //
+        // **A refused escape is a reason to look again, not to end the run.** This was one attempt
+        // and `Stop::Failed`, and the branch immediately below already argued the opposite case in
+        // writing — *a refusal is often transient ... a refusal is a reason to look again, not to
+        // stop* — for the identical reason, on the identical mechanism.
+        //
+        // The 0730Z run of 2026-08-24 stopped on this line one press after a successful
+        // consecration. Praying opens a **lore screen** (`utils/blessings.lua:99`, *You have been
+        // blessed with 3 gold bordered wildcard tiles*), `identify` named `Shrine` from a capture
+        // taken before it, and the press landed in the crossfade between the two: `refusing to
+        // click shrine Go back: scored 0.7839, below 0.90`. That number belongs to neither screen —
+        // the plaque measures **1.0000** on a real shrine screen and **0.0664** on the settled
+        // blessing frame (`the_shrine_plaque_is_gone_once_the_blessing_screen_has_settled`). It was
+        // a fade, and half a second later the run would have been fine.
+        //
+        // `continue` rather than a retry in place, because the top of the loop is where a screen is
+        // named: the blessing screen identifies as `Unknown`, falls through to the text-screen
+        // stage below, and is cleared with space like any other lore screen — which is exactly what
+        // happened at the previous shrine, where the console announced it in time.
+        //
+        // Counted per screen and reset by a successful escape, so a transient refusal at each of
+        // seven shrines is seven ones rather than a march to the limit; only a screen we genuinely
+        // cannot leave accumulates.
         if let Some(esc) = ESCAPES.iter().find(|e| e.screen == screen) {
             match crate::act::click_exact(r.win, esc.button, esc.threshold) {
                 Ok(q) => {
+                    escape_refusals = None;
                     r.park();
                     std::thread::sleep(crate::timing::AFTER_SCREEN_PRESS);
                     r.pump();
                     r.log.push_str(&format!("  left {} ({q:.4})\n", esc.what));
                 }
-                Err(e) => return Stop::Failed(format!("stuck on {}: {e}", esc.what)),
+                Err(e) => {
+                    let tries = refusals_after(escape_refusals, screen);
+                    escape_refusals = Some((screen, tries));
+                    if tries >= ESCAPE_TRIES {
+                        return Stop::Failed(format!(
+                            "stuck on {}: {e} — refused {tries} times running",
+                            esc.what
+                        ));
+                    }
+                    r.log.push_str(&format!(
+                        "  {} refused (try {tries} of {ESCAPE_TRIES}), looking again: {e}\n",
+                        esc.what
+                    ));
+                    std::thread::sleep(crate::timing::BEFORE_RETRY);
+                }
             }
             continue;
         }
@@ -3274,4 +3338,38 @@ pub fn drive(
         let _ = Goal::Explore;
     }
     Stop::Exhausted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::act::Screen;
+
+    /// **The counting rule the retry rests on**, which is the only part of it a window is not
+    /// needed for — and the part that decides whether the limit ever arrives.
+    ///
+    /// The escape retries by `continue`ing to the top of the loop, so the count lives outside the
+    /// iteration. Three things have to hold at once, and each of them was a way to get this wrong:
+    /// a run of refusals on one screen has to *accumulate* or the limit is never reached; a
+    /// different screen has to start over or an unrelated dead end inherits a stranger's count; and
+    /// a successful escape has to clear it, or seven shrines each costing one transient refusal
+    /// march to the limit for no reason.
+    #[test]
+    fn only_a_run_of_refusals_on_one_screen_counts_towards_the_limit() {
+        // Nothing refused yet, and the same thing after a success: `escape_refusals` is set to
+        // `None` on the `Ok` arm, so a success and a fresh start are the same state on purpose.
+        assert_eq!(refusals_after(None, Screen::Shrine), 1);
+
+        // A run on one screen accumulates, and reaches the limit on exactly the third reading.
+        let mut seen = None;
+        let mut n = 0;
+        for _ in 0..ESCAPE_TRIES {
+            n = refusals_after(seen, Screen::Shrine);
+            seen = Some((Screen::Shrine, n));
+        }
+        assert_eq!(n, ESCAPE_TRIES, "the limit must arrive after exactly {ESCAPE_TRIES} refusals");
+
+        // A different dead end does not inherit it.
+        assert_eq!(refusals_after(seen, Screen::Character), 1);
+    }
 }

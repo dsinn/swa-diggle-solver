@@ -735,3 +735,50 @@ fn a_greyed_plank_reads_lower_than_any_live_one() {
     // And it is strictly the looser of the two bars, which is what makes `Combat` imply `live`.
     assert!(AREA_BUTTON_LIVE < AREA_BUTTON_SHOWING);
 }
+
+/// **The score that ended the 0730Z run belonged to neither screen.**
+///
+/// Praying at a shrine hands out a boon, and a boon is announced by a **lore screen**
+/// (`utils/blessings.lua:99`: *You have been blessed with 3 gold bordered wildcard tiles*). On
+/// 2026-08-24 `identify` named `Shrine` from a capture taken before it arrived, the escape pressed
+/// into the crossfade, and `click_exact` refused: *scored 0.7839, below 0.90*. The run stopped one
+/// press after a successful consecration.
+///
+/// This is the half of that measurement nobody had: on the **settled** blessing frame the shrine's
+/// plaque is not there at all. Both numbers are needed to say what 0.7839 was — a real shrine
+/// screen measures 1.0000 (the previous shrine, same run, same press), this frame measures far
+/// below the bar, and 0.7839 sits between them because it was a fade and not a screen.
+///
+/// The positive control for the template itself is
+/// [`the_back_plaque_is_the_same_button_at_a_shrine_and_at_an_inn`], which scores this same plaque
+/// **over** its bar elsewhere in the corpus. Without it, 0.0664 could as easily mean the template
+/// no longer matches anything.
+///
+/// Which is why [`crate::navigate::drive`] now looks again instead of stopping: half a second later
+/// this frame is what is on screen, `identify` calls it `Unknown` — asserted here, because that is
+/// what carries the run to the text-screen stage that clears it — and the shrine screen comes back
+/// underneath for an escape that scores 1.0000.
+#[test]
+fn the_shrine_plaque_is_gone_once_the_blessing_screen_has_settled() {
+    let frame = "shrine-blessing-lorescreen.png";
+    let (Some(back), Some(consecrate)) =
+        (score_at_origin(&SHRINE_GOBACK, frame), score_at_origin(&SHRINE_CONSECRATE, frame))
+    else {
+        eprintln!("SKIP: frame corpus not present");
+        return;
+    };
+    assert!(
+        back < SHRINE_GOBACK_PRESENT,
+        "the back plaque scores {back:.4} on a settled blessing screen, at or above the \
+         {SHRINE_GOBACK_PRESENT:.2} bar — `identify` would call this a shrine and the escape \
+         would press into a lore screen"
+    );
+    // The other shrine fingerprint, because `identify` asks it first and a pass here that fails
+    // there would still send the run down a shrine branch.
+    assert!(consecrate < SHRINE_CONSECRATE_PRESENT, "Consecrate scores {consecrate:.4}");
+
+    // Measured 0.0664 and 0.1772. Pinned well clear of the bars rather than at them: the claim is
+    // that the shrine is *gone*, not that it squeaks under, and a plaque creeping up towards 0.90
+    // would be the thing worth hearing about early.
+    assert!(back < 0.25 && consecrate < 0.35, "back {back:.4}, consecrate {consecrate:.4}");
+}
