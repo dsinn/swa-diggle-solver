@@ -1,15 +1,51 @@
 diggle — interactive dev driver. The game STAYS RUNNING between commands.
 
-  diggle launch          spawn the game detached, record pid, wait for its window
-  diggle kill            terminate it
-  diggle where           cursor position, client size, fingerprint hashes
-  diggle shot <name>     capture -> spike-frames-live/<name>.{bmp,png}
-  diggle key <name>      return | space | backspace | up | down | left | right
-  diggle type <text>     letters via WM_CHAR (this is what combat tile selection uses)
-  diggle nav <x> <y>     arrow-navigate toward a point, verified via GetCursorPos
-  diggle watch <secs>    frame-delta trace; read the SHAPE (rise-then-plateau = a
-                         transition, flat jitter = noise). Design v2 §7.
+Session
+  diggle launch             spawn the game detached, record pid, wait for its window
+  diggle kill               terminate it
+  diggle where              cursor position, client size, fingerprint hashes
+
+Looking
+  diggle shot <name>        capture -> spike-frames-live/<name>.{bmp,png}
+  diggle hash <x0> <y0> <x1> <y1>
+                            fingerprint one client rect, for "did this region change?"
+  diggle watch <secs>       frame-delta trace; read the SHAPE (rise-then-plateau = a
+                            transition, flat jitter = noise). Design v2 §7.
+  diggle find <sprite.png> [step]
+                            sweep a sprite over the live frame and report where it matches
+
+Acting
+  diggle key <name>         return | space | backspace | up | down | left | right
+  diggle type <text>        letters via WM_CHAR (this is what combat tile selection uses)
+  diggle click <x> <y>      one click in client pixels, with a before/after frame diff
+  diggle nav <x> <y>        arrow-navigate toward a point, verified via GetCursorPos
+  diggle hold <dir> <ms>    hold one arrow (u|d|l|r) for a duration
+  diggle walk <dirs>        a sequence of held arrows, e.g. walk d,d,r,r,u,l
+
+Whole steps, which own the console and cannot be mixed with `launch`
+  diggle overworld [secs]   launch, read the verbose log, parse adjacency dumps, report
+  diggle travel [key]       one travel step end to end: read the map, pan the node under
+                            the map hotspot, select it, activate Travel
+
+Measuring instruments
+  diggle probe [hx] [hy] [step]
+                            find selectable map nodes without recognising anything
+  diggle pantest [dir] [ms] how far one held arrow pans the overworld map
+  diggle selftest <x> <y> <size>
+                            crop-and-track against an unchanged frame; must report 1.000
+
+Offline, no game needed
+  diggle save [key]         dump a top-level key of the sandbox save (default mainSaveData)
+  diggle solve <letters> <health> [armour] [threads]
+                            best combat play for a board, from the letters alone
+  diggle findpng <template> <frame.png> [x0 y0 x1 y1]
+                            score a template against a saved frame
+  diggle croppng <in> <out> <x0> <y0> <x1> <y1>
+                            cut a template out of a saved frame
 
 Notes:
   - Never send `escape`: it maps to goBack-or-options and can strand the run.
   - Navigation moves the user's REAL cursor. Warn them before using `nav`.
+  - `overworld` and `travel` launch their own game, because LÖVE attaches to its
+    PARENT's console: whoever reads the log has to be the process that started it.
+    They are therefore exclusive with the `launch`/`where`/`shot` workflow.
