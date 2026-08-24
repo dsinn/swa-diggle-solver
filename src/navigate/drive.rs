@@ -968,6 +968,33 @@ pub fn drive(
             .unwrap_or_else(|| "no errand".into());
         {
             let laps = r.sterile_here(&here);
+            // **A door that keeps handing us back stops being a door.**
+            //
+            // The l31/l47 ping-pong of 2026-08-24. `choose_exit` ranked Langtoft Forest's
+            // three doors by distance to the errand's target and took the nearest, `l47` at 5;
+            // standing on `l47`, the surface router made the first hop back to `l31`. Both
+            // measured honestly and each preferred the other — six nodes a lap, four laps, and
+            // then `LOOP_GIVE_UP` ended a run that was otherwise fine.
+            //
+            // Stopping is not the fix, and neither is ranking harder: the entrance rule is a
+            // tie-break outside `Goal::Explore` on purpose, because overruling a measured
+            // distance walked a run away from the anomaly on 2026-08-16. What separates the two
+            // is **repetition, not geometry**, so the memory is written by the counter that
+            // measures repetition and by nothing else. See [`WorldMap::refuse_door`].
+            //
+            // At [`LOOP_WRITE_OFF`], one lap earlier than the give-up, so the next crossing has
+            // a chance to pick differently while the run still has a run left.
+            if laps >= LOOP_WRITE_OFF {
+                if let Some((c, s)) = r.map.door_we_left_by() {
+                    if !r.map.door_is_refused(&c, &s) {
+                        r.map.refuse_door(&c, &s);
+                        r.log.push_str(&format!(
+                            "{step}. `{here}` for the {laps}th time with nothing gained — the door out of `{c}` to `{s}` is refused from here on"
+                        ));
+                        r.log.push('\n');
+                    }
+                }
+            }
             r.recent.push_back(format!("{step}. `{here}` — {doing}"));
             while r.recent.len() > 10 {
                 r.recent.pop_front();

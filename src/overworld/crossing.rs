@@ -242,6 +242,26 @@ impl WorldMap {
             return None;
         }
         let entrance = self.entered_from.clone();
+        // **A door that has already handed us back is not a door.**
+        //
+        // [`WorldMap::refuse_door`] carries the l31/l47 ping-pong this exists for. Applied as a
+        // filter on the exits rather than as a term in the ranking, for the reason the whole
+        // note there gives: the ranking was not wrong, it was measuring the wrong thing — and a
+        // memory that competes with a distance is a memory that loses to it.
+        //
+        // Dropped entirely if it would leave nothing, exactly as the level-4 gentle pass is:
+        // being inside a container with no door named is worse than any one door.
+        let container = self.inside().map(str::to_string);
+        let kept: Vec<_> = match &container {
+            Some(c) => {
+                exits.iter().filter(|e| !self.door_is_refused(c, &e.to_key)).cloned().collect()
+            }
+            None => exits.to_vec(),
+        };
+        let exits: &[crate::observe::adjacency::Exit] = match kept.is_empty() {
+            true => exits,
+            false => &kept,
+        };
         // **Ask the question from outside the forest** — see [`WorldMap::plan_from_out_here`],
         // which is the whole of why this is not `self.next_target()`.
         //
@@ -3371,6 +3391,42 @@ mod tests {
         open.fold(&dump("start", "camp", vec![node("l2", "Quiet Glade meadow")]));
         open.hell = Some(0.1);
         assert!(!open.gentler_ground_remains("start", &|_: &Place| true));
+    }
+
+    /// **A refused door drops out of the ranking, and the next-best is taken instead.**
+    ///
+    /// The l31/l47 ping-pong of 2026-08-24, in the smallest shape that produces it. Standing in
+    /// `Langtoft Forest` the run logged, four laps running:
+    ///
+    /// ```text
+    /// door: Rest -> l9; doors l26=12 l44=6 l47=5 | reason nearest to the target
+    /// ```
+    ///
+    /// `l47` is genuinely the nearest door — and from `l47` the surface router's first hop back to
+    /// `l9` is `l31`. The ranking is not wrong, so the fix is not in the ranking.
+    ///
+    /// The second half is the control that matters: refusing the *only* door must not leave the run
+    /// with nowhere to go, for the same reason the level-4 gentle pass is dropped when it empties.
+    #[test]
+    fn a_door_that_hands_us_back_is_dropped_and_the_next_best_taken() {
+        let mut m = WorldMap::new();
+        let door = |to: &str| Exit { x: 0.0, y: 0.0, to_key: to.into(), to_heading: "".into() };
+        let exits = [door("l47"), door("l44")];
+        m.fold(&inside_dump("l31", "l31sub1", "Langtoft Forest road", vec![], exits.to_vec()));
+
+        // Whatever the ranking picks first, refusing it must move the choice to the other door.
+        let first = m.choose_exit(&exits).expect("a door").0;
+        m.refuse_door("l31", &first);
+        let second = m.choose_exit(&exits).expect("still a door").0;
+        assert_ne!(second, first, "a refused door was chosen again");
+
+        // And refusing the last one leaves the run a door rather than none: being inside with
+        // nowhere named is worse than any one door.
+        m.refuse_door("l31", &second);
+        assert!(
+            m.choose_exit(&exits).is_some(),
+            "refusing every door must fall back rather than strand the crossing"
+        );
     }
 
     /// **The sweep, retired.** The dev, 2026-08-22: *retire the pre-anomaly phase of avoiding level

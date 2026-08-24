@@ -124,6 +124,19 @@ pub struct WorldMap {
     /// routing has to obey — memory or a monotone measure, never a ranking. Read it before adding
     /// another.
     abandoned: std::collections::HashSet<String>,
+    /// Doors out of a container that have been tried and handed us straight back.
+    ///
+    /// `(container, the surface node on the far side)`. Written when a crossing is about to
+    /// take the same door out of the same container for the second sterile time — see
+    /// [`WorldMap::refuse_door`] for why that is the trigger and not something cleverer.
+    refused_doors: std::collections::HashSet<(String, String)>,
+    /// The last door we actually walked out of, as `(container, the surface node we landed on)`.
+    ///
+    /// Written the moment a dump says we are outside a container we were inside — the only place
+    /// that transition is visible, since once we are on the surface nothing on screen says where we
+    /// came from. Read by the loop guard, which is the one caller that knows the crossing achieved
+    /// nothing.
+    last_exit_taken: Option<(String, String)>,
     /// Villages whose `Heart` we have already bought.
     ///
     /// **The standing assumption is the dev's: every village's general store starts with one.** So
@@ -722,6 +735,45 @@ impl WorldMap {
         self.abandoned.contains(key)
     }
 
+    /// **This door leads back to where we came from, and we have been round once already.**
+    ///
+    /// The l31/l47 ping-pong of 2026-08-24, and the shape is a disagreement rather than a bug
+    /// in either half. Standing in `Langtoft Forest`, `choose_exit` ranked its three doors by
+    /// distance to the errand's target and picked the nearest:
+    ///
+    /// ```text
+    /// door: Rest -> l9; doors l26=12 l44=6 l47=5 | reason nearest to the target
+    /// ```
+    ///
+    /// Standing on `l47`, the surface router then made the first hop of the way to `l9` be
+    /// `l31`. Each vantage measured honestly and each preferred the other — six nodes a lap,
+    /// four laps, until `LOOP_GIVE_UP` stopped the run.
+    ///
+    /// **The ranking cannot be fixed by ranking harder.** The entrance rule above it is
+    /// deliberately only a tie-break outside `Goal::Explore`, because overriding a *measured*
+    /// distance is what walked a run away from the anomaly on 2026-08-16 and the dev said so.
+    /// Both runs took the door their numbers pointed at; only one of them was in a cycle.
+    ///
+    /// So the distinguishing fact is **repetition, not geometry**, which is the answer
+    /// `docs/superpowers/notes/navigation-loops.md` gives for every loop here: *memory, not a
+    /// ranking*. `abandon` is that memory for a node; this is it for a door. The next pass
+    /// ranks `l44` at 6 instead, which still heads for `l9` and is not a cycle.
+    ///
+    /// **Per run and per container**, like `abandoned`: a door refused inside `l31` says
+    /// nothing about the same surface node reached any other way.
+    pub fn refuse_door(&mut self, container: &str, to_key: &str) {
+        self.refused_doors.insert((container.to_string(), to_key.to_string()));
+    }
+
+    /// Has this door already handed us back? See [`WorldMap::refuse_door`].
+    pub fn door_is_refused(&self, container: &str, to_key: &str) -> bool {
+        self.refused_doors.contains(&(container.to_string(), to_key.to_string()))
+    }
+
+    /// The door we last walked out of. See the `last_exit_taken` field note.
+    pub fn door_we_left_by(&self) -> Option<(String, String)> {
+        self.last_exit_taken.clone()
+    }
     pub fn get(&self, key: &str) -> Option<&Place> {
         self.places.get(key)
     }
@@ -1085,6 +1137,12 @@ impl WorldMap {
             // worth nothing and holding it would be blind rather than bold.
             self.crossing_to = None;
         } else if a.subworld.is_none() {
+            // **Leaving: note the door before the container is forgotten.** `inside()` still
+            // answers from the previous dump here, because `here` is only assigned below, and
+            // this is the single frame in which both halves of the pair are known.
+            if let Some(c) = self.inside().map(str::to_string) {
+                self.last_exit_taken = Some((c, a.here_key.clone()));
+            }
             self.entered_from = None;
             self.crossing_to = None;
         }
