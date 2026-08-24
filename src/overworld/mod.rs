@@ -130,12 +130,18 @@ pub struct WorldMap {
     /// take the same door out of the same container for the second sterile time — see
     /// [`WorldMap::refuse_door`] for why that is the trigger and not something cleverer.
     refused_doors: std::collections::HashSet<(String, String)>,
-    /// The last door we actually walked out of, as `(container, the surface node we landed on)`.
+    /// The last door we actually walked out of, as `(container, the far side of the door)`.
     ///
     /// Written the moment a dump says we are outside a container we were inside — the only place
     /// that transition is visible, since once we are on the surface nothing on screen says where we
     /// came from. Read by the loop guard, which is the one caller that knows the crossing achieved
     /// nothing.
+    ///
+    /// **Not the node the leaving dump names.** That dump names the container: stepping out puts
+    /// the player back on the container's own overworld node, and the hop to the far side is a
+    /// separate move after it. The far side comes from the interior door key via [`far_side_of`],
+    /// and taking the dump's word for it instead is what made the first version of this a no-op —
+    /// [`WorldMap::fold`] has the log line that proves it.
     last_exit_taken: Option<(String, String)>,
     /// Villages whose `Heart` we have already bought.
     ///
@@ -474,6 +480,24 @@ pub fn exit_node_key(parent: &str, to: &str) -> String {
 /// matters — see [`crate::observe::log`].
 fn heading_has_combat(heading: &str) -> bool {
     heading.contains("— level ")
+}
+
+/// The overworld node on the far side of a subworld door, read off the door's own key.
+///
+/// The dump builds a door as `parent.key..'_path_to_'..k` (`overworldview.lua:1043`), so the suffix
+/// **is** the surface node it leads to — which is the only place that fact is written down. The
+/// exits section of a dump gives a door's position and never its key, and once inside, nothing on
+/// screen distinguishes the road we came in by from any other.
+///
+/// One function because both halves of a crossing need the same answer and both got it wrong once
+/// by reaching for the nearest key to hand instead: [`WorldMap::fold`] took the container for the
+/// entrance in Ulrome, then took it again for the exit in Langtoft Forest a week later. The door
+/// key is the only key that carries the far side; the dumps on either side of it both name the
+/// container.
+fn far_side_of(door: &str, container: &str) -> Option<String> {
+    door.strip_prefix(&format!("{container}_path_to_"))
+        .filter(|k| !k.is_empty())
+        .map(str::to_string)
 }
 
 impl WorldMap {
@@ -1127,10 +1151,8 @@ impl WorldMap {
             // turned straight back out of Ulrome with the guard against exactly that in place.
             //
             // The key is built by the game as `parent.key..'_path_to_'..k` (`overworldview.lua:1043`),
-            // so the suffix is the overworld node on the other side.
-            let prefix = format!("{container}_path_to_");
-            self.entered_from =
-                a.here_key.strip_prefix(&prefix).filter(|k| !k.is_empty()).map(str::to_string);
+            // so the suffix is the overworld node on the other side. See [`far_side_of`].
+            self.entered_from = far_side_of(&a.here_key, container);
             // A fresh crossing decides its own door. Re-entering a subworld is the one moment the
             // world is allowed to have changed under us — `subworld::Rules::edges_survive_reentry`
             // exists because the interior can re-roll — so a commitment made on the last visit is
@@ -1140,8 +1162,34 @@ impl WorldMap {
             // **Leaving: note the door before the container is forgotten.** `inside()` still
             // answers from the previous dump here, because `here` is only assigned below, and
             // this is the single frame in which both halves of the pair are known.
+            //
+            // ## The far side is in the key we are standing ON, never in the one we arrive at
+            //
+            // This took `a.here_key` for the far side and was wrong in exactly the way the
+            // entrance note above warns about, one branch up, in the same function. Stepping out
+            // of `l31` by the road to `l47` prints two dumps:
+            //
+            // ```text
+            // Arrived at location     l31_path_to_l47 Road to Brackendale crypt
+            //     In subworld:        l31     Langtoft Forest — level 4 mausoleum
+            // Arrived at location     l31     Langtoft Forest — level 4 mausoleum
+            //     Adjacent connections: l47, l44, l26
+            // ```
+            //
+            // Leaving a subworld puts the player back on the **container's own** overworld node,
+            // so the surface dump names `l31` and the crossing to `l47` is a separate move after
+            // it. `(l31, l31)` matched no exit's `to_key`, `choose_exit` filtered nothing, and the
+            // l31/l47 ping-pong ran its four laps again on 2026-08-24 with the guard in place —
+            // the log line `the door out of l31 to l31 is refused from here on` is the whole
+            // diagnosis, printed by the fix that did not work.
+            //
+            // `self.here` is still the interior door node at this point, and its suffix is the
+            // far side, by the same construction the entrance uses. Cleared rather than left
+            // alone when the suffix is not there: an exit we cannot attribute must not hand the
+            // loop guard a *previous* crossing's door to refuse.
             if let Some(c) = self.inside().map(str::to_string) {
-                self.last_exit_taken = Some((c, a.here_key.clone()));
+                let door = self.here.as_deref().unwrap_or_default().to_string();
+                self.last_exit_taken = far_side_of(&door, &c).map(|to| (c, to));
             }
             self.entered_from = None;
             self.crossing_to = None;
@@ -2749,6 +2797,44 @@ mod tests {
         assert_eq!(m.entered_from.as_deref(), Some("l19"));
         m.fold(&dump("l7", "Greenoak Backwoods campfire", vec![]));
         assert_eq!(m.entered_from, None);
+    }
+
+    /// **The door we left by is the suffix of the key we were standing on, not the key we arrive
+    /// at.** The l31/l47 ping-pong of 2026-08-24, and the reason its first fix was a no-op.
+    ///
+    /// Leaving a subworld puts the player back on the **container's own** overworld node, so the
+    /// dump that ends the crossing names `l31` on both sides of the pair. The version this replaces
+    /// took it at its word and wrote `(l31, l31)`, which matches no exit's `to_key`, so
+    /// `choose_exit` filtered nothing and the run went round four more times with the guard in
+    /// place. The live log printed the answer itself: *the door out of `l31` to `l31` is refused
+    /// from here on*.
+    ///
+    /// The second half is the control on the other failure mode. An exit we cannot attribute must
+    /// **clear** the memory: handing the loop guard a previous crossing's door would refuse a door
+    /// this container was never asked about.
+    #[test]
+    fn leaving_records_the_far_side_of_the_door_and_not_the_container() {
+        let mut m = WorldMap::new();
+        let mausoleum = "Langtoft Forest — level 4 mausoleum";
+        m.fold(&dump("l47", "Brackendale crypt", vec![node("l31", mausoleum)]));
+        m.fold(&inside_dump(
+            "l31",
+            "l31_path_to_l47",
+            "Road to Brackendale crypt",
+            vec![],
+            vec![exit("l47"), exit("l44"), exit("l26")],
+        ));
+        m.fold(&dump("l31", mausoleum, vec![node("l47", "Brackendale crypt")]));
+        assert_eq!(
+            m.door_we_left_by(),
+            Some(("l31".to_string(), "l47".to_string())),
+            "the exit dump names the container twice; only the door key names the far side"
+        );
+
+        // Out again, from a road that is not a door: nothing to attribute, so nothing remembered.
+        m.fold(&inside_dump("l31", "l31sub9", "Langtoft Forest road", vec![], vec![exit("l47")]));
+        m.fold(&dump("l31", mausoleum, vec![node("l47", "Brackendale crypt")]));
+        assert_eq!(m.door_we_left_by(), None, "an unattributable exit must not leave a stale door");
     }
 
     #[test]

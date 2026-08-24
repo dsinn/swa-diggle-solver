@@ -3429,6 +3429,58 @@ mod tests {
         );
     }
 
+    /// **The whole rule, through the seam that broke it: walk out, refuse, choose again.**
+    ///
+    /// The test above hands `refuse_door` a door by name, and passed on 2026-08-24 while the live
+    /// run ping-ponged four laps with the rule in place. What it could not see is the join — the
+    /// driver refuses whatever [`WorldMap::door_we_left_by`] hands it, and `fold` was building that
+    /// pair from the leaving dump, which names the **container** on both sides. `(l31, l31)` matches
+    /// no `to_key`, so the filter filtered nothing.
+    ///
+    /// So this drives it the way a run does: dumps only, then the loop guard's two lines, then the
+    /// next crossing's choice.
+    ///
+    /// **The door walked out of is whichever one the ranking picks**, rather than a door named
+    /// here. The first draft named `l47` and `l44` and asserted `l44` at the end — and passed
+    /// against the broken `fold`, because this fixture's ranking preferred `l44` anyway and the
+    /// refusal never had to do anything. Asking the map first, then leaving by its own answer, is
+    /// what makes the refusal the only thing that can move the second choice.
+    #[test]
+    fn the_door_we_walked_out_of_is_the_one_the_next_crossing_drops() {
+        let mausoleum = "Langtoft Forest — level 4 mausoleum";
+        let mut m = WorldMap::new();
+        let exits = [exit("l47"), exit("l44")];
+        let road = |m: &mut WorldMap, here: &str| {
+            m.fold(&inside_dump("l31", here, "Langtoft Forest road", vec![], exits.to_vec()));
+        };
+        m.fold(&dump("l47", "Brackendale crypt", vec![node("l31", mausoleum)]));
+        road(&mut m, "l31sub9");
+
+        // The door the run would take, and does take: walk to it, then step out onto the surface,
+        // which lands on the container's own node and names it in the dump.
+        let taken = m.choose_exit(&exits).map(|(k, _, _)| k).expect("a door");
+        m.fold(&inside_dump(
+            "l31",
+            &format!("l31_path_to_{taken}"),
+            &format!("Road to {taken}"),
+            vec![],
+            exits.to_vec(),
+        ));
+        m.fold(&dump("l31", mausoleum, vec![node("l47", "Brackendale crypt")]));
+
+        // What the driver does when the node it landed on comes round again with nothing gained.
+        let (container, door) = m.door_we_left_by().expect("we just walked out of one");
+        assert_eq!((container.as_str(), door.as_str()), ("l31", taken.as_str()));
+        m.refuse_door(&container, &door);
+
+        road(&mut m, "l31sub9");
+        assert_ne!(
+            m.choose_exit(&exits).map(|(k, _, _)| k),
+            Some(taken),
+            "the door that handed us back was taken a second time"
+        );
+    }
+
     /// **The sweep, retired.** The dev, 2026-08-22: *retire the pre-anomaly phase of avoiding level
     /// 4+ nodes*, and asked whether the portal should then be opened deliberately, *only stop the
     /// exhaustive sweep*.
