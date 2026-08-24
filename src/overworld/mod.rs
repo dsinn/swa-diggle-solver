@@ -2004,6 +2004,36 @@ impl WorldMap {
         self.anomaly_route().map(|r| r.contains(&key.to_string())).unwrap_or(false)
     }
 
+    /// **Winning the word here puts `Consecrate` in the slot** — or, if not, `Pray`.
+    ///
+    /// The one question [`crate::shrineplay::play`] needs answered before it solves, because the
+    /// slot it presses afterwards is decided by it. Both conditions of `showConsecrateButton`
+    /// (`shrine.lua:93-96`), and it takes both:
+    ///
+    /// ```lua
+    /// return ShowAGoodButton() and shrineLocation.majorShrine
+    /// and (not (overworldview.areaFlag'hell' == 0 or ...) or ...)
+    /// ```
+    ///
+    /// The driver used to pass the portal flag alone, under a note in `play` claiming *every shrine
+    /// is major*. It is not — see [`Place::can_be_consecrated`], which has had the full account
+    /// since the run of 2026-08-17 stopped at one. Two models of the same rule lived in this
+    /// codebase, and the driver was passing the wrong one.
+    ///
+    /// The 0749Z run of 2026-08-24 walked into `shrine7sub1`, a **woodland shrine**, solved
+    /// `longus` in three guesses, was told to expect `Consecrate`, measured 0.8560 against a 0.95
+    /// bar, correctly refused to click blind — and stopped, with a live `Pray` at **1.0000** in the
+    /// slot beside it. A woodland shrine owes a prayer and can never owe a consecration.
+    ///
+    /// **Not the same question as [`WorldMap::worth_consecrating_here`]**, which asks whether a
+    /// consecration is worth *walking to* and answers no for a shrine already consecrated or
+    /// corrupted off-route. This asks only what the screen in front of us will show. A shrine can
+    /// fail that and still show `Consecrate`.
+    pub fn solve_yields_consecrate(&self, key: &str) -> bool {
+        self.anomaly_is_open().unwrap_or(false)
+            && self.places.get(key).is_some_and(|p| p.can_be_consecrated())
+    }
+
     /// The shortest known route to the open anomaly, or `None` while it is still shut.
     ///
     /// `None` means "detour freely" — before the anomaly opens there is no corruption to avoid and
@@ -3626,6 +3656,55 @@ mod tests {
         for junk in ["shrine2subs", "shrine2_shrine_", "shrine2_shrine_subs"] {
             assert!(!m.places.contains_key(junk), "the suffix strip must not mint `{junk}`");
         }
+    }
+
+    /// **A woodland shrine owes a prayer, and telling the driver otherwise stops the run.**
+    ///
+    /// The 0749Z run of 2026-08-24, in the state it stopped in. `shrine7` was consecrated the run
+    /// before, the portal was open, and the run crossed its forest and stepped onto `shrine7sub1` —
+    /// a woodland shrine, unused, so worth playing. It solved `longus` in three guesses, was told
+    /// to expect `Consecrate`, and measured **0.8560** against the 0.95 bar:
+    ///
+    /// ```text
+    /// shrine: portal is open, so the solve yields `Consecrate` first
+    /// shrine: no active `Consecrate` (best 0.8560 < 0.95) — not clicking the slot blind
+    /// Failed("shrine shrine7sub1 left unconsecrated — ... an interaction fault worth stopping on")
+    /// ```
+    ///
+    /// `Pray` was in that slot at **1.0000**, and `Consecrate` was never going to be: a
+    /// `shrine_woodland` has no `majorShrine` and is not promoted to one. The refusal to click blind
+    /// was right; the expectation handed to it was not.
+    ///
+    /// The portal flag alone cannot tell these apart — it is the same for all three keys here — so
+    /// each is asserted under one open portal, which is the whole point of the test.
+    #[test]
+    fn a_woodland_shrine_never_yields_consecrate_however_open_the_portal_is() {
+        let mut m = WorldMap::new();
+        m.fold(&dump("shrine7", "Cottam Boscage shrine", vec![node("l55", "Emswell campfire")]));
+        m.fold(&inside_dump(
+            "shrine7",
+            "shrine7sub1",
+            "Cottam Boscage woodland shrine",
+            vec![node("shrine7_plaza", "Cottam Boscage shrine")],
+            vec![exit("l55")],
+        ));
+        m.apply_save(
+            &crate::game::save::parse("return { overworld = { areaFlags = { hell = 0.1 } } }")
+                .unwrap(),
+        );
+        assert!(m.anomaly_is_open().unwrap_or(false), "the portal has to be open or nothing is");
+
+        assert!(m.solve_yields_consecrate("shrine7"), "the overworld node is a major shrine");
+        assert!(m.solve_yields_consecrate("shrine7_plaza"), "the plaza is promoted to its parent");
+        assert!(
+            !m.solve_yields_consecrate("shrine7sub1"),
+            "a woodland shrine can never draw `Consecrate`, so the driver must expect `Pray`"
+        );
+
+        // And the portal is still the other half: with it shut, nowhere yields a consecration.
+        let mut shut = WorldMap::new();
+        shut.fold(&dump("shrine7", "Cottam Boscage shrine", vec![]));
+        assert!(!shut.solve_yields_consecrate("shrine7"), "no portal, no consecration anywhere");
     }
 
     /// **Corruption takes completion away, and the save is how we hear about it.**

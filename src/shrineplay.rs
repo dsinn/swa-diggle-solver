@@ -703,12 +703,28 @@ fn spend_the_solve(
 /// If the game rejects a word this proposes, the baked guess list disagrees with
 /// `utils.dictionary` and is stale — the exact silent-rot failure [`crate::shrine`] warns about.
 /// That is logged as such rather than retried into a loop, because no amount of retrying fixes it.
-/// `anomaly_open` decides **which button the solve is expected to produce**, and it is the game's own
-/// rule rather than a guess. `shrine.lua:98-103` shows `Pray` only when
-/// `areaUnused and (hell == 0 or consecrated or desecrated)`, while `Consecrate` needs
-/// `majorShrine and hell ~= 0` (`:92-95`) — and every shrine is major
-/// (`overworld/generators/world.lua:86-89`). So at an unconsecrated shrine with the portal live,
-/// `Pray` **cannot** be drawn and the slot holds `Consecrate`.
+/// `yields_consecrate` decides **which button the solve is expected to produce**, and it is the
+/// game's own rule rather than a guess. `shrine.lua:98-103` shows `Pray` only when
+/// `areaUnused and (not majorShrine or hell == 0 or consecrated or desecrated)`, while `Consecrate`
+/// needs `majorShrine and hell ~= 0` (`:92-95`). So at an unconsecrated **major** shrine with the
+/// portal live, `Pray` cannot be drawn and the slot holds `Consecrate`.
+///
+/// ## `majorShrine` is not every shrine, and this note used to say it was
+///
+/// It said *every shrine is major (`overworld/generators/world.lua:86-89`)*, and cited the loop that
+/// sets the flag — over `secrets`, the **overworld** locations keyed `shrineN`. Subworld nodes are
+/// generated elsewhere and never enter it. A `shrine_woodland` (`generators/forest.lua:222-224`,
+/// `:630-631`) has no `majorShrine`, is not promoted to its parent by `setShrineLocation`
+/// (`:420-427`) because that needs `location.type=='shrine'`, and therefore **can never show
+/// `Consecrate`**. It owes a prayer instead: `showPrayButton`'s middle clause opens with
+/// `not shrineLocation.majorShrine`, which a minor shrine satisfies unconditionally.
+///
+/// The parameter is named for the conclusion rather than for the portal because of what that cost.
+/// The caller passed `anomaly_is_open()` alone, and the 0749Z run of 2026-08-24 solved `longus` at
+/// `shrine7sub1` — a woodland shrine — expected `Consecrate`, measured 0.8560 against a 0.95 bar,
+/// refused to click blind, and stopped the run with a live `Pray` at **1.0000** beside it.
+/// [`crate::overworld::WorldMap::solve_yields_consecrate`] is now the only thing that answers this,
+/// and it takes both halves of the rule.
 ///
 /// ## `Consecrate` **then** `Pray`, not one or the other
 ///
@@ -770,8 +786,8 @@ fn spend_the_solve(
 /// (This note used to name `Consecrate` and `Pray` as the buttons underneath. That was wrong — both
 /// sit at (1733, 972), the far side of the screen. The hazard is `Go back`.)
 pub fn play(
-    win: &crate::win::window::GameWindow, input: &dyn crate::win::input::Input, anomaly_open: bool,
-    already_open: bool,
+    win: &crate::win::window::GameWindow, input: &dyn crate::win::input::Input,
+    yields_consecrate: bool, already_open: bool,
 ) -> Result<Played, crate::Error> {
     use crate::shrine::{max_guesses, show, solved, Baked, Band, Solver};
     use crate::win::capture::capture_window;
@@ -979,7 +995,7 @@ pub fn play(
     //    yields `Consecrate`, and `Pray` is unreachable until that is done; see this function's doc.
     //    Matching `Pray`'s artwork against an active `Consecrate` scores ~0.856 against a 0.92
     //    threshold, so asking the wrong question here reads as "no button" and abandons the blessing.
-    if out.solved.is_some() && anomaly_open {
+    if out.solved.is_some() && yields_consecrate {
         out.log.push_str("  shrine: portal is open, so the solve yields `Consecrate` first\n");
         spend_the_solve(win, input, &mut out, Duration::from_secs(6))?;
     } else if out.solved.is_some() {

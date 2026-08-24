@@ -118,10 +118,16 @@ pub enum Goal {
     ///                        or 1 gold WILDCARD tile
     /// ```
     ///
-    /// **Every shrine is a major one.** `overworld/generators/world.lua:86-89` sets
-    /// `majorShrine = true` for any location whose key starts with `shrine`, so there is no minor
-    /// shrine to pray at without consecrating first. With the anomaly already open — `hell ~= 0` —
-    /// that ordering is satisfied, and solve → Consecrate → Pray runs straight through.
+    /// **This is the major shrine's payout, and not every shrine is one.**
+    /// `overworld/generators/world.lua:86-89` sets `majorShrine = true` while walking `secrets` —
+    /// the **overworld** locations keyed `shrineN` — so a subworld node never gets it. At one of
+    /// those, solve → Consecrate → Pray runs straight through once `hell ~= 0`.
+    ///
+    /// A `shrine_woodland` is the other kind, and the run of 2026-08-24 0749Z stopped at one
+    /// because this paragraph used to say it could not exist. It offers `Pray` alone, portal open
+    /// or shut — `showPrayButton` leads with `not shrineLocation.majorShrine` — which is still a
+    /// blessing and still worth the visit, just never a consecration. The code below has always had
+    /// this right; see `worth_a_trip` and [`crate::overworld::WorldMap::solve_yields_consecrate`].
     ///
     /// Wildcards are the mechanic Diggle handles best and has exercised live. So an uncorrupted
     /// shrine is the cheapest way to make the *next* fight winnable, which is precisely what a run

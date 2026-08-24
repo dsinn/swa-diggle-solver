@@ -418,8 +418,11 @@ pub fn drive(
                 ));
                 r.shrines_tried.insert(key.clone());
                 r.map.abandon(&key);
-                let anomaly_open = r.map.anomaly_is_open().unwrap_or(false);
-                match crate::shrineplay::play(r.win, &r.keys, anomaly_open, true) {
+                // `worth_consecrating_here` above already implies this, and it is asked again
+                // anyway: two sites deciding the same thing by different routes is how the arrival
+                // branch came to be passing the portal flag alone.
+                let yields_consecrate = r.map.solve_yields_consecrate(&key);
+                match crate::shrineplay::play(r.win, &r.keys, yields_consecrate, true) {
                     Ok(played) => {
                         r.log.push_str(&played.log);
                         if played.consecrated && !r.confirm_consecrated(&key, CONSECRATE_CONFIRM) {
@@ -1196,10 +1199,15 @@ pub fn drive(
             // one shrine the arrival branch would always decline, and the run ping-ponged between it
             // and the cleared crypt on the way to the next.
             r.map.abandon(&key);
-            // The portal decides which button a solve produces, so the answer travels into `play`
-            // rather than being discovered by a failed match afterwards. Unknown reads as closed —
-            // the conservative direction, since it only costs the older `Pray` attempt.
-            let anomaly_open = r.map.anomaly_is_open().unwrap_or(false);
+            // Which button a solve produces travels into `play` rather than being discovered by a
+            // failed match afterwards. Unknown reads as `Pray` — the conservative direction, since
+            // it only costs the older attempt.
+            //
+            // **The portal is half of it and this used to pass only the portal.** The other half is
+            // whether the shrine underfoot can be consecrated at all, which a woodland shrine never
+            // can; [`WorldMap::solve_yields_consecrate`] carries both conditions and the 0749Z run
+            // that stopped for want of the second.
+            let yields_consecrate = r.map.solve_yields_consecrate(&key);
             // **The navigator opens the screen; the driver only plays it.** — the dev, 2026-08-17:
             // *the navigator should make sure we leave the overworld before dispatching the shrine
             // driver.*
@@ -1226,7 +1234,7 @@ pub fn drive(
                      a navigation fault, not a shrine one"
                 ));
             }
-            match crate::shrineplay::play(r.win, &r.keys, anomaly_open, true) {
+            match crate::shrineplay::play(r.win, &r.keys, yields_consecrate, true) {
                 Ok(played) => {
                     let log = played.log.clone();
                     r.log.push_str(&log);
@@ -1258,7 +1266,7 @@ pub fn drive(
                         return Stop::Failed(format!(
                             "shrine {key} left un{} — no word can exhaust the budget, so this is an \
                              interaction fault worth stopping on",
-                            if anomaly_open { "consecrated" } else { "prayed" }
+                            if yields_consecrate { "consecrated" } else { "prayed" }
                         ));
                     }
                 }
