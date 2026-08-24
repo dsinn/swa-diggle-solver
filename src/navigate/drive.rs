@@ -48,6 +48,42 @@ fn refusals_after(before: Option<(crate::act::Screen, usize)>, now: crate::act::
     }
 }
 
+/// Where `key` sits on screen, given a dump just taken.
+///
+/// The dump's own coordinate when it names `key`; the world frame registered against **that same
+/// dump** when it does not. Two sources, which is the same rule
+/// [`crate::overworld::WorldMap::aim_far_hop`] used to choose the aim in the first place — so a
+/// position re-derived after a settle is derived the way the original was.
+///
+/// ## Searching the adjacency list alone could not serve the case it was there for
+///
+/// Both re-derives in the selection loop did exactly that, and a **far hop is by definition not
+/// adjacent**: no dump will ever list it. So the moment a far target needed fresh coordinates —
+/// which is the moment the camera moved, which is precisely when they are needed — the answer was
+/// `None`, and `None` on the second re-derive is a `break` into `Stop::Failed`.
+///
+/// The 0803Z run of 2026-08-24, seventy-nine steps in and on its way to close the anomaly:
+///
+/// ```text
+/// `l25` is travellable in one press and is not in this dump — placed from the world frame at (1171, 514)
+/// this step skipped the pan and now wants a node — settling first
+/// the settle did not place `l25` — the coordinate we had is from before the pan and will not be clicked
+/// re-centred, but `l25` is not in the new dump
+/// Failed("selecting l25 did not register in 1 attempt(s)")
+/// ```
+///
+/// Every line there is correct and the conclusion is wrong. `l25` was a node the run had walked
+/// through minutes earlier; it was never going to be in a dump, and the frame could have placed it
+/// in either of those two dumps had anything asked.
+fn place_in(
+    map: &crate::overworld::WorldMap, a: &crate::observe::adjacency::Adjacency, key: &str,
+) -> Option<(i32, i32)> {
+    if let Some(n) = a.nodes.iter().find(|n| n.key == key) {
+        return Some((n.x as i32, n.y as i32));
+    }
+    map.screen_position(a, key).map(|(x, y)| (x as i32, y as i32))
+}
+
 pub fn drive(
     r: &mut Run, fight: &Fight, previous_health: &mut crate::rest::PreviousHealth,
     deadline: Instant,
@@ -3104,9 +3140,9 @@ pub fn drive(
             // neighbours at -25, -3 and -225; the settled dump twenty lines later put the same four
             // at 709, 938, 960 and 738. The run clicked the first set.
             at = match r.recentre().filter(|a| !camera_is_lost(&a.nodes, cw, ch)) {
-                Some(a) => {
-                    a.nodes.iter().find(|n| n.key == hop.step).map(|n| (n.x as i32, n.y as i32))
-                }
+                // Dump **or** frame — see [`place_in`], and the far hop that died for want of the
+                // second half of that.
+                Some(a) => place_in(&r.map, &a, &hop.step),
                 None => None,
             };
             if at.is_none() {
@@ -3179,18 +3215,23 @@ pub fn drive(
                     standing_on_it = true;
                     break;
                 }
-                Some(a) => match a.nodes.iter().find(|n| n.key == hop.step) {
-                    Some(n) => {
-                        at = Some((n.x as i32, n.y as i32));
+                Some(a) => match place_in(&r.map, &a, &hop.step) {
+                    Some((x, y)) => {
+                        at = Some((x, y));
                         r.log.push_str(&format!(
-                            "  re-centred; `{}` is now at ({}, {})\n",
-                            hop.step, n.x as i32, n.y as i32
+                            "  re-centred; `{}` is now at ({x}, {y})\n",
+                            hop.step
                         ));
                     }
                     None => {
+                        // Neither the dump nor the frame can put it anywhere, and the frame is the
+                        // half that used not to be asked — see [`place_in`]. The old line read
+                        // `is not in the new dump`, which is true of every far hop ever taken and
+                        // was never the question.
                         r.log.push_str(&format!(
-                            "  re-centred, but `{}` is not in the new dump\n",
-                            hop.step
+                            "  re-centred, and `{}` cannot be placed at all: {}\n",
+                            hop.step,
+                            r.map.unplaceable(&a, &hop.step)
                         ));
                         break;
                     }
@@ -3232,8 +3273,36 @@ pub fn drive(
                 ));
                 continue;
             }
+            // **And standing still is a setback too, for the first two of them.**
+            //
+            // The note above quotes the dev's rule and then applies it to one case out of two: it
+            // recovers when the world moved under us, and ends the run when it did not. One press
+            // later, `MAX_HOP_MISSES` treats the identical situation as a retry — *a press that took
+            // us nowhere is a setback, not the end of the run*, with a locate-me as the cure — and
+            // the two are not different problems. A selection that never landed and a Travel that
+            // was ignored both leave us where we started with a stale view.
+            //
+            // This is what the 0803Z run of 2026-08-24 needed and did not have. It could not place
+            // `l25` (see [`place_in`] for why, which is fixed above), spent one attempt, and
+            // stopped — seventy-nine steps in, at full health, on its way to close the anomaly. Even
+            // with the placement fixed, the answer to *this coordinate cannot be aimed at* is to
+            // plan again from a settled camera, not to end an adventure.
+            //
+            // The same counter, deliberately: these are one failure counted in two places, and
+            // giving each its own budget would let a step alternate between them forever. Cleared by
+            // any hop that moves us.
+            r.hop_misses += 1;
+            if r.hop_misses < MAX_HOP_MISSES {
+                r.log.push_str(&format!(
+                    "  could not select `{}` in {tries} attempt(s) (try {} of {MAX_HOP_MISSES}) — \
+                     re-centring and planning again\n",
+                    hop.step, r.hop_misses
+                ));
+                r.needs_recentre = true;
+                continue;
+            }
             return Stop::Failed(format!(
-                "selecting {} did not register in {tries} attempt(s)",
+                "selecting {} did not register in {tries} attempt(s), {MAX_HOP_MISSES} times running",
                 hop.step
             ));
         }
@@ -3379,5 +3448,67 @@ mod tests {
 
         // A different dead end does not inherit it.
         assert_eq!(refusals_after(seen, Screen::Character), 1);
+    }
+
+    /// **A far hop is never in the dump, and that is the whole reason [`place_in`] has two halves.**
+    ///
+    /// The 0803Z run of 2026-08-24 stopped here. `l25` was travellable in one press and placed from
+    /// the world frame; then the step settled the camera, the re-derive looked in the new dump's
+    /// adjacency list, found nothing — of course it found nothing, `l25` was not adjacent — and the
+    /// run ended with `selecting l25 did not register in 1 attempt(s)`.
+    ///
+    /// So the fixture is that shape exactly: three nodes placed by an earlier dump, then a dump
+    /// after a pan that names only two of them. The third is the far target.
+    ///
+    /// The middle assertion is the fix. The first and last are the controls that say the helper has
+    /// not simply been made to answer yes: a node the dump *does* name still comes from the dump,
+    /// and a node the frame has never placed still comes back `None`.
+    #[test]
+    fn a_node_the_dump_omits_is_still_placed_by_the_frame() {
+        use crate::observe::adjacency::Node;
+        let at = |key: &str, x: f64, y: f64| Node {
+            key: key.into(),
+            heading: key.to_uppercase(),
+            x,
+            y,
+            connections: 2,
+        };
+        let dump = |here: &str, nodes: Vec<Node>| crate::observe::adjacency::Adjacency {
+            reason: "Screen pan finished".into(),
+            here_key: here.into(),
+            here_heading: "somewhere".into(),
+            subworld: None,
+            nodes,
+            hidden: 0,
+            exits: vec![],
+            hidden_exits: 0,
+        };
+
+        // One dump places all three, which is what gives the frame something to register against.
+        let mut m = crate::overworld::WorldMap::new();
+        m.fold(&dump(
+            "here",
+            vec![at("a", 100.0, 100.0), at("b", 200.0, 100.0), at("c", 300.0, 100.0)],
+        ));
+
+        // The camera has panned. `b` and `c` are still drawn; `a` is not adjacent to where we now
+        // stand and never will be, which is the far hop's ordinary condition.
+        let after_the_pan = dump("elsewhere", vec![at("b", -100.0, 0.0), at("c", 0.0, 0.0)]);
+        assert!(
+            !after_the_pan.nodes.iter().any(|n| n.key == "a"),
+            "the fixture is worthless unless the dump really omits the far node"
+        );
+
+        assert_eq!(
+            place_in(&m, &after_the_pan, "c"),
+            Some((0, 0)),
+            "a named node comes from the dump"
+        );
+        assert_eq!(
+            place_in(&m, &after_the_pan, "a"),
+            Some((-200, 0)),
+            "and the far node comes from the frame — this used to be `None`, and ended a run"
+        );
+        assert_eq!(place_in(&m, &after_the_pan, "never-seen"), None, "nothing is invented");
     }
 }
