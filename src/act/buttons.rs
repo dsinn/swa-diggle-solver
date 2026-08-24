@@ -960,6 +960,29 @@ pub const HEROSELECT_HEADER_PRESENT: f64 = 0.90;
 /// pressable — but it is why the press is confirmed rather than assumed.
 pub const SHOP_BACK: (i32, i32) = (1727, 918);
 
+/// The same arrow as [`SHOP_BACK`], with a face to check before pressing it.
+///
+/// The bare coordinate above was written when the shop was only ever entered on purpose, and
+/// its note says so: *there is nothing here worth matching* — because the console announces the
+/// screen and the press is a formality. That stopped being true when a **road event** started
+/// opening shops we did not ask for.
+///
+/// The dev, 2026-08-24, after the 0559Z run stalled in the Woodsman's shop: *complete lack of
+/// retries is unacceptable; I already ruled on both "validate before input" and "retry with a
+/// limit".* A coordinate cannot be validated; a face can, and
+/// [`crate::act::click_when_ready`] refuses to press one it cannot find.
+///
+/// Cut at `(1677, 868)`, the 100x100 `small` rect centred on `SHOP_BACK`, from
+/// `tests/frames/shop-woodsman.png` — the frame the 2211Z run stopped on, already in the
+/// corpus for [`SHOP_INVENTORY`].
+pub const SHOP_BACK_ARROW: Button = Button {
+    name: "shop back",
+    template: "shop-back.png",
+    search: (1627, 818, 1827, 1018),
+    origin: (1677, 868),
+    click: SHOP_BACK,
+};
+
 /// The console line `core.onActive` prints when a shop UI opens (`shop.lua:253`).
 pub const SHOP_OPENED: &str = "Opened shop UI";
 
@@ -1411,6 +1434,7 @@ pub const ALL: &[&Button] = &[
     &SHRINE_GOBACK,
     &SHOP_SELL,
     &SHOP_INVENTORY,
+    &SHOP_BACK_ARROW,
     &STATS_BACK,
     &HEROSELECT_HEADER,
     &UNLOCK_CONTINUE,

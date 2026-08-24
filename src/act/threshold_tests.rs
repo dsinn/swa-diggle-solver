@@ -80,6 +80,25 @@ fn score_at_origin(button: &Button, name: &str) -> Option<f64> {
     find_at_scale_in(&crop(&f, rect), &tpl, 1.0, 1, None).map(|m| m.inliers)
 }
 
+/// **The way out of a shop has to be findable before it can be pressed.**
+///
+/// `click_when_ready` refuses to press a face it cannot locate — which is the point of it, and
+/// also means a template that does not match turns the shop from a stall into a different stall.
+/// So the arrow is measured on the frame a run actually stopped on.
+///
+/// Cut at the 100x100 `small` rect centred on `SHOP_BACK`, the coordinate derived from
+/// `shop.lua:180-187` long before anything pressed it. That the crop lands on the arrow is itself
+/// the check that the derivation was right.
+#[test]
+fn the_shop_back_arrow_is_where_the_lua_says_it_is() {
+    let Some(q) = score_at_origin(&SHOP_BACK_ARROW, "shop-woodsman.png") else { return };
+    assert!(q >= 0.90, "the back arrow scores {q:.4} on the frame a run stopped on");
+    // And it is not simply matching any patch of that screen: the same template at the *other*
+    // end of the same bar, where `Inventory` sits, must not.
+    let Some(elsewhere) = score(&SHOP_BACK_ARROW, "shop-general-store.png") else { return };
+    assert!(elsewhere >= 0.90, "a general store has the same arrow: {elsewhere:.4}");
+}
+
 /// **A shop that does not buy is still a shop**, and until 2026-08-23 we could not see one.
 ///
 /// `Sell` and `Inventory` are one plank at one anchor, switched on `canSellTo`

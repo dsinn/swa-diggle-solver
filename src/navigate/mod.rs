@@ -3408,6 +3408,31 @@ impl Run<'_> {
             index + 1,
             if found.is_some() { "located" } else { "derived from the console" }
         ));
+        // **Do not answer an event into a screen that has already replaced it.**
+        //
+        // When the plaque cannot be scored there is nothing to confirm the answer against, so the
+        // loop below falls back to a screen-moved proxy and presses up to four times. That is
+        // acceptable while the event is still up and indefensible once it is not — and the observer
+        // can tell the difference for the price of one capture.
+        //
+        // Live 2026-08-24: the `Woodsman`'s only choice is `[Shop]`, the shop opened before we
+        // pressed, `identify` had *already* named it `Screen::Shop` that same iteration, and this
+        // sent four blind clicks into the shelves anyway. The dev's rule, and not a new one:
+        // *validate before input.*
+        //
+        // Only when unverifiable. With a plaque to score, that score is the better test and this
+        // would refuse answers the run can confirm for itself.
+        if !verifiable {
+            if let Some(named) = Self::a_screen_we_know(self.win) {
+                self.log.push_str(&format!(
+                    "  not clicking the choice: the plaque cannot be scored and the observer \
+                     calls this {named:?}, so the event is already behind us\n"
+                ));
+                // `answered_event` is already stamped above, so the caller will not come back to
+                // this event; `None` says only that nothing was pressed this pass.
+                return None;
+            }
+        }
         if let Ok((cx, cy)) = self.win.client_to_screen(click_x, click_y) {
             for attempt in 1..=4 {
                 let before = crate::win::capture::capture_window(self.win).ok();

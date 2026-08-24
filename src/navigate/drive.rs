@@ -20,6 +20,13 @@
 // pure helpers the loop reads. Listing them would be a hundred lines that say nothing.
 use super::*;
 
+/// How many times the back arrow is pressed before a shop is called a trap.
+///
+/// Three, the same count `left_the_overworld` and the `Enter` press use, and for the same reason:
+/// the overworld demonstrably swallows presses, so one refusal is not a verdict — but a screen
+/// that has eaten three validated presses is not going to yield to a fourth.
+const LEAVE_SHOP_TRIES: usize = 3;
+
 pub fn drive(
     r: &mut Run, fight: &Fight, previous_health: &mut crate::rest::PreviousHealth,
     deadline: Instant,
@@ -135,6 +142,25 @@ pub fn drive(
         //
         // Only screens that need naming are logged. The map is the ordinary case and reporting it
         // every iteration would bury everything else.
+        // **Take the cursor off the screen before reading it.**
+        //
+        // The dev, 2026-08-24: *we needed to guard against the hotspot by dragging the mouse
+        // elsewhere and then using the observer.* The game draws its hotspot highlight over
+        // whichever control is selected (`ui/elements/hotspot.lua`, `utils/input.lua:130-158`) as
+        // four corner brackets pulsing 5-15 px outward, and a template scored through one reads
+        // low for a reason that has nothing to do with which screen is up: a lit `Start` measures
+        // **0.4972** against its own artwork, which is below impostors on other screens.
+        //
+        // `love.mousemoved` clears the highlight on any non-zero delta (`main.lua:420`) and
+        // nothing can re-create one without a direction key, so moving the cursor away *is* the
+        // guard. It also takes the pointer off whatever we last pressed, so no button is scored
+        // through its own hover artwork.
+        //
+        // Here rather than inside `identify`, because `identify` is also called from places
+        // holding a borrow of the log, and because this is the one read that happens every
+        // iteration and immediately after a transition — which is exactly when a highlight that is
+        // still up gets re-snapped onto the new screen's nearest control.
+        r.park();
         let mut screen = crate::act::identify(r.win);
         // **One look is not enough right after we asked for a fight.**
         //
@@ -225,6 +251,57 @@ pub fn drive(
                  than treating it as the map\n"
             ));
             return stop;
+        }
+        // **A shop nobody asked for, and the way out of it.**
+        //
+        // A road event can open one: the `Woodsman` at `Bempton Silva road` offers a single
+        // `[Shop]` choice, and answering it is the only thing on offer. The screen that arrives
+        // has no map under it, so every branch below is wrong about where we are.
+        //
+        // The 0559Z run of 2026-08-24 named it correctly — `52. screen: Shop` — and then did
+        // nothing with the answer: it blind-clicked the event coordinate four times into the
+        // shelves, polled three times for a map that was not there, and stopped. The dev:
+        // *complete lack of retries is unacceptable; I already ruled on both "validate before
+        // input" and "retry with a limit".*
+        //
+        // So: press the back arrow, confirm we left, and try again a bounded number of times.
+        // [`crate::act::click_when_ready`] locates the arrow before pressing, so a refusal here is
+        // a measured absence rather than a click into the dark; `identify` afterwards is the
+        // other half. Leaving rather than shopping is deliberate and is the smaller half of #117
+        // — the stock is worth reading and that is a separate change; not ending the run is this
+        // one.
+        if screen == crate::act::Screen::Shop {
+            let mut left = false;
+            for attempt in 1..=LEAVE_SHOP_TRIES {
+                match crate::act::click_when_ready(r.win, &crate::act::SHOP_BACK_ARROW, BACK_WAIT) {
+                    Ok(_) => {
+                        r.park();
+                        std::thread::sleep(crate::timing::AFTER_SCREEN_PRESS);
+                        r.pump();
+                        let now = crate::act::identify(r.win);
+                        if now != crate::act::Screen::Shop {
+                            r.log.push_str(&format!(
+                                "{step}. left the shop on press {attempt} — now {now:?}\n"
+                            ));
+                            left = true;
+                            break;
+                        }
+                        r.log.push_str(&format!(
+                            "  press {attempt} of {LEAVE_SHOP_TRIES}: still in the shop\n"
+                        ));
+                    }
+                    Err(e) => r.log.push_str(&format!(
+                        "  press {attempt} of {LEAVE_SHOP_TRIES}: no back arrow to press ({e})\n"
+                    )),
+                }
+                std::thread::sleep(crate::timing::BEFORE_RETRY);
+            }
+            if !left {
+                return Stop::Failed(format!(
+                    "stuck in a shop: the back arrow did not take in {LEAVE_SHOP_TRIES} presses"
+                ));
+            }
+            continue;
         }
         // A fight we did not know we were in. Tested first, because every branch below assumes there
         // is a map underneath the screen, and in combat there is not.
