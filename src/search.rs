@@ -1,12 +1,23 @@
-//! Finding a word that kills the enemy.
+//! Finding a word to play against the enemy.
 //!
-//! Per the MVP scope: **a race, not an optimisation.** Threads take contiguous alphabetical slices of
-//! the dictionary and the first to find a lethal word wins; the rest stop. Optimal play is not the
-//! goal, and for non-boss enemies a killing word is usually easy to find.
+//! **Only [`Goal::FirstKill`] is still a race.** Threads take contiguous alphabetical slices of the
+//! dictionary and the first to find any lethal word wins; the rest stop the moment it does. That is
+//! fine there because every lethal word ends the fight the same way, so which one is irrelevant.
+//!
+//! Every other goal scans the whole dictionary and ranks what it finds, because "irrelevant" turned
+//! out to be false in general. Live 2026-08-10, a highwayman search with a ceiling stopped every
+//! thread on the first word inside the band — decided by thread scheduling, not by merit — and the
+//! word that happened to win spent a solid gold tile while cheaper words in the same band went
+//! unexamined. [`race_for_band`] (used for [`Goal::Scare`] and [`Goal::FrugalKill`]) and
+//! [`ranked_kill`] (for [`Goal::RankedKill`]) both pay for a full scan so [`crate::pick::Rank`] can
+//! choose between candidates that are all equally acceptable by score alone. [`Goal::MaxDamage`]
+//! ([`max_damage`]) was never a race either — it needs the single hardest word on the board, which
+//! cannot be known until every word has been tried.
 //!
 //! Contiguous slices are deliberately not a balanced partition — a slice whose initial letters are
-//! absent from the board yields nothing at all. That is fine for a race (any thread can win) and it
-//! keeps the split trivial, but it is worth knowing that thread load is wildly uneven by design.
+//! absent from the board yields nothing at all. That is fine for [`Goal::FirstKill`] (any thread can
+//! win) but not for a full scan, where an unbalanced split lets one thread grind the long-word tail
+//! while the rest idle; those paths claim work in [`CLAIM`]-sized blocks from a shared cursor instead.
 //!
 //! ## What makes a word playable
 //!
