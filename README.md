@@ -1,6 +1,7 @@
 # Diggle Solver
 
-An external Windows program in Rust that plays the LÖVE game *Sternly Worded Adventures* by reading
+An external Windows program in Rust that plays the LÖVE game
+*[Sternly Worded Adventures](https://the-balthazar.itch.io/sternly-worded-adventures)* by reading
 its window and console and injecting real input. The goal is to clear the anomaly quickly, shrines
 included.
 
