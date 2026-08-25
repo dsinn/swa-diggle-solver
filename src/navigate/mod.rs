@@ -2554,8 +2554,8 @@ impl Run<'_> {
     /// ## What the watch was costing
     ///
     /// [`crate::win::capture::capture_window`] is `PrintWindow` with `PW_RENDERFULLCONTENT`,
-    /// measured at a **28.5 ms** median over this window (`spike-cheap-capture.md`, against 4.4 ms
-    /// for a `BitBlt` crop). A watched press pays one of those before the click and one per poll,
+    /// measured at a **28.5 ms** median over this window, against 4.4 ms
+    /// for a `BitBlt` crop. A watched press pays one of those before the click and one per poll,
     /// and cannot reach its first look sooner than [`crate::timing::POLL_SCREEN`].
     ///
     /// So the floor, for a press whose screen has plainly moved, is a quarter-second and two full
@@ -2604,7 +2604,7 @@ impl Run<'_> {
         // dissolve shader in `love.draw` (`:389-391`), so the screen begins changing on the very
         // next frame however long the dissolve runs. What the second was really covering is that the
         // *test* is expensive: `capture_window` is `PrintWindow` with `PW_RENDERFULLCONTENT` over
-        // the whole client area, at a 28.5 ms median (`spike-cheap-capture.md`).
+        // the whole client area, at a 28.5 ms median.
         //
         // So the deadline stays exactly where it was and only the sampling changes. The decision is
         // untouched — the same `before` frame, the same [`crate::observe::settle::FULL`] region and
