@@ -2843,6 +2843,7 @@ branky
 branle
 branny
 brants
+brappy
 brasco
 brasen
 brashy
@@ -7490,6 +7491,7 @@ fasten
 faster
 fastly
 fatals
+fatfur
 fathas
 father
 fathom
@@ -7498,6 +7500,7 @@ fating
 fatism
 fatsia
 fatsos
+fatspo
 fatted
 fatten
 fatter
@@ -7559,6 +7562,7 @@ fedora
 feeble
 feebly
 feeded
+feedee
 feeder
 feeing
 feeler
@@ -7784,6 +7788,7 @@ fitchy
 fitful
 fitnas
 fitout
+fitspo
 fitted
 fitter
 fittes

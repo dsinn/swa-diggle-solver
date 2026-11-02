@@ -3891,6 +3891,7 @@ bonedog
 bonedry
 bonelet
 boneset
+bonespo
 bonetta
 bonfire
 bonging
@@ -6502,7 +6503,9 @@ cloning
 clonism
 clonked
 clootie
+clopfic
 clopped
+clopper
 cloques
 closely
 closers
@@ -11570,6 +11573,7 @@ fatally
 fatback
 fatberg
 fateful
+fatfurs
 fathead
 fathers
 fathoms
@@ -11662,8 +11666,10 @@ feebles
 feedbag
 feedbin
 feedbox
+feedees
 feeders
 feeding
+feedism
 feedlot
 feedway
 feelbad
@@ -19761,6 +19767,7 @@ meanest
 meanies
 meaning
 meanish
+meanspo
 mearing
 measled
 measles
@@ -30474,6 +30481,7 @@ smurred
 smushed
 smushes
 smutchy
+smutfic
 smutted
 smutter
 snabble
@@ -33257,6 +33265,7 @@ thinker
 thinkos
 thinned
 thinner
+thinspo
 thiolic
 thionic
 thionin

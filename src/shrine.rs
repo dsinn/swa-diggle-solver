@@ -17,15 +17,15 @@
 //! list. Probe words that cannot be the answer are therefore legal, which is the tool that breaks
 //! endgame clusters like `?ills`.
 //!
-//! Sizes as of game v52.4, for a sense of scale only — nothing asserts them, because the game's
+//! Sizes as of game v53.2, for a sense of scale only — nothing asserts them, because the game's
 //! lexica and dictionary move between versions. `gen_shrine_data` prints the current figures.
 //!
 //! | L | guesses | easy | hard | wild | legal guesses |
 //! |---|---|---|---|---|---|
 //! | 4 | 8 | 1,323 | 2,430 | 3,753 | 6,102 |
-//! | 5 | 6 | 1,677 | 5,514 | 7,191 | 13,865 |
-//! | 6 | 6 | 2,385 | 9,736 | 12,121 | 25,373 |
-//! | 7 | 6 | 2,614 | 13,660 | 16,274 | 38,111 |
+//! | 5 | 6 | 1,677 | 5,514 | 7,191 | 13,866 |
+//! | 6 | 6 | 2,385 | 9,736 | 12,121 | 25,378 |
+//! | 7 | 6 | 2,614 | 13,660 | 16,274 | 38,120 |
 //!
 //! The budget is comfortable: `maxGuesses = clamp(ceil(30/L), 6, 10)` (`shrineview.lua:39`). Longer
 //! words are *easier* despite the larger list, because 3^7 = 2,187 feedback patterns collapse a
