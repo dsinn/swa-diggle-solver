@@ -589,51 +589,52 @@ mod tests {
         assert!(!h.is_full());
     }
 
-    /// The whole of the 1519Z diagnosis, read out of the real files rather than a fixture.
-    ///
-    /// Two archived mid-fight checkpoints: `mainSaveData` has no status effects at all, and the
-    /// bank is sitting in `combatSaveData` under a different root. Read the first as zero and a
-    /// resumed run walks to an inn for stacks it already has.
-    #[test]
-    fn mid_fight_the_bank_is_only_in_the_combat_save() {
-        let mut checked = 0;
-        for (cp, banked) in [("l1-midfight-depleted", 3), ("in-the-anomaly-turn17", 6)] {
-            let main = format!("checkpoints/{cp}/mainSaveData");
-            let combat = format!("checkpoints/{cp}/combatSaveData");
-            let (Ok(m), Ok(c)) = (std::fs::read_to_string(&main), std::fs::read_to_string(&combat))
-            else {
-                eprintln!("SKIP: {cp} is not present");
-                continue;
-            };
-            let m = crate::game::save::parse(&m).expect("the main save parses");
-            let c = crate::game::save::parse(&c).expect("the combat save parses");
-            assert_eq!(
-                well_rested_from(&m, STATUS_IN_MAIN),
-                None,
-                "{cp}: mid-fight the main save carries no status effects"
-            );
-            assert_eq!(
-                well_rested_from(&c, STATUS_IN_COMBAT),
-                Some(banked),
-                "{cp}: the bank is in the combat save"
-            );
-            checked += 1;
-        }
-        // Prove the signal was there: an empty loop would pass this test saying nothing.
-        assert!(checked > 0, "no mid-fight checkpoint was read, so nothing was proved");
+    fn fixture(name: &str) -> crate::game::save::Table {
+        crate::game::save::load(std::path::Path::new(&format!("tests/fixtures/{name}")))
+            .unwrap_or_else(|e| panic!("tests/fixtures/{name} loads: {e}"))
     }
 
-    /// The other side of it, and the positive control: out of combat the main save answers, and
-    /// answers with a number rather than an absence.
+    /// The whole of the 1519Z diagnosis, read out of real saves.
+    ///
+    /// Mid-fight, `mainSaveData` has no status effects at all, and the bank is sitting in
+    /// `combatSaveData` under a different root. Read the first as zero and a resumed run walks to an
+    /// inn for stacks it already has.
+    ///
+    /// Committed fixtures rather than `checkpoints/`, which is gitignored and machine-local: the
+    /// checkpoints this used to read (`l1-midfight-depleted`, `in-the-anomaly-turn17`) did not
+    /// survive the machine migration, and the test then failed on every clone without saying
+    /// anything about the code. Both halves are still real bytes:
+    ///
+    /// - `combatSaveData-l1-depleted.lua` is `l1-midfight-depleted`'s combat save verbatim (see
+    ///   `fight.rs`), with `wellRestedInn = 3` under `rpg.player`.
+    /// - `mainSaveData-l35-midfight.lua` is the `l35-stalled` checkpoint's main save, taken
+    ///   mid-fight (it has a `combatSaveData` beside it on `handoff/machine-migration`).
+    #[test]
+    fn mid_fight_the_bank_is_only_in_the_combat_save() {
+        let main = fixture("mainSaveData-l35-midfight.lua");
+        // The positive control: the player is there, so `None` below is the status table being
+        // absent, not the whole save failing to read.
+        assert!(main.table_at("player").is_some(), "the main save has a player");
+        assert_eq!(
+            well_rested_from(&main, STATUS_IN_MAIN),
+            None,
+            "mid-fight the main save carries no status effects"
+        );
+        let combat = fixture("combatSaveData-l1-depleted.lua");
+        assert_eq!(
+            well_rested_from(&combat, STATUS_IN_COMBAT),
+            Some(3),
+            "the bank is in the combat save"
+        );
+    }
+
+    /// The other side of it: out of combat the main save answers, and answers with a number rather
+    /// than an absence. `mainSaveData-at-shrine1.lua` is the `at-shrine1` checkpoint's main save,
+    /// with `wellRestedCampfire = 2` and no fight in progress.
     #[test]
     fn out_of_combat_the_main_save_carries_the_bank() {
-        let path = "checkpoints/at-l11-before-shrine-errands/mainSaveData";
-        let Ok(src) = std::fs::read_to_string(path) else {
-            eprintln!("SKIP: {path} is not present");
-            return;
-        };
-        let save = crate::game::save::parse(&src).expect("parses");
-        assert_eq!(well_rested_from(&save, STATUS_IN_MAIN), Some(11));
+        let save = fixture("mainSaveData-at-shrine1.lua");
+        assert_eq!(well_rested_from(&save, STATUS_IN_MAIN), Some(2));
     }
 
     /// Absence and zero are different answers, and the fixture says so without any checkpoint.
