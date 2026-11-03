@@ -44,8 +44,9 @@ pub struct Cell {
     pub ink: (u8, u8, u8),
     /// Typed into a wildcard: drawn in a handwriting face, as the game scribbles them.
     pub wildcard: bool,
-    /// A variant material, a gem, or a tile with a border overlay: drawn with a border.
-    pub special: bool,
+    /// The ring a special tile is drawn with: its metal border's colour, else its material's
+    /// (see [`super::palette::Face::ring`]). `None` for a plain tile.
+    pub ring: Option<(u8, u8, u8)>,
     /// Burning tiles score nothing (`utils/tiles.lua:56-57`); drawn with a red border, never red
     /// lettering, which is hard to read on the darker tiles.
     pub burning: bool,
@@ -59,7 +60,7 @@ pub fn cell_for(res: &Resources, tile: &crate::observe::board::Tile, letter: &st
         colour: face.colour,
         ink: face.ink,
         wildcard: false,
-        special: face.special || tile.quality.border.is_some(),
+        ring: res.palette.border(tile.quality.border.as_deref()).or(face.ring),
         burning: tile.burn().is_some(),
     }
 }
@@ -172,7 +173,7 @@ impl View {
                                 colour: super::palette::GREY,
                                 ink: (0, 0, 0),
                                 wildcard: false,
-                                special: false,
+                                ring: None,
                                 burning: false,
                             },
                         };
@@ -335,44 +336,36 @@ mod tests {
         assert_eq!(drawn_material(&res.scorer, &tile("Q")), "gold");
     }
 
-    /// Braced wood has its own face, black lettering and a ring; a gilt tile is special; fire is
-    /// its own flag.
+    /// Braced wood has its own face, black lettering and a ring; a gilt tile is ringed gold; fire
+    /// is its own flag.
     #[test]
-    fn a_cell_shows_its_own_colours_special_and_fire() {
+    fn a_cell_shows_its_own_colours_ring_and_fire() {
         use crate::observe::board::{Quality, Tile};
         let res = res();
-        let wood = res.palette.colour(Some("wood"));
+        let wood = res.palette.face(Some("wood")).colour;
         let tile = |q: Quality| Tile { letter: "E".into(), quality: q };
         let braced = cell_for(
             &res,
             &tile(Quality { material: Some("woodbraced".into()), ..Quality::default() }),
             "E",
         );
-        let braced_face = res.palette.colour(Some("woodbraced"));
-        assert_eq!((braced.colour, braced.special, braced.burning), (braced_face, true, false));
-        let gilt = cell_for(
-            &res,
-            &tile(Quality { border: Some("gold".into()), ..Quality::default() }),
-            "E",
-        );
-        assert_eq!((gilt.colour, gilt.special), (wood, true));
+        assert_eq!(braced.colour, res.palette.face(Some("woodbraced")).colour);
+        assert_eq!(braced.ring, Some(super::super::palette::SPECIAL), "a plain dark ring");
         assert!(
             braced.ink.0 < 80,
             "braced wood is lettered black, as in the game: {:?}",
             braced.ink
         );
-        let inlaid = cell_for(
+        let gilt = cell_for(
             &res,
-            &tile(Quality { material: Some("woodornate".into()), ..Quality::default() }),
+            &tile(Quality { border: Some("gold".into()), ..Quality::default() }),
             "E",
         );
-        assert_ne!(inlaid.colour, wood, "inlaid wood has its own face");
+        assert_eq!((gilt.colour, gilt.ring), (wood, res.palette.border(Some("gold"))));
         let fire = cell_for(&res, &tile(Quality { burn: Some(2), ..Quality::default() }), "E");
-        assert_eq!((fire.colour, fire.special, fire.burning), (wood, false, true));
+        assert_eq!((fire.colour, fire.ring, fire.burning), (wood, None, true));
     }
 
-    /// A held spell shows on the words that cast it, and only on those. `COAL` and `CHAR` are fire
-    /// words (`utils/lexica/fire.lua`) the crypt board can spell, so the column is proven to fill.
     #[test]
     fn a_held_spell_shows_on_the_words_that_cast_it() {
         let res = res();

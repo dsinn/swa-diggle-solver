@@ -36,24 +36,69 @@ struct Swatch {
 #[derive(Debug, Clone, Default)]
 pub struct Palette {
     swatches: HashMap<String, Swatch>,
+    /// Each metal border's colour (`rpg/effects/border/*.lua`), from its overlay.
+    borders: HashMap<String, (u8, u8, u8)>,
+}
+
+/// The ring on a special tile with no colour of its own: near-black, which reads against the
+/// list's white background and every tile face.
+pub const SPECIAL: (u8, u8, u8) = (25, 25, 25);
+
+/// How far plain wood's face is lightened toward white, from 0 to 1. **The user's call**,
+/// 2026-11-02: the sampled median sits between its pale grain and its dark grain lines and comes
+/// out no lighter than braced wood, while in the game plain wood reads clearly paler.
+const PLAIN_WOOD_LIGHTEN: f64 = 0.4;
+
+/// How far inlaid wood's gold lettering is lightened, once its sampled colour is spent on the
+/// ring. The user's call, 2026-11-02: ring in the gold, letters lighter than it.
+const INLAID_INK_LIGHTEN: f64 = 0.5;
+
+fn swatches_face(swatches: &HashMap<String, Swatch>, m: &str) -> Option<(u8, u8, u8)> {
+    swatches.get(m).map(|s| s.face)
+}
+
+/// Mixes `c` toward white by `by`.
+fn lighten((r, g, b): (u8, u8, u8), by: f64) -> (u8, u8, u8) {
+    let mix = |c: u8| (c as f64 + (255.0 - c as f64) * by).round() as u8;
+    (mix(r), mix(g), mix(b))
 }
 
 impl Palette {
     /// Samples every material the game defines. A texture that cannot be read is left out, and
     /// that material shows as [`GREY`].
     pub fn load(game_dir: &Path) -> Self {
-        let mut swatches = HashMap::new();
-        let Ok(entries) = std::fs::read_dir(game_dir.join("rpg/effects/material")) else {
-            return Palette { swatches };
+        let names = |dir: &str| -> Vec<String> {
+            std::fs::read_dir(game_dir.join(dir))
+                .map(|d| {
+                    d.flatten()
+                        .map(|e| {
+                            e.file_name().to_string_lossy().trim_end_matches(".lua").to_string()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
         };
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().trim_end_matches(".lua").to_string();
-            let png = game_dir.join("ui/graphics/tiles").join(format!("{name}.png"));
-            if let Some(s) = sample(&png) {
-                swatches.insert(name, s);
-            }
-        }
-        Palette { swatches }
+        let tiles = game_dir.join("ui/graphics/tiles");
+        let swatches: HashMap<String, Swatch> = names("rpg/effects/material")
+            .into_iter()
+            .filter_map(|n| Some((n.clone(), sample(&tiles.join(format!("{n}.png")))?)))
+            .collect();
+        // A border is coloured as the metal its file names (`categories.material` in
+        // `rpg/effects/border/*.lua`), using that metal's tile face: gold reads as the gold tile,
+        // not as the shaded overlay (`overlays/border_rounded_<name>.png`), whose median is olive.
+        // Silver has no sheet of its own and takes `silver2`'s; iron has none at all and falls back
+        // to its overlay.
+        let borders = names("rpg/effects/border")
+            .into_iter()
+            .filter_map(|n| {
+                let metal = if n == "silver" { "silver2" } else { n.as_str() };
+                let colour = swatches_face(&swatches, metal).or_else(|| {
+                    opaque_median(&tiles.join(format!("overlays/border_rounded_{n}.png")))
+                })?;
+                Some((n, colour))
+            })
+            .collect();
+        Palette { swatches, borders }
     }
 
     /// A material's face colour, or [`GREY`].
@@ -61,7 +106,12 @@ impl Palette {
         material.and_then(|m| self.swatches.get(m)).map(|s| s.face).unwrap_or(GREY)
     }
 
-    /// How a tile of `material` is drawn: its own face and ink, and whether it is special.
+    /// The colour of a tile's metal border overlay (`extra.border`), if it has one.
+    pub fn border(&self, border: Option<&str>) -> Option<(u8, u8, u8)> {
+        border.and_then(|b| self.borders.get(b)).copied()
+    }
+
+    /// How a tile of `material` is drawn: its own face, ink and ring.
     ///
     /// Special means a variant or a gem, ringed in the list so it stands apart. Variants are named
     /// by suffix on their family (`categories.material` in `rpg/effects/material/*.lua`): `braced`
@@ -75,9 +125,20 @@ impl Palette {
                     .iter()
                     .any(|suffix| m.strip_suffix(suffix).is_some_and(|f| !f.is_empty()))
         });
-        match swatch {
-            Some(s) => Face { colour: s.face, ink: readable(s.face, s.ink), special },
-            None => Face { colour: GREY, ink: (0, 0, 0), special },
+        let ring = special.then_some(SPECIAL);
+        let Some(s) = swatch else { return Face { colour: GREY, ink: (0, 0, 0), ring } };
+        match material {
+            Some("wood") => {
+                let face = lighten(s.face, PLAIN_WOOD_LIGHTEN);
+                Face { colour: face, ink: readable(face, s.ink), ring }
+            }
+            // Inlaid wood's own gold goes to the ring, and its letters are lifted above it.
+            Some("woodornate") => Face {
+                colour: s.face,
+                ink: readable(s.face, lighten(s.ink, INLAID_INK_LIGHTEN)),
+                ring: Some(s.ink),
+            },
+            _ => Face { colour: s.face, ink: readable(s.face, s.ink), ring },
         }
     }
 }
@@ -88,8 +149,8 @@ pub struct Face {
     pub colour: (u8, u8, u8),
     /// The lettering colour the game prints on this material.
     pub ink: (u8, u8, u8),
-    /// A variant or gem: drawn with a ring so it stands apart from a plain tile.
-    pub special: bool,
+    /// A variant or gem is ringed so it stands apart from a plain tile, in this colour.
+    pub ring: Option<(u8, u8, u8)>,
 }
 
 /// The least contrast lettering may have against its face: WCAG's 3:1 for large text, which
@@ -127,6 +188,28 @@ pub fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
     };
     let (x, y) = (lum(a), lum(b));
     (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+/// The per-channel median of an overlay's opaque pixels. Only for a metal with no tile sheet of
+/// its own (iron): the overlays are lit from above, so this lands between highlight and shade.
+fn opaque_median(path: &Path) -> Option<(u8, u8, u8)> {
+    let mut dec = png::Decoder::new(std::fs::File::open(path).ok()?);
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = dec.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let channels = info.color_type.samples();
+    if channels < 4 {
+        return None;
+    }
+    let px: Vec<&[u8]> =
+        buf[..info.buffer_size()].chunks_exact(channels).filter(|p| p[3] >= 128).collect();
+    let median = |c: usize| -> Option<u8> {
+        let mut v: Vec<u8> = px.iter().map(|p| p[c]).collect();
+        v.sort_unstable();
+        v.get(v.len() / 2).copied()
+    };
+    Some((median(0)?, median(1)?, median(2)?))
 }
 
 fn sample(path: &Path) -> Option<Swatch> {
@@ -228,15 +311,43 @@ mod tests {
         assert_eq!(p.face(Some("wood")).ink, p.swatches["wood"].ink, "readable ink is kept");
     }
 
+    /// Plain wood reads lighter than braced wood, as the user sees them in the game.
+    #[test]
+    fn plain_wood_is_lighter_than_braced() {
+        let p = Palette::load(&game_dir());
+        let (wood, braced) = (p.face(Some("wood")).colour, p.face(Some("woodbraced")).colour);
+        assert!(luma(wood) > luma(braced) + 10.0, "wood {wood:?} vs braced {braced:?}");
+    }
+
+    /// Inlaid wood is ringed in its own gold lettering colour, and its letters are lighter still.
+    #[test]
+    fn inlaid_wood_is_ringed_in_its_ink_and_lettered_lighter() {
+        let p = Palette::load(&game_dir());
+        let f = p.face(Some("woodornate"));
+        let sampled = p.swatches["woodornate"].ink;
+        assert_eq!(f.ring, Some(sampled));
+        assert!(luma(f.ink) > luma(sampled) + 20.0, "ink {:?} vs ring {sampled:?}", f.ink);
+    }
+
+    /// A metal border is ringed in its own colour, sampled from its overlay.
+    #[test]
+    fn a_gold_border_is_ringed_gold() {
+        let p = Palette::load(&game_dir());
+        let (r, g, b) = p.border(Some("gold")).expect("gold border sampled");
+        assert!(r > 180 && r > g && g > b, "gold should be bright warm yellow: {:?}", (r, g, b));
+        assert_ne!(p.border(Some("silver")), p.border(Some("gold")));
+        assert_eq!(p.border(None), None);
+    }
+
     /// Variants and gems are ringed; plain tiles are not.
     #[test]
     fn variants_and_gems_are_marked_special() {
         let p = Palette::load(&game_dir());
         for m in ["woodbraced", "woodornate", "bronzebleed", "silvertoxin", "gemheal"] {
-            assert!(p.face(Some(m)).special, "{m}");
+            assert!(p.face(Some(m)).ring.is_some(), "{m}");
         }
         for m in ["wood", "bronze", "silver3", "gold"] {
-            assert!(!p.face(Some(m)).special, "{m}");
+            assert!(p.face(Some(m)).ring.is_none(), "{m}");
         }
     }
 

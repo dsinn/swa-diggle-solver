@@ -379,10 +379,8 @@ fn cell_text(v: &View, item: usize, sub: i32) -> String {
 /// The fire ring's colour and width. Pure red, wide enough to read at a glance.
 const FIRE: (u8, u8, u8) = (220, 0, 0);
 const FIRE_RING: i32 = 3;
-/// The special-tile ring: near-black, which reads against the background and every family.
-const SPECIAL: (u8, u8, u8) = (25, 25, 25);
-/// The special-tile ring's width.
-const SPECIAL_RING: i32 = 2;
+/// The special-tile ring's width: as wide as the fire ring, so its colour can be read.
+const SPECIAL_RING: i32 = 3;
 
 unsafe fn fill(hdc: windows::Win32::Graphics::Gdi::HDC, rc: &RECT, colour: (u8, u8, u8)) {
     let brush = CreateSolidBrush(colorref(colour));
@@ -456,12 +454,12 @@ unsafe fn draw_word(ui: &Ui, cd: &NMLVCUSTOMDRAW) {
         if cell.burning {
             frame(hdc, &tile, FIRE_RING, shade(FIRE));
         }
-        // A special tile — braced, ornate, serrated, gem, gilt — is ringed near-black, at the
-        // tile's edge or just inside the fire ring. Not in the ink colour: on a dark tile that is
-        // white, and a white ring at the edge vanishes into the list's white background.
-        if cell.special {
+        // A special tile — braced, inlaid, serrated, gem, bordered — is ringed in its own colour
+        // (a metal border's, inlaid wood's gold, else near-black), at the tile's edge or just
+        // inside the fire ring.
+        if let Some(ring) = cell.ring {
             let inner = if cell.burning { inset(&tile, FIRE_RING) } else { tile };
-            frame(hdc, &inner, SPECIAL_RING, shade(SPECIAL));
+            frame(hdc, &inner, SPECIAL_RING, shade(ring));
         }
         SetTextColor(hdc, colorref(ink));
         tile.top = (tile.top + tile.bottom) / 2 - caps_mid;

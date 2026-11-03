@@ -186,8 +186,9 @@ Diggle drives. The game data (dictionary, scores, tile textures) comes from
 
 - **On your turn** it lists every playable word, in the order Diggle prefers them. **The top row is
   the word Diggle would type.** Each letter sits on the tile it would be typed into, in that
-  material's face and lettering colours as sampled from the game's own textures: variants (braced,
-  ornate, serrated), gems and gilt-bordered tiles are ringed, a burning tile has a red ring, letters
+  material's face and lettering colours as sampled from the game's own textures: tiles with a metal
+  border are ringed in that metal (gold, silver, bronze, iron), inlaid wood in its own gold,
+  variants and gems near-black; a burning tile has a red ring, letters
   typed into wildcards are handwritten (Segoe Print), and the historical ligatures show as the game
   draws them (Þ, Ð, Æ, Œ, ß, ꙮ). The columns show the expected damage; the enemy's lexicon bonus
   when it isn't x1, with its lexicon (`x2.00 (Bone)`); the health the word should give back
