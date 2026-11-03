@@ -31,6 +31,7 @@ pub mod subworld;
 pub mod tables;
 pub mod timing;
 pub mod tower;
+pub mod turn;
 pub mod typist;
 pub mod win;
 
