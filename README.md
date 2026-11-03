@@ -53,6 +53,9 @@ stop reason names the state that had no handler, which is usually the next thing
 - **Never touch `%APPDATA%\SternlyWordedAdventures`.** That is the real Steam save. The sandbox
   this project drives is `%APPDATA%\LOVE\SternlyWordedAdventures`, which is where the unfused
   `lovec.exe` writes. The names differ by one directory level and nothing else.
+  The one exception is the [Diggle Advisor](#diggle-advisor), which **reads** it so it can follow a
+  game started from Steam. It never writes there, and it reads under the rules in
+  `src/advisor/watch.rs`.
 - **Never modify the game checkout** at `../sternly-worded-adventures`. It is read as evidence —
   templates, dictionary, score tables and source citations all come from it — and editing it would
   make every measurement here a measurement of something else.
@@ -170,6 +173,37 @@ and `travel` launch their own game** — LÖVE attaches to its *parent's* consol
 log has to be the process that started it, which makes those two exclusive with the
 `launch`/`where`/`shot` workflow.
 
+## Diggle Advisor
+
+```powershell
+cargo run --release --bin diggle_advisor
+```
+
+A window for playing the game **yourself** with Diggle's judgment beside you. It sends no input of
+any kind, captures nothing, and does not read the console. Everything it knows comes from the save
+folders, so it works whether the game was started from Steam or with `lovec.exe`: it watches both
+`%APPDATA%\SternlyWordedAdventures` and `%APPDATA%\LOVE\SternlyWordedAdventures` and follows
+whichever was written most recently. The game data (dictionary, scores, tile textures) comes from
+`game_dir` in `config.toml`, or `--game-dir <path>`.
+
+- **On your turn** it lists every playable word, in the order Diggle prefers them. **The top row is
+  the word Diggle would type.** Each letter sits on the colour of the tile it would be typed into.
+  The columns show the expected damage, the enemy's lexicon bonus when it isn't x1, the health the
+  word should give back (Well-Rested overkill, wood-kill gear, a Diamond tile played last), and what
+  it does: `kills`, `scares`, `frugal kill`, `chip`, `overshoots - would kill`.
+- **Between turns** the last list stays up, greyed.
+- **Out of combat** shows only once `combatSaveData` is gone, which is when the reward is taken,
+  not when `Finish` is clicked. Nothing on disk marks `Finish`; this is temporary until something
+  does.
+- **Stay on top** is off by default.
+
+It does not model Diggle's murder backoff, which reacts to a warning the game prints to the console.
+You see that warning on screen.
+
+It keeps out of the game's way: it watches the folders rather than the file, reads only after the
+file's size or time has changed and the writes have stopped, reads in one go without holding the
+file open, and never retries a save it couldn't parse.
+
 ## Other tools
 
 ```powershell
@@ -186,7 +220,7 @@ should be able to re-run the evidence. They are history, not an interface, and m
 anything useful today. The same goes for `probe_*`, `crop_template` and `gen_*`, which build
 committed data files and only need re-running when their input changes.
 
-If you are looking for the program, it is `spike_run`.
+If you are looking for the program, it is `spike_run`; for the advisor, `diggle_advisor`.
 
 ## Roadmap
 
