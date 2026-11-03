@@ -52,9 +52,9 @@ pub type Offer = (String, i32, i32);
 ///
 /// ## Where these come from, and why there are exactly three
 ///
-/// `overworld.lua:1119-1127` rolls `rarity = random(0,9)` and, on `rarity <= 2`, picks a single
+/// `overworld.lua:1222-1230` rolls `rarity = random(0,9)` and, on `rarity <= 2`, picks a single
 /// lucky item out of the drops and hangs `getRewardBoons(rng, luckyKey, rarity==0 and 'rare' or
-/// 'uncommon', class)` on it. `getRewardBoons` (`:640-656`) joins the source item's own declared
+/// 'uncommon', class)` on it. `getRewardBoons` (`:714-730`) joins the source item's own declared
 /// boons with everything whose `sources` name `<type>RewardBoon` or `rewardBoon` at that rarity,
 /// filters for class and usefulness, and returns **one**. The whole pool in `items/`:
 ///
@@ -82,33 +82,21 @@ pub type Offer = (String, i32, i32);
 /// and `filterUselessBoons` drops it before the roll. So a heal boon on offer is *already* one the
 /// game thought we could use — this ranking is the second, stricter opinion.
 ///
-/// # ⚠ This policy is NOT HOOKED UP
+/// ## Where we learn which offer carries which boon
 ///
-/// Nothing supplies it. [`choose`] builds an empty boon list, every offer reads "no boon", and the
-/// pick is decided entirely by [`PREFERRED_KINDS`] exactly as it was before any of this existed. The
-/// code below is a decision waiting for an input, and it is deliberately not pretending otherwise.
+/// From the console, since v53.2. `ui/itemselect.lua:453-456` prints `Bonuses:` and the boon list
+/// right under the lucky item's row, which is the `_VERBOSE` output the dev asked the game's author
+/// for. [`boons`] reads it and [`shortlist`] applies the policy.
 ///
-/// **The console does not carry the attachment.** `ui/itemselection.lua:413-428` prints each item's
-/// key, name and screen position and nothing else; the boon is held in `extras.bonuses[item]` and
-/// never logged. The game is never modified, so that is the end of the console route.
+/// Two other routes were considered and are still declined, so nobody re-derives them as fresh
+/// ideas:
 ///
-/// **The screen does carry it, and the dev has ruled that route out.** `:102-114` draws the boon
-/// item's own 32x32 icon at 2x inside the item button and `:395` puts a lens flare over the lucky
-/// pedestal, so three templates and the button transform would read it. The dev, 2026-08-15: *I'd
-/// prefer not to rely on the rendering.* Recorded here so nobody re-derives it as a fresh idea and
-/// spends an evening on it — it is a known option that was considered and declined.
-///
-/// **Deriving the roll is also declined.** `overworld.lua:1120` seeds
-/// `love.math.newRandomGenerator(seed * location.seed * 1000)` when `playerData.overworld.seedDrops`
-/// is set, so the draws are in principle reproducible offline. The dev, 2026-08-15: *I do not want
-/// you to derive the roll.* Both remaining guesses are therefore closed, and neither is a gap to be
-/// filled by whoever reads this next.
-///
-/// **The plan is upstream.** The dev has asked the game's author for `_VERBOSE` output naming the
-/// boon and the item it is attached to. When that lands, the whole of the work here is parsing it
-/// into `boons` — the policy below is already written and tested against the dev's rules, so the
-/// hook is one line and this warning comes off. Until then this stays inert **on purpose**, and a
-/// run that picks by kind alone is behaving correctly rather than missing a feature.
+/// - **Reading the screen.** `ui/itemselect.lua:102-114` draws the boon's icon inside the item
+///   button and `:422` puts a lens flare over the lucky pedestal. The dev, 2026-08-15: *I'd prefer
+///   not to rely on the rendering.*
+/// - **Deriving the roll.** `overworld.lua:1188` seeds the drop RNG from the save when
+///   `playerData.overworld.seedDrops` is set, so the draws are in principle reproducible. The dev,
+///   2026-08-15: *I do not want you to derive the roll.*
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Boon {
     /// `gearSlotsBuff` — a permanent extra gear slot. Taken eagerly, whatever it is stapled to.
@@ -222,16 +210,37 @@ pub fn rank(kind: Option<&str>) -> usize {
 /// brace depth rather than read as the end of the block, which would hide every offer after the
 /// lucky one.
 pub fn offers(lines: &[String]) -> Vec<Offer> {
-    let mut out = Vec::new();
+    read_block(lines).0
+}
+
+/// The bonuses in the latest `Item selection:` block, each paired with the offer it is attached to.
+///
+/// The game prints a bonus directly under the row of the item that carries it
+/// (`ui/itemselect.lua:453-456`), so it belongs to the row read just before it. The list is
+/// `table.serialize` output, one `"key",` line per entry (`utils/table.lua:384-388`).
+/// `getRewardBoons` returns a single entry (`overworld.lua:727-729`), but every entry is read anyway.
+pub fn boons(lines: &[String]) -> Vec<(String, Boon)> {
+    read_block(lines).1
+}
+
+/// One walk of the latest block, shared by [`offers`] and [`boons`] so they never disagree about
+/// where it starts or ends.
+fn read_block(lines: &[String]) -> (Vec<Offer>, Vec<(String, Boon)>) {
+    let mut out: Vec<Offer> = Vec::new();
+    let mut boons = Vec::new();
     let Some(start) = lines.iter().rposition(|l| l.contains("Item selection:")) else {
-        return out;
+        return (out, boons);
     };
     let mut rest = lines.iter().skip(start + 1);
     while let Some(line) = rest.next() {
         if line.trim() == "Bonuses:" {
+            let owner = out.last().map(|(k, _, _)| k.clone());
             let mut depth = 0i32;
             for l in rest.by_ref() {
                 depth += l.matches('{').count() as i32 - l.matches('}').count() as i32;
+                if let (Some(owner), Some(key)) = (&owner, quoted_entry(l)) {
+                    boons.push((owner.clone(), Boon::from_key(key)));
+                }
                 if depth <= 0 {
                     break;
                 }
@@ -248,7 +257,41 @@ pub fn offers(lines: &[String]) -> Vec<Offer> {
         };
         out.push((parts[0].to_string(), x, y));
     }
-    out
+    (out, boons)
+}
+
+/// `    "gold50",` → `gold50`. Item keys are identifiers, so `%q` never escapes anything in one.
+fn quoted_entry(line: &str) -> Option<&str> {
+    line.trim().trim_end_matches(',').strip_prefix('"')?.strip_suffix('"')
+}
+
+/// The offers still in the running once the item ranking and the bonus policy have both been
+/// applied. The caller picks among them at random.
+///
+/// In order, as the dev set it out on 2026-08-15 (see [`Boon`]):
+/// 1. Any offer carrying a gear slot, whatever its kind. That's what "eagerly" means.
+/// 2. Otherwise the best kind by `rank_of`, and then, *only among those*, the best bonus by
+///    [`Boon::worth`]. A bonus worth nothing (the heal at full health) narrows nothing.
+pub fn shortlist<'a>(
+    found: &'a [Offer], rank_of: impl Fn(&str) -> usize, boons: &[(String, Boon)], hurt: bool,
+) -> Vec<&'a Offer> {
+    fn boons_on<'b>(boons: &'b [(String, Boon)], key: &'b str) -> impl Iterator<Item = Boon> + 'b {
+        boons.iter().filter(move |(k, _)| k == key).map(|(_, b)| *b)
+    }
+    let eager: Vec<&Offer> =
+        found.iter().filter(|(k, _, _)| boons_on(boons, k).any(Boon::is_eager)).collect();
+    if !eager.is_empty() {
+        return eager;
+    }
+
+    let best = found.iter().map(|(k, _, _)| rank_of(k)).min().unwrap_or(0);
+    let by_kind: Vec<&Offer> = found.iter().filter(|(k, _, _)| rank_of(k) == best).collect();
+    let worth = |key: &str| boons_on(boons, key).map(|b| b.worth(hurt)).max().unwrap_or(0);
+    let top = by_kind.iter().map(|(k, _, _)| worth(k)).max().unwrap_or(0);
+    if top == 0 {
+        return by_kind;
+    }
+    by_kind.into_iter().filter(|(k, _, _)| worth(k) == top).collect()
 }
 
 /// Is a "Choose one:" screen up, untouched?
@@ -347,39 +390,18 @@ pub fn choose(
             .join(", ")
     ));
 
-    // **NOT HOOKED UP.** This is always empty, so every branch below it is inert and the pick is
-    // exactly what it was before boons existed. See [`Boon`] for the policy, which is built and
-    // tested; what is missing is any way to learn *which* offer carries *which* boon.
-    let boons: Vec<(String, Boon)> = Vec::new();
-    let boon_on = |key: &str| boons.iter().find(|(k, _)| k == key).map(|(_, b)| *b);
-
-    // Eager, and ahead of everything: a gear slot is not a tiebreak, it is a change to what the
-    // whole bag can equip. The dev's word for it was "eagerly".
-    let eager: Vec<&Offer> =
-        found.iter().filter(|(k, _, _)| boon_on(k).is_some_and(Boon::is_eager)).collect();
-
-    let best = found.iter().map(|(k, _, _)| rank(kind_of(k).as_deref())).min().unwrap_or(0);
-    let by_kind: Vec<&Offer> =
-        found.iter().filter(|(k, _, _)| rank(kind_of(k).as_deref()) == best).collect();
-    // Only *then* the boon, and only between offers the kind ranking already called equal — which
-    // is what "the bonus reward only becomes a tiebreaker" means.
-    let shortlist: Vec<&Offer> = match eager.is_empty() {
-        false => eager,
-        true => {
-            let top = by_kind
-                .iter()
-                .map(|(k, _, _)| boon_on(k).map(|b| b.worth(hurt)).unwrap_or(0))
-                .max()
-                .unwrap_or(0);
-            match top {
-                0 => by_kind,
-                _ => by_kind
-                    .into_iter()
-                    .filter(|(k, _, _)| boon_on(k).map(|b| b.worth(hurt)).unwrap_or(0) == top)
-                    .collect(),
-            }
-        }
-    };
+    // Read from the same feed lines as the offers. One `onActive` call prints the whole block
+    // (`ui/itemselect.lua:442-461`), so a read that has the rows has their bonuses too. A read
+    // that somehow caught it half-printed would be missing later rows as well, which is the
+    // offers' risk already, not a new one.
+    let boons = boons(feed.lines());
+    if !boons.is_empty() {
+        log.push_str(&format!(
+            "  bonus: {}\n",
+            boons.iter().map(|(k, b)| format!("{b:?} on {k}")).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    let shortlist = shortlist(&found, |k| rank(kind_of(k).as_deref()), &boons, hurt);
 
     // Seeded from the clock so repeated runs do not always take the same position when the shortlist
     // has more than one item — an arbitrary-but-fixed choice would hide a click that only ever works
@@ -478,6 +500,120 @@ mod boon_tests {
         // An item's own `uncommonRewardBoons` -- a consumable in practice.
         assert_eq!(Boon::from_key("healthPotion"), Boon::Other);
         assert!(Boon::Gold.worth(true) > Boon::Other.worth(true));
+    }
+}
+
+/// The bonus read off the console, and the policy applied to it.
+#[cfg(test)]
+mod hookup_tests {
+    use super::*;
+
+    fn lines(s: &str) -> Vec<String> {
+        s.lines().map(|l| l.to_string()).collect()
+    }
+
+    /// The shape `ui/itemselect.lua:451-456` prints: the row, then `Bonuses:` and `table.serialize`
+    /// of the list (`utils/table.lua:372-411`), which for a one-string list is exactly this.
+    const LUCKY_GLOVES: &str = "Item selection:\n\
+         \x20       armourLeatherGloves     Blacksmith gloves       480     540\n\
+         Bonuses:\n\
+         return {\n\
+         \x20   \"gold50\",\n\
+         }\n\
+         \x20       iBeforeEBad     Weird veiny beige thumb 960     540\n\
+         \x20       goldIdol        Gold idol       1440    540";
+
+    #[test]
+    fn a_bonus_belongs_to_the_row_printed_above_it() {
+        assert_eq!(boons(&lines(LUCKY_GLOVES)), vec![("armourLeatherGloves".into(), Boon::Gold)]);
+    }
+
+    #[test]
+    fn a_bonus_on_the_last_row_is_still_read() {
+        let got = boons(&lines(
+            "Item selection:\n\
+             \tphoenixFeather\tPhoenix feather\t480\t540\n\
+             \tgoldIdol\tGold idol\t1440\t540\n\
+             Bonuses:\n\
+             return {\n\
+             \x20   \"gearSlotsBuff\",\n\
+             }\n\
+             ach_something\talready achieved",
+        ));
+        assert_eq!(got, vec![("goldIdol".into(), Boon::GearSlot)]);
+    }
+
+    /// The same feed spans screens. A bonus from the last fight must not follow us into this one.
+    #[test]
+    fn an_earlier_screens_bonus_is_not_carried_over() {
+        let mut feed = LUCKY_GLOVES.to_string();
+        feed.push_str(
+            "\nnoise\nItem selection:\n\tarmourLeatherGloves\tBlacksmith gloves\t480\t540",
+        );
+        assert!(boons(&lines(&feed)).is_empty());
+    }
+
+    #[test]
+    fn a_screen_without_a_bonus_has_no_boons() {
+        let got = boons(&lines(
+            "Item selection:\n\
+             \tphoenixFeather\tPhoenix feather\t480\t540\n\
+             \tgoldIdol\tGold idol\t1440\t540",
+        ));
+        assert!(got.is_empty());
+    }
+
+    // ---- the policy ----
+
+    fn offer(k: &str, x: i32) -> Offer {
+        (k.to_string(), x, 540)
+    }
+    fn kind(k: &str) -> usize {
+        rank(Some(match k {
+            k if k.starts_with("passive") => "passive",
+            k if k.starts_with("gear") => "gear",
+            _ => "consumable",
+        }))
+    }
+    fn keys(v: Vec<&Offer>) -> Vec<&str> {
+        v.into_iter().map(|(k, _, _)| k.as_str()).collect()
+    }
+
+    #[test]
+    fn a_gear_slot_is_taken_over_a_better_kind() {
+        let found = [offer("passiveA", 480), offer("gearB", 960)];
+        let b = [("gearB".to_string(), Boon::GearSlot)];
+        assert_eq!(keys(shortlist(&found, kind, &b, false)), vec!["gearB"]);
+    }
+
+    #[test]
+    fn gold_breaks_a_tie_between_equal_kinds() {
+        let found = [offer("passiveA", 480), offer("passiveB", 960)];
+        let b = [("passiveB".to_string(), Boon::Gold)];
+        assert_eq!(keys(shortlist(&found, kind, &b, false)), vec!["passiveB"]);
+    }
+
+    /// Only a tiebreaker: gold on a consumable does not beat a passive with nothing on it.
+    #[test]
+    fn gold_does_not_outrank_a_better_kind() {
+        let found = [offer("passiveA", 480), offer("potionB", 960)];
+        let b = [("potionB".to_string(), Boon::Gold)];
+        assert_eq!(keys(shortlist(&found, kind, &b, true)), vec!["passiveA"]);
+    }
+
+    /// At full health the heal adds nothing, so it does not narrow a tie at all.
+    #[test]
+    fn a_heal_only_breaks_a_tie_when_hurt() {
+        let found = [offer("passiveA", 480), offer("passiveB", 960)];
+        let b = [("passiveB".to_string(), Boon::Heal)];
+        assert_eq!(keys(shortlist(&found, kind, &b, true)), vec!["passiveB"]);
+        assert_eq!(keys(shortlist(&found, kind, &b, false)), vec!["passiveA", "passiveB"]);
+    }
+
+    #[test]
+    fn with_no_bonus_every_offer_of_the_best_kind_stays_eligible() {
+        let found = [offer("gearA", 480), offer("gearB", 960), offer("potionC", 1440)];
+        assert_eq!(keys(shortlist(&found, kind, &[], false)), vec!["gearA", "gearB"]);
     }
 }
 
