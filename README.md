@@ -53,9 +53,8 @@ stop reason names the state that had no handler, which is usually the next thing
 - **Never touch `%APPDATA%\SternlyWordedAdventures`.** That is the real Steam save. The sandbox
   this project drives is `%APPDATA%\LOVE\SternlyWordedAdventures`, which is where the unfused
   `lovec.exe` writes. The names differ by one directory level and nothing else.
-  The one exception is the [Diggle Advisor](#diggle-advisor), which **reads** it so it can follow a
-  game started from Steam. It never writes there, and it reads under the rules in
-  `src/advisor/watch.rs`.
+  The one exception is the [Diggle Advisor](#diggle-advisor), which **reads** it, and only it.
+  It never writes there, and it reads under the rules in `src/advisor/watch.rs`.
 - **Never modify the game checkout** at `../sternly-worded-adventures`. It is read as evidence —
   templates, dictionary, score tables and source citations all come from it — and editing it would
   make every measurement here a measurement of something else.
@@ -181,9 +180,8 @@ cargo run --release --bin diggle_advisor
 
 A window for playing the game **yourself** with Diggle's judgment beside you. It sends no input of
 any kind, captures nothing, and does not read the console. Everything it knows comes from the save
-folders, so it works whether the game was started from Steam or with `lovec.exe`: it watches both
-`%APPDATA%\SternlyWordedAdventures` and `%APPDATA%\LOVE\SternlyWordedAdventures` and follows
-whichever was written most recently. The game data (dictionary, scores, tile textures) comes from
+folder of the game you play, `%APPDATA%\SternlyWordedAdventures` — never the `LOVE` subfolder
+Diggle drives. The game data (dictionary, scores, tile textures) comes from
 `game_dir` in `config.toml`, or `--game-dir <path>`.
 
 - **On your turn** it lists every playable word, in the order Diggle prefers them. **The top row is

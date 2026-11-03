@@ -16,10 +16,10 @@
 //! - **A failed parse is not retried.** It is reported once and left until the file changes again
 //!   ([`load_if_changed`]); a half-written file is always followed by the change that finishes it.
 //!
-//! **Both save folders are watched** — the Steam build's `%APPDATA%\SternlyWordedAdventures` and
-//! `lovec.exe`'s `%APPDATA%\LOVE\SternlyWordedAdventures` ([`crate::game::savedir`]) — and the one
-//! written most recently is followed, so it works however the game was started. The Steam folder
-//! is the real save: everything above is why reading it is safe, and nothing here ever writes.
+//! **Only the fused game's folder is watched**, `%APPDATA%\SternlyWordedAdventures` — see
+//! [`save_dirs`]. That is the user's real save: everything above is why reading it is safe, and
+//! nothing here ever writes. Several folders can still be given (`--dir`, for testing), and then the
+//! one written most recently is followed.
 
 use super::mode::{Snapshot, Stamp};
 use crate::game::save::Table;
@@ -45,8 +45,17 @@ pub const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// How often the folders are looked at with no notification. Only metadata is looked at, so this
 /// costs the game nothing; it covers a missed notification and a folder created after start-up
-/// (`LOVE` makes the save folder on its first save).
+/// (LÖVE makes the save folder on its first save).
 pub const FALLBACK: Duration = Duration::from_secs(2);
+
+/// The folders the advisor watches by default: the fused game's, and only that.
+///
+/// **Never the `LOVE` subfolder.** `%APPDATA%\LOVE\SternlyWordedAdventures` is where `lovec.exe`
+/// writes — Diggle's sandbox ([`crate::game::savedir::unfused`]) — and the user ruled it out: the
+/// advisor is for the game they play, which is the fused build ([`crate::game::savedir::fused`]).
+pub fn save_dirs(appdata: &Path) -> Vec<PathBuf> {
+    vec![crate::game::savedir::fused(appdata)]
+}
 
 /// Read only when there is a file and its size or modification time is not the one last read.
 pub fn should_read(prev: Option<Stamp>, now: Option<Stamp>) -> bool {
@@ -250,6 +259,16 @@ mod tests {
         let broken = Event::Unreadable { dir: "x".into(), error: "eof".into() };
         assert!(snap.supersedes_a_turn());
         assert!(!broken.supersedes_a_turn());
+    }
+
+    /// Only the fused game's folder: never the `LOVE` subfolder that `lovec.exe` writes to.
+    #[test]
+    fn the_advisor_watches_only_the_fused_save_folder() {
+        let appdata = std::path::Path::new(r"C:\Users\x\AppData\Roaming");
+        assert_eq!(
+            save_dirs(appdata),
+            vec![std::path::PathBuf::from(r"C:\Users\x\AppData\Roaming\SternlyWordedAdventures")]
+        );
     }
 
     #[test]

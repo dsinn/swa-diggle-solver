@@ -4,8 +4,8 @@
 //!
 //! No `SendInput`, no message to the game's window, no screen capture, no console. It never calls
 //! `SetForegroundWindow`; it has focus only when clicked. Everything it knows comes from the save
-//! folders, read under the rules in [`diggle_solver::advisor::watch`] — which is also why it works
-//! however the game was started, from Steam or from `lovec.exe`.
+//! folder `%APPDATA%\SternlyWordedAdventures` ([`diggle_solver::advisor::watch::save_dirs`]),
+//! read under the rules in [`diggle_solver::advisor::watch`]. Never the `LOVE` subfolder.
 //!
 //! ## What it shows
 //!
@@ -25,7 +25,7 @@
 //!
 //! - `--game-dir <path>`: the game checkout. Otherwise `game_dir` from `config.toml` in the working
 //!   directory, else `../sternly-worded-adventures`.
-//! - `--dir <path>` (repeatable): watch these folders instead of the two save folders. For testing
+//! - `--dir <path>` (repeatable): watch these folders instead of the save folder. For testing
 //!   against a copied save.
 
 #![windows_subsystem = "windows"]
@@ -127,9 +127,7 @@ fn args() -> Args {
         .unwrap_or_else(|| PathBuf::from("../sternly-worded-adventures"));
     if dirs.is_empty() {
         if let Ok(appdata) = std::env::var("APPDATA") {
-            let appdata = PathBuf::from(appdata);
-            dirs.push(diggle_solver::game::savedir::unfused(&appdata));
-            dirs.push(diggle_solver::game::savedir::fused(&appdata));
+            dirs = watch::save_dirs(&PathBuf::from(appdata));
         }
     }
     Args { game_dir, dirs }
