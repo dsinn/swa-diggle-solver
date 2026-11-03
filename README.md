@@ -191,11 +191,14 @@ Diggle drives. The game data (dictionary, scores, tile textures) comes from
   variants and gems near-black; a burning tile has a red ring, letters
   typed into wildcards are handwritten (Segoe Print), and the historical ligatures show as the game
   draws them (Þ, Ð, Æ, Œ, ß, ꙮ). The columns show the expected damage; the enemy's lexicon bonus
-  when it isn't x1, with its lexicon (`x2.00 (Bone)`); the health the word should give back
+  when it isn't x1, with its lexicon (`x2.00 (💀 Bone)`); the health the word should give back
   (Well-Rested overkill, wood-kill gear, a Diamond tile played last); the spells you hold that it
-  qualifies for, led by the one to cast when it beats the plain attack (`Cast Turn`), in which
+  qualifies for, led by the one to cast when it beats the plain attack (`💀 Cast Turn`), in which
   case the damage and ranking are that spell's; and what it does: `kills`, `scares`,
   `frugal kill`, `overshoots - would kill`, or blank when the enemy simply survives.
+  Bonuses and spells are marked with colour emoji, one per dictionary (🔥 fire, ❄️ ice, 💀 bone,
+  🪵 wood, 🕷️ spider, ❗ profanity, 🪓 axe, 🩸 blood, ⛓️ iron, ⚙️ metal, 🟢 slime), so a spell
+  checked against a dictionary shares its emoji; the others are 💚 Four heal, 🔤 Vowels, 🥺 UwU.
 - **Between turns** the last list stays up, greyed.
 - **Out of combat** shows only once `combatSaveData` is gone, which is when the reward is taken,
   not when `Finish` is clicked. Nothing on disk marks `Finish`; this is temporary until something

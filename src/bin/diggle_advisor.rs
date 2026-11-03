@@ -39,6 +39,21 @@ use std::path::PathBuf;
 use std::sync::{mpsc, Mutex, OnceLock};
 use windows::core::{w, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
+};
+use windows::Win32::Graphics::Direct2D::{
+    D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
+    D2D1_RENDER_TARGET_USAGE_NONE,
+};
+use windows::Win32::Graphics::DirectWrite::{
+    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
     CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, FillRect, GetSysColorBrush,
     GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, SelectObject, SetBkMode, SetTextColor,
@@ -88,6 +103,9 @@ struct Ui {
     banner: HWND,
     tile_font: HFONT,
     wildcard_font: HFONT,
+    /// Direct2D text for the cells that carry emoji. `None` if it would not start, and those
+    /// cells fall back to the list's own GDI text, emoji in monochrome.
+    colour_text: Option<ColourText>,
 }
 
 thread_local! {
@@ -316,7 +334,16 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         };
         SendMessageW(list, LVM_INSERTCOLUMNW, WPARAM(i), LPARAM(&col as *const _ as isize));
     }
-    Ok(Ui { status, notes, topmost, list, banner, tile_font, wildcard_font })
+    Ok(Ui {
+        status,
+        notes,
+        topmost,
+        list,
+        banner,
+        tile_font,
+        wildcard_font,
+        colour_text: ColourText::new().ok(),
+    })
 }
 
 unsafe fn layout(hwnd: HWND, ui: &Ui) {
@@ -360,6 +387,88 @@ fn colorref((r, g, b): (u8, u8, u8)) -> COLORREF {
 fn faded((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
     let mix = |c: u8| ((c as u16 + 200) / 2) as u8;
     (mix(r), mix(g), mix(b))
+}
+
+/// The columns whose text carries emoji, drawn by [`ColourText`]: Bonus and Spell.
+const EMOJI_COLUMNS: [i32; 2] = [3, 5];
+
+/// Colour emoji, which GDI cannot draw: GDI renders a colour font's glyphs in one colour, so the
+/// list's own text would show 🔥 as a black outline. Direct2D's text drawing with
+/// `D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT` draws them in colour, onto the list's own device
+/// context through a DC render target.
+struct ColourText {
+    target: ID2D1DCRenderTarget,
+    format: IDWriteTextFormat,
+}
+
+impl ColourText {
+    fn new() -> windows::core::Result<Self> {
+        // SAFETY: plain factory and resource creation; nothing is shared across threads.
+        unsafe {
+            let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+            let props = D2D1_RENDER_TARGET_PROPERTIES {
+                r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_IGNORE,
+                },
+                dpiX: 0.0,
+                dpiY: 0.0,
+                usage: D2D1_RENDER_TARGET_USAGE_NONE,
+                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+            };
+            let target = factory.CreateDCRenderTarget(&props)?;
+            let write: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+            // The same face and size as the list's other columns (15 px Segoe UI, at 96 DPI).
+            let format = write.CreateTextFormat(
+                w!("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                15.0,
+                w!(""),
+            )?;
+            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+            Ok(ColourText { target, format })
+        }
+    }
+
+    /// Draws `text` into `rc` of `hdc`, black, or greyed for a stale list.
+    unsafe fn draw(
+        &self, hdc: windows::Win32::Graphics::Gdi::HDC, rc: &RECT, text: &str, live: bool,
+    ) {
+        FillRect(hdc, rc, GetSysColorBrush(COLOR_WINDOW));
+        if self.target.BindDC(hdc, rc).is_err() {
+            return;
+        }
+        let (w, h) = ((rc.right - rc.left) as f32, (rc.bottom - rc.top) as f32);
+        let colour = |r: f32, g: f32, b: f32, a: f32| D2D1_COLOR_F { r, g, b, a };
+        self.target.BeginDraw();
+        self.target.Clear(Some(&colour(1.0, 1.0, 1.0, 1.0)));
+        if let Ok(ink) = self.target.CreateSolidColorBrush(&colour(0.0, 0.0, 0.0, 1.0), None) {
+            let units: Vec<u16> = text.encode_utf16().collect();
+            self.target.DrawText(
+                &units,
+                &self.format,
+                &D2D_RECT_F { left: 6.0, top: 0.0, right: w - 4.0, bottom: h },
+                &ink,
+                D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT | D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+        // A stale list is greyed by washing it with translucent white, which greys the coloured
+        // glyphs as well as the black ones.
+        if !live {
+            if let Ok(wash) = self.target.CreateSolidColorBrush(&colour(1.0, 1.0, 1.0, 0.55), None)
+            {
+                self.target
+                    .FillRectangle(&D2D_RECT_F { left: 0.0, top: 0.0, right: w, bottom: h }, &wash);
+            }
+        }
+        let _ = self.target.EndDraw(None, None);
+    }
 }
 
 /// The text of one cell of the virtual list.
@@ -501,6 +610,24 @@ unsafe fn notify(ui: &Ui, lparam: LPARAM) -> Option<LRESULT> {
             if stage.0 == CDDS_ITEMPREPAINT.0 | CDDS_SUBITEM.0 {
                 if cd.iSubItem == WORD_COLUMN {
                     draw_word(ui, cd);
+                    return Some(LRESULT(CDRF_SKIPDEFAULT as isize));
+                }
+                if let Some(colour) =
+                    ui.colour_text.as_ref().filter(|_| EMOJI_COLUMNS.contains(&cd.iSubItem))
+                {
+                    let (text, live) = {
+                        let v = view().lock().unwrap();
+                        (cell_text(&v, cd.nmcd.dwItemSpec, cd.iSubItem), v.live)
+                    };
+                    let mut rc =
+                        RECT { top: cd.iSubItem, left: LVIR_BOUNDS as i32, ..Default::default() };
+                    SendMessageW(
+                        ui.list,
+                        LVM_GETSUBITEMRECT,
+                        WPARAM(cd.nmcd.dwItemSpec),
+                        LPARAM(&mut rc as *mut _ as isize),
+                    );
+                    colour.draw(cd.nmcd.hdc, &rc, &text, live);
                     return Some(LRESULT(CDRF_SKIPDEFAULT as isize));
                 }
                 let live = view().lock().unwrap().live;

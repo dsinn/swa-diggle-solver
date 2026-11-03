@@ -1295,7 +1295,7 @@ pub fn ranked(
         }
     });
     let mut list = all.into_inner().unwrap();
-    list.sort_by(|a, b| order(a, b));
+    list.sort_by(order);
     list
 }
 

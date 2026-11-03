@@ -50,7 +50,7 @@ pub fn plan(
     let health = cs.int_at("rpg.enemy.health").unwrap_or(0);
     let armour = cs.int_at("rpg.enemy.armour").unwrap_or(0);
     let name = cs.str_at("rpg.enemy.name").unwrap_or("?").to_string();
-    let (mods, geom) = Modifiers::from_save(&game_dir, cs, tiles.len())?;
+    let (mods, geom) = Modifiers::from_save(game_dir, cs, tiles.len())?;
     for p in &mods.problems {
         notes.push(format!("  WARNING {p}\n"));
     }

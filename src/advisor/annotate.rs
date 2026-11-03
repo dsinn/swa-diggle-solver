@@ -58,7 +58,15 @@ impl std::fmt::Display for Bonus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "x{:.2}", self.mult)?;
         if !self.names.is_empty() {
-            write!(f, " ({})", self.names.join(", "))?;
+            let named: Vec<String> = self
+                .names
+                .iter()
+                .map(|n| match lexicon_emoji(n) {
+                    Some(e) => format!("{e} {n}"),
+                    None => n.clone(),
+                })
+                .collect();
+            write!(f, " ({})", named.join(", "))?;
         }
         Ok(())
     }
@@ -215,12 +223,56 @@ fn historical_glyph(ligature: &str) -> Option<&'static str> {
     })
 }
 
-/// The Spell column: the spell to cast for the damage shown, first, as `Cast Turn`; then any
+/// The Spell column: the spell to cast for the damage shown, first, as `💀 Cast Turn`; then any
 /// other held spell the word qualifies for, as a choice the player may still want.
 pub fn spell_column(cast: Option<&'static str>, qualifying: Vec<&'static str>) -> Vec<String> {
-    let mut out: Vec<String> = cast.map(|c| format!("Cast {c}")).into_iter().collect();
-    out.extend(qualifying.into_iter().filter(|q| Some(*q) != cast).map(str::to_string));
+    let label = |text: String, heading: &str| match spell_emoji(heading) {
+        Some(e) => format!("{e} {text}"),
+        None => text,
+    };
+    let mut out: Vec<String> = cast.map(|c| label(format!("Cast {c}"), c)).into_iter().collect();
+    out.extend(
+        qualifying.into_iter().filter(|q| Some(*q) != cast).map(|q| label(q.to_string(), q)),
+    );
     out
+}
+
+/// The emoji for a lexicon, by the name a bonus carries (`Bone`, from `lexiconBonusBone`).
+///
+/// The user's choices, 2026-11-02: fire, cold, bone, wood, spider and profane. The rest are
+/// filled in to match; the dictionaries are `utils/dictionaries/*.lua`.
+pub fn lexicon_emoji(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "Fire" => "🔥",
+        "Ice" => "❄️",
+        "Bone" => "💀",
+        "Wood" => "🪵",
+        "Spider" => "🕷️",
+        "Swears" => "❗",
+        "Axe" => "🪓",
+        "Blood" => "🩸",
+        "Iron" => "⛓️",
+        "Metal" => "⚙️",
+        "Slime" => "🟢",
+        _ => return None,
+    })
+}
+
+/// The emoji for a spell, by its `castHeading`. A spell checked against a dictionary shares that
+/// dictionary's emoji, so a Bone bonus and `Cast Turn` read as the same thing.
+pub fn spell_emoji(heading: &str) -> Option<&'static str> {
+    match heading {
+        "Fire" => lexicon_emoji("Fire"),
+        "Ice" => lexicon_emoji("Ice"),
+        "Metal" => lexicon_emoji("Metal"),
+        "Drain" => lexicon_emoji("Blood"),
+        "Curse" => lexicon_emoji("Swears"),
+        "Turn" | "Turn (if undead)" => lexicon_emoji("Bone"),
+        "Four heal" => Some("💚"),
+        "Vowels" => Some("🔤"),
+        "UwU" => Some("🥺"),
+        _ => None,
+    }
 }
 
 /// The list's rows, at most `cap` of them, in the order given.
@@ -301,7 +353,7 @@ mod tests {
         mods.bonus_names = vec!["Fire".into(), "Ice".into()];
         let both = Bonus { mult: 2.0, names: vec!["Fire".into(), "Ice".into()] };
         assert_eq!(bonus_of(&mods, "CAT"), Some(both.clone()));
-        assert_eq!(both.to_string(), "x2.00 (Fire, Ice)");
+        assert_eq!(both.to_string(), "x2.00 (🔥 Fire, ❄️ Ice)");
         assert_eq!(bonus_of(&mods, "DOG"), None);
     }
 
@@ -389,6 +441,32 @@ mod tests {
         let c = cand("X", 1, Tier::Fallback, (0..tiles.len()).collect());
         let shown: Vec<String> = letters_of(&tiles, &c).into_iter().map(|l| l.text).collect();
         assert_eq!(shown, ["Þ", "Ð", "Æ", "Œ", "ß", "ꙮ", "ING", "TH", "QU"]);
+    }
+
+    /// The spell to cast leads, with its emoji; other qualifying spells follow; a spell sharing a
+    /// dictionary shows that dictionary's emoji.
+    #[test]
+    fn the_spell_column_leads_with_the_cast_and_its_emoji() {
+        assert_eq!(
+            spell_column(Some("Turn"), vec!["Turn", "Four heal"]),
+            vec!["💀 Cast Turn", "💚 Four heal"]
+        );
+        assert_eq!(spell_column(None, vec!["Fire"]), vec!["🔥 Fire"]);
+        assert!(spell_column(None, vec![]).is_empty());
+    }
+
+    /// Every dictionary the game ships has an emoji, so a bonus never shows a bare name by accident.
+    #[test]
+    fn every_lexicon_has_an_emoji() {
+        let lex =
+            crate::lexica::Lexica::load(&PathBuf::from("../sternly-worded-adventures")).unwrap();
+        let statuses: std::collections::HashMap<String, f64> =
+            lex.status_keys().iter().map(|k| (k.to_string(), 2.0)).collect();
+        let names = lex.bonus_names(&statuses);
+        assert!(names.len() >= 10, "{names:?}");
+        for n in names {
+            assert!(lexicon_emoji(&n).is_some(), "{n}");
+        }
     }
 
     #[test]

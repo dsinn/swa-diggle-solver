@@ -6,7 +6,13 @@ edition = "2021"
 [dependencies]
 mlua = { version = "0.10", features = ["luajit", "vendored"] }
 windows = { version = "0.58", features = [
+    "Foundation_Numerics",
     "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Storage_FileSystem",
