@@ -196,6 +196,11 @@ Diggle drives. The game data (dictionary, scores, tile textures) comes from
   qualifies for, shown as their emoji and led by the one to cast when it beats the plain attack
   (`💀` for Turn), in which case the damage and ranking are that spell's; and what it does: `kills`, `scares`,
   `frugal kill`, `overshoots - would kill`, or blank when the enemy simply survives.
+  With the rapier, a word that starts and ends with the same letter ignores armour, as in the
+  game: its damage is marked 🤺, and it kills on the enemy's health alone. Words that don't kill
+  are then ranked by the share of what's left that they remove — health alone for a 🤺 word,
+  health plus armour for any other — so a long word that strips the armour still beats a short
+  🤺 word that barely scratches the health. Diggle plays by the same rule.
   Bonuses and spells are marked with colour emoji, one per dictionary (🔥 fire, ❄️ ice, 💀 bone,
   🪵 wood, 🕷️ spider, ❗ profanity, 🪓 axe, 🩸 blood, ⛓️ iron, 🤘 metal, 🍮 slime), so a spell
   checked against a dictionary shares its emoji; the others are 💚 Four heal and 🔤 Vowels, and UwU is just `UwU`.

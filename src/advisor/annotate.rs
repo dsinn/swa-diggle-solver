@@ -28,6 +28,9 @@ pub struct Row {
     pub letters: Vec<Letter>,
     /// The headings of the held spells this word would cast (`Fire`, `Four heal`).
     pub spells: Vec<String>,
+    /// The rapier carries this word's damage past the enemy's armour — see
+    /// [`crate::search::Modifiers::pierces`].
+    pub pierces: bool,
 }
 
 /// The enemy's lexicon bonus for `word`, when it is not 1, and which lexicons it comes from.
@@ -109,12 +112,13 @@ impl Heals {
     ///   (`rpg/effects/material/gemheal.lua`, its `activate`). Diggle's ranking does not model this.
     ///
     /// A kill is judged as the goals judge it, against post-status health, so this agrees with
-    /// Diggle's arithmetic rather than with a second reading of the same save.
+    /// Diggle's arithmetic rather than with a second reading of the same save. And on the word's
+    /// reach, so a rapier word's overkill is counted past health alone, as `rpgview.lua:1207` does.
     pub fn of(&self, tiles: &[Tile], scorer: &Scorer, c: &Candidate) -> i64 {
-        let kills = c.score >= self.need;
+        let kills = c.reach >= self.need;
         let mut heal = 0;
         if self.rested && self.bleed == 0 && kills {
-            heal += crate::rested::heal_from(c.score, self.need);
+            heal += crate::rested::heal_from(c.reach, self.need);
         }
         if self.wood_gear
             && self.bleed == 0
@@ -157,7 +161,10 @@ pub fn bleed_of(cs: &Table) -> i64 {
 /// **Blank when the enemy simply survives.** A hit that neither kills, scares nor breaks a scare's
 /// ceiling has nothing to say beyond its damage, which has its own column; the user found a
 /// `chip` label there to be noise.
-pub fn effect(goal: Goal, tier: Tier, score: i64, kill: i64) -> &'static str {
+///
+/// `score` is the damage, which decides whether the word lands at all; `reach` is the damage as the
+/// goal measures it ([`crate::search::Modifiers::reach`]), which decides whether it kills.
+pub fn effect(goal: Goal, tier: Tier, score: i64, reach: i64, kill: i64) -> &'static str {
     if score < MIN_MEANINGFUL_DAMAGE {
         return "no damage";
     }
@@ -167,7 +174,7 @@ pub fn effect(goal: Goal, tier: Tier, score: i64, kill: i64) -> &'static str {
         (Tier::InBand, _) => "kills",
         (Tier::Under, _) => "",
         (Tier::Overshoot, _) => "overshoots - would kill",
-        (Tier::Fallback, _) if score >= kill => "kills",
+        (Tier::Fallback, _) if reach >= kill => "kills",
         (Tier::Fallback, _) => "",
     }
 }
@@ -299,7 +306,8 @@ pub fn rows(
             tier: c.tier,
             bonus: bonus_of(&plan.mods, &c.word),
             heal: heals.of(&plan.tiles, scorer, c),
-            effect: effect(plan.goal, c.tier, c.score, heals.need),
+            effect: effect(plan.goal, c.tier, c.score, c.reach, heals.need),
+            pierces: c.pierces,
             letters: letters_of(&plan.tiles, c),
             spells: spell_column(c.cast, spells.qualifying(&c.word, &tile_letters(c))),
         })
@@ -324,6 +332,8 @@ mod tests {
         Candidate {
             word: word.into(),
             score,
+            reach: score,
+            pierces: false,
             tier,
             rank: None,
             typed: Typed { tiles, wildcards: vec![None; n], corners_used: 0 },
@@ -364,6 +374,20 @@ mod tests {
         assert_eq!(h.of(&tiles, &s, &cand("CAT", 9, Tier::InBand, vec![0, 1, 2])), 2);
         assert_eq!(h.of(&tiles, &s, &cand("CAT", 20, Tier::InBand, vec![0, 1, 2])), 3);
         assert_eq!(h.of(&tiles, &s, &cand("CAT", 4, Tier::Fallback, vec![0, 1, 2])), 0);
+    }
+
+    /// A rapier word's damage goes to health alone, so its overkill — and the heal — are counted
+    /// from its reach: 45 into an enemy on 42 behind 54 armour overkills by 3, not by -51.
+    #[test]
+    fn a_rapier_kill_heals_from_its_reach() {
+        let tiles: Vec<Tile> = "SINGES".chars().map(|c| Tile::plain(&c.to_string())).collect();
+        let h = Heals { rested: true, ..heals(96, 10) };
+        let c = Candidate {
+            reach: 99,
+            pierces: true,
+            ..cand("SINGES", 45, Tier::InBand, vec![0, 1, 2, 3, 4, 5])
+        };
+        assert_eq!(h.of(&tiles, &scorer(), &c), 1, "floor(3 / 2)");
     }
 
     /// Bleeding skips the heal branch (`rpgview.lua:1080`).
@@ -471,7 +495,7 @@ mod tests {
     #[test]
     fn effects_match_goal_and_tier() {
         let kill = 5;
-        let e = |goal: Goal, tier: Tier, score: i64| effect(goal, tier, score, kill);
+        let e = |goal: Goal, tier: Tier, score: i64| effect(goal, tier, score, score, kill);
         assert_eq!(e(Goal::RankedKill { need: 5 }, Tier::InBand, 6), "kills");
         assert_eq!(
             e(Goal::RankedKill { need: 5 }, Tier::Fallback, 3),
@@ -492,6 +516,9 @@ mod tests {
         assert_eq!(e(Goal::FrugalKill { need: 5, below: 7 }, Tier::InBand, 5), "frugal kill");
         assert_eq!(e(Goal::FrugalKill { need: 5, below: 7 }, Tier::Fallback, 9), "kills");
         assert_eq!(e(Goal::MaxDamage, Tier::Fallback, 9), "kills");
+        // A rapier word: it kills on its reach, and lands or not on its damage.
+        assert_eq!(effect(Goal::MaxDamage, Tier::Fallback, 3, 9, kill), "kills");
+        assert_eq!(effect(Goal::MaxDamage, Tier::Fallback, 0, 4, kill), "no damage");
     }
 
     /// The row shows each letter against the tile it is typed into — wildcards as their letter.

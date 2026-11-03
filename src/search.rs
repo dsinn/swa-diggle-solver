@@ -176,6 +176,18 @@ pub struct Modifiers {
     /// for why the obvious wiring makes play worse rather than better. It is reported in the turn
     /// log, which is what makes the next step measurable instead of theoretical.
     pub player_dodges: bool,
+    /// What stands between us and the kill, for the one gear that changes which of it a word must
+    /// get through: the rapier. `None` until the turn's plan fills it in ([`crate::turn::plan`]), and
+    /// then no word is treated as piercing — see [`Modifiers::reach`].
+    pub defence: Option<Defence>,
+}
+
+/// The enemy's health and armour, as the goals measure them: health after the status already on it
+/// ticks (see [`crate::turn::plan`]'s `deciding_health`), and the armour from the save.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Defence {
+    pub health: i64,
+    pub armour: i64,
 }
 
 impl Modifiers {
@@ -259,6 +271,7 @@ impl Modifiers {
                 weapon,
                 enemy_status_tick,
                 player_dodges,
+                defence: None,
             },
             resolved.geometry,
         ))
@@ -285,6 +298,73 @@ impl Modifiers {
             weapon: crate::gear::Weapon::default(),
             enemy_status_tick: 0,
             player_dodges: false,
+            defence: None,
+        }
+    }
+
+    /// This word's damage ignores the enemy's armour: the rapier is held, the word starts and ends
+    /// with the same letter ([`crate::gear::Weapon::pierces`]), and there is armour to ignore.
+    pub fn pierces(&self, word: &str) -> bool {
+        self.defence.is_some_and(|d| d.armour > 0) && self.weapon.pierces(word)
+    }
+
+    /// `damage` as the goals measure it: against health **plus** armour.
+    ///
+    /// A piercing word's damage goes straight to health (`rpgview.lua:1022`, `:1200-1201`), so it
+    /// counts as its damage plus the armour it skips. This is exact, not an approximation, because
+    /// every threshold a goal sets is measured on that same sum, and adding the armour to both sides
+    /// changes nothing:
+    ///
+    /// - **the kill**: `damage >= health` is `damage + armour >= health + armour`;
+    /// - **a scare's floor**, `(health - top) + armour` ([`Goal::for_enemy`]), and its ceiling,
+    ///   `health + armour`, the same way;
+    /// - **the Well-Rested heal**: overkill is `damage - (health + effectiveArmour)`
+    ///   (`rpgview.lua:1207`), which is `reach - (health + armour)` either way;
+    /// - **overkill gold**, which pays that same overkill.
+    ///
+    /// The damage shown to a person stays the real one; this is only for comparing with a goal.
+    /// It is **not** an ordering of the words that miss — see [`Modifiers::hits_harder`].
+    pub fn reach(&self, word: &str, damage: i64) -> i64 {
+        match self.defence {
+            Some(d) if self.pierces(word) => damage + d.armour,
+            _ => damage,
+        }
+    }
+
+    /// Whether `a` (word, damage) is a harder hit than `b`: the ordering every "hardest word"
+    /// fallback uses.
+    ///
+    /// **A kill beats any non-kill**, and kills compare by [`Modifiers::reach`], which is how far
+    /// past lethal they go — what overkill gold pays on.
+    ///
+    /// **Among words that do not kill, the larger share of what is left wins** — the user's rule,
+    /// 2026-11-03. A rapier word removes `damage / health`, any other `damage / (health + armour)`.
+    /// Ranking by reach instead would put a three-letter rapier word for 5 (worth 59 in reach)
+    /// above a long word that strips 53 of 54 armour, and that is the wrong way round: the long
+    /// word leaves almost any word able to finish the job next turn.
+    ///
+    /// The rule assumes the next word will be the same kind as this one, so close calls lean a
+    /// little towards non-rapier words: 17 to health out of 42 (0.40) loses to 43 of 96 (0.45),
+    /// though it leaves a rapier word far less to do. Accepted for being explainable in a sentence.
+    ///
+    /// Without the rapier, or without armour, every word has the same denominator and this is
+    /// plain damage, as it was before.
+    pub fn hits_harder(&self, a: (&str, i64), b: (&str, i64)) -> std::cmp::Ordering {
+        let (ra, rb) = (self.reach(a.0, a.1), self.reach(b.0, b.1));
+        let Some(d) = self.defence else { return ra.cmp(&rb) };
+        let lethal = d.health + d.armour;
+        match (ra >= lethal, rb >= lethal) {
+            (true, true) => ra.cmp(&rb),
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => {
+                let share = |word: &str, damage: i64| -> (i128, i128) {
+                    let of = if self.pierces(word) { d.health } else { lethal };
+                    (damage as i128, of.max(1) as i128)
+                };
+                let ((na, da), (nb, db)) = (share(a.0, a.1), share(b.0, b.1));
+                (na * db).cmp(&(nb * da))
+            }
         }
     }
 
@@ -441,7 +521,8 @@ pub struct Outcome {
     /// [`Goal::FirstKill`] reports whichever thread got there first and stops everything, while
     /// [`Goal::RankedKill`] reports the best by [`crate::pick::Rank`] after seeing them all.
     pub lethal: Option<Found>,
-    /// Highest-scoring word seen, for when nothing is lethal.
+    /// Hardest hit seen, for when nothing is lethal — by [`Modifiers::hits_harder`], which is plain
+    /// damage unless the rapier is held.
     pub best: Option<Found>,
     /// Lowest-scoring word seen. The **last** resort for a band goal, behind [`Outcome::under`].
     ///
@@ -1004,7 +1085,9 @@ pub fn ranked_kill(
                             typed.corners_used,
                             corner_count,
                         );
-                        if score >= need {
+                        // Measured as the goal is: see [`Modifiers::reach`].
+                        let reach = mods.reach(word, score);
+                        if reach >= need {
                             let rank = crate::pick::rank(
                                 tiles,
                                 geometry,
@@ -1012,7 +1095,7 @@ pub fn ranked_kill(
                                 scorer,
                                 &picking.target,
                                 picking.prefs,
-                                score,
+                                reach,
                             );
                             let take = match &local_lethal {
                                 Some((_, cur)) => rank.better_than(cur),
@@ -1023,7 +1106,11 @@ pub fn ranked_kill(
                                     Some((Found { word: word.clone(), score, slice }, rank));
                             }
                         }
-                        if local_best.as_ref().map(|b| score > b.score).unwrap_or(true) {
+                        if local_best
+                            .as_ref()
+                            .map(|b| mods.hits_harder((word, score), (&b.word, b.score)).is_gt())
+                            .unwrap_or(true)
+                        {
                             local_best = Some(Found { word: word.clone(), score, slice });
                         }
                         if local_longest
@@ -1046,7 +1133,12 @@ pub fn ranked_kill(
                 }
                 if let Some(lb) = local_best {
                     let mut b = best.lock().unwrap();
-                    if b.as_ref().map(|cur| lb.score > cur.score).unwrap_or(true) {
+                    if b.as_ref()
+                        .map(|cur| {
+                            mods.hits_harder((&lb.word, lb.score), (&cur.word, cur.score)).is_gt()
+                        })
+                        .unwrap_or(true)
+                    {
                         *b = Some(lb);
                     }
                 }
@@ -1123,7 +1215,11 @@ pub fn max_damage(
                             typed.corners_used,
                             corner_count,
                         );
-                        if local_best.as_ref().map(|b| score > b.score).unwrap_or(true) {
+                        if local_best
+                            .as_ref()
+                            .map(|b| mods.hits_harder((word, score), (&b.word, b.score)).is_gt())
+                            .unwrap_or(true)
+                        {
                             local_best = Some(Found { word: word.clone(), score, slice });
                         }
                         if local_longest
@@ -1138,7 +1234,12 @@ pub fn max_damage(
                 considered.fetch_add(seen, Ordering::Relaxed);
                 if let Some(lb) = local_best {
                     let mut b = best.lock().unwrap();
-                    if b.as_ref().map(|cur| lb.score > cur.score).unwrap_or(true) {
+                    if b.as_ref()
+                        .map(|cur| {
+                            mods.hits_harder((&lb.word, lb.score), (&cur.word, cur.score)).is_gt()
+                        })
+                        .unwrap_or(true)
+                    {
                         *b = Some(lb);
                     }
                 }
@@ -1187,7 +1288,12 @@ pub enum Tier {
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub word: String,
+    /// The damage the word deals — what a person is shown.
     pub score: i64,
+    /// [`Modifiers::reach`]: the damage as the goal measures it, which is what decides the tier.
+    pub reach: i64,
+    /// The damage ignores armour ([`Modifiers::pierces`]).
+    pub pierces: bool,
     pub tier: Tier,
     /// Only for [`Tier::InBand`], where it is what orders the band — as in the search.
     pub rank: Option<crate::pick::Rank>,
@@ -1210,8 +1316,12 @@ pub struct Candidate {
 ///   *gentlest* first, then the words that do nothing;
 /// - **`MaxDamage`**: hardest first.
 ///
-/// Ties are broken by score, then alphabetically, so the list is stable between reads of the same
-/// save. `FirstKill` is listed as `RankedKill` would list it: a list has no "first to be found".
+/// "Hardest" is [`Modifiers::hits_harder`] and "gentlest" is [`Modifiers::reach`], the same as the
+/// search's own fallbacks; both are plain damage unless the rapier is held. The tiers themselves are
+/// decided on reach, so a rapier word kills on health alone.
+///
+/// Ties are broken by the harder hit, then alphabetically, so the list is stable between reads of
+/// the same save. `FirstKill` is listed as `RankedKill` would list it: a list has no "first to be found".
 ///
 /// **Diggle does not play from this yet.** It still calls [`search`], and
 /// `ranked_head_matches_choice_for_on_every_fixture` holds the two together: the head of this list
@@ -1230,12 +1340,14 @@ pub fn ranked(
     let corner_count = geometry.corner_count();
     let words = dict.words();
     let threads = threads.max(1).min(words.len().max(1));
-    let tier_of = |score: i64| -> Tier {
+    // Judged on reach, which is the damage measured the way the thresholds are (see
+    // [`Modifiers::reach`]) — except the floor, which is about whether the word lands at all.
+    let tier_of = |score: i64, reach: i64| -> Tier {
         match goal {
-            Goal::RankedKill { need } | Goal::FirstKill { need } if score >= need => Tier::InBand,
-            Goal::FrugalKill { need, below } if score >= need && score < below => Tier::InBand,
-            Goal::Scare { need, below } if score >= need && score < below => Tier::InBand,
-            Goal::Scare { below, .. } if score >= below => Tier::Overshoot,
+            Goal::RankedKill { need } | Goal::FirstKill { need } if reach >= need => Tier::InBand,
+            Goal::FrugalKill { need, below } if reach >= need && reach < below => Tier::InBand,
+            Goal::Scare { need, below } if reach >= need && reach < below => Tier::InBand,
+            Goal::Scare { below, .. } if reach >= below => Tier::Overshoot,
             Goal::Scare { .. } if score >= MIN_MEANINGFUL_DAMAGE => Tier::Under,
             _ => Tier::Fallback,
         }
@@ -1268,7 +1380,8 @@ pub fn ranked(
                             typed.corners_used,
                             corner_count,
                         );
-                        let tier = tier_of(score);
+                        let reach = mods.reach(word, score);
+                        let tier = tier_of(score, reach);
                         let rank = (tier == Tier::InBand).then(|| {
                             crate::pick::rank(
                                 tiles,
@@ -1277,12 +1390,14 @@ pub fn ranked(
                                 scorer,
                                 &picking.target,
                                 picking.prefs,
-                                score,
+                                reach,
                             )
                         });
                         local.push(Candidate {
                             word: word.clone(),
                             score,
+                            reach,
+                            pierces: mods.pierces(word),
                             tier,
                             rank,
                             typed,
@@ -1295,22 +1410,27 @@ pub fn ranked(
         }
     });
     let mut list = all.into_inner().unwrap();
-    list.sort_by(order);
+    list.sort_by(|a, b| order(mods, a, b));
     list
 }
 
 /// [`ranked`]'s comparison: tier, then within it the tier's own ordering, then the tiebreaks.
-fn order(a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
+///
+/// "Hardest first" is [`Modifiers::hits_harder`] and "gentlest first" is reach, so both agree with
+/// the search's own fallbacks.
+fn order(mods: &Modifiers, a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
     let tier = |t: Tier| t as usize;
     tier(a.tier).cmp(&tier(b.tier)).then_with(|| {
         let within = match (a.tier, a.rank, b.rank) {
             (Tier::InBand, Some(ra), Some(rb)) if ra.better_than(&rb) => Less,
             (Tier::InBand, Some(ra), Some(rb)) if rb.better_than(&ra) => Greater,
-            (Tier::Overshoot, ..) => a.score.cmp(&b.score),
+            (Tier::Overshoot, ..) => a.reach.cmp(&b.reach),
             _ => Equal,
         };
-        within.then_with(|| b.score.cmp(&a.score)).then_with(|| a.word.cmp(&b.word))
+        within
+            .then_with(|| mods.hits_harder((&b.word, b.score), (&a.word, a.score)))
+            .then_with(|| a.word.cmp(&b.word))
     })
 }
 
@@ -1389,7 +1509,10 @@ pub fn race_for_band(
                         typed.corners_used,
                         corner_count,
                     );
-                    if score >= need && below.map(|b| score < b).unwrap_or(true) {
+                    // Measured as the goal is: see [`Modifiers::reach`]. The floor below stays on
+                    // the damage itself, because it asks whether the word lands at all.
+                    let reach = mods.reach(word, score);
+                    if reach >= need && below.map(|b| reach < b).unwrap_or(true) {
                         // Ranked, not raced. Every word in the band ends the exchange the same way,
                         // so the tiles it spends are the only thing left to choose on.
                         let rank = crate::pick::rank(
@@ -1399,7 +1522,7 @@ pub fn race_for_band(
                             scorer,
                             &picking.target,
                             picking.prefs,
-                            score,
+                            reach,
                         );
                         // **Only a band ranks.** With no ceiling this is `race_for_kill`, whose
                         // contract is `Goal::FirstKill`'s: every lethal word ends the exchange, so
@@ -1423,23 +1546,33 @@ pub fn race_for_band(
                         }
                         continue;
                     }
-                    if local_best.as_ref().map(|b| score > b.score).unwrap_or(true) {
+                    if local_best
+                        .as_ref()
+                        .map(|b| mods.hits_harder((word, score), (&b.word, b.score)).is_gt())
+                        .unwrap_or(true)
+                    {
                         local_best = Some(Found { word: word.clone(), score, slice });
                     }
                     // The gentlest word that still does something. A zero-scoring word is the
                     // gentlest of all and is never the answer — see `MIN_MEANINGFUL_DAMAGE` — so
                     // this is the minimum over words that actually land, not over all of them.
                     if score >= MIN_MEANINGFUL_DAMAGE
-                        && local_least.as_ref().map(|b| score < b.score).unwrap_or(true)
+                        && local_least
+                            .as_ref()
+                            .map(|b| reach < mods.reach(&b.word, b.score))
+                            .unwrap_or(true)
                     {
                         local_least = Some(Found { word: word.clone(), score, slice });
                     }
                     // The hardest word that still cannot break a ceiling. Every word reaching this
-                    // line missed the band, so `score < below` here also means `score < need` — the
+                    // line missed the band, so `reach < below` here also means `reach < need` — the
                     // in-between words left above. See [`Outcome::under`].
                     if score >= MIN_MEANINGFUL_DAMAGE
-                        && below.is_some_and(|b| score < b)
-                        && local_under.as_ref().map(|u| score > u.score).unwrap_or(true)
+                        && below.is_some_and(|b| reach < b)
+                        && local_under
+                            .as_ref()
+                            .map(|u| mods.hits_harder((word, score), (&u.word, u.score)).is_gt())
+                            .unwrap_or(true)
                     {
                         local_under = Some(Found { word: word.clone(), score, slice });
                     }
@@ -1460,19 +1593,34 @@ pub fn race_for_band(
                 }
                 if let Some(lb) = local_best {
                     let mut b = best.lock().unwrap();
-                    if b.as_ref().map(|cur| lb.score > cur.score).unwrap_or(true) {
+                    if b.as_ref()
+                        .map(|cur| {
+                            mods.hits_harder((&lb.word, lb.score), (&cur.word, cur.score)).is_gt()
+                        })
+                        .unwrap_or(true)
+                    {
                         *b = Some(lb);
                     }
                 }
                 if let Some(lst) = local_least {
                     let mut l = least.lock().unwrap();
-                    if l.as_ref().map(|cur| lst.score < cur.score).unwrap_or(true) {
+                    if l.as_ref()
+                        .map(|cur| {
+                            mods.reach(&lst.word, lst.score) < mods.reach(&cur.word, cur.score)
+                        })
+                        .unwrap_or(true)
+                    {
                         *l = Some(lst);
                     }
                 }
                 if let Some(lu) = local_under {
                     let mut u = under.lock().unwrap();
-                    if u.as_ref().map(|cur| lu.score > cur.score).unwrap_or(true) {
+                    if u.as_ref()
+                        .map(|cur| {
+                            mods.hits_harder((&lu.word, lu.score), (&cur.word, cur.score)).is_gt()
+                        })
+                        .unwrap_or(true)
+                    {
                         *u = Some(lu);
                     }
                 }
@@ -2849,6 +2997,89 @@ mod ranked_tests {
         assert_eq!(scored(&w.scorer, &mods, &word, &tiles, None, 0, 0), plain * 2);
     }
 
+    /// Modifiers for a player holding the rapier against an enemy on `health + armour`.
+    fn rapier(health: i64, armour: i64) -> Modifiers {
+        let save = crate::game::save::parse(
+            "return { rpg = { player = { gearFlags = { damageArmourPiercingEndsMatch = 1 } } } }",
+        )
+        .unwrap();
+        let mut mods = Modifiers::none();
+        mods.weapon = crate::gear::Weapon::from_save(&crate::gear::Gear::from_save(&save), &save);
+        mods.defence = Some(Defence { health, armour });
+        mods
+    }
+
+    /// A rapier word goes straight to health, so against every threshold — all of them measured
+    /// on health plus armour — it counts as its damage plus the armour it skips.
+    #[test]
+    fn a_rapier_word_reaches_past_the_armour() {
+        let mods = rapier(42, 54);
+        assert_eq!(mods.reach("SINGES", 45), 99);
+        assert_eq!(mods.reach("SCATHING", 53), 53);
+        let mut no_defence = rapier(42, 54);
+        no_defence.defence = None;
+        assert_eq!(no_defence.reach("SINGES", 45), 45);
+        assert_eq!(Modifiers::none().reach("SINGES", 45), 45);
+        assert!(!rapier(42, 0).pierces("SINGES"), "nothing to pierce");
+    }
+
+    /// The user's rule for a hit that does not kill: the share of what stands between us and the
+    /// kill — health alone for a rapier word, health plus armour for any other.
+    #[test]
+    fn the_harder_hit_is_the_larger_share_of_what_is_left() {
+        use std::cmp::Ordering::*;
+        let mods = rapier(42, 54);
+        // 53/96 strips the armour; 5/42 barely scratches the health.
+        assert_eq!(mods.hits_harder(("SCATHING", 53), ("SIS", 5)), Greater);
+        // 39/42 leaves it on 3; 53/96 leaves it on 42 + 1.
+        assert_eq!(mods.hits_harder(("SANGAREES", 39), ("SCATHING", 53)), Greater);
+        // A kill beats any non-kill, and kills compare by how far past lethal they reach, which is
+        // what overkill gold pays on.
+        assert_eq!(mods.hits_harder(("SINGES", 45), ("SCATHING", 95)), Greater);
+        assert_eq!(mods.hits_harder(("SCATHING", 100), ("SINGES", 45)), Greater);
+        assert_eq!(mods.hits_harder(("SIS", 5), ("SIS", 5)), Equal);
+        // Without the rapier it is plain damage, as it always was.
+        assert_eq!(Modifiers::none().hits_harder(("SIS", 5), ("SCATHING", 53)), Less);
+    }
+
+    /// With the rapier, the band is decided on reach: rapier words kill on health alone, and the
+    /// words that do not kill are listed by the share of what is left that they remove.
+    #[test]
+    fn ranked_judges_rapier_words_against_health_alone() {
+        let w = world();
+        let mods = rapier(2, 200);
+        let need = 2 + 200 + DAMAGE_BUFFER;
+        let list = rank_all(&w, &mods, Goal::RankedKill { need });
+        assert_tiers_in_order(&list);
+        let band: Vec<&Candidate> = list.iter().filter(|c| c.tier == Tier::InBand).collect();
+        assert!(!band.is_empty(), "some rapier word should do 3");
+        for c in &list {
+            assert_eq!(c.pierces, mods.pierces(&c.word), "{}", c.word);
+            assert_eq!(c.reach, mods.reach(&c.word, c.score), "{}", c.word);
+            assert_eq!(c.tier == Tier::InBand, c.reach >= need, "{} reaches {}", c.word, c.reach);
+        }
+        assert!(band.iter().all(|c| c.pierces), "nothing else on this board does {need}");
+
+        // Nothing kills here, so the whole list is the fallback, ordered by the share removed.
+        let mods = rapier(400, 600);
+        let list = rank_all(&w, &mods, Goal::RankedKill { need: 1001 });
+        assert!(list.iter().all(|c| c.tier == Tier::Fallback));
+        assert!(list.iter().any(|c| c.pierces) && list.iter().any(|c| !c.pierces));
+        for p in list.windows(2) {
+            assert_ne!(
+                mods.hits_harder((&p[0].word, p[0].score), (&p[1].word, p[1].score)),
+                std::cmp::Ordering::Less,
+                "{} listed above {}",
+                p[0].word,
+                p[1].word
+            );
+        }
+        assert!(
+            list.iter().position(|c| c.pierces) < list.iter().position(|c| !c.pierces),
+            "at 400 health behind 600 armour, a rapier word's share is the larger"
+        );
+    }
+
     /// The advisor's top row is the word Diggle would play, or one it cannot tell apart from it.
     ///
     /// A tie is allowed because Diggle's own winner among equals depends on thread scheduling: the
@@ -2868,6 +3099,24 @@ mod ranked_tests {
         ] {
             cases.push((format!("crypt {goal:?}"), world(), Modifiers::none(), goal));
         }
+        // The rapier, where Diggle's search and the list must agree on reach and on the share rule.
+        for (health, armour) in [(2, 200), (400, 600), (5, 3)] {
+            let goal = Goal::RankedKill { need: health + armour + DAMAGE_BUFFER };
+            cases.push((
+                format!("rapier {health}+{armour}"),
+                world(),
+                rapier(health, armour),
+                goal,
+            ));
+            let goal = Goal::Scare { need: armour + 1, below: health + armour };
+            cases.push((
+                format!("rapier scare {health}+{armour}"),
+                world(),
+                rapier(health, armour),
+                goal,
+            ));
+        }
+        cases.push(("rapier max damage".into(), world(), rapier(5, 3), Goal::MaxDamage));
         let letters = crate::letters::Weights::load(&game_dir()).unwrap();
         for name in ["combatSaveData-crypt-l0.lua", "combatSaveData-l1-depleted.lua"] {
             let src = std::fs::read_to_string(format!("tests/fixtures/{name}")).unwrap();
@@ -2915,9 +3164,13 @@ mod ranked_tests {
                     chosen.word
                 ),
                 _ => assert_eq!(
-                    head.score, chosen.score,
-                    "{label}: head {} vs {}",
-                    head.word, chosen.word
+                    mods.hits_harder((&head.word, head.score), (&chosen.word, chosen.score)),
+                    std::cmp::Ordering::Equal,
+                    "{label}: head {} ({}) vs {} ({})",
+                    head.word,
+                    head.score,
+                    chosen.word,
+                    chosen.score
                 ),
             }
         }

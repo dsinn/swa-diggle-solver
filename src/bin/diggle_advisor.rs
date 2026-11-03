@@ -51,7 +51,8 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
@@ -118,7 +119,7 @@ thread_local! {
 const COLUMNS: [(&str, i32, bool); 7] = [
     ("#", 44, true),
     ("Word", 470, false),
-    ("Damage", 70, true),
+    ("Damage", 84, true),
     ("Bonus", 90, false),
     ("Heals", 56, true),
     ("Spell", 120, false),
@@ -392,8 +393,9 @@ fn faded((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
     (mix(r), mix(g), mix(b))
 }
 
-/// The columns whose text carries emoji, drawn by [`ColourText`]: Bonus and Spell.
-const EMOJI_COLUMNS: [i32; 2] = [3, 5];
+/// The columns whose text carries emoji, drawn by [`ColourText`]: Damage (the rapier's 🤺), Bonus
+/// and Spell.
+const EMOJI_COLUMNS: [i32; 3] = [2, 3, 5];
 
 /// Colour emoji, which GDI cannot draw: GDI renders a colour font's glyphs in one colour, so the
 /// list's own text would show 🔥 as a black outline. Direct2D's text drawing with
@@ -402,6 +404,8 @@ const EMOJI_COLUMNS: [i32; 2] = [3, 5];
 struct ColourText {
     target: ID2D1DCRenderTarget,
     format: IDWriteTextFormat,
+    /// The same, set flush right, for the right-aligned columns.
+    right: IDWriteTextFormat,
 }
 
 impl ColourText {
@@ -423,24 +427,31 @@ impl ColourText {
             let target = factory.CreateDCRenderTarget(&props)?;
             let write: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             // The same face and size as the list's other columns (15 px Segoe UI, at 96 DPI).
-            let format = write.CreateTextFormat(
-                w!("Segoe UI"),
-                None,
-                DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                15.0,
-                w!(""),
-            )?;
-            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-            Ok(ColourText { target, format })
+            let make = || -> windows::core::Result<IDWriteTextFormat> {
+                let format = write.CreateTextFormat(
+                    w!("Segoe UI"),
+                    None,
+                    DWRITE_FONT_WEIGHT_NORMAL,
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    15.0,
+                    w!(""),
+                )?;
+                format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+                format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+                Ok(format)
+            };
+            let (format, right) = (make()?, make()?);
+            right.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)?;
+            Ok(ColourText { target, format, right })
         }
     }
 
-    /// Draws `text` into `rc` of `hdc`, black, or greyed for a stale list.
+    /// Draws `text` into `rc` of `hdc`, black, or greyed for a stale list; flush right when
+    /// `right` is set.
     unsafe fn draw(
         &self, hdc: windows::Win32::Graphics::Gdi::HDC, rc: &RECT, text: &str, live: bool,
+        right: bool,
     ) {
         FillRect(hdc, rc, GetSysColorBrush(COLOR_WINDOW));
         if self.target.BindDC(hdc, rc).is_err() {
@@ -454,8 +465,8 @@ impl ColourText {
             let units: Vec<u16> = text.encode_utf16().collect();
             self.target.DrawText(
                 &units,
-                &self.format,
-                &D2D_RECT_F { left: 6.0, top: 0.0, right: w - 4.0, bottom: h },
+                if right { &self.right } else { &self.format },
+                &D2D_RECT_F { left: 6.0, top: 0.0, right: w - 6.0, bottom: h },
                 &ink,
                 D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT | D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 DWRITE_MEASURING_MODE_NATURAL,
@@ -480,6 +491,8 @@ fn cell_text(v: &View, item: usize, sub: i32) -> String {
     match sub {
         0 => (item + 1).to_string(),
         1 => r.row.word.clone(),
+        // The fencer before the number, so the numbers stay lined up on the right.
+        2 if r.row.pierces => format!("🤺 {}", r.row.score),
         2 => r.row.score.to_string(),
         3 => r.row.bonus.as_ref().map(|b| b.to_string()).unwrap_or_default(),
         4 => (r.row.heal > 0).then(|| format!("+{}", r.row.heal)).unwrap_or_default(),
@@ -681,7 +694,8 @@ unsafe fn notify(ui: &Ui, lparam: LPARAM) -> Option<LRESULT> {
                         WPARAM(cd.nmcd.dwItemSpec),
                         LPARAM(&mut rc as *mut _ as isize),
                     );
-                    colour.draw(cd.nmcd.hdc, &rc, &text, live);
+                    let right = COLUMNS.get(cd.iSubItem as usize).is_some_and(|c| c.2);
+                    colour.draw(cd.nmcd.hdc, &rc, &text, live, right);
                     return Some(LRESULT(CDRF_SKIPDEFAULT as isize));
                 }
                 let live = view().lock().unwrap().live;

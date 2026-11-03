@@ -438,6 +438,50 @@ mod tests {
         assert!(plain.row.spells.is_empty());
     }
 
+    /// The user's fight, 2026-11-03: the rapier against an enemy behind 54 armour. `SINGES` starts
+    /// and ends with S, so it goes straight to health and kills, where without the rapier it would
+    /// only dent the armour.
+    #[test]
+    fn a_rapier_word_kills_through_armour() {
+        let res = res();
+        let board: String = "SINGESCATHQQQQQQ".chars().map(|c| format!("\"{c}\", ")).collect();
+        let save = |rapier: bool| {
+            let mut s = turn().replacen("health = 3,", "health = 5, armour = 54,", 1);
+            let a = s.find("tileboard = {").unwrap();
+            let b = a + s[a..].find('}').unwrap();
+            s.replace_range(a..=b, &format!("tileboard = {{ {board} }}"));
+            if rapier {
+                s = s.replacen(
+                    "gearFlags = {",
+                    "gearFlags = { damageArmourPiercingEndsMatch = 1,",
+                    1,
+                );
+            }
+            s
+        };
+        let view = |rapier: bool| {
+            View::next(&View::default(), &snap(Some(&save(rapier))), &res, &mut Default::default())
+        };
+        let row = |v: &View, w: &str| v.rows.iter().find(|r| r.row.word == w).cloned();
+        let (plain, rapier) = (view(false), view(true));
+        let singes = row(&rapier, "SINGES").expect("typeable");
+        assert!(singes.row.score > 5, "SINGES must out-damage 5 health: {}", singes.row.score);
+        assert!(singes.row.pierces);
+        assert_eq!(singes.row.tier, crate::search::Tier::InBand);
+        assert_eq!(singes.row.effect, "kills");
+        assert!(
+            rapier.rows[0].row.pierces,
+            "the top row is a rapier kill: {}",
+            rapier.rows[0].row.word
+        );
+        assert!(rapier.notes.contains("rapier"), "{}", rapier.notes);
+
+        let singes = row(&plain, "SINGES").expect("typeable");
+        assert!(!singes.row.pierces);
+        assert_eq!(singes.row.tier, crate::search::Tier::Fallback);
+        assert!(!plain.notes.contains("rapier"));
+    }
+
     #[test]
     fn goals_read_as_words() {
         use crate::search::Goal;

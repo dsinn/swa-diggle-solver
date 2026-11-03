@@ -47,6 +47,10 @@ pub struct Weapon {
     toxin_attack: i64,
     burn_attack: i64,
     bleed_attack: i64,
+    /// The rapier's `damageArmourPiercingEndsMatch`: a word that starts and ends with the same
+    /// letter ignores the enemy's armour (`rpgview.lua:935`, read at `:1022` for the estimate and
+    /// `:1200-1201` for the hit). See [`Weapon::pierces`].
+    rapier: bool,
     /// `bonusMindfogToxin` is held but unmodelled — the `!` count includes the tile queue.
     pub mindfog_unmodelled: bool,
 }
@@ -70,12 +74,29 @@ impl Weapon {
             burn_attack: (status("burnAttack") != 0 || flag("burnAttack") != 0) as i64,
             // Bleed is the exception: the two sources ADD rather than either granting it (`:905`).
             bleed_attack: status("bleedAttack") + flag("bleedAttack"),
+            rapier: gear.get("damageArmourPiercingEndsMatch").is_some(),
             mindfog_unmodelled: gear.get("bonusMindfogToxin").is_some(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
         *self == Weapon::default()
+    }
+
+    /// The rapier is held — see [`Weapon::pierces`].
+    pub fn holds_rapier(&self) -> bool {
+        self.rapier
+    }
+
+    /// Whether this word's damage ignores armour: the rapier is held and the word starts and ends
+    /// with the same letter.
+    ///
+    /// The game tests the upper-cased word (`wordboard.lua:230` hands `LAZYWORD` to the modifier's
+    /// `wordCache`, `rpg/effects/modifiers/damageArmourPiercingEndsMatch.lua`), so a wildcard's
+    /// lower-case letter matches like any other, and a one-letter word pierces.
+    pub fn pierces(&self, word: &str) -> bool {
+        let b = word.as_bytes();
+        self.rapier && !b.is_empty() && b[0].eq_ignore_ascii_case(&b[b.len() - 1])
     }
 
     /// The adjustment for one word.
@@ -218,6 +239,23 @@ pub fn deferred_status_model(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// The rapier (`items/rapier.lua`): "Damage from attacks that start and end with the same
+    /// letter ignore armour." The game compares the upper-cased word (`wordboard.lua:230`), so a
+    /// one-letter word counts, and so does a wildcard at either end.
+    #[test]
+    fn the_rapier_pierces_only_a_word_that_ends_on_its_first_letter() {
+        let save = crate::game::save::parse(
+            "return { rpg = { player = { gearFlags = { damageArmourPiercingEndsMatch = 1 } } } }",
+        )
+        .unwrap();
+        let rapier = Weapon::from_save(&Gear::from_save(&save), &save);
+        assert!(rapier.pierces("SINGES"));
+        assert!(rapier.pierces("A"));
+        assert!(!rapier.pierces("SCATHING"));
+        assert!(!rapier.pierces(""));
+        assert!(!Weapon::default().pierces("SINGES"), "only with the rapier");
+    }
 
     fn bastard() -> Weapon {
         Weapon { bastard: true, ..Weapon::default() }

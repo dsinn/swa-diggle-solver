@@ -50,7 +50,7 @@ pub fn plan(
     let health = cs.int_at("rpg.enemy.health").unwrap_or(0);
     let armour = cs.int_at("rpg.enemy.armour").unwrap_or(0);
     let name = cs.str_at("rpg.enemy.name").unwrap_or("?").to_string();
-    let (mods, geom) = Modifiers::from_save(game_dir, cs, tiles.len())?;
+    let (mut mods, geom) = Modifiers::from_save(game_dir, cs, tiles.len())?;
     for p in &mods.problems {
         notes.push(format!("  WARNING {p}\n"));
     }
@@ -81,6 +81,15 @@ pub fn plan(
     // still kills if the status finishes the job, which is how a live run collected thirty
     // avoidable-murder refusals for words its own arithmetic called safe.
     let deciding_health = (health - mods.enemy_status_tick).max(0);
+    // The same health and armour the goal is built from, so a rapier word is measured against the
+    // thresholds it will actually meet — see `search::Modifiers::reach`.
+    mods.defence = Some(crate::search::Defence { health: deciding_health, armour });
+    if armour > 0 && mods.weapon.holds_rapier() {
+        notes.push(format!(
+            "  rapier: a word that starts and ends with the same letter ignores {name}'s {armour} armour
+"
+        ));
+    }
     // Printed rather than acted on. The halfling's `immuneTurnMod2` is the only thing that sets
     // it, it is a per-turn fact that leaves no other trace in a log, and the case it unlocks —
     // spending a free turn rather than committing an avoidable murder — needs a goal that does
