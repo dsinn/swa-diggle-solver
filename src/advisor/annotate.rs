@@ -222,17 +222,13 @@ fn historical_glyph(ligature: &str) -> Option<&'static str> {
     })
 }
 
-/// The Spell column: the spell to cast for the damage shown, first, as `💀 Cast Turn`; then any
-/// other held spell the word qualifies for, as a choice the player may still want.
+/// The Spell column: the spell to cast for the damage shown, first, then any other held spell
+/// the word qualifies for. Each is its emoji alone — the user's call, the emoji say which — and
+/// only a spell without one (UwU) is written out.
 pub fn spell_column(cast: Option<&'static str>, qualifying: Vec<&'static str>) -> Vec<String> {
-    let label = |text: String, heading: &str| match spell_emoji(heading) {
-        Some(e) => format!("{e} {text}"),
-        None => text,
-    };
-    let mut out: Vec<String> = cast.map(|c| label(format!("Cast {c}"), c)).into_iter().collect();
-    out.extend(
-        qualifying.into_iter().filter(|q| Some(*q) != cast).map(|q| label(q.to_string(), q)),
-    );
+    let mark = |heading: &str| spell_emoji(heading).unwrap_or(heading).to_string();
+    let mut out: Vec<String> = cast.map(mark).into_iter().collect();
+    out.extend(qualifying.into_iter().filter(|q| Some(*q) != cast).map(mark));
     out
 }
 
@@ -259,7 +255,7 @@ pub fn lexicon_emoji(name: &str) -> Option<&'static str> {
 }
 
 /// The emoji for a spell, by its `castHeading`. A spell checked against a dictionary shares that
-/// dictionary's emoji, so a Bone bonus and `Cast Turn` read as the same thing. UwU has none: the
+/// dictionary's emoji, so a Bone bonus and casting Turn read as the same thing. UwU has none: the
 /// user's call, its name is already the picture.
 pub fn spell_emoji(heading: &str) -> Option<&'static str> {
     match heading {
@@ -449,14 +445,11 @@ mod tests {
     /// dictionary shows that dictionary's emoji.
     #[test]
     fn the_spell_column_leads_with_the_cast_and_its_emoji() {
-        assert_eq!(
-            spell_column(Some("Turn"), vec!["Turn", "Four heal"]),
-            vec!["💀 Cast Turn", "💚 Four heal"]
-        );
-        assert_eq!(spell_column(None, vec!["Fire"]), vec!["🔥 Fire"]);
+        assert_eq!(spell_column(Some("Turn"), vec!["Turn", "Four heal"]), vec!["💀", "💚"]);
+        assert_eq!(spell_column(None, vec!["Fire"]), vec!["🔥"]);
         assert!(spell_column(None, vec![]).is_empty());
         assert_eq!(spell_column(None, vec!["UwU"]), vec!["UwU"], "UwU is its own label");
-        assert_eq!(spell_column(Some("Metal"), vec!["Metal"]), vec!["🤘 Cast Metal"]);
+        assert_eq!(spell_column(Some("Metal"), vec!["Metal"]), vec!["🤘"]);
         assert_eq!(lexicon_emoji("Slime"), Some("🍮"));
         assert_eq!(lexicon_emoji("Swears"), Some("❗"), "the profane book's own mark");
     }

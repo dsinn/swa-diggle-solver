@@ -193,8 +193,8 @@ Diggle drives. The game data (dictionary, scores, tile textures) comes from
   draws them (Þ, Ð, Æ, Œ, ß, ꙮ). The columns show the expected damage; the enemy's lexicon bonus
   when it isn't x1, marked with its lexicon's emoji (`x1.50 💀`); the health the word should give back
   (Well-Rested overkill, wood-kill gear, a Diamond tile played last); the spells you hold that it
-  qualifies for, led by the one to cast when it beats the plain attack (`💀 Cast Turn`), in which
-  case the damage and ranking are that spell's; and what it does: `kills`, `scares`,
+  qualifies for, shown as their emoji and led by the one to cast when it beats the plain attack
+  (`💀` for Turn), in which case the damage and ranking are that spell's; and what it does: `kills`, `scares`,
   `frugal kill`, `overshoots - would kill`, or blank when the enemy simply survives.
   Bonuses and spells are marked with colour emoji, one per dictionary (🔥 fire, ❄️ ice, 💀 bone,
   🪵 wood, 🕷️ spider, ❗ profanity, 🪓 axe, 🩸 blood, ⛓️ iron, 🤘 metal, 🍮 slime), so a spell

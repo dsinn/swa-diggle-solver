@@ -480,7 +480,7 @@ fn cell_text(v: &View, item: usize, sub: i32) -> String {
         2 => r.row.score.to_string(),
         3 => r.row.bonus.as_ref().map(|b| b.to_string()).unwrap_or_default(),
         4 => (r.row.heal > 0).then(|| format!("+{}", r.row.heal)).unwrap_or_default(),
-        5 => r.row.spells.join(", "),
+        5 => r.row.spells.join(" "),
         _ => r.row.effect.to_string(),
     }
 }
