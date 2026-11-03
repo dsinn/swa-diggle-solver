@@ -60,6 +60,7 @@ use windows::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, COLOR_WINDOW, DT_CENTER, DT_SINGLELINE, DT_TOP, HFONT, HGDIOBJ, TEXTMETRICW,
     TRANSPARENT,
 };
+use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     ImageList_Create, InitCommonControlsEx, BST_CHECKED, CDDS_ITEMPREPAINT, CDDS_PREPAINT,
@@ -71,6 +72,7 @@ use windows::Win32::UI::Controls::{
     LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_OWNERDATA, LVS_REPORT, NMHDR, NMLVCUSTOMDRAW,
     NMLVDISPINFOW, NM_CUSTOMDRAW, WC_LISTVIEWW,
 };
+use windows::Win32::UI::Controls::{LVM_GETCOLUMNWIDTH, LVM_SETCOLUMNWIDTH};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW, LoadCursorW,
     MoveWindow, PostMessageW, PostQuitMessage, RegisterClassW, SendMessageW, SetWindowPos,
@@ -376,6 +378,7 @@ unsafe fn refresh(hwnd: HWND, ui: &Ui) {
     let _ = ShowWindow(ui.list, if show_list { SW_SHOW } else { SW_HIDE });
     let _ = ShowWindow(ui.banner, if show_list { SW_HIDE } else { SW_SHOW });
     SendMessageW(ui.list, LVM_SETITEMCOUNT, WPARAM(v.rows.len()), LPARAM(0));
+    fit_word_column(ui, &v);
     let _ = InvalidateRect(ui.list, None, true);
 }
 
@@ -541,7 +544,7 @@ unsafe fn draw_word(ui: &Ui, cd: &NMLVCUSTOMDRAW) {
         (tm.tmInternalLeading + tm.tmAscent) / 2
     };
     let (tile_mid, wildcard_mid) = (caps_mid(ui.tile_font), caps_mid(ui.wildcard_font));
-    let mut x = rc.left + 4;
+    let mut x = rc.left + WORD_MARGIN;
     for cell in &r.cells {
         let (font, caps_mid) = match cell.wildcard {
             true => (ui.wildcard_font, wildcard_mid),
@@ -549,9 +552,7 @@ unsafe fn draw_word(ui: &Ui, cd: &NMLVCUSTOMDRAW) {
         };
         SelectObject(hdc, HGDIOBJ(font.0));
         let mut text: Vec<u16> = cell.letter.encode_utf16().collect();
-        let mut size = SIZE::default();
-        let _ = GetTextExtentPoint32W(hdc, &text, &mut size);
-        let width = size.cx.max(12) + 2 * (FIRE_RING + SPECIAL_RING) + 6;
+        let width = tile_width(hdc, &text);
         let mut tile = RECT { left: x, right: x + width, top: rc.top + 1, bottom: rc.bottom - 1 };
         let shade = |c| if v.live { c } else { faded(c) };
         let colour = shade(cell.colour);
@@ -573,9 +574,62 @@ unsafe fn draw_word(ui: &Ui, cd: &NMLVCUSTOMDRAW) {
         SetTextColor(hdc, colorref(ink));
         tile.top = (tile.top + tile.bottom) / 2 - caps_mid;
         DrawTextW(hdc, &mut text, &mut tile, DT_CENTER | DT_TOP | DT_SINGLELINE);
-        x += width + 2;
+        x += width + TILE_GAP;
     }
     SelectObject(hdc, old);
+}
+
+/// Space between tiles, and the margin before the first.
+const TILE_GAP: i32 = 2;
+const WORD_MARGIN: i32 = 4;
+
+/// One tile's width for its letter, in whatever font `hdc` has selected: the lettering, room for
+/// both rings, and a little air.
+unsafe fn tile_width(hdc: windows::Win32::Graphics::Gdi::HDC, text: &[u16]) -> i32 {
+    let mut size = SIZE::default();
+    let _ = GetTextExtentPoint32W(hdc, text, &mut size);
+    size.cx.max(12) + 2 * (FIRE_RING + SPECIAL_RING) + 6
+}
+
+/// Widens the Word column to fit the longest word on the list, measured as [`draw_word`] draws
+/// it, and returns it to its default width when nothing needs more. Never narrower than the
+/// default, so the other columns do not jump about from turn to turn.
+unsafe fn fit_word_column(ui: &Ui, v: &View) {
+    let hdc = GetDC(ui.list);
+    if hdc.is_invalid() {
+        return;
+    }
+    let old = SelectObject(hdc, HGDIOBJ(ui.tile_font.0));
+    let needed = v
+        .rows
+        .iter()
+        .map(|r| {
+            r.cells
+                .iter()
+                .map(|cell| {
+                    let font = if cell.wildcard { ui.wildcard_font } else { ui.tile_font };
+                    SelectObject(hdc, HGDIOBJ(font.0));
+                    let text: Vec<u16> = cell.letter.encode_utf16().collect();
+                    tile_width(hdc, &text) + TILE_GAP
+                })
+                .sum::<i32>()
+                + 2 * WORD_MARGIN
+        })
+        .max()
+        .unwrap_or(0);
+    SelectObject(hdc, old);
+    ReleaseDC(ui.list, hdc);
+    let width = needed.max(COLUMNS[WORD_COLUMN as usize].1);
+    let current =
+        SendMessageW(ui.list, LVM_GETCOLUMNWIDTH, WPARAM(WORD_COLUMN as usize), LPARAM(0)).0 as i32;
+    if width != current {
+        SendMessageW(
+            ui.list,
+            LVM_SETCOLUMNWIDTH,
+            WPARAM(WORD_COLUMN as usize),
+            LPARAM(width as isize),
+        );
+    }
 }
 
 unsafe fn notify(ui: &Ui, lparam: LPARAM) -> Option<LRESULT> {
