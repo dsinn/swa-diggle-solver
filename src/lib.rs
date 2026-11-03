@@ -1,4 +1,5 @@
 pub mod act;
+pub mod advisor;
 pub mod buyer;
 pub mod combat;
 pub mod config;
