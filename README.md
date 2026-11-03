@@ -191,7 +191,7 @@ Diggle drives. The game data (dictionary, scores, tile textures) comes from
   variants and gems near-black; a burning tile has a red ring, letters
   typed into wildcards are handwritten (Segoe Print), and the historical ligatures show as the game
   draws them (Þ, Ð, Æ, Œ, ß, ꙮ). The columns show the expected damage; the enemy's lexicon bonus
-  when it isn't x1, with its lexicon (`x2.00 (💀 Bone)`); the health the word should give back
+  when it isn't x1, marked with its lexicon's emoji (`x1.50 💀`); the health the word should give back
   (Well-Rested overkill, wood-kill gear, a Diamond tile played last); the spells you hold that it
   qualifies for, led by the one to cast when it beats the plain attack (`💀 Cast Turn`), in which
   case the damage and ranking are that spell's; and what it does: `kills`, `scares`,

@@ -117,7 +117,7 @@ const COLUMNS: [(&str, i32, bool); 7] = [
     ("#", 44, true),
     ("Word", 470, false),
     ("Damage", 70, true),
-    ("Bonus", 150, false),
+    ("Bonus", 90, false),
     ("Heals", 56, true),
     ("Spell", 120, false),
     ("Effect", 190, false),

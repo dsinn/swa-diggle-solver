@@ -57,16 +57,15 @@ pub struct Bonus {
 impl std::fmt::Display for Bonus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "x{:.2}", self.mult)?;
+        // Just the emoji: they say which lexicon, and the user found the names noise. A lexicon
+        // with no emoji keeps its name, so nothing drops out of sight.
         if !self.names.is_empty() {
-            let named: Vec<String> = self
+            let marks: String = self
                 .names
                 .iter()
-                .map(|n| match lexicon_emoji(n) {
-                    Some(e) => format!("{e} {n}"),
-                    None => n.clone(),
-                })
+                .map(|n| lexicon_emoji(n).map(str::to_string).unwrap_or_else(|| format!(" {n}")))
                 .collect();
-            write!(f, " ({})", named.join(", "))?;
+            write!(f, " {}", marks.trim_start())?;
         }
         Ok(())
     }
@@ -354,7 +353,9 @@ mod tests {
         mods.bonus_names = vec!["Fire".into(), "Ice".into()];
         let both = Bonus { mult: 2.0, names: vec!["Fire".into(), "Ice".into()] };
         assert_eq!(bonus_of(&mods, "CAT"), Some(both.clone()));
-        assert_eq!(both.to_string(), "x2.00 (🔥 Fire, ❄️ Ice)");
+        assert_eq!(both.to_string(), "x2.00 🔥❄️", "the emoji say which, without words");
+        let unknown = Bonus { mult: 1.5, names: vec!["Mystery".into()] };
+        assert_eq!(unknown.to_string(), "x1.50 Mystery", "a lexicon with no emoji keeps its name");
         assert_eq!(bonus_of(&mods, "DOG"), None);
     }
 
