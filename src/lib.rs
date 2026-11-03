@@ -140,18 +140,34 @@ mod source_hygiene {
     /// the test half, while `mod threshold_tests;` merely points at another file and is followed by
     /// several hundred lines of shipping code. Splitting on the attribute alone treats the second as
     /// the first and throws the file away.
+    ///
+    /// Read line by line, with each line's ending trimmed, so a `\r\n` checkout cuts in the same
+    /// place as a `\n` one. See [`the_cut_is_the_same_for_either_line_ending`].
     fn shipping_half(text: &str) -> &str {
-        const OPENS: &str = "\n#[cfg(test)]\nmod ";
-        let mut from = 0;
-        while let Some(rel) = text[from..].find(OPENS) {
-            let at = from + rel;
-            let line = at + OPENS.len() - "mod ".len();
-            let end = text[line..].find('\n').map_or(text.len(), |n| line + n);
-            if text[line..end].trim_end().ends_with('{') {
-                return &text[..at];
+        let mut offset = 0;
+        let mut attribute_at: Option<usize> = None;
+        for line in text.split_inclusive('\n') {
+            let bare = line.trim_end();
+            match attribute_at {
+                Some(at) if bare.starts_with("mod ") && bare.ends_with('{') => return &text[..at],
+                _ => {}
             }
-            from = at + 1;
+            attribute_at = (bare == "#[cfg(test)]").then_some(offset);
+            offset += line.len();
         }
         text
+    }
+
+    /// The cut must not depend on how git checked the file out. With `core.autocrlf` on Windows
+    /// every line ends `\r\n`, and a cut that only knew `\n` read every test module as shipping
+    /// code, then reported the game's aligned output in their fixtures as eaten continuations.
+    #[test]
+    fn the_cut_is_the_same_for_either_line_ending() {
+        let lf = "fn ship() {}\n#[cfg(test)]\nmod threshold_tests;\nfn more() {}\n\
+                  #[cfg(test)]\nmod tests {\n    \"aligned   output\"\n}\n";
+        let crlf = lf.replace('\n', "\r\n");
+        let want = "fn ship() {}\n#[cfg(test)]\nmod threshold_tests;\nfn more() {}";
+        assert_eq!(shipping_half(lf).trim_end(), want);
+        assert_eq!(shipping_half(&crlf).replace("\r\n", "\n").trim_end(), want);
     }
 }
