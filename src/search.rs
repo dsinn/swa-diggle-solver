@@ -1142,6 +1142,141 @@ pub fn max_damage(
     }
 }
 
+/// Where a candidate sits in [`ranked`]'s list, in the order the tiers are listed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    /// Meets the goal: lethal for a kill, inside the band for a scare or a frugal kill.
+    InBand,
+    /// A scare's safe chip: lands, and stays under the ceiling. See [`Outcome::under`].
+    Under,
+    /// A scare's overshoot: would break the ceiling. See [`Outcome::least`].
+    Overshoot,
+    /// Everything else, hardest hit first — or, for a scare, the words that do no damage at all.
+    Fallback,
+}
+
+/// One playable word, as [`ranked`] lists it.
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    pub word: String,
+    pub score: i64,
+    pub tier: Tier,
+    /// Only for [`Tier::InBand`], where it is what orders the band — as in the search.
+    pub rank: Option<crate::pick::Rank>,
+    /// Which tiles the word consumes, so a caller can show them.
+    pub typed: crate::typist::Typed,
+}
+
+/// **Every** playable word, in the order Diggle prefers them for `goal`.
+///
+/// [`search`] answers "which one"; this answers "and then which", for the advisor
+/// (`src/bin/diggle_advisor.rs`), which shows the whole list to a human who may see something the
+/// model does not. The order is [`Outcome::choice_for`]'s fallback chain carried down the whole
+/// list rather than stopped at its first answer:
+///
+/// - **kill goals** (`RankedKill`, `FirstKill`, `FrugalKill`): the band by [`crate::pick::Rank`],
+///   then everything else hardest first, since a kill that cannot be made tidily is still a kill;
+/// - **`Scare`**: the band by `Rank`, then the safe chip hardest first, then the overshoots
+///   *gentlest* first, then the words that do nothing;
+/// - **`MaxDamage`**: hardest first.
+///
+/// Ties are broken by score, then alphabetically, so the list is stable between reads of the same
+/// save. `FirstKill` is listed as `RankedKill` would list it: a list has no "first to be found".
+///
+/// **Diggle does not play from this yet.** It still calls [`search`], and
+/// `ranked_head_matches_choice_for_on_every_fixture` holds the two together: the head of this list
+/// is Diggle's word or one tied with it. Moving Diggle onto this list is a separate change, for
+/// after the advisor has been watched in real fights — the same caution [`Outcome`]'s note records
+/// about restructuring a ranking that has not yet been seen working.
+#[allow(clippy::too_many_arguments)]
+pub fn ranked(
+    dict: &Dictionary, scorer: &Scorer, tiles: &[Tile], geometry: &Geometry, mods: &Modifiers,
+    goal: Goal, picking: &crate::pick::Context, threads: usize,
+) -> Vec<Candidate> {
+    if tiles.is_empty() {
+        return Vec::new();
+    }
+    let typist = Typist::new(tiles, geometry);
+    let corner_count = geometry.corner_count();
+    let words = dict.words();
+    let threads = threads.max(1).min(words.len().max(1));
+    let tier_of = |score: i64| -> Tier {
+        match goal {
+            Goal::RankedKill { need } | Goal::FirstKill { need } if score >= need => Tier::InBand,
+            Goal::FrugalKill { need, below } if score >= need && score < below => Tier::InBand,
+            Goal::Scare { need, below } if score >= need && score < below => Tier::InBand,
+            Goal::Scare { below, .. } if score >= below => Tier::Overshoot,
+            Goal::Scare { .. } if score >= MIN_MEANINGFUL_DAMAGE => Tier::Under,
+            _ => Tier::Fallback,
+        }
+    };
+    let all: Mutex<Vec<Candidate>> = Mutex::new(Vec::new());
+    let cursor = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            let (all, cursor, typist, tier_of) = (&all, &cursor, &typist, &tier_of);
+            scope.spawn(move || {
+                let mut local = Vec::new();
+                loop {
+                    let start = cursor.fetch_add(CLAIM, Ordering::Relaxed);
+                    if start >= words.len() {
+                        break;
+                    }
+                    for word in &words[start..(start + CLAIM).min(words.len())] {
+                        if mods.excluded.contains(word) {
+                            continue;
+                        }
+                        let Some(typed) = typist.type_word(word) else { continue };
+                        let consumed: Vec<Tile> =
+                            typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
+                        let score = scored(
+                            scorer,
+                            mods,
+                            word,
+                            &consumed,
+                            Some(&typed),
+                            typed.corners_used,
+                            corner_count,
+                        );
+                        let tier = tier_of(score);
+                        let rank = (tier == Tier::InBand).then(|| {
+                            crate::pick::rank(
+                                tiles,
+                                geometry,
+                                &typed.tiles,
+                                scorer,
+                                &picking.target,
+                                picking.prefs,
+                                score,
+                            )
+                        });
+                        local.push(Candidate { word: word.clone(), score, tier, rank, typed });
+                    }
+                }
+                all.lock().unwrap().extend(local);
+            });
+        }
+    });
+    let mut list = all.into_inner().unwrap();
+    list.sort_by(|a, b| order(a, b));
+    list
+}
+
+/// [`ranked`]'s comparison: tier, then within it the tier's own ordering, then the tiebreaks.
+fn order(a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    let tier = |t: Tier| t as usize;
+    tier(a.tier).cmp(&tier(b.tier)).then_with(|| {
+        let within = match (a.tier, a.rank, b.rank) {
+            (Tier::InBand, Some(ra), Some(rb)) if ra.better_than(&rb) => Less,
+            (Tier::InBand, Some(ra), Some(rb)) if rb.better_than(&ra) => Greater,
+            (Tier::Overshoot, ..) => a.score.cmp(&b.score),
+            _ => Equal,
+        };
+        within.then_with(|| b.score.cmp(&a.score)).then_with(|| a.word.cmp(&b.word))
+    })
+}
+
 pub fn race_for_kill(
     dict: &Dictionary, scorer: &Scorer, tiles: &[Tile], geometry: &Geometry, mods: &Modifiers,
     need: i64, picking: &crate::pick::Context, threads: usize,
@@ -2515,5 +2650,201 @@ mod typeable_count {
              precomputing word facts becomes worth reconsidering",
             share * 100.0
         );
+    }
+}
+
+#[cfg(test)]
+mod ranked_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn game_dir() -> PathBuf {
+        PathBuf::from("../sternly-worded-adventures")
+    }
+
+    struct World {
+        dict: Dictionary,
+        scorer: Scorer,
+        board: Vec<Tile>,
+        geom: Geometry,
+        picking: crate::pick::Context,
+    }
+
+    /// The level-0 crypt board, with the real dictionary, scores and letter target.
+    fn world() -> World {
+        let board: Vec<Tile> =
+            "OYCAACTPORLIGAHJ".chars().map(|c| Tile::plain(&c.to_string())).collect();
+        let picking = crate::pick::Context {
+            target: crate::letters::Weights::load(&game_dir()).unwrap().target(board.len()),
+            prefs: crate::pick::Preferences::default(),
+        };
+        World {
+            dict: Dictionary::load(&game_dir()).unwrap(),
+            scorer: Scorer::new(&game_dir()).unwrap(),
+            board,
+            geom: Geometry::default(),
+            picking,
+        }
+    }
+
+    fn rank_all(w: &World, mods: &Modifiers, goal: Goal) -> Vec<Candidate> {
+        ranked(&w.dict, &w.scorer, &w.board, &w.geom, mods, goal, &w.picking, 8)
+    }
+
+    fn tier_index(t: Tier) -> usize {
+        match t {
+            Tier::InBand => 0,
+            Tier::Under => 1,
+            Tier::Overshoot => 2,
+            Tier::Fallback => 3,
+        }
+    }
+
+    /// Tiers never go backwards down the list.
+    fn assert_tiers_in_order(list: &[Candidate]) {
+        for pair in list.windows(2) {
+            assert!(
+                tier_index(pair[0].tier) <= tier_index(pair[1].tier),
+                "{} ({:?}) listed before {} ({:?})",
+                pair[0].word,
+                pair[0].tier,
+                pair[1].word,
+                pair[1].tier
+            );
+        }
+    }
+
+    /// Within the band the order is the Rank's; outside it, the hardest hit first.
+    #[test]
+    fn ranked_kill_puts_lethal_words_first_by_rank() {
+        let w = world();
+        let need = 3;
+        let list = rank_all(&w, &Modifiers::none(), Goal::RankedKill { need });
+        assert_tiers_in_order(&list);
+        let band: Vec<&Candidate> = list.iter().filter(|c| c.tier == Tier::InBand).collect();
+        assert!(band.len() > 1, "the comparison proves nothing with {} kills", band.len());
+        assert!(band.iter().all(|c| c.score >= need && c.rank.is_some()));
+        for pair in band.windows(2) {
+            let (a, b) = (pair[0].rank.unwrap(), pair[1].rank.unwrap());
+            assert!(
+                !b.better_than(&a),
+                "{} outranks {} but is listed after it",
+                pair[1].word,
+                pair[0].word
+            );
+        }
+        let rest: Vec<&Candidate> = list.iter().filter(|c| c.tier != Tier::InBand).collect();
+        assert!(rest.iter().all(|c| c.score < need && c.tier == Tier::Fallback));
+        assert!(rest.windows(2).all(|p| p[0].score >= p[1].score));
+    }
+
+    /// A scare: the band, then the safe chip hardest-first, then overshoots gentlest-first.
+    #[test]
+    fn scare_orders_band_then_under_then_overshoot_low_first() {
+        let w = world();
+        let (need, below) = (4, 7);
+        let list = rank_all(&w, &Modifiers::none(), Goal::Scare { need, below });
+        assert_tiers_in_order(&list);
+        let of = |t: Tier| -> Vec<&Candidate> { list.iter().filter(|c| c.tier == t).collect() };
+        assert!(of(Tier::InBand).iter().all(|c| c.score >= need && c.score < below));
+        let under = of(Tier::Under);
+        assert!(!under.is_empty());
+        assert!(under.iter().all(|c| c.score >= MIN_MEANINGFUL_DAMAGE && c.score < need));
+        assert!(under.windows(2).all(|p| p[0].score >= p[1].score));
+        let over = of(Tier::Overshoot);
+        assert!(!over.is_empty());
+        assert!(over.iter().all(|c| c.score >= below));
+        assert!(over.windows(2).all(|p| p[0].score <= p[1].score), "overshoots go gentlest first");
+        assert!(of(Tier::Fallback).iter().all(|c| c.score < MIN_MEANINGFUL_DAMAGE));
+    }
+
+    /// A frugal kill that cannot land in its band falls back to the hardest hit, like any kill.
+    #[test]
+    fn frugal_falls_back_to_hardest() {
+        let w = world();
+        let list = rank_all(&w, &Modifiers::none(), Goal::FrugalKill { need: 1000, below: 1001 });
+        let top = list.iter().map(|c| c.score).max().unwrap();
+        assert_eq!(list[0].score, top);
+    }
+
+    #[test]
+    fn an_empty_board_ranks_nothing() {
+        let mut w = world();
+        w.board.clear();
+        assert!(rank_all(&w, &Modifiers::none(), Goal::RankedKill { need: 1 }).is_empty());
+    }
+
+    /// The advisor's top row is the word Diggle would play, or one it cannot tell apart from it.
+    ///
+    /// A tie is allowed because Diggle's own winner among equals depends on thread scheduling: the
+    /// same tier and score, and for an in-band word, neither Rank better than the other.
+    #[test]
+    fn ranked_head_matches_choice_for_on_every_fixture() {
+        let mut cases: Vec<(String, World, Modifiers, Goal)> = Vec::new();
+        for goal in [
+            Goal::RankedKill { need: 3 },
+            Goal::RankedKill { need: 1000 },
+            Goal::Scare { need: 4, below: 7 },
+            Goal::Scare { need: 1000, below: 1001 },
+            Goal::Scare { need: 0, below: 1 },
+            Goal::FrugalKill { need: 4, below: 7 },
+            Goal::FrugalKill { need: 1000, below: 1001 },
+            Goal::MaxDamage,
+        ] {
+            cases.push((format!("crypt {goal:?}"), world(), Modifiers::none(), goal));
+        }
+        let letters = crate::letters::Weights::load(&game_dir()).unwrap();
+        for name in ["combatSaveData-crypt-l0.lua", "combatSaveData-l1-depleted.lua"] {
+            let src = std::fs::read_to_string(format!("tests/fixtures/{name}")).unwrap();
+            let cs = crate::game::save::parse(&src).unwrap();
+            let plan = crate::turn::plan(&cs, &game_dir(), &letters, &mut Default::default())
+                .unwrap()
+                .unwrap();
+            let fw = World {
+                dict: Dictionary::load(&game_dir()).unwrap(),
+                scorer: Scorer::new(&game_dir()).unwrap(),
+                board: plan.tiles,
+                geom: plan.geom,
+                picking: plan.picking,
+            };
+            cases.push((name.to_string(), fw, plan.mods, plan.goal));
+        }
+        for (label, w, mods, goal) in &cases {
+            let list = rank_all(w, mods, *goal);
+            let out = search(&w.dict, &w.scorer, &w.board, &w.geom, mods, *goal, &w.picking, 8);
+            let Some(chosen) = out.choice_for(*goal) else {
+                assert!(
+                    list.is_empty(),
+                    "{label}: Diggle has no word but the list has {}",
+                    list.len()
+                );
+                continue;
+            };
+            let head = &list[0];
+            if head.word == chosen.word {
+                continue;
+            }
+            let twin =
+                list.iter().find(|c| c.word == chosen.word).expect("Diggle's word is listed");
+            assert_eq!(
+                head.tier, twin.tier,
+                "{label}: head {} vs Diggle's {}",
+                head.word, chosen.word
+            );
+            match (head.rank, twin.rank) {
+                // Rank does not carry the score, so two tied band words may score differently.
+                (Some(a), Some(b)) => assert!(
+                    !a.better_than(&b) && !b.better_than(&a),
+                    "{label}: {} and {} are not tied",
+                    head.word,
+                    chosen.word
+                ),
+                _ => assert_eq!(
+                    head.score, chosen.score,
+                    "{label}: head {} vs {}",
+                    head.word, chosen.word
+                ),
+            }
+        }
     }
 }
