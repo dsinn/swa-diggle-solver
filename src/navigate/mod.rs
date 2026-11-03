@@ -87,6 +87,40 @@ const LORE_LINE: &str = "Lore screen:";
 fn announces_a_lore_screen(lines: &[String]) -> bool {
     lines.iter().any(|l| l.trim_start().starts_with(LORE_LINE))
 }
+
+/// The console's announcement that an event's combat cutscene has started
+/// (`ui/rpgcutscene.lua:27-29`).
+///
+/// Since v53.2 the highwayman, the woodsman and the dying paladin open with one: 2.5 s of the
+/// combat view (`rpgview`) with no controls, raised through `ui/modesequence.lua:40-43`. It is not
+/// a fight (`rpginfo`, which draws `Turn:`, is not among its objects) and not a lore screen, so
+/// nothing in the registry names it.
+const CUTSCENE_LINE: &str = "Event combat cutscene.";
+
+/// The headers of the screens a cutscene hands over to. Every `combatscene` in v53.2 is followed by
+/// an event screen (the `pretext` of `highwaymen.lua:26-28`, `spider_forest.lua:21-30` and
+/// `dying_paladin.lua:366-368`, `:393-395`) or a lore screen (`dying_paladin.lua:176`, `:274`, which
+/// insert it ahead of their result text).
+const AFTER_CUTSCENE: &[&str] = &["Event:", LORE_LINE];
+
+/// Is a combat cutscene on screen right now? Returns the feed index of its announcement.
+///
+/// The cutscene prints nothing when it ends, so "up" means its line is the latest and no screen
+/// has announced itself after it. A pure function of the feed, so it is tested on real lines.
+fn cutscene_up_at(lines: &[String]) -> Option<usize> {
+    let at = lines.iter().rposition(|l| l.trim_start().starts_with(CUTSCENE_LINE))?;
+    let handed_over = lines[at + 1..]
+        .iter()
+        .any(|l| AFTER_CUTSCENE.iter().any(|h| l.trim_start().starts_with(h)));
+    (!handed_over).then_some(at)
+}
+
+/// How long to hold still for a cutscene before carrying on regardless.
+///
+/// It lasts `duration = 2.5` s (every `combatscene` in v53.2) plus a transition each way. Five
+/// seconds covers that with room; past it, a missing announcement is the more likely story, and the
+/// ordinary checks are better than waiting forever.
+const CUTSCENE_HOLD: Duration = Duration::from_secs(5);
 /// Does this dump say the game has just arrived at the node we think we are on — and that
 /// nothing was raised over the top of it?
 ///
@@ -732,6 +766,8 @@ pub struct Run<'a> {
     /// has a larger index, the same event has the same index, and nothing has to stay in step with a
     /// count that can drift.
     pub answered_event: Option<usize>,
+    /// Feed line index of the last combat cutscene we waited out. See [`Run::wait_out_cutscene`].
+    pub cutscene_waited: Option<usize>,
     /// We pressed an area button meaning to start a fight, and have not yet seen one.
     ///
     /// Kept only so the log can tell a fight we walked into from a fight we asked for. Nothing
@@ -2964,6 +3000,7 @@ impl Run<'_> {
     /// Reading the binding beats assuming a coordinate, and this button's position moves with
     /// whether it carries a label.
     pub fn clear_text_screen(&mut self) -> bool {
+        self.wait_out_cutscene();
         let first = self.affirmative();
         // Logged even when there is nothing to do. A gate that has never been calibrated against a
         // live screen must show its score for the negative case too, or `Absent` is
@@ -3048,6 +3085,52 @@ impl Run<'_> {
         // through to the map path, which is where a run standing on the map belongs.
         self.log.push_str("  affirmative still live after 6 presses — giving up on it\n");
         false
+    }
+
+    /// Holds still while an event's combat cutscene plays, so nothing is pressed into it.
+    ///
+    /// ## Why here
+    ///
+    /// Every path that presses on an unrecognised screen goes through [`Run::clear_text_screen`]
+    /// first: both arrival waits in `drive`, and the top-of-loop dismissal that comes before the
+    /// map path. Waiting here therefore covers all of them, and the screen that follows (an event or
+    /// a lore screen) has announced itself by the time the ordinary checks run.
+    ///
+    /// ## What a press would have cost
+    ///
+    /// The cutscene binds `affirmative` to *skip* (`ui/rpgcutscene.lua:15-21`), and its backdrop is
+    /// the combat view, which no template here was measured against. If the affirmative slot ever
+    /// read "ready" on it, `clear_text_screen` would press space up to six times. The first skips
+    /// the cutscene, which is harmless; the rest land on the event behind it, where space is a real
+    /// choice: `[-Item] - Give them a potion` for the paladin (`dying_paladin.lua:208`) and `[Shop]`
+    /// for the woodsman (`spider_forest.lua:62`). Nothing is lost by waiting 2.5 s instead.
+    ///
+    /// Each cutscene is waited for once, keyed on its feed index like [`Run::answered_event`], so a
+    /// cutscene that never hands over costs [`CUTSCENE_HOLD`] once rather than on every tick.
+    fn wait_out_cutscene(&mut self) -> bool {
+        let Some(at) = cutscene_up_at(self.feed.lines()) else { return false };
+        if self.cutscene_waited == Some(at) {
+            return false;
+        }
+        self.cutscene_waited = Some(at);
+        self.log
+            .push_str("  an event's combat cutscene is playing — pressing nothing until it ends\n");
+        let began = Instant::now();
+        while began.elapsed() < CUTSCENE_HOLD {
+            std::thread::sleep(crate::timing::POLL_BRISK);
+            self.pump();
+            if cutscene_up_at(self.feed.lines()) != Some(at) {
+                self.log.push_str(&format!(
+                    "  cutscene handed over after {:.1}s\n",
+                    began.elapsed().as_secs_f64()
+                ));
+                return true;
+            }
+        }
+        self.log.push_str(&format!(
+            "  no screen announced itself within {CUTSCENE_HOLD:?} of the cutscene — carrying on\n"
+        ));
+        true
     }
 
     /// Which of the three things a run can meet at the door is on screen.
@@ -3571,6 +3654,62 @@ mod tests {
             "and the Lore screen: is not at the start of this one".into(),
         ]));
         assert!(!super::announces_a_lore_screen(&[]));
+    }
+
+    fn feed(s: &str) -> Vec<String> {
+        s.lines().map(|l| l.to_string()).collect()
+    }
+
+    /// `ui/rpgcutscene.lua:27-29` prints this as the cutscene opens, tab and all. Nothing is
+    /// printed when it ends, so it is "up" until the next screen announces itself.
+    #[test]
+    fn a_cutscene_is_up_until_a_screen_announces_itself() {
+        let opening = "Local overworld data:\tArrived at location with event\tl12\tRoad\n\
+                       Event combat cutscene. Skippable:\ttrue";
+        assert_eq!(super::cutscene_up_at(&feed(opening)), Some(1));
+        // The console renders the tab as spaces; that form counts too.
+        assert_eq!(
+            super::cutscene_up_at(&feed("Event combat cutscene. Skippable:   true")),
+            Some(0)
+        );
+    }
+
+    /// Every cutscene in v53.2 hands over to an event screen or a lore screen, and both announce
+    /// themselves from `onActive` (`ui/eventscreen.lua:142-145`, `ui/lorescreen.lua:20-22`).
+    #[test]
+    fn the_screen_after_a_cutscene_ends_it() {
+        let to_event = "Event combat cutscene. Skippable:\ttrue\n\
+                        Event:\tHighwayman near Ulrome\n\
+                        As you travel the road near the town you're accosted by a highwayman!";
+        assert_eq!(super::cutscene_up_at(&feed(to_event)), None);
+        let to_lore = "Event combat cutscene. Skippable:\ttrue\n\
+                       Lore screen: \tWandering in Bempton Silva you're hailed by a woodsman:";
+        assert_eq!(super::cutscene_up_at(&feed(to_lore)), None);
+    }
+
+    /// Unrelated output during the 2.5 s, such as a map dump, does not end it.
+    #[test]
+    fn other_output_does_not_end_a_cutscene() {
+        let f = "Event combat cutscene. Skippable:\ttrue\n\
+                 Local overworld data:\tScreen pan finished\tl12\tRoad";
+        assert_eq!(super::cutscene_up_at(&feed(f)), Some(0));
+    }
+
+    /// The feed spans the whole session: an old, finished cutscene must not mask a new one, and a
+    /// new one must not be hidden by an old event.
+    #[test]
+    fn only_the_latest_cutscene_counts() {
+        let f = "Event combat cutscene. Skippable:\ttrue\n\
+                 Event:\tWoodsman at Bempton Silva road\n\
+                 Lore screen: \tsomething\n\
+                 Event combat cutscene. Skippable:\ttrue";
+        assert_eq!(super::cutscene_up_at(&feed(f)), Some(3));
+    }
+
+    #[test]
+    fn no_cutscene_line_means_no_cutscene() {
+        assert_eq!(super::cutscene_up_at(&feed("Event:\tLost in the mists!")), None);
+        assert_eq!(super::cutscene_up_at(&[]), None);
     }
 
     /// Every source file the driver is made of, listed because `include_str!` cannot glob.

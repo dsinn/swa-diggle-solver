@@ -124,6 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         affirm_repeat: None,
         affirm: affirm::ButtonArt::load(Path::new(&cfg.game_dir), "right")?,
         answered_event: None,
+        cutscene_waited: None,
         recentre_misses: 0,
         hop_misses: 0,
         skipped_the_pan: false,
