@@ -5,5 +5,6 @@
 pub mod annotate;
 pub mod mode;
 pub mod palette;
+pub mod spells;
 pub mod view;
 pub mod watch;

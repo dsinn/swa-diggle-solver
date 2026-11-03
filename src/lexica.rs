@@ -147,6 +147,16 @@ impl Lexica {
         out
     }
 
+    /// The names of [`Lexica::bonus_sets`], in the same order: each lexicon's status key less its
+    /// `lexiconBonus` prefix, so `lexiconBonusBone` reads `Bone`.
+    pub fn bonus_names(&self, statuses: &HashMap<String, f64>) -> Vec<String> {
+        self.lexicons
+            .iter()
+            .filter(|lex| statuses.get(&lex.status_key).is_some_and(|&v| v > 1.0))
+            .map(|lex| lex.status_key.trim_start_matches("lexiconBonus").to_string())
+            .collect()
+    }
+
     /// Words to exclude from the search, given the enemy's status effects.
     ///
     /// Excludes any word belonging to a lexicon whose status value is `<= 1` — resist or immune.

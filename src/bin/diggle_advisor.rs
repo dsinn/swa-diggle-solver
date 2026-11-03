@@ -87,6 +87,7 @@ struct Ui {
     list: HWND,
     banner: HWND,
     tile_font: HFONT,
+    wildcard_font: HFONT,
 }
 
 thread_local! {
@@ -94,12 +95,13 @@ thread_local! {
 }
 
 /// Columns: header, width, right-aligned.
-const COLUMNS: [(&str, i32, bool); 6] = [
+const COLUMNS: [(&str, i32, bool); 7] = [
     ("#", 44, true),
     ("Word", 470, false),
     ("Damage", 70, true),
-    ("Bonus", 64, true),
+    ("Bonus", 150, false),
     ("Heals", 56, true),
+    ("Spell", 120, false),
     ("Effect", 190, false),
 ];
 const WORD_COLUMN: i32 = 1;
@@ -221,7 +223,7 @@ fn main() -> windows::core::Result<()> {
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            980,
+            1250,
             720,
             None,
             None,
@@ -261,6 +263,10 @@ unsafe fn child(
 unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
     let font = CreateFontW(-15, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 0, 0, w!("Segoe UI"));
     let tile_font = CreateFontW(-TILE_TEXT, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0, w!("Segoe UI"));
+    // Wildcards are scribbled in the game (`ui/graphics/tiles/scribble_*.png`). Segoe Print is a
+    // handwriting face that has shipped with Windows since Vista.
+    let wildcard_font =
+        CreateFontW(-TILE_TEXT, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0, w!("Segoe Print"));
     let banner_font = CreateFontW(-28, 0, 0, 0, 600, 0, 0, 0, 0, 0, 0, 0, 0, w!("Segoe UI"));
     let status = child(hwnd, w!("STATIC"), w!(""), 0, 0)?;
     let notes = child(
@@ -310,7 +316,7 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         };
         SendMessageW(list, LVM_INSERTCOLUMNW, WPARAM(i), LPARAM(&col as *const _ as isize));
     }
-    Ok(Ui { status, notes, topmost, list, banner, tile_font })
+    Ok(Ui { status, notes, topmost, list, banner, tile_font, wildcard_font })
 }
 
 unsafe fn layout(hwnd: HWND, ui: &Ui) {
@@ -363,8 +369,9 @@ fn cell_text(v: &View, item: usize, sub: i32) -> String {
         0 => (item + 1).to_string(),
         1 => r.row.word.clone(),
         2 => r.row.score.to_string(),
-        3 => r.row.bonus.map(|b| format!("x{b:.2}")).unwrap_or_default(),
+        3 => r.row.bonus.as_ref().map(|b| b.to_string()).unwrap_or_default(),
         4 => (r.row.heal > 0).then(|| format!("+{}", r.row.heal)).unwrap_or_default(),
+        5 => r.row.spells.join(", "),
         _ => r.row.effect.to_string(),
     }
 }
@@ -417,14 +424,23 @@ unsafe fn draw_word(ui: &Ui, cd: &NMLVCUSTOMDRAW) {
     FillRect(hdc, &rc, GetSysColorBrush(COLOR_WINDOW));
     let old = SelectObject(hdc, HGDIOBJ(ui.tile_font.0));
     SetBkMode(hdc, TRANSPARENT);
-    // Where capitals sit in a line of this font: below the internal leading (room for accents),
+    // Where capitals sit in a line of each font: below the internal leading (room for accents),
     // down to the baseline. Centring that band on the tile is what looks centred; centring the
     // whole line box, as `DT_VCENTER` does, leaves the letters low.
-    let mut tm = TEXTMETRICW::default();
-    let _ = GetTextMetricsW(hdc, &mut tm);
-    let caps_mid = (tm.tmInternalLeading + tm.tmAscent) / 2;
+    let caps_mid = |font: HFONT| {
+        SelectObject(hdc, HGDIOBJ(font.0));
+        let mut tm = TEXTMETRICW::default();
+        let _ = GetTextMetricsW(hdc, &mut tm);
+        (tm.tmInternalLeading + tm.tmAscent) / 2
+    };
+    let (tile_mid, wildcard_mid) = (caps_mid(ui.tile_font), caps_mid(ui.wildcard_font));
     let mut x = rc.left + 4;
     for cell in &r.cells {
+        let (font, caps_mid) = match cell.wildcard {
+            true => (ui.wildcard_font, wildcard_mid),
+            false => (ui.tile_font, tile_mid),
+        };
+        SelectObject(hdc, HGDIOBJ(font.0));
         let mut text: Vec<u16> = cell.letter.encode_utf16().collect();
         let mut size = SIZE::default();
         let _ = GetTextExtentPoint32W(hdc, &text, &mut size);
@@ -432,13 +448,9 @@ unsafe fn draw_word(ui: &Ui, cd: &NMLVCUSTOMDRAW) {
         let mut tile = RECT { left: x, right: x + width, top: rc.top + 1, bottom: rc.bottom - 1 };
         let shade = |c| if v.live { c } else { faded(c) };
         let colour = shade(cell.colour);
-        let (cr, cg, cb) = colour;
-        let light = 299 * cr as u32 + 587 * cg as u32 + 114 * cb as u32 > 140_000;
-        let ink = match (v.live, light) {
-            (false, _) => (110, 110, 110),
-            (true, true) => (0, 0, 0),
-            (true, false) => (255, 255, 255),
-        };
+        // The game's own lettering colour for this material (see the palette), greyed with the
+        // rest of a stale list.
+        let ink = shade(cell.ink);
         fill(hdc, &tile, colour);
         // Fire is an outer ring of red; the lettering keeps the contrast of its tile.
         if cell.burning {

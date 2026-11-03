@@ -20,28 +20,48 @@ pub struct Row {
     pub score: i64,
     pub tier: Tier,
     /// The enemy's lexicon multiplier for this word, when it is not 1.
-    pub bonus: Option<f64>,
+    pub bonus: Option<Bonus>,
     /// Health this word is expected to give back. Zero for most words.
     pub heal: i64,
     pub effect: &'static str,
     /// Each letter as typed, with the board index of the tile it goes into.
-    pub letters: Vec<(String, usize)>,
+    pub letters: Vec<Letter>,
+    /// The headings of the held spells this word would cast (`Fire`, `Four heal`).
+    pub spells: Vec<&'static str>,
 }
 
-/// The enemy's lexicon bonus for `word`, when it is not 1.
+/// The enemy's lexicon bonus for `word`, when it is not 1, and which lexicons it comes from.
 ///
 /// The same accumulator as [`Modifiers::modifier_for_base`] — lexicons add, `mult + val - 1` per
 /// match (`utils/words.lua:219-242`) — started from 1 and without the corner nerf, which is a
 /// property of the board rather than of the word.
-pub fn bonus_of(mods: &Modifiers, word: &str) -> Option<f64> {
-    let mult: f64 = 1.0
-        + mods
-            .bonuses
-            .iter()
-            .filter(|(words, _)| words.contains(word))
-            .map(|(_, v)| v - 1.0)
-            .sum::<f64>();
-    ((mult - 1.0).abs() > 1e-9).then_some(mult)
+pub fn bonus_of(mods: &Modifiers, word: &str) -> Option<Bonus> {
+    let mut mult = 1.0;
+    let mut names = Vec::new();
+    for (i, (words, v)) in mods.bonuses.iter().enumerate() {
+        if words.contains(word) {
+            mult += v - 1.0;
+            names.extend(mods.bonus_names.get(i).cloned());
+        }
+    }
+    ((mult - 1.0f64).abs() > 1e-9).then_some(Bonus { mult, names })
+}
+
+/// A word's lexicon bonus: the multiplier, and the lexicons it came from (`Bone`, `Slime`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bonus {
+    pub mult: f64,
+    pub names: Vec<String>,
+}
+
+impl std::fmt::Display for Bonus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "x{:.2}", self.mult)?;
+        if !self.names.is_empty() {
+            write!(f, " ({})", self.names.join(", "))?;
+        }
+        Ok(())
+    }
 }
 
 /// What the player can get back this turn, and what decides it.
@@ -147,7 +167,7 @@ pub fn effect(goal: Goal, tier: Tier, score: i64, kill: i64) -> &'static str {
 
 /// Each letter as it is typed, against the board index of its tile. A wildcard shows the letter
 /// typed into it, upper-cased like every other tile (the typist reports it in lower case).
-pub fn letters_of(tiles: &[Tile], c: &Candidate) -> Vec<(String, usize)> {
+pub fn letters_of(tiles: &[Tile], c: &Candidate) -> Vec<Letter> {
     c.typed
         .steps()
         .map(|(i, wild)| {
@@ -161,9 +181,19 @@ pub fn letters_of(tiles: &[Tile], c: &Candidate) -> Vec<(String, usize)> {
                     })
                     .unwrap_or_default(),
             };
-            (letter, i)
+            Letter { text: letter, tile: i, wildcard: wild.is_some() }
         })
         .collect()
+}
+
+/// One letter of a candidate word, as typed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Letter {
+    pub text: String,
+    /// Board index of the tile it is typed into.
+    pub tile: usize,
+    /// Typed into a wildcard, which the game draws as handwriting.
+    pub wildcard: bool,
 }
 
 /// The letter the game draws for a ligature tile, when that is a historical glyph.
@@ -187,9 +217,23 @@ fn historical_glyph(ligature: &str) -> Option<&'static str> {
 
 /// The list's rows, at most `cap` of them, in the order given.
 pub fn rows(
-    plan: &TurnPlan, cs: &Table, scorer: &Scorer, cands: &[Candidate], cap: usize,
+    plan: &TurnPlan, cs: &Table, scorer: &Scorer, spells: &super::spells::Spells,
+    cands: &[Candidate], cap: usize,
 ) -> Vec<Row> {
     let heals = Heals::from_save(plan, cs);
+    // One entry per tile, as the game's spell checks see them: a ligature is one tile (`TH`), and
+    // a wildcard is the letter typed into it.
+    let tile_letters = |c: &Candidate| -> Vec<String> {
+        c.typed
+            .steps()
+            .map(|(i, wild)| match wild {
+                Some(ch) => ch.to_ascii_uppercase().to_string(),
+                None => {
+                    plan.tiles.get(i).map(|t| t.letter.to_ascii_uppercase()).unwrap_or_default()
+                }
+            })
+            .collect()
+    };
     cands
         .iter()
         .take(cap)
@@ -201,6 +245,7 @@ pub fn rows(
             heal: heals.of(&plan.tiles, scorer, c),
             effect: effect(plan.goal, c.tier, c.score, heals.need),
             letters: letters_of(&plan.tiles, c),
+            spells: spells.cast_by(&c.word, &tile_letters(c)),
         })
         .collect()
 }
@@ -244,7 +289,10 @@ mod tests {
         let mut mods = Modifiers::none();
         let set: HashSet<String> = ["CAT".to_string()].into();
         mods.bonuses = vec![(set.clone(), 1.5), (set, 1.5)];
-        assert_eq!(bonus_of(&mods, "CAT"), Some(2.0));
+        mods.bonus_names = vec!["Fire".into(), "Ice".into()];
+        let both = Bonus { mult: 2.0, names: vec!["Fire".into(), "Ice".into()] };
+        assert_eq!(bonus_of(&mods, "CAT"), Some(both.clone()));
+        assert_eq!(both.to_string(), "x2.00 (Fire, Ice)");
         assert_eq!(bonus_of(&mods, "DOG"), None);
     }
 
@@ -330,7 +378,7 @@ mod tests {
             lig("QU", None),
         ];
         let c = cand("X", 1, Tier::Fallback, (0..tiles.len()).collect());
-        let shown: Vec<String> = letters_of(&tiles, &c).into_iter().map(|(l, _)| l).collect();
+        let shown: Vec<String> = letters_of(&tiles, &c).into_iter().map(|l| l.text).collect();
         assert_eq!(shown, ["Þ", "Ð", "Æ", "Œ", "ß", "ꙮ", "ING", "TH", "QU"]);
     }
 
@@ -366,9 +414,11 @@ mod tests {
         let tiles: Vec<Tile> = "C.T".chars().map(|c| Tile::plain(&c.to_string())).collect();
         let mut c = cand("CAT", 1, Tier::Fallback, vec![0, 1, 2]);
         c.typed.wildcards = vec![None, Some('a'), None];
+        let l = |text: &str, tile, wildcard| Letter { text: text.into(), tile, wildcard };
         assert_eq!(
             letters_of(&tiles, &c),
-            vec![("C".to_string(), 0), ("A".to_string(), 1), ("T".to_string(), 2)]
+            vec![l("C", 0, false), l("A", 1, true), l("T", 2, false)],
+            "the wildcard is flagged, so it can be drawn as the game draws it"
         );
     }
 }

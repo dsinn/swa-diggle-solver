@@ -134,6 +134,9 @@ pub struct Modifiers {
     /// Lexicons this enemy takes extra damage from, and by how much. Applied per word, because
     /// membership is a property of the word rather than of the board.
     pub bonuses: Vec<(HashSet<String>, f64)>,
+    /// What each of [`Modifiers::bonuses`] is called, in the same order: the lexicon's name as its
+    /// status key spells it, `lexiconBonusBone` → `Bone`. For showing a bonus, not for scoring.
+    pub bonus_names: Vec<String>,
     /// This enemy cancels overkill healing outright (`rpgview.lua:1084`).
     pub overkill_no_heal: bool,
     /// This enemy turns overkill healing into gold instead (`:1085`), which is the curse described
@@ -243,6 +246,7 @@ impl Modifiers {
                     .and_then(|k| crate::flee::Nerve::from_status(k)),
                 immobile: save.path("rpg.enemy.immobile").is_some(),
                 bonuses: lexica.bonus_sets(&statuses),
+                bonus_names: lexica.bonus_names(&statuses),
                 overkill_no_heal: statuses.contains_key("overkillNoHeal"),
                 overkill_heal_to_gold: statuses.contains_key("overkillHealToGold"),
                 plan,
@@ -267,6 +271,7 @@ impl Modifiers {
             nerve: None,
             immobile: false,
             bonuses: Vec::new(),
+            bonus_names: Vec::new(),
             overkill_no_heal: false,
             overkill_heal_to_gold: false,
             plan: crate::gear::Plan::default(),
@@ -2571,6 +2576,7 @@ mod lexicon_bonus_tests {
     fn with_bonus(pairs: &[(&str, f64)]) -> Modifiers {
         Modifiers {
             bonuses: pairs.iter().map(|(w, v)| (HashSet::from([w.to_string()]), *v)).collect(),
+            bonus_names: Vec::new(),
             ..Modifiers::none()
         }
     }
@@ -2582,6 +2588,18 @@ mod lexicon_bonus_tests {
         assert_eq!(m.modifier_for("OOZE", 0, 0), 1.5);
         // A word outside the lexicon is untouched.
         assert_eq!(m.modifier_for("STONE", 0, 0), 1.0);
+    }
+
+    /// Each bonus is named after its lexicon, in the same order, so a reader can say which.
+    #[test]
+    fn bonuses_are_named_after_their_lexicon() {
+        let src = std::fs::read_to_string("tests/fixtures/combatSaveData-l1-depleted.lua").unwrap();
+        let save = crate::game::save::parse(&src).unwrap();
+        let tiles = save.table_at("tileboard").map(crate::observe::board::tiles_from).unwrap();
+        let game = std::path::PathBuf::from("../sternly-worded-adventures");
+        let (mods, _) = Modifiers::from_save(&game, &save, tiles.len()).unwrap();
+        assert_eq!(mods.bonus_names, vec!["Bone".to_string()], "lexiconBonusBone = 2");
+        assert_eq!(mods.bonus_names.len(), mods.bonuses.len());
     }
 
     #[test]

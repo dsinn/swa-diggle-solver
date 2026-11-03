@@ -185,12 +185,15 @@ Diggle drives. The game data (dictionary, scores, tile textures) comes from
 `game_dir` in `config.toml`, or `--game-dir <path>`.
 
 - **On your turn** it lists every playable word, in the order Diggle prefers them. **The top row is
-  the word Diggle would type.** Each letter sits on the colour of the tile it would be typed into:
-  variants (braced, ornate, serrated), gems and gilt-bordered tiles are ringed, a burning tile has
-  a red ring, and the historical ligatures show as the game draws them (Þ, Ð, Æ, Œ, ß, ꙮ).
-  The columns show the expected damage, the enemy's lexicon bonus when it isn't x1, the health the
-  word should give back (Well-Rested overkill, wood-kill gear, a Diamond tile played last), and what
-  it does: `kills`, `scares`, `frugal kill`, `overshoots - would kill`, or blank when the enemy simply survives.
+  the word Diggle would type.** Each letter sits on the tile it would be typed into, in that
+  material's face and lettering colours as sampled from the game's own textures: variants (braced,
+  ornate, serrated), gems and gilt-bordered tiles are ringed, a burning tile has a red ring, letters
+  typed into wildcards are handwritten (Segoe Print), and the historical ligatures show as the game
+  draws them (Þ, Ð, Æ, Œ, ß, ꙮ). The columns show the expected damage; the enemy's lexicon bonus
+  when it isn't x1, with its lexicon (`x2.00 (Bone)`); the health the word should give back
+  (Well-Rested overkill, wood-kill gear, a Diamond tile played last); the spells you hold that it
+  would cast (`Fire`, `Four heal`, `Turn (if undead)`); and what it does: `kills`, `scares`,
+  `frugal kill`, `overshoots - would kill`, or blank when the enemy simply survives.
 - **Between turns** the last list stays up, greyed.
 - **Out of combat** shows only once `combatSaveData` is gone, which is when the reward is taken,
   not when `Finish` is clicked. Nothing on disk marks `Finish`; this is temporary until something

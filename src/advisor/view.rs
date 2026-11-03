@@ -17,6 +17,8 @@ pub struct Resources {
     pub scorer: crate::score::Scorer,
     pub letters: crate::letters::Weights,
     pub palette: Palette,
+    /// The game's word lists, for the spells a word would cast.
+    pub lexica: crate::lexica::Lexica,
 }
 
 impl Resources {
@@ -27,6 +29,7 @@ impl Resources {
             scorer: crate::score::Scorer::new(game_dir)?,
             letters: crate::letters::Weights::load(game_dir)?,
             palette: Palette::load(game_dir),
+            lexica: crate::lexica::Lexica::load(game_dir)?,
         })
     }
 }
@@ -35,8 +38,12 @@ impl Resources {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
     pub letter: String,
-    /// The tile's family colour — see [`super::palette::Palette::face`].
+    /// The tile's face colour — see [`super::palette::Palette::face`].
     pub colour: (u8, u8, u8),
+    /// The lettering colour the game prints on this tile, made readable where it leans on a glow.
+    pub ink: (u8, u8, u8),
+    /// Typed into a wildcard: drawn in a handwriting face, as the game scribbles them.
+    pub wildcard: bool,
     /// A variant material, a gem, or a tile with a border overlay: drawn with a border.
     pub special: bool,
     /// Burning tiles score nothing (`utils/tiles.lua:56-57`); drawn with a red border, never red
@@ -50,6 +57,8 @@ pub fn cell_for(res: &Resources, tile: &crate::observe::board::Tile, letter: &st
     Cell {
         letter: letter.to_string(),
         colour: face.colour,
+        ink: face.ink,
+        wildcard: false,
         special: face.special || tile.quality.border.is_some(),
         burning: tile.burn().is_some(),
     }
@@ -148,20 +157,26 @@ impl View {
         if list.is_empty() {
             notes.push("nothing playable on this board".into());
         }
-        let rows = rows(&plan, cs, &res.scorer, &list, ROW_CAP)
+        let spells = super::spells::Spells::from_save(cs, &res.lexica);
+        let rows = rows(&plan, cs, &res.scorer, &spells, &list, ROW_CAP)
             .into_iter()
             .map(|row| {
                 let cells = row
                     .letters
                     .iter()
-                    .map(|(letter, i)| match plan.tiles.get(*i) {
-                        Some(tile) => cell_for(res, tile, letter),
-                        None => Cell {
-                            letter: letter.clone(),
-                            colour: super::palette::GREY,
-                            special: false,
-                            burning: false,
-                        },
+                    .map(|l| {
+                        let cell = match plan.tiles.get(l.tile) {
+                            Some(tile) => cell_for(res, tile, &l.text),
+                            None => Cell {
+                                letter: l.text.clone(),
+                                colour: super::palette::GREY,
+                                ink: (0, 0, 0),
+                                wildcard: false,
+                                special: false,
+                                burning: false,
+                            },
+                        };
+                        Cell { wildcard: l.wildcard, ..cell }
                     })
                     .collect();
                 ListRow { row, cells }
@@ -320,9 +335,10 @@ mod tests {
         assert_eq!(drawn_material(&res.scorer, &tile("Q")), "gold");
     }
 
-    /// Braced wood is wood-coloured and bordered; a bordered tile is special; fire is its own flag.
+    /// Braced wood has its own face, black lettering and a ring; a gilt tile is special; fire is
+    /// its own flag.
     #[test]
-    fn a_cell_shows_family_colour_special_and_fire() {
+    fn a_cell_shows_its_own_colours_special_and_fire() {
         use crate::observe::board::{Quality, Tile};
         let res = res();
         let wood = res.palette.colour(Some("wood"));
@@ -332,15 +348,55 @@ mod tests {
             &tile(Quality { material: Some("woodbraced".into()), ..Quality::default() }),
             "E",
         );
-        assert_eq!((braced.colour, braced.special, braced.burning), (wood, true, false));
+        let braced_face = res.palette.colour(Some("woodbraced"));
+        assert_eq!((braced.colour, braced.special, braced.burning), (braced_face, true, false));
         let gilt = cell_for(
             &res,
             &tile(Quality { border: Some("gold".into()), ..Quality::default() }),
             "E",
         );
         assert_eq!((gilt.colour, gilt.special), (wood, true));
+        assert!(
+            braced.ink.0 < 80,
+            "braced wood is lettered black, as in the game: {:?}",
+            braced.ink
+        );
+        let inlaid = cell_for(
+            &res,
+            &tile(Quality { material: Some("woodornate".into()), ..Quality::default() }),
+            "E",
+        );
+        assert_ne!(inlaid.colour, wood, "inlaid wood has its own face");
         let fire = cell_for(&res, &tile(Quality { burn: Some(2), ..Quality::default() }), "E");
         assert_eq!((fire.colour, fire.special, fire.burning), (wood, false, true));
+    }
+
+    /// A held spell shows on the words that cast it, and only on those. `COAL` and `CHAR` are fire
+    /// words (`utils/lexica/fire.lua`) the crypt board can spell, so the column is proven to fill.
+    #[test]
+    fn a_held_spell_shows_on_the_words_that_cast_it() {
+        let res = res();
+        let held = turn().replacen(
+            "turnState = \"PlayerTurn\",",
+            "turnState = \"PlayerTurn\", gearFlags = { spellFire = 1 },",
+            1,
+        );
+        let v = View::next(&View::default(), &snap(Some(&held)), &res, &mut Default::default());
+        let fire = res.lexica.words_for("fire").unwrap();
+        let mut cast = 0;
+        for r in &v.rows {
+            assert_eq!(
+                r.row.spells.contains(&"Fire"),
+                fire.contains(&r.row.word),
+                "{}",
+                r.row.word
+            );
+            cast += r.row.spells.len();
+        }
+        assert!(cast > 0, "no row cast Fire, so this proves nothing");
+        let plain =
+            View::next(&View::default(), &snap(Some(&turn())), &res, &mut Default::default());
+        assert!(plain.rows.iter().all(|r| r.row.spells.is_empty()), "no spell held, none shown");
     }
 
     #[test]
