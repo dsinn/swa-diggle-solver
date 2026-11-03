@@ -27,6 +27,7 @@ pub mod search;
 pub mod shopplay;
 pub mod shrine;
 pub mod shrineplay;
+pub mod spells;
 pub mod stamp;
 pub mod subworld;
 pub mod tables;

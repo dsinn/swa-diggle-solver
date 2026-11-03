@@ -137,6 +137,9 @@ pub struct Modifiers {
     /// What each of [`Modifiers::bonuses`] is called, in the same order: the lexicon's name as its
     /// status key spells it, `lexiconBonusBone` → `Bone`. For showing a bonus, not for scoring.
     pub bonus_names: Vec<String>,
+    /// The spells the player holds, when the caller can cast them — see [`crate::spells`].
+    /// `None` for Diggle, which never presses the cast buttons; the advisor fills it in.
+    pub spells: Option<crate::spells::SpellBook>,
     /// This enemy cancels overkill healing outright (`rpgview.lua:1084`).
     pub overkill_no_heal: bool,
     /// This enemy turns overkill healing into gold instead (`:1085`), which is the curse described
@@ -247,6 +250,7 @@ impl Modifiers {
                 immobile: save.path("rpg.enemy.immobile").is_some(),
                 bonuses: lexica.bonus_sets(&statuses),
                 bonus_names: lexica.bonus_names(&statuses),
+                spells: None,
                 overkill_no_heal: statuses.contains_key("overkillNoHeal"),
                 overkill_heal_to_gold: statuses.contains_key("overkillHealToGold"),
                 plan,
@@ -272,6 +276,7 @@ impl Modifiers {
             immobile: false,
             bonuses: Vec::new(),
             bonus_names: Vec::new(),
+            spells: None,
             overkill_no_heal: false,
             overkill_heal_to_gold: false,
             plan: crate::gear::Plan::default(),
@@ -338,6 +343,20 @@ pub fn scored(
     scorer: &Scorer, mods: &Modifiers, word: &str, consumed: &[Tile],
     typed: Option<&crate::typist::Typed>, corners_used: usize, corner_count: usize,
 ) -> i64 {
+    scored_cast(scorer, mods, word, consumed, typed, corners_used, corner_count).0
+}
+
+/// [`scored`], and the spell to cast for that damage — `None` for the plain attack.
+///
+/// A held spell is an alternative to the plain attack, chosen on the cast buttons
+/// (`wordboard.lua:483-487`), so the damage is the better of the two
+/// ([`crate::spells::SpellBook::best_cast`]). It applies to the word's score before the weapon
+/// layer: the spell is handed `cache.score` (`wordboard.lua:603`) and deals it through
+/// `rpgview.dealDamage`, where the weapon bonus is added (`rpgview.lua:868-912`).
+pub fn scored_cast(
+    scorer: &Scorer, mods: &Modifiers, word: &str, consumed: &[Tile],
+    typed: Option<&crate::typist::Typed>, corners_used: usize, corner_count: usize,
+) -> (i64, Option<&'static str>) {
     let facts = crate::gear::Facts::new(word, consumed, typed, &mods.dicts);
     let adjust = mods.plan.apply(&facts, &mods.fight);
     let modifier = mods.modifier_for_base(word, corners_used, corner_count, adjust.mult);
@@ -354,7 +373,11 @@ pub fn scored(
     // removes 6 from a seven-letter word (`rpgview.lua:871-876`). Clamped at zero because the game
     // takes `math.max(0, damageByPlayer-effectiveArmour)` downstream and a negative here would
     // otherwise read as healing.
-    (score + mods.weapon.bonus_for(word, consumed).damage_delta).max(0)
+    let (score, cast) = match &mods.spells {
+        Some(book) => book.best_cast(word, score),
+        None => (score, None),
+    };
+    ((score + mods.weapon.bonus_for(word, consumed).damage_delta).max(0), cast)
 }
 
 /// A word the search found worth reporting.
@@ -1170,6 +1193,8 @@ pub struct Candidate {
     pub rank: Option<crate::pick::Rank>,
     /// Which tiles the word consumes, so a caller can show them.
     pub typed: crate::typist::Typed,
+    /// The spell to cast for [`Candidate::score`], when one beats the plain attack.
+    pub cast: Option<&'static str>,
 }
 
 /// **Every** playable word, in the order Diggle prefers them for `goal`.
@@ -1234,7 +1259,7 @@ pub fn ranked(
                         let Some(typed) = typist.type_word(word) else { continue };
                         let consumed: Vec<Tile> =
                             typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
-                        let score = scored(
+                        let (score, cast) = scored_cast(
                             scorer,
                             mods,
                             word,
@@ -1255,7 +1280,14 @@ pub fn ranked(
                                 score,
                             )
                         });
-                        local.push(Candidate { word: word.clone(), score, tier, rank, typed });
+                        local.push(Candidate {
+                            word: word.clone(),
+                            score,
+                            tier,
+                            rank,
+                            typed,
+                            cast,
+                        });
                     }
                 }
                 all.lock().unwrap().extend(local);
@@ -2577,6 +2609,7 @@ mod lexicon_bonus_tests {
         Modifiers {
             bonuses: pairs.iter().map(|(w, v)| (HashSet::from([w.to_string()]), *v)).collect(),
             bonus_names: Vec::new(),
+            spells: None,
             ..Modifiers::none()
         }
     }
@@ -2790,6 +2823,30 @@ mod ranked_tests {
         let mut w = world();
         w.board.clear();
         assert!(rank_all(&w, &Modifiers::none(), Goal::RankedKill { need: 1 }).is_empty());
+    }
+
+    /// With a spell book, a word that casts a stronger spell scores the spell's damage and names it;
+    /// without one — Diggle, which never casts — it scores the plain attack.
+    #[test]
+    fn a_held_spell_raises_the_score_only_with_a_book() {
+        let w = world();
+        let lex = crate::lexica::Lexica::load(&game_dir()).unwrap();
+        let word = lex.words_for("bone").unwrap().iter().min().unwrap().clone();
+        let tiles: Vec<Tile> = word.chars().map(|c| Tile::plain(&c.to_string())).collect();
+        let plain = scored(&w.scorer, &Modifiers::none(), &word, &tiles, None, 0, 0);
+        assert!(plain > 0, "{word} must do some damage for the doubling to show");
+        let cs = crate::game::save::parse(
+            "return { rpg = { player = { gearFlags = { spellTurnUndead = 1 } } } }",
+        )
+        .unwrap();
+        let mut mods = Modifiers::none();
+        mods.spells = Some(crate::spells::SpellBook::from_save(&cs, &lex, Some(true)));
+        assert_eq!(
+            scored_cast(&w.scorer, &mods, &word, &tiles, None, 0, 0),
+            (plain * 2, Some("Turn")),
+            "{word}"
+        );
+        assert_eq!(scored(&w.scorer, &mods, &word, &tiles, None, 0, 0), plain * 2);
     }
 
     /// The advisor's top row is the word Diggle would play, or one it cannot tell apart from it.

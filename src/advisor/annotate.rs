@@ -27,7 +27,7 @@ pub struct Row {
     /// Each letter as typed, with the board index of the tile it goes into.
     pub letters: Vec<Letter>,
     /// The headings of the held spells this word would cast (`Fire`, `Four heal`).
-    pub spells: Vec<&'static str>,
+    pub spells: Vec<String>,
 }
 
 /// The enemy's lexicon bonus for `word`, when it is not 1, and which lexicons it comes from.
@@ -215,9 +215,17 @@ fn historical_glyph(ligature: &str) -> Option<&'static str> {
     })
 }
 
+/// The Spell column: the spell to cast for the damage shown, first, as `Cast Turn`; then any
+/// other held spell the word qualifies for, as a choice the player may still want.
+pub fn spell_column(cast: Option<&'static str>, qualifying: Vec<&'static str>) -> Vec<String> {
+    let mut out: Vec<String> = cast.map(|c| format!("Cast {c}")).into_iter().collect();
+    out.extend(qualifying.into_iter().filter(|q| Some(*q) != cast).map(str::to_string));
+    out
+}
+
 /// The list's rows, at most `cap` of them, in the order given.
 pub fn rows(
-    plan: &TurnPlan, cs: &Table, scorer: &Scorer, spells: &super::spells::Spells,
+    plan: &TurnPlan, cs: &Table, scorer: &Scorer, spells: &crate::spells::SpellBook,
     cands: &[Candidate], cap: usize,
 ) -> Vec<Row> {
     let heals = Heals::from_save(plan, cs);
@@ -245,7 +253,7 @@ pub fn rows(
             heal: heals.of(&plan.tiles, scorer, c),
             effect: effect(plan.goal, c.tier, c.score, heals.need),
             letters: letters_of(&plan.tiles, c),
-            spells: spells.cast_by(&c.word, &tile_letters(c)),
+            spells: spell_column(c.cast, spells.qualifying(&c.word, &tile_letters(c))),
         })
         .collect()
 }
@@ -271,6 +279,7 @@ mod tests {
             tier,
             rank: None,
             typed: Typed { tiles, wildcards: vec![None; n], corners_used: 0 },
+            cast: None,
         }
     }
 

@@ -19,6 +19,8 @@ pub struct Resources {
     pub palette: Palette,
     /// The game's word lists, for the spells a word would cast.
     pub lexica: crate::lexica::Lexica,
+    /// Enemy names to enemy types, for whether Turn undead applies.
+    pub bestiary: super::bestiary::Bestiary,
 }
 
 impl Resources {
@@ -30,6 +32,7 @@ impl Resources {
             letters: crate::letters::Weights::load(game_dir)?,
             palette: Palette::load(game_dir),
             lexica: crate::lexica::Lexica::load(game_dir)?,
+            bestiary: super::bestiary::Bestiary::load(game_dir),
         })
     }
 }
@@ -139,9 +142,14 @@ impl View {
     fn turn(
         cs: &crate::game::save::Table, res: &Resources, peaks: &mut HashMap<String, i64>,
     ) -> Result<View, crate::Error> {
-        let Some(plan) = crate::turn::plan(cs, &res.game_dir, &res.letters, peaks)? else {
+        let Some(mut plan) = crate::turn::plan(cs, &res.game_dir, &res.letters, peaks)? else {
             return Ok(View { mode: Mode::CombatPlayerTurn, ..View::default() });
         };
+        // The player can cast, so the search scores each word by its best option — see
+        // `crate::spells`. Diggle's own plan leaves this `None`.
+        let book =
+            crate::spells::SpellBook::from_save(cs, &res.lexica, res.bestiary.undead(&plan.name));
+        plan.mods.spells = Some(book.clone());
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
         let list = crate::search::ranked(
             &res.dict,
@@ -155,11 +163,16 @@ impl View {
         );
         let mut notes = plan.notes.clone();
         notes.extend(crate::turn::goal_notes(cs, &plan.name, &plan.mods, plan.goal));
+        if book.turn_undead_unknown() {
+            notes.push(format!(
+                "cannot tell whether {} is undead; Turn undead's double damage is not counted",
+                plan.name
+            ));
+        }
         if list.is_empty() {
             notes.push("nothing playable on this board".into());
         }
-        let spells = super::spells::Spells::from_save(cs, &res.lexica);
-        let rows = rows(&plan, cs, &res.scorer, &spells, &list, ROW_CAP)
+        let rows = rows(&plan, cs, &res.scorer, &book, &list, ROW_CAP)
             .into_iter()
             .map(|row| {
                 let cells = row
@@ -379,7 +392,7 @@ mod tests {
         let mut cast = 0;
         for r in &v.rows {
             assert_eq!(
-                r.row.spells.contains(&"Fire"),
+                r.row.spells.iter().any(|s| s == "Fire"),
                 fire.contains(&r.row.word),
                 "{}",
                 r.row.word
@@ -390,6 +403,39 @@ mod tests {
         let plain =
             View::next(&View::default(), &snap(Some(&turn())), &res, &mut Default::default());
         assert!(plain.rows.iter().all(|r| r.row.spells.is_empty()), "no spell held, none shown");
+    }
+
+    /// The bug a user found on a real save: against an undead enemy, a bone word with Turn undead
+    /// held deals double, can kill, and must rank and read as such — `ACETABULUM` had been shown at
+    /// half its damage, below words that could not kill.
+    #[test]
+    fn turn_undead_doubles_a_bone_word_against_a_skeleton() {
+        let res = res();
+        let board: String = "ACETABULUMQXZJVK".chars().map(|c| format!("\"{c}\", ")).collect();
+        let save = |spell: bool| {
+            let mut s = turn().replacen("\"Amorphous\"", "\"Bones McCoy\"", 1);
+            let a = s.find("tileboard = {").unwrap();
+            let b = a + s[a..].find('}').unwrap();
+            s.replace_range(a..=b, &format!("tileboard = {{ {board} }}"));
+            if spell {
+                s = s.replacen(
+                    "turnState = \"PlayerTurn\",",
+                    "turnState = \"PlayerTurn\", gearFlags = { spellTurnUndead = 1 },",
+                    1,
+                );
+            }
+            s
+        };
+        let row = |v: &View| v.rows.iter().find(|r| r.row.word == "ACETABULUM").cloned();
+        let plain =
+            View::next(&View::default(), &snap(Some(&save(false))), &res, &mut Default::default());
+        let cast =
+            View::next(&View::default(), &snap(Some(&save(true))), &res, &mut Default::default());
+        let (plain, cast) = (row(&plain).expect("spellable"), row(&cast).expect("spellable"));
+        assert!(plain.row.score > 0);
+        assert_eq!(cast.row.score, plain.row.score * 2);
+        assert_eq!(cast.row.spells.first().map(String::as_str), Some("Cast Turn"));
+        assert!(plain.row.spells.is_empty());
     }
 
     #[test]

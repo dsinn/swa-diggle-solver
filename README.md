@@ -193,13 +193,18 @@ Diggle drives. The game data (dictionary, scores, tile textures) comes from
   draws them (Þ, Ð, Æ, Œ, ß, ꙮ). The columns show the expected damage; the enemy's lexicon bonus
   when it isn't x1, with its lexicon (`x2.00 (Bone)`); the health the word should give back
   (Well-Rested overkill, wood-kill gear, a Diamond tile played last); the spells you hold that it
-  would cast (`Fire`, `Four heal`, `Turn (if undead)`); and what it does: `kills`, `scares`,
+  qualifies for, led by the one to cast when it beats the plain attack (`Cast Turn`), in which
+  case the damage and ranking are that spell's; and what it does: `kills`, `scares`,
   `frugal kill`, `overshoots - would kill`, or blank when the enemy simply survives.
 - **Between turns** the last list stays up, greyed.
 - **Out of combat** shows only once `combatSaveData` is gone, which is when the reward is taken,
   not when `Finish` is clicked. Nothing on disk marks `Finish`; this is temporary until something
   does.
 - **Stay on top** is off by default.
+
+Casting is your choice in the game, so only the advisor scores spells; Diggle never casts and
+scores every word as a plain attack. Turn undead counts only when the enemy's name is on the
+skeleton list (the save does not record its type); otherwise the notes say it was not counted.
 
 It does not model Diggle's murder backoff, which reacts to a warning the game prints to the console.
 You see that warning on screen.

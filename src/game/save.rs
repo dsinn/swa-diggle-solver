@@ -227,6 +227,25 @@ local function require(name) return __stub() end
     eval(&format!("{SHIM}{source}"), true)
 }
 
+/// [`parse_module`], except that each stub remembers the module it stands for, as a `__module`
+/// field: `name = require'rpg.names.skeleton'` evaluates to a table whose `__module` is
+/// `"rpg.names.skeleton"`. For data that refers to other modules by requiring them — an enemy's
+/// name list (`rpg/enemies/skeletons.lua:25`).
+///
+/// Its stub's fields are stubs too, not functions, so a chain that indexes a field of a field —
+/// `rpg/enemies/spiders.lua:54` indexes `onDeath` — evaluates instead of erroring. Stubs convert
+/// to empty tables, which the callers here ignore.
+pub fn parse_module_named(source: &str) -> Result<Table, crate::Error> {
+    const SHIM: &str = "\
+local __meta = {}
+local function __stub() return setmetatable({}, __meta) end
+__meta.__index = function() return __stub() end
+__meta.__call = function() return __stub() end
+local function require(name) return setmetatable({ __module = name }, __meta) end
+";
+    eval(&format!("{SHIM}{source}"), true)
+}
+
 /// Reads and parses a save file.
 ///
 /// A missing file is reported as such rather than as an empty table: `combatSaveData` is absent
@@ -264,6 +283,22 @@ pub fn combat_in_progress(save_dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A required module is remembered by name, so `name = require'rpg.names.skeleton'` says which
+    /// list an enemy draws its name from; calling or indexing it still evaluates as in
+    /// [`parse_module`].
+    #[test]
+    fn a_named_module_remembers_what_it_required() {
+        let t = parse_module_named(
+            "local person = require'rpg.names.person'\n\
+             local x = person.anything()\n\
+             return { { name = require'rpg.names.skeleton', categories = { undead = true } } }",
+        )
+        .unwrap();
+        let entry = t.arr[0].as_table().unwrap();
+        assert_eq!(entry.str_at("name.__module"), Some("rpg.names.skeleton"));
+        assert!(entry.path("categories.undead").is_some());
+    }
 
     /// The passive is read from either list, because the game hashes both together
     /// (`overworld.lua:105-109`) and a snail can arrive as combat loot as easily as a purchase.
