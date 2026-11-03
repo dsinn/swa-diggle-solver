@@ -41,6 +41,38 @@ impl Palette {
     pub fn colour(&self, material: Option<&str>) -> (u8, u8, u8) {
         material.and_then(|m| self.colours.get(m)).copied().unwrap_or(GREY)
     }
+
+    /// How a tile of `material` is drawn: its family's colour, and whether it is special.
+    ///
+    /// A variant's own texture is the wrong colour to show — the braces on `woodbraced` pull its
+    /// median toward grey, and a braced tile is still wood. So variants are coloured as their
+    /// family and marked with a border instead. The families are each material's
+    /// `categories.material` (`rpg/effects/material/*.lua`), and the variants share a suffix:
+    /// `braced` and `ornate` for wood, `bleed` and `toxin` for the serrated metals. The silver
+    /// family has no file of its own, so it takes `silver2`'s colour. Gems are special tiles with
+    /// faces of their own, so they keep their colour and are marked too.
+    pub fn face(&self, material: Option<&str>) -> Face {
+        let Some(m) = material else { return Face { colour: GREY, special: false } };
+        if m.starts_with("gem") {
+            return Face { colour: self.colour(Some(m)), special: true };
+        }
+        let family = ["braced", "ornate", "bleed", "toxin"]
+            .iter()
+            .find_map(|suffix| m.strip_suffix(suffix).filter(|f| !f.is_empty()));
+        match family {
+            Some("silver") => Face { colour: self.colour(Some("silver2")), special: true },
+            Some(f) => Face { colour: self.colour(Some(f)), special: true },
+            None => Face { colour: self.colour(Some(m)), special: false },
+        }
+    }
+}
+
+/// A tile's face in the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Face {
+    pub colour: (u8, u8, u8),
+    /// A variant or gem: drawn with a border so it stands apart from a plain tile of its family.
+    pub special: bool,
 }
 
 fn median_colour(path: &Path) -> Option<(u8, u8, u8)> {
@@ -97,6 +129,33 @@ mod tests {
         assert_ne!(wood, GREY, "wood was sampled");
         assert_ne!(gold, GREY, "gold was sampled");
         assert_ne!(wood, gold);
+    }
+
+    /// A variant is drawn in its family's colour and marked special; plain tiles are not marked.
+    #[test]
+    fn variants_take_their_family_colour_and_are_marked() {
+        let p = Palette::load(&game_dir());
+        let wood = p.colour(Some("wood"));
+        assert_eq!(p.face(Some("woodbraced")), Face { colour: wood, special: true });
+        assert_eq!(p.face(Some("woodornate")), Face { colour: wood, special: true });
+        assert_eq!(
+            p.face(Some("bronzebleed")),
+            Face { colour: p.colour(Some("bronze")), special: true }
+        );
+        assert_eq!(
+            p.face(Some("silvertoxin")),
+            Face { colour: p.colour(Some("silver2")), special: true }
+        );
+        assert_eq!(p.face(Some("wood")), Face { colour: wood, special: false });
+        assert_eq!(
+            p.face(Some("silver3")),
+            Face { colour: p.colour(Some("silver3")), special: false }
+        );
+        let gem = p.face(Some("gemheal"));
+        assert!(
+            gem.special && gem.colour == p.colour(Some("gemheal")),
+            "a gem keeps its own colour"
+        );
     }
 
     #[test]

@@ -185,7 +185,9 @@ Diggle drives. The game data (dictionary, scores, tile textures) comes from
 `game_dir` in `config.toml`, or `--game-dir <path>`.
 
 - **On your turn** it lists every playable word, in the order Diggle prefers them. **The top row is
-  the word Diggle would type.** Each letter sits on the colour of the tile it would be typed into.
+  the word Diggle would type.** Each letter sits on the colour of the tile it would be typed into:
+  variants (braced, ornate, serrated), gems and gilt-bordered tiles are ringed, a burning tile has
+  a red ring, and the historical ligatures show as the game draws them (Þ, Ð, Æ, Œ, ß, ꙮ).
   The columns show the expected damage, the enemy's lexicon bonus when it isn't x1, the health the
   word should give back (Well-Rested overkill, wood-kill gear, a Diamond tile played last), and what
   it does: `kills`, `scares`, `frugal kill`, `chip`, `overshoots - would kill`.

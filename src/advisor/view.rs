@@ -35,9 +35,24 @@ impl Resources {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
     pub letter: String,
+    /// The tile's family colour — see [`super::palette::Palette::face`].
     pub colour: (u8, u8, u8),
-    /// Burning tiles score nothing (`utils/tiles.lua:56-57`); drawn with red lettering.
+    /// A variant material, a gem, or a tile with a border overlay: drawn with a border.
+    pub special: bool,
+    /// Burning tiles score nothing (`utils/tiles.lua:56-57`); drawn with a red border, never red
+    /// lettering, which is hard to read on the darker tiles.
     pub burning: bool,
+}
+
+/// The cell for `letter` typed into `tile`.
+pub fn cell_for(res: &Resources, tile: &crate::observe::board::Tile, letter: &str) -> Cell {
+    let face = res.palette.face(Some(drawn_material(&res.scorer, tile)));
+    Cell {
+        letter: letter.to_string(),
+        colour: face.colour,
+        special: face.special || tile.quality.border.is_some(),
+        burning: tile.burn().is_some(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,15 +154,14 @@ impl View {
                 let cells = row
                     .letters
                     .iter()
-                    .map(|(letter, i)| {
-                        let tile = plan.tiles.get(*i);
-                        Cell {
+                    .map(|(letter, i)| match plan.tiles.get(*i) {
+                        Some(tile) => cell_for(res, tile, letter),
+                        None => Cell {
                             letter: letter.clone(),
-                            colour: res
-                                .palette
-                                .colour(tile.and_then(|t| res.scorer.material_name(t))),
-                            burning: tile.is_some_and(|t| t.burn().is_some()),
-                        }
+                            colour: super::palette::GREY,
+                            special: false,
+                            burning: false,
+                        },
                     })
                     .collect();
                 ListRow { row, cells }
@@ -185,6 +199,25 @@ impl View {
             format!("save in {} unreadable, waiting for the next write: {error}", dir.display());
         let notes = if self.notes.is_empty() { line } else { format!("{line}\r\n{}", self.notes) };
         View { notes, ..self.clone() }
+    }
+}
+
+/// The material the game draws a tile in.
+///
+/// [`crate::score::Scorer::material_name`] answers only for letters in the material table, and
+/// ligature tiles (`AE`, `TH`, `ING`) are not in it. The game falls back rather than giving up:
+/// `getMaterialName` is `bomb` for a digit and `letterMaterials[letter] or 'wood'` otherwise
+/// (`rpg/effects/material/default.lua`). Display only — the scorer is left as it is.
+pub fn drawn_material<'a>(
+    scorer: &'a crate::score::Scorer, tile: &'a crate::observe::board::Tile,
+) -> &'a str {
+    if let Some(m) = scorer.material_name(tile) {
+        return m;
+    }
+    if tile.letter.parse::<f64>().is_ok() {
+        "bomb"
+    } else {
+        "wood"
     }
 }
 
@@ -274,6 +307,40 @@ mod tests {
         );
         assert_eq!(v.header, live.header);
         assert_eq!(v.rows.len(), live.rows.len());
+    }
+
+    /// A letter the material table does not list is wood, and a digit is a bomb, as the game draws
+    /// them (`getMaterialName`, `rpg/effects/material/default.lua`).
+    #[test]
+    fn unlisted_letters_are_coloured_as_the_game_draws_them() {
+        let res = res();
+        let tile = |l: &str| crate::observe::board::Tile::plain(l);
+        assert_eq!(drawn_material(&res.scorer, &tile("AE")), "wood");
+        assert_eq!(drawn_material(&res.scorer, &tile("3")), "bomb");
+        assert_eq!(drawn_material(&res.scorer, &tile("Q")), "gold");
+    }
+
+    /// Braced wood is wood-coloured and bordered; a bordered tile is special; fire is its own flag.
+    #[test]
+    fn a_cell_shows_family_colour_special_and_fire() {
+        use crate::observe::board::{Quality, Tile};
+        let res = res();
+        let wood = res.palette.colour(Some("wood"));
+        let tile = |q: Quality| Tile { letter: "E".into(), quality: q };
+        let braced = cell_for(
+            &res,
+            &tile(Quality { material: Some("woodbraced".into()), ..Quality::default() }),
+            "E",
+        );
+        assert_eq!((braced.colour, braced.special, braced.burning), (wood, true, false));
+        let gilt = cell_for(
+            &res,
+            &tile(Quality { border: Some("gold".into()), ..Quality::default() }),
+            "E",
+        );
+        assert_eq!((gilt.colour, gilt.special), (wood, true));
+        let fire = cell_for(&res, &tile(Quality { burn: Some(2), ..Quality::default() }), "E");
+        assert_eq!((fire.colour, fire.special, fire.burning), (wood, false, true));
     }
 
     #[test]

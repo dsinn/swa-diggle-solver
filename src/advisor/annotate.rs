@@ -149,11 +149,36 @@ pub fn letters_of(tiles: &[Tile], c: &Candidate) -> Vec<(String, usize)> {
         .map(|(i, wild)| {
             let letter = match wild {
                 Some(ch) => ch.to_ascii_uppercase().to_string(),
-                None => tiles.get(i).map(|t| t.letter.to_ascii_uppercase()).unwrap_or_default(),
+                None => tiles
+                    .get(i)
+                    .map(|t| match t.quality.ligature.as_deref().and_then(historical_glyph) {
+                        Some(glyph) => glyph.to_string(),
+                        None => t.letter.to_ascii_uppercase(),
+                    })
+                    .unwrap_or_default(),
             };
             (letter, i)
         })
         .collect()
+}
+
+/// The letter the game draws for a ligature tile, when that is a historical glyph.
+///
+/// The game picks a tile's face from its ligature sheet by `extra.ligature` first
+/// (`ui/objects/tile.lua:40-73,97`), and these six cells of `ui/graphics/tiles/*_ligatures.png` are
+/// letters in their own right rather than letters run together. Each counts as the letters the
+/// tile carries (`rpg/effects/ligature/thorn.lua` and its neighbours). Digraphs drawn as ordinary
+/// letters — `Th`, `Qu`, `ing` — are not in the list and show as text.
+fn historical_glyph(ligature: &str) -> Option<&'static str> {
+    Some(match ligature {
+        "thorn" => "Þ",
+        "eth" => "Ð",
+        "ash" => "Æ",
+        "ethel" => "Œ",
+        "eszett" => "ß",
+        "multiO" => "ꙮ",
+        _ => return None,
+    })
 }
 
 /// The list's rows, at most `cap` of them, in the order given.
@@ -279,6 +304,30 @@ mod tests {
         assert_eq!(bleed_of(&cs("0.25")), 1);
         assert_eq!(bleed_of(&cs("2")), 2);
         assert_eq!(bleed_of(&crate::game::save::parse("return {}").unwrap()), 0);
+    }
+
+    /// A ligature the game draws as a historical letter shows that letter
+    /// (`ui/objects/tile.lua:40-73`, `ui/graphics/tiles/*_ligatures.png`); others stay as text.
+    #[test]
+    fn historical_ligatures_show_their_glyph() {
+        let lig = |letter: &str, ligature: Option<&str>| Tile {
+            letter: letter.into(),
+            quality: Quality { ligature: ligature.map(str::to_string), ..Quality::default() },
+        };
+        let tiles = vec![
+            lig("TH", Some("thorn")),
+            lig("TH", Some("eth")),
+            lig("AE", Some("ash")),
+            lig("OE", Some("ethel")),
+            lig("SS", Some("eszett")),
+            lig("O", Some("multiO")),
+            lig("ING", None),
+            lig("TH", None),
+            lig("QU", None),
+        ];
+        let c = cand("X", 1, Tier::Fallback, (0..tiles.len()).collect());
+        let shown: Vec<String> = letters_of(&tiles, &c).into_iter().map(|(l, _)| l).collect();
+        assert_eq!(shown, ["Þ", "Ð", "Æ", "Œ", "ß", "ꙮ", "ING", "TH", "QU"]);
     }
 
     #[test]

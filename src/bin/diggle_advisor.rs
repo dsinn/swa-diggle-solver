@@ -46,13 +46,14 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
-    InitCommonControlsEx, BST_CHECKED, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM,
-    CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT,
-    ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, LVCFMT_LEFT, LVCFMT_RIGHT,
-    LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVIR_BOUNDS, LVM_GETSUBITEMRECT,
-    LVM_INSERTCOLUMNW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMCOUNT, LVN_GETDISPINFOW,
-    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_OWNERDATA, LVS_REPORT, NMHDR,
-    NMLVCUSTOMDRAW, NMLVDISPINFOW, NM_CUSTOMDRAW, WC_LISTVIEWW,
+    ImageList_Create, InitCommonControlsEx, BST_CHECKED, CDDS_ITEMPREPAINT, CDDS_PREPAINT,
+    CDDS_SUBITEM, CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYSUBITEMDRAW,
+    CDRF_SKIPDEFAULT, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, ILC_COLOR32,
+    INITCOMMONCONTROLSEX, LVCFMT_LEFT, LVCFMT_RIGHT, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW,
+    LVIF_TEXT, LVIR_BOUNDS, LVM_GETSUBITEMRECT, LVM_INSERTCOLUMNW, LVM_SETEXTENDEDLISTVIEWSTYLE,
+    LVM_SETIMAGELIST, LVM_SETITEMCOUNT, LVN_GETDISPINFOW, LVSIL_SMALL, LVS_EX_DOUBLEBUFFER,
+    LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_OWNERDATA, LVS_REPORT, NMHDR, NMLVCUSTOMDRAW,
+    NMLVDISPINFOW, NM_CUSTOMDRAW, WC_LISTVIEWW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW, LoadCursorW,
@@ -94,13 +95,18 @@ thread_local! {
 /// Columns: header, width, right-aligned.
 const COLUMNS: [(&str, i32, bool); 6] = [
     ("#", 44, true),
-    ("Word", 340, false),
+    ("Word", 470, false),
     ("Damage", 70, true),
     ("Bonus", 64, true),
     ("Heals", 56, true),
     ("Effect", 190, false),
 ];
 const WORD_COLUMN: i32 = 1;
+/// Lettering on the word column's tiles, in pixels. Bigger than the rest of the list on purpose:
+/// the word is what the player reads.
+const TILE_TEXT: i32 = 26;
+/// Row height, to fit [`TILE_TEXT`] on a tile with a little margin.
+const ROW_HEIGHT: i32 = 36;
 
 struct Args {
     game_dir: PathBuf,
@@ -214,7 +220,7 @@ fn main() -> windows::core::Result<()> {
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            840,
+            980,
             720,
             None,
             None,
@@ -253,7 +259,7 @@ unsafe fn child(
 
 unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
     let font = CreateFontW(-15, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 0, 0, w!("Segoe UI"));
-    let tile_font = CreateFontW(-16, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0, w!("Consolas"));
+    let tile_font = CreateFontW(-TILE_TEXT, 0, 0, 0, 700, 0, 0, 0, 0, 0, 0, 0, 0, w!("Segoe UI"));
     let banner_font = CreateFontW(-28, 0, 0, 0, 600, 0, 0, 0, 0, 0, 0, 0, 0, w!("Segoe UI"));
     let status = child(hwnd, w!("STATIC"), w!(""), 0, 0)?;
     let notes = child(
@@ -282,6 +288,10 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         SendMessageW(h, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
     }
     SendMessageW(banner, WM_SETFONT, WPARAM(banner_font.0 as usize), LPARAM(1));
+    // A ListView's rows are as tall as its small icons. An empty one-pixel-wide image list is the
+    // way to make rows tall enough for the tiles without enlarging every other column's text.
+    let rows = ImageList_Create(1, ROW_HEIGHT, ILC_COLOR32, 0, 0);
+    SendMessageW(list, LVM_SETIMAGELIST, WPARAM(LVSIL_SMALL as usize), LPARAM(rows.0));
     SendMessageW(
         list,
         LVM_SETEXTENDEDLISTVIEWSTYLE,
@@ -339,7 +349,7 @@ fn colorref((r, g, b): (u8, u8, u8)) -> COLORREF {
     COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
 }
 
-/// Halfway to light grey: how a stale list's tiles are drawn.
+/// Halfway to light grey: how a stale list's tiles and rings are drawn.
 fn faded((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
     let mix = |c: u8| ((c as u16 + 200) / 2) as u8;
     (mix(r), mix(g), mix(b))
@@ -355,6 +365,37 @@ fn cell_text(v: &View, item: usize, sub: i32) -> String {
         3 => r.row.bonus.map(|b| format!("x{b:.2}")).unwrap_or_default(),
         4 => (r.row.heal > 0).then(|| format!("+{}", r.row.heal)).unwrap_or_default(),
         _ => r.row.effect.to_string(),
+    }
+}
+
+/// The fire ring's colour and width. Pure red, wide enough to read at a glance.
+const FIRE: (u8, u8, u8) = (220, 0, 0);
+const FIRE_RING: i32 = 3;
+/// The special-tile ring's width.
+const SPECIAL_RING: i32 = 2;
+
+unsafe fn fill(hdc: windows::Win32::Graphics::Gdi::HDC, rc: &RECT, colour: (u8, u8, u8)) {
+    let brush = CreateSolidBrush(colorref(colour));
+    FillRect(hdc, rc, brush);
+    let _ = DeleteObject(brush);
+}
+
+fn inset(rc: &RECT, by: i32) -> RECT {
+    RECT { left: rc.left + by, top: rc.top + by, right: rc.right - by, bottom: rc.bottom - by }
+}
+
+/// A ring `width` pixels wide just inside `rc`.
+unsafe fn frame(
+    hdc: windows::Win32::Graphics::Gdi::HDC, rc: &RECT, width: i32, colour: (u8, u8, u8),
+) {
+    let w = width;
+    for side in [
+        RECT { bottom: rc.top + w, ..*rc },
+        RECT { top: rc.bottom - w, ..*rc },
+        RECT { right: rc.left + w, ..*rc },
+        RECT { left: rc.right - w, ..*rc },
+    ] {
+        fill(hdc, &side, colour);
     }
 }
 
@@ -378,20 +419,28 @@ unsafe fn draw_word(ui: &Ui, cd: &NMLVCUSTOMDRAW) {
         let mut text: Vec<u16> = cell.letter.encode_utf16().collect();
         let mut size = SIZE::default();
         let _ = GetTextExtentPoint32W(hdc, &text, &mut size);
-        let width = size.cx.max(10) + 8;
+        let width = size.cx.max(12) + 2 * (FIRE_RING + SPECIAL_RING) + 6;
         let mut tile = RECT { left: x, right: x + width, top: rc.top + 1, bottom: rc.bottom - 1 };
-        let colour = if v.live { cell.colour } else { faded(cell.colour) };
-        let brush = CreateSolidBrush(colorref(colour));
-        FillRect(hdc, &tile, brush);
-        let _ = DeleteObject(brush);
+        let shade = |c| if v.live { c } else { faded(c) };
+        let colour = shade(cell.colour);
         let (cr, cg, cb) = colour;
         let light = 299 * cr as u32 + 587 * cg as u32 + 114 * cb as u32 > 140_000;
-        let ink = match (cell.burning, v.live, light) {
-            (true, _, _) => (200, 0, 0),
-            (false, false, _) => (110, 110, 110),
-            (false, true, true) => (0, 0, 0),
-            (false, true, false) => (255, 255, 255),
+        let ink = match (v.live, light) {
+            (false, _) => (110, 110, 110),
+            (true, true) => (0, 0, 0),
+            (true, false) => (255, 255, 255),
         };
+        fill(hdc, &tile, colour);
+        // Fire is an outer ring of red; the lettering keeps the contrast of its tile.
+        if cell.burning {
+            frame(hdc, &tile, FIRE_RING, shade(FIRE));
+        }
+        // A special tile — braced, ornate, serrated, gem, gilt — is ringed inside that, in the ink
+        // colour, so the ring reads against its own tile whatever the family.
+        if cell.special {
+            let inner = inset(&tile, FIRE_RING);
+            frame(hdc, &inner, SPECIAL_RING, ink);
+        }
         SetTextColor(hdc, colorref(ink));
         DrawTextW(hdc, &mut text, &mut tile, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         x += width + 2;
