@@ -21,11 +21,24 @@
 //! worth nothing, one in a corner and worth everything against `resistCornerless` — so "the word is
 //! makeable" was never the whole answer. Which tiles it eats is the answer.
 //!
-//! ## What this does not model
+//! ## The letter-chaining curse
 //!
-//! `wordRequirementAdjacent` gear restricts each pick to the 3×3 neighbourhood of the last
-//! selection ([`crate::geometry::Geometry::adjacency_required`]). Callers must check that flag; this
-//! types as if the whole board were reachable, which is true without that gear and wrong with it.
+//! `wordRequirementAdjacent` gear (directThinker) confines typing to the 3×3 box around the last
+//! tile selected ([`crate::geometry::Geometry::adjacency_required`]):
+//!
+//! - the exact-letter lookup and both wildcard lookups search only that box, corners first and then
+//!   column-major, as without the curse (`tileboard.lua:2269-2292`, `:2216-2245`); the "could a
+//!   ligature tile absorb this letter" check does not (`:2182-2192`);
+//! - the box moves only when the selection is refreshed with a real tile last
+//!   (`wordboard.lua:265-267`), so a ligature is looked up around the tile it is about to replace,
+//!   and a placeholder never moves it;
+//! - the first letter has no box, so it comes from the whole board, corners first — **greedily**:
+//!   if that tile strands the rest of the word, the game does not try another;
+//! - on submit, every tile must be next to the one before ([`Geometry::tiles_adjacent`],
+//!   `rpg/effects/modifiers/wordRequirementAdjacent.lua`), which a ligature swap can break.
+//!
+//! So the words this accepts are exactly the ones the keyboard can chain — fewer than a mouse could
+//! drag, which is the user's call (2026-11-03): they type.
 
 use crate::geometry::Geometry;
 use crate::observe::board::Tile;
@@ -47,6 +60,9 @@ pub struct Typed {
     pub wildcards: Vec<Option<char>>,
     /// How many of them are corner tiles — the numerator of the `resistCornerless` nerf.
     pub corners_used: usize,
+    /// Every tile is next to the one before it (`tileboard.tilesAreAllAdjacent`) — what
+    /// `wordScoreBonusAdjacent` pays on, and what the chaining curse requires.
+    pub adjacent: bool,
 }
 
 impl Typed {
@@ -110,10 +126,16 @@ impl<'a> Typist<'a> {
         let chars = upper.as_bytes();
         let mut selected = vec![false; self.tiles.len()];
         let mut built: Vec<Slot> = Vec::with_capacity(chars.len());
+        // The tile the curse's box is centred on: `lastSelectedCol/Row`. None until a real tile is
+        // selected, and then only ever moved to a real tile — see the module notes.
+        let mut last: Option<usize> = None;
 
         for &c in chars {
-            if self.step(c, &mut selected, &mut built).is_none() {
-                return None;
+            self.step(c, &mut selected, &mut built, last)?;
+            if let Some(Slot::Real(i) | Slot::Wild(i, _)) = built.last() {
+                if self.geometry.adjacency_required {
+                    last = Some(*i);
+                }
             }
         }
 
@@ -163,15 +185,23 @@ impl<'a> Typist<'a> {
             })
             .collect();
         let corners_used = tiles.iter().filter(|&&i| self.geometry.is_corner(i)).count();
-        Some(Typed { tiles, wildcards, corners_used })
+        let adjacent =
+            !tiles.is_empty() && tiles.windows(2).all(|p| self.geometry.tiles_adjacent(p[0], p[1]));
+        if self.geometry.adjacency_required && !adjacent {
+            // Typed, but refused on submit: "not contiguous".
+            return None;
+        }
+        Some(Typed { tiles, wildcards, corners_used, adjacent })
     }
 
-    fn step(&self, c: u8, selected: &mut [bool], built: &mut Vec<Slot>) -> Option<()> {
+    fn step(
+        &self, c: u8, selected: &mut [bool], built: &mut Vec<Slot>, last: Option<usize>,
+    ) -> Option<()> {
         // Clause 1: the previous tile plus this character naming a two-character ligature tile.
         if let Some(&prev) = built.last() {
             let mut key = self.slot_letters(prev);
             key.push(c as char);
-            if let Some(t) = self.find_exact(&key, selected) {
+            if let Some(t) = self.find_exact(&key, selected, last) {
                 self.deselect(built, selected, 1);
                 self.select(t, None, selected, built);
                 self.clear_ephemeral(built);
@@ -183,7 +213,7 @@ impl<'a> Typist<'a> {
             let mut key = self.slot_letters(built[built.len() - 2]);
             key.push_str(&self.slot_letters(built[built.len() - 1]));
             key.push(c as char);
-            if let Some(t) = self.find_exact(&key, selected) {
+            if let Some(t) = self.find_exact(&key, selected, last) {
                 self.deselect(built, selected, 2);
                 self.select(t, None, selected, built);
                 self.clear_ephemeral(built);
@@ -192,15 +222,15 @@ impl<'a> Typist<'a> {
         }
         // Clause 3: a plain tile, then wildcards.
         let one = (c as char).to_string();
-        if let Some(t) = self.find_exact(&one, selected) {
+        if let Some(t) = self.find_exact(&one, selected, last) {
             self.select(t, None, selected, built);
             return Some(());
         }
-        if let Some(t) = self.find_restricted_wildcard(c, selected) {
+        if let Some(t) = self.find_restricted_wildcard(c, selected, last) {
             self.select(t, Some(c), selected, built);
             return Some(());
         }
-        if let Some(t) = self.find_plain_wildcard(selected) {
+        if let Some(t) = self.find_plain_wildcard(selected, last) {
             self.select(t, Some(c), selected, built);
             return Some(());
         }
@@ -245,22 +275,28 @@ impl<'a> Typist<'a> {
 
     /// `getUnselectedLegalTileWithLetter` with `allowPartial` unset: an exact letter match, corners
     /// tried first and then column-major, which is dump order.
-    fn find_exact(&self, letter: &str, selected: &[bool]) -> Option<usize> {
+    ///
+    /// Under the chaining curse, only within the box around `last` — corners in it first, then the
+    /// rest of it column-major, which is still dump order.
+    fn find_exact(&self, letter: &str, selected: &[bool], last: Option<usize>) -> Option<usize> {
         for &i in &self.corner_first {
-            if self.candidate(i, selected) && self.letters[i] == letter {
+            if self.reachable(i, selected, last) && self.letters[i] == letter {
                 return Some(i);
             }
         }
-        (0..self.tiles.len()).find(|&i| self.candidate(i, selected) && self.letters[i] == letter)
+        (0..self.tiles.len())
+            .find(|&i| self.reachable(i, selected, last) && self.letters[i] == letter)
     }
 
     /// `getUnselectedLegalRestrictedWildcardOfLetter` (`tileboard.lua:2216-2228`): a wildcard whose
     /// `extra.ligature` is a Lua pattern the typed letter matches. The patterns in the game are
     /// character classes such as `[AEIOU]` (`rpg/effects/ligature/`), so only that form and a plain
     /// literal are honoured; anything else is left alone rather than approximated.
-    fn find_restricted_wildcard(&self, c: u8, selected: &[bool]) -> Option<usize> {
+    fn find_restricted_wildcard(
+        &self, c: u8, selected: &[bool], last: Option<usize>,
+    ) -> Option<usize> {
         (0..self.tiles.len()).find(|&i| {
-            self.candidate(i, selected)
+            self.reachable(i, selected, last)
                 && self.letters[i] == WILDCARD
                 && self.tiles[i]
                     .quality
@@ -271,9 +307,9 @@ impl<'a> Typist<'a> {
         })
     }
 
-    fn find_plain_wildcard(&self, selected: &[bool]) -> Option<usize> {
+    fn find_plain_wildcard(&self, selected: &[bool], last: Option<usize>) -> Option<usize> {
         (0..self.tiles.len()).find(|&i| {
-            self.candidate(i, selected)
+            self.reachable(i, selected, last)
                 && self.letters[i] == WILDCARD
                 && self.tiles[i].quality.ligature.is_none()
         })
@@ -290,6 +326,22 @@ impl<'a> Typist<'a> {
 
     fn candidate(&self, i: usize, selected: &[bool]) -> bool {
         self.usable[i] && !selected[i]
+    }
+
+    /// [`Typist::candidate`], and inside the chaining curse's box around `last`: within one column
+    /// and one row of index (`tileboard.lua:2273-2274`). The box, not true adjacency — on a
+    /// hexagonal board typing can still pick a tile the submit check then refuses, as in the game.
+    fn reachable(&self, i: usize, selected: &[bool], last: Option<usize>) -> bool {
+        if !self.candidate(i, selected) {
+            return false;
+        }
+        match last {
+            None => true,
+            Some(l) => match (self.geometry.position(l), self.geometry.position(i)) {
+                (Some((c1, r1)), Some((c2, r2))) => c1.abs_diff(c2) <= 1 && r1.abs_diff(r2) <= 1,
+                _ => false,
+            },
+        }
     }
 }
 
@@ -539,6 +591,70 @@ mod tests {
 
     fn typed(tiles: &[Tile], geom: &Geometry, word: &str) -> Option<Vec<usize>> {
         Typist::new(tiles, geom).type_word(word).map(|t| t.tiles)
+    }
+
+    /// A 4x4 board with the letter-chaining curse. Dump index is `(col-1)*4 + (row-1)`; `board`
+    /// names all sixteen tiles in that order.
+    fn chained(board: &str) -> (Vec<Tile>, Geometry) {
+        let g = Geometry { adjacency_required: true, ..Geometry::default() };
+        let t = if board.contains(',') {
+            tiles_of(&board.split(',').collect::<Vec<_>>())
+        } else {
+            plain(board)
+        };
+        (t, g)
+    }
+
+    /// Typing only looks around the last tile (`tileboard.lua:2273-2274`): a word whose letters
+    /// are on the board but not next to each other cannot be typed.
+    #[test]
+    fn the_chaining_curse_types_only_through_neighbours() {
+        // C(1,1) A(1,2) T(1,3), and a second T far away at (4,4).
+        let (t, g) = chained("CATQQQQQQQQQQQQT");
+        assert_eq!(typed(&t, &g, "CAT"), Some(vec![0, 1, 2]));
+        let w = Typist::new(&t, &g).type_word("CAT").unwrap();
+        assert!(w.adjacent);
+        // C(1,1) A(1,2), and the only T at (4,4).
+        let (t, g) = chained("CAQQQQQQQQQQQQQT");
+        assert_eq!(typed(&t, &g, "CAT"), None, "T is out of reach of A");
+        let free = Geometry::default();
+        let w = Typist::new(&t, &free).type_word("CAT").expect("no curse, any tile");
+        assert!(!w.adjacent, "typeable without the curse, but not a chain");
+    }
+
+    /// The first letter is taken from the whole board, corners first, and greedily: when that
+    /// choice strands the word, the game does not go back for another A.
+    #[test]
+    fn the_chaining_curse_is_greedy_about_the_first_letter() {
+        // A in the corner (1,1), another A at (3,3), B at (4,4) — next to the second A only.
+        let (t, g) = chained("AQQQQQQQQQAQQQQB");
+        assert_eq!(typed(&t, &g, "AB"), None, "the corner A is taken, and B is not beside it");
+        assert_eq!(typed(&t, &g, "BA"), Some(vec![15, 10]), "from B, the A beside it");
+    }
+
+    /// The wildcard lookups are confined too (`tileboard.lua:2216-2245`).
+    #[test]
+    fn the_chaining_curse_confines_wildcards() {
+        // C(1,1) A(1,2) and a wildcard at (4,4).
+        let (t, g) = chained("CAQQQQQQQQQQQQQ.");
+        assert_eq!(typed(&t, &g, "CAT"), None);
+        // ...and one at (2,3), beside A.
+        let (t, g) = chained("CAQQQQ.QQQQQQQQQ");
+        assert_eq!(typed(&t, &g, "CAT"), Some(vec![0, 1, 6]));
+    }
+
+    /// A ligature is looked up around the tile it replaces, before that tile is released, so it
+    /// can land out of reach of the tile before — and the game refuses the word on submit
+    /// (`wordRequirementAdjacent.lua`'s `tilesAreAllAdjacent`).
+    #[test]
+    fn the_chaining_curse_checks_the_whole_chain_after_a_ligature() {
+        // A(1,1), T(2,2), TH(3,3): typing A, T, H swaps T for TH, leaving A and TH apart.
+        let board = "A,Q,Q,Q,Q,T,Q,Q,Q,Q,TH,Q,Q,Q,Q,Q";
+        let (t, g) = chained(board);
+        assert_eq!(typed(&t, &g, "ATH"), None);
+        // With TH beside A as well, at (2,1), the swap keeps the chain.
+        let (t, g) = chained("A,Q,Q,Q,TH,T,Q,Q,Q,Q,Q,Q,Q,Q,Q,Q");
+        assert_eq!(typed(&t, &g, "ATH"), Some(vec![0, 4]));
     }
 
     #[test]

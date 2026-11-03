@@ -25,8 +25,8 @@
 //! The game's `textinput` is a specific greedy consumer that decides which tile each character
 //! takes, and that choice sets both the tile state that scores the word and the corner count that
 //! `resistCornerless` scales it by. Adjacency is not required unless the player carries
-//! `wordRequirementAdjacent` gear, which [`Modifiers::from_save`] refuses to search under rather
-//! than quietly assuming away.
+//! `wordRequirementAdjacent` gear (the letter-chaining curse), which the typist models: see
+//! [`crate::typist`].
 //!
 //! ## Word length
 //!
@@ -205,11 +205,6 @@ impl Modifiers {
         let mut problems = resolved.problems.clone();
         problems.extend(lexica.problems().iter().cloned());
         problems.extend(lexica.unmodelled(&statuses));
-        if resolved.geometry.adjacency_required {
-            // Every pick would be confined to the 3x3 around the last one. Searching as if the whole
-            // board were reachable would produce words that cannot be typed at all.
-            problems.push("wordRequirementAdjacent gear is not modelled".into());
-        }
 
         // Either source grants it, so both are checked (`rpgview.lua:1211`).
         let overkill_gold = statuses.contains_key("overkillGold")
@@ -3078,6 +3073,26 @@ mod ranked_tests {
             list.iter().position(|c| c.pierces) < list.iter().position(|c| !c.pierces),
             "at 400 health behind 600 armour, a rapier word's share is the larger"
         );
+    }
+
+    /// Boggling anxiety's chain items are modelled now — the curse by the typist, the bonus from
+    /// the typed word — so neither is reported as a gap.
+    #[test]
+    fn the_chain_items_are_not_reported_as_unmodelled() {
+        let src = std::fs::read_to_string("tests/fixtures/combatSaveData-crypt-l0.lua")
+            .unwrap()
+            .replacen(
+                "gearFlags = {",
+                "gearFlags = { wordRequirementAdjacent = 1, wordScoreBonusAdjacent = 1,",
+                1,
+            );
+        let cs = crate::game::save::parse(&src).unwrap();
+        let tiles = crate::turn::tiles_of(&cs).len();
+        let (mods, geom) = Modifiers::from_save(&game_dir(), &cs, tiles).unwrap();
+        assert!(geom.adjacency_required);
+        let adjacency: Vec<&String> =
+            mods.problems.iter().filter(|p| p.contains("Adjacent")).collect();
+        assert!(adjacency.is_empty(), "{adjacency:?}");
     }
 
     /// The advisor's top row is the word Diggle would play, or one it cannot tell apart from it.

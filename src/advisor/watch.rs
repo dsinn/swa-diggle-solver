@@ -25,7 +25,7 @@ use super::mode::{Snapshot, Stamp};
 use crate::game::save::Table;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use windows::core::HSTRING;
 use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Storage::FileSystem::{
@@ -34,8 +34,56 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Threading::WaitForMultipleObjects;
 
-/// The file the combat panels are driven by.
+/// The file the combat panels are driven by in a normal run.
 pub const COMBAT_SAVE: &str = "combatSaveData";
+
+/// The save names of the arcade challenges, from the game's own list.
+///
+/// A challenge does not write `combatSaveData`: `rpg.save` writes `filename or 'combatSaveData'`
+/// (`rpg.lua:43`), and starting a challenge sets `filename` to the challenge's own
+/// (`ui/arcade.lua:807`, kept by `rpg.lua:84`) — Boggling anxiety's is `bogglingChallenge`. Read
+/// from `ui/arcade.lua`'s `filename = '…'` lines, so a new challenge needs nothing here. Empty when
+/// the file cannot be read, which leaves the advisor following normal runs only.
+pub fn arcade_saves(game_dir: &Path) -> Vec<String> {
+    let Ok(src) = std::fs::read_to_string(game_dir.join("ui").join("arcade.lua")) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = src
+        .lines()
+        .filter_map(|l| {
+            let rest = l.trim_start().strip_prefix("filename")?.trim_start().strip_prefix('=')?;
+            let rest = rest.trim_start();
+            let quote = rest.chars().next().filter(|c| *c == '\'' || *c == '"')?;
+            let name = rest[1..].split(quote).next()?;
+            (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                .then(|| name.to_string())
+        })
+        .filter(|n| n != COMBAT_SAVE)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Which of the save files `names` in `dir` to follow: the one written most recently **after
+/// `since`**, else `current`.
+///
+/// `since` is the last moment anything was seen of the file being followed — its last write, or
+/// when it went. So the advisor moves to a challenge as soon as the challenge saves, and when the
+/// challenge ends and its file is deleted, it stays on it (out of combat) rather than falling back
+/// to a normal run's older save; that one is followed again once the game writes it. `None`, before
+/// anything has been followed: the newest that exists.
+pub fn choose_save(
+    dir: &Path, names: &[String], current: &str, since: Option<SystemTime>,
+) -> String {
+    names
+        .iter()
+        .filter_map(|n| Some((stamp_of(&dir.join(n))?.1, n)))
+        .filter(|(t, _)| since.is_none_or(|s| *t > s))
+        .max_by_key(|(t, _)| *t)
+        .map(|(_, n)| n.clone())
+        .unwrap_or_else(|| current.to_string())
+}
 
 /// How long the folder must be quiet before a read. LÖVE writes the whole file in one go, so a
 /// short pause after the last change is enough to be past it; long enough to cover a write that
@@ -186,9 +234,17 @@ fn wait(watches: &[Watch], timeout: Duration) -> Option<usize> {
 }
 
 /// Runs the watcher on its own thread until the receiving end hangs up.
-pub fn spawn(dirs: Vec<PathBuf>, tx: Sender<Event>) -> std::thread::JoinHandle<()> {
+///
+/// `arcade` is [`arcade_saves`]: the challenge saves followed alongside [`COMBAT_SAVE`].
+pub fn spawn(
+    dirs: Vec<PathBuf>, arcade: Vec<String>, tx: Sender<Event>,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        let names: Vec<String> = std::iter::once(COMBAT_SAVE.to_string()).chain(arcade).collect();
         let mut following = newest_dir(&dirs).unwrap_or_else(|| dirs[0].clone());
+        let mut file = choose_save(&following, &names, COMBAT_SAVE, None);
+        // The last moment anything was seen of `file` — see `choose_save`.
+        let mut since: Option<SystemTime> = None;
         let mut last: Option<Option<Stamp>> = None;
         let mut watches: Vec<Watch> = Vec::new();
         loop {
@@ -200,19 +256,32 @@ pub fn spawn(dirs: Vec<PathBuf>, tx: Sender<Event>) -> std::thread::JoinHandle<(
                     }
                 }
             }
-            let path = following.join(COMBAT_SAVE);
+            let next = choose_save(&following, &names, &file, since);
+            if next != file {
+                file = next;
+                last = None;
+            }
+            let path = following.join(&file);
             let event = match load_if_changed(&path, &mut last) {
                 Load::Unchanged => None,
-                Load::Absent => Some(Event::Snapshot(Snapshot {
-                    dir: following.clone(),
-                    combat: None,
-                    stamp: None,
-                })),
-                Load::Fresh((t, stamp)) => Some(Event::Snapshot(Snapshot {
-                    dir: following.clone(),
-                    combat: Some(t),
-                    stamp: Some(stamp),
-                })),
+                Load::Absent => {
+                    since = Some(SystemTime::now());
+                    Some(Event::Snapshot(Snapshot {
+                        dir: following.clone(),
+                        file: file.clone(),
+                        combat: None,
+                        stamp: None,
+                    }))
+                }
+                Load::Fresh((t, stamp)) => {
+                    since = since.max(Some(stamp.1));
+                    Some(Event::Snapshot(Snapshot {
+                        dir: following.clone(),
+                        file: file.clone(),
+                        combat: Some(t),
+                        stamp: Some(stamp),
+                    }))
+                }
                 Load::Unreadable(error) => {
                     Some(Event::Unreadable { dir: following.clone(), error })
                 }
@@ -230,6 +299,8 @@ pub fn spawn(dirs: Vec<PathBuf>, tx: Sender<Event>) -> std::thread::JoinHandle<(
             }
             if active != following {
                 following = active;
+                file = choose_save(&following, &names, COMBAT_SAVE, None);
+                since = None;
                 last = None;
             }
         }
@@ -255,7 +326,12 @@ mod tests {
     /// A ranked turn is thrown away only for a newer save, never for a note about a broken one.
     #[test]
     fn only_a_newer_snapshot_supersedes_a_ranked_turn() {
-        let snap = Event::Snapshot(Snapshot { dir: "x".into(), combat: None, stamp: None });
+        let snap = Event::Snapshot(Snapshot {
+            dir: "x".into(),
+            file: COMBAT_SAVE.into(),
+            combat: None,
+            stamp: None,
+        });
         let broken = Event::Unreadable { dir: "x".into(), error: "eof".into() };
         assert!(snap.supersedes_a_turn());
         assert!(!broken.supersedes_a_turn());
@@ -291,6 +367,45 @@ mod tests {
         std::fs::write(b.join("mainSaveData"), "return {}").unwrap();
         assert_eq!(newest_dir(&[a.clone(), b.clone()]), Some(b.clone()));
         assert_eq!(newest_dir(&[a.join("missing")]), None);
+    }
+
+    /// An arcade challenge saves under its own name (`rpg.lua:43`, `ui/arcade.lua:807`), read from
+    /// the game's list so a new challenge needs no change here.
+    #[test]
+    fn arcade_save_names_come_from_the_game() {
+        let names = arcade_saves(std::path::Path::new("../sternly-worded-adventures"));
+        assert!(names.iter().any(|n| n == "bogglingChallenge"), "{names:?}");
+        assert!(names.iter().any(|n| n == "boggledChallenge"));
+        assert!(!names.iter().any(|n| n == COMBAT_SAVE));
+        assert!(arcade_saves(std::path::Path::new("missing")).is_empty());
+    }
+
+    /// The save written last is followed; an older one is not returned to just because the one
+    /// being followed is gone — only once it is written again.
+    #[test]
+    fn the_save_written_last_is_followed() {
+        let d = temp("choose");
+        let names: Vec<String> = vec![COMBAT_SAVE.into(), "bogglingChallenge".into()];
+        std::fs::write(d.join(COMBAT_SAVE), "return {}").unwrap();
+        std::thread::sleep(MTIME_STEP);
+        std::fs::write(d.join("bogglingChallenge"), "return {}").unwrap();
+        assert_eq!(choose_save(&d, &names, COMBAT_SAVE, None), "bogglingChallenge");
+        let written = stamp_of(&d.join("bogglingChallenge")).unwrap().1;
+        assert_eq!(
+            choose_save(&d, &names, "bogglingChallenge", Some(written)),
+            "bogglingChallenge"
+        );
+        // The challenge ends and its file goes: stay on it, which reads as out of combat.
+        std::fs::remove_file(d.join("bogglingChallenge")).unwrap();
+        let gone = SystemTime::now();
+        assert_eq!(choose_save(&d, &names, "bogglingChallenge", Some(gone)), "bogglingChallenge");
+        // The normal run is played again.
+        std::thread::sleep(MTIME_STEP);
+        std::fs::write(d.join(COMBAT_SAVE), "return { }").unwrap();
+        assert_eq!(choose_save(&d, &names, "bogglingChallenge", Some(gone)), COMBAT_SAVE);
+        // Nothing at all: the combat save, as before.
+        let empty = temp("choose-empty");
+        assert_eq!(choose_save(&empty, &names, COMBAT_SAVE, None), COMBAT_SAVE);
     }
 
     /// A half-written save is reported once, then left alone until it changes again.

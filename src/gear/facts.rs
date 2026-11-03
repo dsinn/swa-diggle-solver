@@ -263,21 +263,24 @@ impl<'a> Facts<'a> {
             Fact::Quill => yes,
             // Resolved by `Plan::apply`'s second pass, which knows the tally.
             Fact::QuillCount => Eval::Unknown,
-            // TODO(board facts): the last three, stubbed deliberately.
+            // `tileboard.tilesAreAllAdjacent(wordTiles)`: the typist knows, having placed the tiles.
+            Fact::Adjacent => match self.typed {
+                Some(t) => Eval::when(t.adjacent),
+                None => Eval::Unknown,
+            },
+            // TODO(board facts): the last two, stubbed deliberately.
             //
             // Each needs an input this type is not handed yet, and each is small on its own:
             //
             // - `EachHasWood` — `tiles.eachHasCat(wordTiles, 'wood')`. Needs the material→category
             //   table from `utils/tiles.lua`; `Tile::quality.material` already carries the material
             //   name, so it is a lookup away.
-            // - `Adjacent` — `tileboard.tilesAreAllAdjacent(wordTiles)`. Needs `Typed::tiles` mapped
-            //   through `Geometry::position`, which `Facts` could take but currently does not.
-            // - `FullColumn` — `tileboard.countTilesInFullySelectedColumn(wordTiles)`. The same
-            //   inputs as `Adjacent`, plus `Geometry::rows_per_col`.
+            // - `FullColumn` — `tileboard.countTilesInFullySelectedColumn(wordTiles)`. Needs
+            //   `Typed::tiles` mapped through `Geometry::position`, and `Geometry::rows_per_col`.
             //
             // Until then they report rather than contribute, which keeps the score an honest lower
             // bound instead of a confident wrong one.
-            Fact::EachHasWood | Fact::Adjacent | Fact::FullColumn => {
+            Fact::EachHasWood | Fact::FullColumn => {
                 let _ = self.tiles;
                 Eval::Unknown
             }

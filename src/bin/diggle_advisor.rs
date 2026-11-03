@@ -188,7 +188,7 @@ fn worker(hwnd: isize, args: Args) {
         return publish(hwnd, View { header: "APPDATA is not set".into(), ..View::default() });
     }
     let (tx, rx) = mpsc::channel();
-    watch::spawn(args.dirs, tx);
+    watch::spawn(args.dirs, watch::arcade_saves(&args.game_dir), tx);
     let mut peaks: HashMap<String, i64> = HashMap::new();
     let mut current = View::default();
     let mut pending: Option<Event> = None;

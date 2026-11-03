@@ -49,10 +49,14 @@ pub struct Geometry {
     pub locked_rows: BTreeSet<usize>,
     /// Columns locked by `tileboardUnselectableCol<N>` (`tileboard.lua:414-417`).
     pub locked_cols: BTreeSet<usize>,
-    /// `wordRequirementAdjacent` gear: each letter must come from a tile next to the previous one
-    /// (`tileboard.lua:2196-2202`, `:2273-2274`). **Not modelled** — surfaced so a caller can refuse
-    /// rather than silently search as if the whole board were reachable.
+    /// `wordRequirementAdjacent` gear (directThinker, the letter-chaining curse): each tile must be
+    /// next to the previous one ([`Geometry::tiles_adjacent`]), and typing looks for each letter only
+    /// around the last tile (`tileboard.lua:2196-2202`, `:2273-2274`). [`crate::typist`] models both.
     pub adjacency_required: bool,
+    /// A hexagonal board, where adjacency loses two diagonals ([`Geometry::tiles_adjacent`]).
+    pub hexagonal: bool,
+    /// `middleColI` (`tileboard.lua:81`): which side of it a tile is on decides which two.
+    pub middle_col: usize,
 }
 
 impl Default for Geometry {
@@ -65,6 +69,8 @@ impl Default for Geometry {
             locked_rows: BTreeSet::new(),
             locked_cols: BTreeSet::new(),
             adjacency_required: false,
+            hexagonal: false,
+            middle_col: 2,
         }
     }
 }
@@ -109,6 +115,35 @@ impl Geometry {
     /// letters a typed word consumes.
     pub fn corner_indices(&self) -> Vec<usize> {
         self.corners.iter().filter_map(|&c| self.flat_of(c)).collect()
+    }
+
+    /// `tileboard.tilesAreAdjacent(prev, next)` (`tileboard.lua:500-521`), by dump index.
+    ///
+    /// Within one column and one row of index either way — on `(col, row)` indices, so a short
+    /// column's tiles neighbour the bottoms of the columns beside it. A hexagonal board then drops
+    /// two of those eight, chosen by which side of the middle column `prev` is on, with
+    /// `x = x1 - x2` and `y = y2 - y1` (the game's own signs, `:505`):
+    ///
+    /// - left of the middle, `leftHexNotAdj`: `(y, x)` of `(-1, -1)` and `(1, 1)`;
+    /// - right of it, `rightHexNotAdj`: `(-1, 1)` and `(1, -1)`;
+    /// - on it, `midColNotAdj`: `(1, -1)` and `(1, 1)` (`:488-498`).
+    pub fn tiles_adjacent(&self, prev: usize, next: usize) -> bool {
+        let (Some((x1, y1)), Some((x2, y2))) = (self.position(prev), self.position(next)) else {
+            return false;
+        };
+        let (x, y) = (x1 as i64 - x2 as i64, y2 as i64 - y1 as i64);
+        if x.abs() > 1 || y.abs() > 1 {
+            return false;
+        }
+        if !self.hexagonal {
+            return true;
+        }
+        let excluded: [(i64, i64); 2] = match x1.cmp(&self.middle_col) {
+            std::cmp::Ordering::Less => [(-1, -1), (1, 1)],
+            std::cmp::Ordering::Greater => [(-1, 1), (1, -1)],
+            std::cmp::Ordering::Equal => [(1, -1), (1, 1)],
+        };
+        !excluded.contains(&(y, x))
     }
 
     fn flat_of(&self, (col, row): (usize, usize)) -> Option<usize> {
@@ -289,6 +324,8 @@ fn shape_to_geometry(shape: &crate::tables::Shape) -> Geometry {
         locked_rows: BTreeSet::new(),
         locked_cols: BTreeSet::new(),
         adjacency_required: false,
+        hexagonal,
+        middle_col: middle,
     }
 }
 
@@ -372,6 +409,45 @@ mod tests {
         assert_eq!(r.geometry.corner_indices(), vec![0, 12, 2, 14]);
     }
 
+    /// `tileboard.tilesAreAdjacent` (`tileboard.lua:500-521`): the eight neighbours on a square board,
+    /// by `(col, row)` index — so a short column's tiles sit against the bottoms of its neighbours.
+    #[test]
+    fn square_adjacency_is_the_eight_neighbours() {
+        let g = Geometry::default(); // 4x4; dump index = (col-1)*4 + (row-1)
+        let at = |col: usize, row: usize| (col - 1) * 4 + (row - 1);
+        assert!(g.tiles_adjacent(at(1, 1), at(2, 2)), "diagonal");
+        assert!(g.tiles_adjacent(at(2, 2), at(2, 3)));
+        assert!(g.tiles_adjacent(at(3, 3), at(2, 3)));
+        assert!(!g.tiles_adjacent(at(1, 1), at(1, 3)), "two rows apart");
+        assert!(!g.tiles_adjacent(at(1, 1), at(3, 1)), "two columns apart");
+        assert!(!g.tiles_adjacent(at(1, 1), 99), "off the board");
+    }
+
+    /// On a hexagonal board two of the eight box neighbours are not neighbours, and which two
+    /// depends on whether the PREVIOUS tile is left of, right of, or on the middle column
+    /// (`leftHexNotAdj`, `rightHexNotAdj`, `midColNotAdj`, `tileboard.lua:488-498`), with
+    /// `x = x1 - x2` and `y = y2 - y1`.
+    #[test]
+    fn hexagonal_adjacency_drops_two_diagonals_by_side() {
+        let g = shape_to_geometry(crate::tables::shape("hex5").expect("hex5 is baked"));
+        assert!(g.hexagonal);
+        let mid = g.middle_col;
+        let flat = |col: usize, row: usize| g.flat_of((col, row)).unwrap();
+        // Left of the middle: x = -1 (moving right) with y = -1 is out, with y = +1 is in.
+        let left = mid - 1;
+        assert!(!g.tiles_adjacent(flat(left, 2), flat(left + 1, 1)));
+        assert!(g.tiles_adjacent(flat(left, 2), flat(left + 1, 3)));
+        // Right of the middle: x = +1 (moving left) with y = -1 is out, with y = +1 is in.
+        let right = mid + 1;
+        assert!(!g.tiles_adjacent(flat(right, 2), flat(right - 1, 1)));
+        assert!(g.tiles_adjacent(flat(right, 2), flat(right - 1, 3)));
+        // On the middle column, both diagonals with y = +1 are out; straight up is in.
+        assert!(!g.tiles_adjacent(flat(mid, 2), flat(mid - 1, 3)));
+        assert!(!g.tiles_adjacent(flat(mid, 2), flat(mid + 1, 3)));
+        assert!(g.tiles_adjacent(flat(mid, 2), flat(mid - 1, 1)));
+        assert!(g.tiles_adjacent(flat(mid, 2), flat(mid, 3)));
+    }
+
     #[test]
     fn a_hexagonal_board_has_ragged_columns() {
         // A 5x4 hexagonal board with colTileCounts {3,3,4,3,3} holds sixteen tiles -- exactly as
@@ -453,7 +529,7 @@ mod tests {
         let r = Geometry::from_save(&save, 16);
         assert!(r.geometry.locked_rows.contains(&2));
         assert!(r.geometry.locked_cols.contains(&3));
-        assert!(r.geometry.adjacency_required, "must be surfaced, it is not modelled");
+        assert!(r.geometry.adjacency_required, "the typist confines itself on this flag");
     }
 }
 

@@ -78,7 +78,8 @@ pub struct ListRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct View {
     pub mode: Mode,
-    /// The save folder being followed, for the window title.
+    /// The save file being followed, for the window title — which also says when it is an arcade
+    /// challenge's rather than the normal run's.
     pub folder: String,
     /// One line: enemy, player, goal.
     pub header: String,
@@ -110,7 +111,7 @@ impl View {
     pub fn next(
         prev: &View, snap: &Snapshot, res: &Resources, peaks: &mut HashMap<String, i64>,
     ) -> View {
-        let folder = snap.dir.display().to_string();
+        let folder = snap.dir.join(&snap.file).display().to_string();
         let mode = classify(snap);
         match &mode {
             Mode::OutOfCombat => {
@@ -273,6 +274,7 @@ mod tests {
     fn snap(src: Option<&str>) -> Snapshot {
         Snapshot {
             dir: PathBuf::from("saves"),
+            file: "bogglingChallenge".into(),
             combat: src.map(|s| crate::game::save::parse(s).unwrap()),
             stamp: None,
         }
@@ -293,7 +295,11 @@ mod tests {
         for r in &v.rows {
             assert_eq!(r.cells.len(), r.row.letters.len(), "{}", r.row.word);
         }
-        assert_eq!(v.folder, "saves", "names the folder it follows");
+        assert_eq!(
+            v.folder,
+            PathBuf::from("saves").join("bogglingChallenge").display().to_string(),
+            "names the file it follows"
+        );
         assert!(v.header.contains("first sighting"), "{}", v.header);
     }
 
@@ -480,6 +486,72 @@ mod tests {
         assert!(!singes.row.pierces);
         assert_eq!(singes.row.tier, crate::search::Tier::Fallback);
         assert!(!plain.notes.contains("rapier"));
+    }
+
+    /// Boggling anxiety: a 5x5 board (erudite) under the letter-chaining curse with the chain
+    /// bonus. Every word listed must chain tile to tile, every one earns the bonus, and the list must
+    /// arrive well inside the challenge's twenty-second turn.
+    #[test]
+    fn boggling_anxiety_lists_only_chained_words_in_time() {
+        let res = res();
+        let board: String =
+            "TRAINSOLETCAPIDMUNESHOWER".chars().map(|c| format!("\"{c}\", ")).collect();
+        let save = |curse: bool, bonus: bool| {
+            let mut s = turn().replacen("health = 3,", "health = 200,", 1);
+            let a = s.find("tileboard = {").unwrap();
+            let b = a + s[a..].find('}').unwrap();
+            s.replace_range(a..=b, &format!("tileboard = {{ {board} }}"));
+            s = s.replacen("\"bedroll\",", "\"erudite\", \"bedroll\",", 1);
+            if curse {
+                s = s.replacen("gearFlags = {", "gearFlags = { wordRequirementAdjacent = 1,", 1);
+            }
+            if bonus {
+                s = s.replacen("gearFlags = {", "gearFlags = { wordScoreBonusAdjacent = 1,", 1);
+            }
+            s
+        };
+        let view = |curse: bool, bonus: bool| {
+            View::next(
+                &View::default(),
+                &snap(Some(&save(curse, bonus))),
+                &res,
+                &mut Default::default(),
+            )
+        };
+        let started = std::time::Instant::now();
+        let cursed = view(true, true);
+        let took = started.elapsed();
+        let free = view(false, false);
+        let unpaid = view(true, false);
+        assert!(!cursed.notes.contains("Adjacent"), "{}", cursed.notes);
+        assert!(!cursed.rows.is_empty());
+        let geom = crate::geometry::Geometry::for_passive("erudite", 25).geometry;
+        assert_eq!(geom.total_tiles(), 25);
+        for r in &cursed.rows {
+            let tiles: Vec<usize> = r.row.letters.iter().map(|l| l.tile).collect();
+            assert!(
+                tiles.windows(2).all(|p| geom.tiles_adjacent(p[0], p[1])),
+                "{} does not chain: {tiles:?}",
+                r.row.word
+            );
+        }
+        // The curse removes words, and the bonus raises the ones that are left.
+        assert!(
+            cursed.rows.len() < free.rows.len()
+                || free.rows.len() == crate::advisor::annotate::ROW_CAP
+        );
+        let unpaid_score =
+            |w: &str| unpaid.rows.iter().find(|r| r.row.word == w).map(|r| r.row.score);
+        let shared: Vec<(i64, i64)> = cursed
+            .rows
+            .iter()
+            .filter_map(|r| Some((r.row.score, unpaid_score(&r.row.word)?)))
+            .collect();
+        assert!(!shared.is_empty(), "no word on both lists to compare");
+        assert!(shared.iter().all(|(c, f)| c >= f), "the chain bonus never lowers a score");
+        assert!(shared.iter().any(|(c, f)| c > f), "and it raises some: {shared:?}");
+        eprintln!("boggling turn ranked in {took:?}, {} rows", cursed.rows.len());
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
     }
 
     #[test]

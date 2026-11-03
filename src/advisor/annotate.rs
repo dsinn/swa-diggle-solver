@@ -336,7 +336,7 @@ mod tests {
             pierces: false,
             tier,
             rank: None,
-            typed: Typed { tiles, wildcards: vec![None; n], corners_used: 0 },
+            typed: Typed { tiles, wildcards: vec![None; n], corners_used: 0, adjacent: false },
             cast: None,
         }
     }

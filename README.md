@@ -204,8 +204,16 @@ Diggle drives. The game data (dictionary, scores, tile textures) comes from
   Bonuses and spells are marked with colour emoji, one per dictionary (🔥 fire, ❄️ ice, 💀 bone,
   🪵 wood, 🕷️ spider, ❗ profanity, 🪓 axe, 🩸 blood, ⛓️ iron, 🤘 metal, 🍮 slime), so a spell
   checked against a dictionary shares its emoji; the others are 💚 Four heal and 🔤 Vowels, and UwU is just `UwU`.
+- **Arcade challenges** are followed too: each saves under its own name (Boggling anxiety's is
+  `bogglingChallenge`), read from the game's `ui/arcade.lua`. The advisor follows whichever save
+  the game wrote last, and the window title names it.
+- **The letter-chaining curse** (directThinker, as in Boggling anxiety) is modelled as the keyboard
+  types: each letter is taken from the tiles around the previous one, the first from the whole board
+  (corners first), and greedily — so only words the keyboard can chain are listed, fewer than a
+  mouse could drag. enchantedChain's +25% is counted. The Board Shaker does not save, so after a
+  shuffle the list describes the old board until your next submission.
 - **Between turns** the last list stays up, greyed.
-- **Out of combat** shows only once `combatSaveData` is gone, which is when the reward is taken,
+- **Out of combat** shows only once the save being followed is gone, which is when the reward is taken,
   not when `Finish` is clicked. Nothing on disk marks `Finish`; this is temporary until something
   does.
 - **Stay on top** is off by default.

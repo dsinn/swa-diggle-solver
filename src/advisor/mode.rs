@@ -17,6 +17,9 @@ pub type Stamp = (u64, SystemTime);
 pub struct Snapshot {
     /// The save folder being followed.
     pub dir: PathBuf,
+    /// The save file in it: `combatSaveData`, or an arcade challenge's own
+    /// ([`super::watch::arcade_saves`]).
+    pub file: String,
     /// `combatSaveData`, or `None` when the file does not exist.
     pub combat: Option<Table>,
     pub stamp: Option<Stamp>,
@@ -55,7 +58,12 @@ mod tests {
     use std::path::PathBuf;
 
     fn snap(src: Option<&str>) -> Snapshot {
-        Snapshot { dir: PathBuf::from("x"), combat: src.map(|s| parse(s).unwrap()), stamp: None }
+        Snapshot {
+            dir: PathBuf::from("x"),
+            file: "combatSaveData".into(),
+            combat: src.map(|s| parse(s).unwrap()),
+            stamp: None,
+        }
     }
 
     #[test]

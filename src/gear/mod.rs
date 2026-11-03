@@ -173,7 +173,9 @@ impl Plan {
         self.active
             .iter()
             .filter(|a| {
-                matches!(a.spec.fact, Fact::EachHasWood | Fact::Adjacent | Fact::FullColumn)
+                // `Adjacent` is not here: every search scores a typed word, and the typist knows
+                // whether its tiles chain. It stays `Unknown` only for a word scored untyped.
+                matches!(a.spec.fact, Fact::EachHasWood | Fact::FullColumn)
             })
             .map(|a| a.spec.flag)
             .collect()
@@ -352,6 +354,25 @@ mod tests {
         let a = plain(&gear, "AAPA");
         assert_eq!(a.pre_add, 3.0, "what we can evaluate is still applied");
         assert_eq!(a.unknown, vec!["wordScoreBonusAdjacent"]);
+    }
+
+    /// enchantedChain (`wordScoreBonusAdjacent`, mult +0.25) pays on a word whose tiles chain,
+    /// which the typist knows; without a typed word it stays unknown.
+    #[test]
+    fn the_chain_bonus_pays_on_a_typed_chain() {
+        let gear = Gear::from_pairs(&[("wordScoreBonusAdjacent", 1.0)]);
+        let typed = |adjacent: bool| crate::typist::Typed {
+            tiles: vec![0, 1, 2],
+            wildcards: vec![None; 3],
+            corners_used: 0,
+            adjacent,
+        };
+        let fight = FightFacts::default();
+        let (chain, apart) = (typed(true), typed(false));
+        let a = gear.compile().apply(&Facts::new("CAT", &[], Some(&chain), &[]), &fight);
+        assert_eq!((a.mult, a.unknown.len()), (1.25, 0));
+        let a = gear.compile().apply(&Facts::new("CAT", &[], Some(&apart), &[]), &fight);
+        assert_eq!((a.mult, a.unknown.len()), (1.0, 0));
     }
 
     #[test]
