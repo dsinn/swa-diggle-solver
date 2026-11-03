@@ -214,12 +214,30 @@ pub fn rank(kind: Option<&str>) -> usize {
 ///
 /// Takes the **latest** block, so a driver reusing one feed across screens cannot collect an earlier
 /// one's items.
+///
+/// ## A row can carry a bonus underneath it
+///
+/// Since v53.2 a lucky offer is followed by `Bonuses:` and the bonus list as `table.serialize` writes
+/// it — `return {`, one line per item, `}` (`ui/itemselect.lua:453-456`). Those lines are skipped by
+/// brace depth rather than read as the end of the block, which would hide every offer after the
+/// lucky one.
 pub fn offers(lines: &[String]) -> Vec<Offer> {
     let mut out = Vec::new();
     let Some(start) = lines.iter().rposition(|l| l.contains("Item selection:")) else {
         return out;
     };
-    for line in lines.iter().skip(start + 1) {
+    let mut rest = lines.iter().skip(start + 1);
+    while let Some(line) = rest.next() {
+        if line.trim() == "Bonuses:" {
+            let mut depth = 0i32;
+            for l in rest.by_ref() {
+                depth += l.matches('{').count() as i32 - l.matches('}').count() as i32;
+                if depth <= 0 {
+                    break;
+                }
+            }
+            continue;
+        }
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 4 {
             break; // the block has ended
@@ -512,6 +530,48 @@ mod tests {
              \tnewThing\tNew\t960\t540",
         ));
         assert_eq!(got, vec![("newThing".to_string(), 960, 540)]);
+    }
+
+    /// v53.2's `ui/itemselect.lua:453-456` prints a lucky item's bonus right under its row:
+    /// `print('Bonuses:')` then `table.repr` of the list, which is `table.serialize`'s multi-line
+    /// `return { ... }` (`utils/table.lua:372-411`). The bonus lands on one random offer in about
+    /// three fights in ten (`overworld.lua:1222-1230`), so ending the block at the first short line
+    /// silently dropped every offer after the lucky one.
+    #[test]
+    fn a_bonus_under_a_row_does_not_end_the_block() {
+        let got = offers(&lines(
+            "Item selection:\n\
+             \tarmourLeatherGloves\tBlacksmith gloves\t480\t540\n\
+             Bonuses:\n\
+             return {\n\
+             \x20   \"gold50\",\n\
+             }\n\
+             \tiBeforeEBad\tWeird veiny beige thumb\t960\t540\n\
+             \tgoldIdol\tGold idol\t1440\t540",
+        ));
+        assert_eq!(got.len(), 3, "the bonus belongs to the first offer and hides none of them");
+        assert_eq!(got[0], ("armourLeatherGloves".into(), 480, 540));
+        assert_eq!(got[1], ("iBeforeEBad".into(), 960, 540));
+        assert_eq!(got[2], ("goldIdol".into(), 1440, 540));
+    }
+
+    /// The bonus is skipped, not treated as the start of a free-for-all: what follows the last row
+    /// still ends the block.
+    #[test]
+    fn a_bonus_on_the_last_row_still_lets_the_block_end() {
+        let got = offers(&lines(
+            "Item selection:\n\
+             \tphoenixFeather\tPhoenix feather\t480\t540\n\
+             \tgoldIdol\tGold idol\t1440\t540\n\
+             Bonuses:\n\
+             return {\n\
+             \x20   \"gold50\",\n\
+             }\n\
+             ach_something\talready achieved\n\
+             \tstray\tStray\t1\t2",
+        ));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[1], ("goldIdol".into(), 1440, 540));
     }
 
     #[test]
