@@ -41,8 +41,9 @@ use windows::core::{w, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, FillRect, GetSysColorBrush,
-    GetTextExtentPoint32W, InvalidateRect, SelectObject, SetBkMode, SetTextColor, COLOR_BTNFACE,
-    COLOR_WINDOW, DT_CENTER, DT_SINGLELINE, DT_VCENTER, HFONT, HGDIOBJ, TRANSPARENT,
+    GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, SelectObject, SetBkMode, SetTextColor,
+    COLOR_BTNFACE, COLOR_WINDOW, DT_CENTER, DT_SINGLELINE, DT_TOP, HFONT, HGDIOBJ, TEXTMETRICW,
+    TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
@@ -371,6 +372,8 @@ fn cell_text(v: &View, item: usize, sub: i32) -> String {
 /// The fire ring's colour and width. Pure red, wide enough to read at a glance.
 const FIRE: (u8, u8, u8) = (220, 0, 0);
 const FIRE_RING: i32 = 3;
+/// The special-tile ring: near-black, which reads against the background and every family.
+const SPECIAL: (u8, u8, u8) = (25, 25, 25);
 /// The special-tile ring's width.
 const SPECIAL_RING: i32 = 2;
 
@@ -414,6 +417,12 @@ unsafe fn draw_word(ui: &Ui, cd: &NMLVCUSTOMDRAW) {
     FillRect(hdc, &rc, GetSysColorBrush(COLOR_WINDOW));
     let old = SelectObject(hdc, HGDIOBJ(ui.tile_font.0));
     SetBkMode(hdc, TRANSPARENT);
+    // Where capitals sit in a line of this font: below the internal leading (room for accents),
+    // down to the baseline. Centring that band on the tile is what looks centred; centring the
+    // whole line box, as `DT_VCENTER` does, leaves the letters low.
+    let mut tm = TEXTMETRICW::default();
+    let _ = GetTextMetricsW(hdc, &mut tm);
+    let caps_mid = (tm.tmInternalLeading + tm.tmAscent) / 2;
     let mut x = rc.left + 4;
     for cell in &r.cells {
         let mut text: Vec<u16> = cell.letter.encode_utf16().collect();
@@ -435,14 +444,16 @@ unsafe fn draw_word(ui: &Ui, cd: &NMLVCUSTOMDRAW) {
         if cell.burning {
             frame(hdc, &tile, FIRE_RING, shade(FIRE));
         }
-        // A special tile — braced, ornate, serrated, gem, gilt — is ringed inside that, in the ink
-        // colour, so the ring reads against its own tile whatever the family.
+        // A special tile — braced, ornate, serrated, gem, gilt — is ringed near-black, at the
+        // tile's edge or just inside the fire ring. Not in the ink colour: on a dark tile that is
+        // white, and a white ring at the edge vanishes into the list's white background.
         if cell.special {
-            let inner = inset(&tile, FIRE_RING);
-            frame(hdc, &inner, SPECIAL_RING, ink);
+            let inner = if cell.burning { inset(&tile, FIRE_RING) } else { tile };
+            frame(hdc, &inner, SPECIAL_RING, shade(SPECIAL));
         }
         SetTextColor(hdc, colorref(ink));
-        DrawTextW(hdc, &mut text, &mut tile, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        tile.top = (tile.top + tile.bottom) / 2 - caps_mid;
+        DrawTextW(hdc, &mut text, &mut tile, DT_CENTER | DT_TOP | DT_SINGLELINE);
         x += width + 2;
     }
     SelectObject(hdc, old);

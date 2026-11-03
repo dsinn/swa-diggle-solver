@@ -126,6 +126,10 @@ pub fn bleed_of(cs: &Table) -> i64 {
 ///
 /// `kill` is the damage that kills, so a word outside the band can still say it kills — a frugal
 /// kill's overshoot, or any hit under `MaxDamage`.
+///
+/// **Blank when the enemy simply survives.** A hit that neither kills, scares nor breaks a scare's
+/// ceiling has nothing to say beyond its damage, which has its own column; the user found a
+/// `chip` label there to be noise.
 pub fn effect(goal: Goal, tier: Tier, score: i64, kill: i64) -> &'static str {
     if score < MIN_MEANINGFUL_DAMAGE {
         return "no damage";
@@ -134,10 +138,10 @@ pub fn effect(goal: Goal, tier: Tier, score: i64, kill: i64) -> &'static str {
         (Tier::InBand, Goal::Scare { .. }) => "scares",
         (Tier::InBand, Goal::FrugalKill { .. }) => "frugal kill",
         (Tier::InBand, _) => "kills",
-        (Tier::Under, _) => "chip (under ceiling)",
+        (Tier::Under, _) => "",
         (Tier::Overshoot, _) => "overshoots - would kill",
         (Tier::Fallback, _) if score >= kill => "kills",
-        (Tier::Fallback, _) => "chip",
+        (Tier::Fallback, _) => "",
     }
 }
 
@@ -335,9 +339,17 @@ mod tests {
         let kill = 5;
         let e = |goal: Goal, tier: Tier, score: i64| effect(goal, tier, score, kill);
         assert_eq!(e(Goal::RankedKill { need: 5 }, Tier::InBand, 6), "kills");
-        assert_eq!(e(Goal::RankedKill { need: 5 }, Tier::Fallback, 3), "chip");
+        assert_eq!(
+            e(Goal::RankedKill { need: 5 }, Tier::Fallback, 3),
+            "",
+            "survives: nothing to say"
+        );
         assert_eq!(e(Goal::Scare { need: 2, below: 4 }, Tier::InBand, 3), "scares");
-        assert_eq!(e(Goal::Scare { need: 2, below: 4 }, Tier::Under, 1), "chip (under ceiling)");
+        assert_eq!(
+            e(Goal::Scare { need: 2, below: 4 }, Tier::Under, 1),
+            "",
+            "a safe hit under a scare"
+        );
         assert_eq!(
             e(Goal::Scare { need: 2, below: 4 }, Tier::Overshoot, 9),
             "overshoots - would kill"
