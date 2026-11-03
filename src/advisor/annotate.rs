@@ -21,8 +21,8 @@ pub struct Row {
     pub tier: Tier,
     /// The enemy's lexicon multiplier for this word, when it is not 1.
     pub bonus: Option<Bonus>,
-    /// Health this word is expected to give back. Zero for most words.
-    pub heal: i64,
+    /// Health and armour this word is expected to give. Zero for most words.
+    pub gain: crate::pick::Gains,
     pub effect: &'static str,
     /// Each letter as typed, with the board index of the tile it goes into.
     pub letters: Vec<Letter>,
@@ -74,7 +74,7 @@ impl std::fmt::Display for Bonus {
     }
 }
 
-/// What the player can get back this turn, and what decides it.
+/// What the player can get back this turn — health and armour — and what decides it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Heals {
     /// Damage that kills: post-status health plus armour, the figure every goal aims against.
@@ -85,60 +85,84 @@ pub struct Heals {
     pub rested: bool,
     /// `onWoodKillGainHealth` is worn.
     pub wood_gear: bool,
+    /// Armour the player can still gain before the cap — [`crate::pick::Room::armour`].
+    pub armour_room: i64,
+    /// `onWoodKillGainArmour` is worn (the Wooden buckler family).
+    pub wood_armour: bool,
 }
 
 impl Heals {
     pub fn from_save(plan: &TurnPlan, cs: &Table) -> Self {
         let current = cs.int_at("rpg.player.health").unwrap_or(0);
         let max = cs.int_at("rpg.player.maxHealth").unwrap_or(current);
+        let flag = |f: &str| cs.path(&format!("rpg.player.gearFlags.{f}")).is_some();
         Heals {
             need: plan.deciding_health + plan.armour,
             missing: (max - current).max(0),
             bleed: bleed_of(cs),
             rested: plan.player.as_ref().is_some_and(|p| p.heals),
-            wood_gear: cs.path("rpg.player.gearFlags.onWoodKillGainHealth").is_some(),
+            wood_gear: flag("onWoodKillGainHealth"),
+            armour_room: plan.picking.prefs.room.armour,
+            wood_armour: flag("onWoodKillGainArmour"),
         }
     }
 
-    /// Health `c` is expected to restore, capped at what is missing.
+    /// Health and armour `c` is expected to give, each capped at what would land.
     ///
-    /// Three sources, summed:
+    /// Health, from three sources:
     ///
     /// - **Well-Rested overkill**: `floor(overkill / 2)` on a kill (`rpgview.lua:1195-1196`,
     ///   [`crate::rested::heal_from`]), skipped while bleeding (`:1080`).
     /// - **Wood-kill gear**: 4 on a kill made only of wood tiles, unless bleeding
     ///   (`onWoodKillGainHealth`, see [`crate::pick::Preferences::from_flags`]).
-    /// - **A Diamond tile played last**: `3 × gems in the word`, less any bleed, kill or not
-    ///   (`rpg/effects/material/gemheal.lua`, its `activate`). Diggle's ranking does not model this.
+    /// - **A Diamond tile played last**: its heal and regen, kill or not — [`crate::pick::gains`],
+    ///   which is also what Diggle's ranking counts.
+    ///
+    /// Armour, from two:
+    ///
+    /// - **Braced wood played last**: 4 per braced tile — [`crate::pick::gains`] again.
+    /// - **Wood-kill armour gear**: 4 on a wood-only kill (`onWoodKillGainArmour`).
     ///
     /// A kill is judged as the goals judge it, against post-status health, so this agrees with
     /// Diggle's arithmetic rather than with a second reading of the same save. And on the word's
     /// reach, so a rapier word's overkill is counted past health alone, as `rpgview.lua:1207` does.
-    pub fn of(&self, tiles: &[Tile], scorer: &Scorer, c: &Candidate) -> i64 {
+    pub fn of(&self, tiles: &[Tile], scorer: &Scorer, c: &Candidate) -> crate::pick::Gains {
         let kills = c.reach >= self.need;
+        let wood_kill = kills && crate::pick::wood_only(tiles, &c.typed.tiles, scorer);
         let mut heal = 0;
         if self.rested && self.bleed == 0 && kills {
             heal += crate::rested::heal_from(c.reach, self.need);
         }
-        if self.wood_gear
-            && self.bleed == 0
-            && kills
-            && crate::pick::wood_only(tiles, &c.typed.tiles, scorer)
-        {
+        if self.wood_gear && self.bleed == 0 && wood_kill {
             heal += 4;
         }
-        let material = |i: &usize| tiles.get(*i).and_then(|t| scorer.material_name(t));
-        if c.typed.tiles.last().and_then(material) == Some("gemheal") {
-            let gems = c
-                .typed
-                .tiles
-                .iter()
-                .filter(|i| material(i).is_some_and(|m| m.starts_with("gem")))
-                .count() as i64;
-            heal += (3 * gems - self.bleed).max(0);
+        let room = crate::pick::Room {
+            armour: self.armour_room,
+            health: (self.missing - heal).max(0),
+            bleed: self.bleed,
+        };
+        let material = crate::pick::gains(tiles, &c.typed.tiles, scorer, room);
+        let mut armour = material.armour;
+        if self.wood_armour && wood_kill {
+            armour += 4;
         }
-        heal.min(self.missing)
+        crate::pick::Gains {
+            health: (heal + material.health).min(self.missing),
+            armour: armour.min(self.armour_room.max(0)),
+        }
     }
+}
+
+/// The Gain column's text: `+3 ❤️ +4 🛡️`, each part only when there is some.
+pub fn gain_text(g: crate::pick::Gains) -> String {
+    let mut parts = Vec::new();
+    if g.health > 0 {
+        parts.push(format!("+{} ❤️", g.health));
+    }
+    if g.armour > 0 {
+        parts.push(format!("+{} 🛡️", g.armour));
+    }
+    parts.join(" ")
 }
 
 /// The player's bleed, as a whole number of stacks, and never zero while any is present.
@@ -305,7 +329,7 @@ pub fn rows(
             score: c.score,
             tier: c.tier,
             bonus: bonus_of(&plan.mods, &c.word),
-            heal: heals.of(&plan.tiles, scorer, c),
+            gain: heals.of(&plan.tiles, scorer, c),
             effect: effect(plan.goal, c.tier, c.score, c.reach, heals.need),
             pierces: c.pierces,
             letters: letters_of(&plan.tiles, c),
@@ -342,7 +366,15 @@ mod tests {
     }
 
     fn heals(need: i64, missing: i64) -> Heals {
-        Heals { need, missing, bleed: 0, rested: false, wood_gear: false }
+        Heals {
+            need,
+            missing,
+            bleed: 0,
+            rested: false,
+            wood_gear: false,
+            armour_room: 0,
+            wood_armour: false,
+        }
     }
 
     #[test]
@@ -371,9 +403,9 @@ mod tests {
         let tiles: Vec<Tile> = "CAT".chars().map(|c| Tile::plain(&c.to_string())).collect();
         let h = Heals { rested: true, ..heals(5, 3) };
         let s = scorer();
-        assert_eq!(h.of(&tiles, &s, &cand("CAT", 9, Tier::InBand, vec![0, 1, 2])), 2);
-        assert_eq!(h.of(&tiles, &s, &cand("CAT", 20, Tier::InBand, vec![0, 1, 2])), 3);
-        assert_eq!(h.of(&tiles, &s, &cand("CAT", 4, Tier::Fallback, vec![0, 1, 2])), 0);
+        assert_eq!(h.of(&tiles, &s, &cand("CAT", 9, Tier::InBand, vec![0, 1, 2])).health, 2);
+        assert_eq!(h.of(&tiles, &s, &cand("CAT", 20, Tier::InBand, vec![0, 1, 2])).health, 3);
+        assert_eq!(h.of(&tiles, &s, &cand("CAT", 4, Tier::Fallback, vec![0, 1, 2])).health, 0);
     }
 
     /// A rapier word's damage goes to health alone, so its overkill — and the heal — are counted
@@ -387,7 +419,7 @@ mod tests {
             pierces: true,
             ..cand("SINGES", 45, Tier::InBand, vec![0, 1, 2, 3, 4, 5])
         };
-        assert_eq!(h.of(&tiles, &scorer(), &c), 1, "floor(3 / 2)");
+        assert_eq!(h.of(&tiles, &scorer(), &c).health, 1, "floor(3 / 2)");
     }
 
     /// Bleeding skips the heal branch (`rpgview.lua:1080`).
@@ -395,7 +427,10 @@ mod tests {
     fn no_overkill_heal_while_bleeding() {
         let tiles: Vec<Tile> = "CAT".chars().map(|c| Tile::plain(&c.to_string())).collect();
         let h = Heals { rested: true, bleed: 2, ..heals(5, 3) };
-        assert_eq!(h.of(&tiles, &scorer(), &cand("CAT", 20, Tier::InBand, vec![0, 1, 2])), 0);
+        assert_eq!(
+            h.of(&tiles, &scorer(), &cand("CAT", 20, Tier::InBand, vec![0, 1, 2])).health,
+            0
+        );
     }
 
     /// `onWoodKillGainHealth`: 4 on a wood-only kill (`items/woodaugmentgear.lua`).
@@ -404,12 +439,21 @@ mod tests {
         let tiles: Vec<Tile> = "EATZ".chars().map(|c| Tile::plain(&c.to_string())).collect();
         let h = Heals { wood_gear: true, ..heals(3, 10) };
         let s = scorer();
-        assert_eq!(h.of(&tiles, &s, &cand("EAT", 3, Tier::InBand, vec![0, 1, 2])), 4);
-        assert_eq!(h.of(&tiles, &s, &cand("ZEA", 12, Tier::InBand, vec![3, 0, 1])), 0, "Z is gold");
-        assert_eq!(h.of(&tiles, &s, &cand("EAT", 2, Tier::Fallback, vec![0, 1, 2])), 0, "no kill");
+        assert_eq!(h.of(&tiles, &s, &cand("EAT", 3, Tier::InBand, vec![0, 1, 2])).health, 4);
+        assert_eq!(
+            h.of(&tiles, &s, &cand("ZEA", 12, Tier::InBand, vec![3, 0, 1])).health,
+            0,
+            "Z is gold"
+        );
+        assert_eq!(
+            h.of(&tiles, &s, &cand("EAT", 2, Tier::Fallback, vec![0, 1, 2])).health,
+            0,
+            "no kill"
+        );
     }
 
-    /// A Diamond last: `3 × gems − bleed` (`rpg/effects/material/gemheal.lua`), kill or not.
+    /// A Diamond last: `3 × gems − bleed` healing and `3 × gems` regen
+    /// (`rpg/effects/material/gemheal.lua`), kill or not, as [`crate::pick::gains`] counts them.
     #[test]
     fn a_diamond_played_last_heals_three_per_gem() {
         let mut tiles: Vec<Tile> = "CAT".chars().map(|c| Tile::plain(&c.to_string())).collect();
@@ -419,11 +463,45 @@ mod tests {
         };
         let s = scorer();
         let c = cand("CAT", 1, Tier::Fallback, vec![0, 1, 2]);
-        assert_eq!(heals(100, 10).of(&tiles, &s, &c), 3);
-        assert_eq!(Heals { bleed: 1, ..heals(100, 10) }.of(&tiles, &s, &c), 2);
-        assert_eq!(heals(100, 2).of(&tiles, &s, &c), 2, "capped at what is missing");
+        assert_eq!(heals(100, 10).of(&tiles, &s, &c).health, 3 + 3, "heal and regen");
+        assert_eq!(Heals { bleed: 1, ..heals(100, 10) }.of(&tiles, &s, &c).health, 2 + 3);
+        assert_eq!(heals(100, 2).of(&tiles, &s, &c).health, 2, "capped at what is missing");
         let first = cand("TCA", 1, Tier::Fallback, vec![2, 0, 1]);
-        assert_eq!(heals(100, 10).of(&tiles, &s, &first), 0, "only when last");
+        assert_eq!(heals(100, 10).of(&tiles, &s, &first).health, 0, "only when last");
+    }
+
+    /// Braced wood last: 4 armour per braced tile, up to the cap — `FUD`, not `DAU`.
+    #[test]
+    fn braced_wood_last_shows_as_armour() {
+        let mut tiles: Vec<Tile> = "FUD".chars().map(|c| Tile::plain(&c.to_string())).collect();
+        tiles[2].quality = Quality { material: Some("woodbraced".into()), ..Quality::default() };
+        let s = scorer();
+        let h = Heals { armour_room: 10, ..heals(100, 0) };
+        let fud = h.of(&tiles, &s, &cand("FUD", 4, Tier::InBand, vec![0, 1, 2]));
+        assert_eq!((fud.armour, fud.health), (4, 0));
+        assert_eq!(h.of(&tiles, &s, &cand("DUF", 4, Tier::InBand, vec![2, 1, 0])).armour, 0);
+        let capped = Heals { armour_room: 2, ..heals(100, 0) };
+        assert_eq!(capped.of(&tiles, &s, &cand("FUD", 4, Tier::InBand, vec![0, 1, 2])).armour, 2);
+    }
+
+    /// `onWoodKillGainArmour`: 4 armour on a wood-only kill, up to the cap.
+    #[test]
+    fn a_wood_only_kill_gives_four_armour_with_the_buckler() {
+        let tiles: Vec<Tile> = "EATZ".chars().map(|c| Tile::plain(&c.to_string())).collect();
+        let h = Heals { wood_armour: true, armour_room: 10, ..heals(3, 0) };
+        let s = scorer();
+        assert_eq!(h.of(&tiles, &s, &cand("EAT", 3, Tier::InBand, vec![0, 1, 2])).armour, 4);
+        assert_eq!(h.of(&tiles, &s, &cand("EAT", 2, Tier::Fallback, vec![0, 1, 2])).armour, 0);
+    }
+
+    /// The Gain column: health and armour, each only when there is some.
+    #[test]
+    fn gain_reads_as_hearts_and_shields() {
+        let g = |health, armour| crate::pick::Gains { armour, health };
+        assert_eq!(gain_text(g(0, 0)), "");
+        assert_eq!(gain_text(g(3, 0)), "+3 ❤️");
+        assert_eq!(gain_text(g(0, 4)), "+4 🛡️");
+        assert_eq!(gain_text(g(3, 4)), "+3 ❤️ +4 🛡️");
     }
 
     /// Any bleed is bleeding, as Diggle reads it, even one the save writes as a fraction.

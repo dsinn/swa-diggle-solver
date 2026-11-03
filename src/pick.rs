@@ -51,6 +51,23 @@ pub struct Preferences {
     /// `lethal + 2 * missing`, because the heal is `floor(overkill/2)` capped at the deficit
     /// (`rpgview.lua:1195-1196`). See [`Rank::heals_fully`] for why this is a rank and not a floor.
     pub heal_at: Option<i64>,
+    /// How much of what a word can give the player would land — see [`gain`].
+    pub room: Room,
+}
+
+/// How much a word's armour and healing can actually give, this turn.
+///
+/// Default is all zero, which makes [`gain`] worth nothing: the safe direction for a caller that
+/// does not know, because then the ranking is what it was before gain existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Room {
+    /// Armour the player can still gain before the cap, `maxHealth / (maxArmourHalved and 2 or 1)`
+    /// (`overworld.lua:18`).
+    pub armour: i64,
+    /// Health missing.
+    pub health: i64,
+    /// Bleed stacks on the player, which eat a Diamond's heal and stop regen.
+    pub bleed: i64,
 }
 
 impl Preferences {
@@ -97,7 +114,7 @@ impl Preferences {
         let heals = has_flag("onWoodKillGainHealth") && injured && !bleeding;
         let armours = has_flag("onWoodKillGainArmour") && armour_room;
         let braced = has_flag("onWoodKillQueueWoodbraced");
-        Preferences { wood_only_pays: heals || armours || braced, heal_at: None }
+        Preferences { wood_only_pays: heals || armours || braced, ..Preferences::default() }
     }
 
     /// Records the damage at which the Well-Rested heal covers the whole deficit.
@@ -107,6 +124,11 @@ impl Preferences {
     /// enemy's. See [`Rank::heals_fully`].
     pub fn healing_at(self, damage: Option<i64>) -> Self {
         Preferences { heal_at: damage, ..self }
+    }
+
+    /// Records how much armour and healing would land — see [`gain`].
+    pub fn with_room(self, room: Room) -> Self {
+        Preferences { room, ..self }
     }
 }
 
@@ -207,6 +229,15 @@ pub struct Rank {
     /// floor drops to plain lethal whenever the wood payout is live, and this field carries the heal
     /// into the comparison instead — see [`crate::search::Goal::killing_blow`].
     pub heals_fully: bool,
+    /// Health and armour this word gives the player, as far as they would land: see [`gain`].
+    /// Higher is better.
+    ///
+    /// **Above every board-hygiene term and below the three before it** — the user's call,
+    /// 2026-11-03, after `DAU` was listed above `FUD` for the same damage while only `FUD` ends on
+    /// a braced tile and gives 4 armour. Below the fire count, which costs every turn the board
+    /// burns (see [`Rank::fire_eaten`]), and below the wood-only and full-heal payouts, which the
+    /// dev ordered and which already stand for gain of their own.
+    pub gain: i64,
     /// What this word spends from the board's stock of tiles worth keeping. **Lower** is better.
     ///
     /// See [`hoarded`]. Ranked below `wood_only`, which is a payout the gear actually pays, and above
@@ -248,6 +279,9 @@ impl Rank {
         if self.heals_fully != other.heals_fully {
             return self.heals_fully;
         }
+        if self.gain != other.gain {
+            return self.gain > other.gain;
+        }
         if self.hoarded != other.hoarded {
             return self.hoarded < other.hoarded;
         }
@@ -258,6 +292,54 @@ impl Rank {
             return self.hazard_fall > other.hazard_fall;
         }
         self.deviation < other.deviation
+    }
+}
+
+/// Health and armour the word gives the player, counting only what would land.
+///
+/// Two materials pay out when they are the **last** tile (both have `active = wordTiles[#wordTiles]
+/// == tile`), and each counts its kind across the whole word:
+///
+/// - **Braced wood** (`rpg/effects/material/woodbraced.lua`): 4 armour per braced tile —
+///   `countEachMaterialWithCat(wordTiles, 'wood', 'braced')`, and `woodbraced` is the only material
+///   whose `wood` category is `braced` — up to [`Room::armour`].
+/// - **A Diamond** (`rpg/effects/material/gemheal.lua`): with `val` = 3 per gem in the word (the three
+///   `gem*` materials), it heals `max(0, val - bleed)`, takes `val` off the bleed, and adds `val`
+///   regen. The heal counts up to [`Room::health`]. Regen heals 1 a turn and not while bleeding
+///   (`rpgview.lua:1000-1002`), so it counts only if the bleed is gone, and only up to what is still
+///   missing after the heal.
+///
+/// Armour and health count the same, point for point. Its toxin removal is not counted.
+pub fn gain(tiles: &[Tile], consumed: &[usize], scorer: &Scorer, room: Room) -> i64 {
+    let g = gains(tiles, consumed, scorer, room);
+    g.armour + g.health
+}
+
+/// What [`gain`] adds up: the armour and the health (heal and regen) a word gives, each only as far
+/// as it would land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Gains {
+    pub armour: i64,
+    pub health: i64,
+}
+
+/// [`gain`], kept apart, for a caller that shows the two separately.
+pub fn gains(tiles: &[Tile], consumed: &[usize], scorer: &Scorer, room: Room) -> Gains {
+    let material = |i: &usize| tiles.get(*i).and_then(|t| scorer.material_name(t));
+    let count = |kind: &dyn Fn(&str) -> bool| {
+        consumed.iter().filter(|i| material(i).is_some_and(kind)).count() as i64
+    };
+    match consumed.last().and_then(material) {
+        Some("woodbraced") => {
+            Gains { armour: (4 * count(&|m| m == "woodbraced")).min(room.armour.max(0)), health: 0 }
+        }
+        Some("gemheal") => {
+            let val = 3 * count(&|m| m.starts_with("gem"));
+            let heal = (val - room.bleed).max(0).min(room.health.max(0));
+            let regen = if room.bleed > val { 0 } else { val.min(room.health.max(0) - heal) };
+            Gains { armour: 0, health: heal + regen }
+        }
+        _ => Gains::default(),
     }
 }
 
@@ -449,6 +531,7 @@ pub fn rank(
             .count(),
         wood_only: prefs.wood_only_pays && wood_only(tiles, consumed, scorer),
         heals_fully: prefs.heal_at.is_some_and(|at| damage >= at),
+        gain: gain(tiles, consumed, scorer, prefs.room),
         hoarded: hoarded(tiles, consumed, scorer),
         shed: shed(tiles, consumed),
         hazard_fall: hazard_fall(tiles, geometry, consumed, scorer),
@@ -540,6 +623,7 @@ mod tests {
             fire_eaten: fire,
             wood_only: wood,
             heals_fully: false,
+            gain: 0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 0,
@@ -555,6 +639,73 @@ mod tests {
         assert!(r(5, false).better_than(&r(4, true)));
         // Equal fire falls through to the payouts, unchanged.
         assert!(r(2, true).better_than(&r(2, false)));
+    }
+
+    fn of(letter: &str, material: &str) -> Tile {
+        Tile {
+            letter: letter.into(),
+            quality: crate::observe::board::Quality {
+                material: Some(material.into()),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn room(armour: i64, health: i64, bleed: i64) -> Room {
+        Room { armour, health, bleed }
+    }
+
+    /// Braced wood as the last tile: 4 armour per braced tile in the word
+    /// (`rpg/effects/material/woodbraced.lua`), only as much as fits under the armour cap.
+    #[test]
+    fn braced_wood_last_gives_four_armour_per_braced_tile() {
+        let Some(sc) = scorer() else { return };
+        let t = vec![of("F", "wood"), of("U", "woodbraced"), of("D", "woodbraced")];
+        assert_eq!(gain(&t, &[0, 1, 2], &sc, room(100, 0, 0)), 8, "two braced, the last of them");
+        assert_eq!(gain(&t, &[2, 1, 0], &sc, room(100, 0, 0)), 0, "braced, but not last");
+        assert_eq!(gain(&t, &[0, 1, 2], &sc, room(3, 0, 0)), 3, "only up to the cap");
+        assert_eq!(gain(&t, &[0, 1, 2], &sc, room(0, 0, 0)), 0, "at the cap it is worth nothing");
+    }
+
+    /// A Diamond last: per gem in the word, 3 healing less bleed, bleed down by 3, and 3 regen
+    /// (`rpg/effects/material/gemheal.lua`). Regen heals 1 a turn and not while bleeding
+    /// (`rpgview.lua:1000-1002`), so it counts only once the bleed is gone, and only up to what is
+    /// still missing after the heal.
+    #[test]
+    fn a_diamond_last_gives_its_heal_and_regen_up_to_what_is_missing() {
+        let Some(sc) = scorer() else { return };
+        let t = vec![of("C", "gemice"), of("A", "wood"), of("T", "gemheal")];
+        let word = [0, 1, 2]; // two gems: 6 healing, 6 regen
+        assert_eq!(gain(&t, &word, &sc, room(0, 10, 0)), 6 + 4, "regen fills the rest");
+        assert_eq!(gain(&t, &word, &sc, room(0, 20, 0)), 6 + 6);
+        assert_eq!(gain(&t, &word, &sc, room(0, 20, 2)), 4 + 6, "bleed eats the heal, then clears");
+        assert_eq!(gain(&t, &word, &sc, room(0, 20, 9)), 0, "still bleeding: no heal, no regen");
+        assert_eq!(gain(&t, &word, &sc, room(0, 0, 0)), 0, "at full health it is worth nothing");
+        assert_eq!(gain(&t, &[2, 1, 0], &sc, room(0, 20, 0)), 0, "the Diamond must be last");
+    }
+
+    /// The user's rule, 2026-11-03: what a word gives the player outranks board hygiene, but not
+    /// the fire count or the two payouts ranked above it.
+    #[test]
+    fn gain_outranks_hygiene_but_not_fire_or_the_payouts() {
+        let r = |fire: usize, wood: bool, gain: i64, hoarded: f64, deviation: f64| Rank {
+            fire_eaten: fire,
+            wood_only: wood,
+            heals_fully: false,
+            gain,
+            hoarded,
+            shed: 0,
+            hazard_fall: 0,
+            deviation,
+        };
+        assert!(r(0, true, 4, 0.0, 11.6).better_than(&r(0, true, 0, 0.0, 11.0)), "FUD over DAU");
+        assert!(r(0, false, 4, 5.0, 0.0).better_than(&r(0, false, 0, 0.0, 0.0)), "over hoarding");
+        assert!(r(0, false, 8, 0.0, 0.0).better_than(&r(0, false, 4, 0.0, 0.0)), "more is better");
+        assert!(
+            r(0, true, 0, 0.0, 0.0).better_than(&r(0, false, 8, 0.0, 0.0)),
+            "wood payout first"
+        );
+        assert!(r(1, false, 0, 0.0, 0.0).better_than(&r(0, false, 8, 0.0, 0.0)), "fire first");
     }
 
     /// The dev's four tiers, 2026-08-15, in the order they stated them.
@@ -573,6 +724,7 @@ mod tests {
             fire_eaten: 0,
             wood_only: wood,
             heals_fully: heal,
+            gain: 0,
             hoarded,
             shed: 0,
             hazard_fall: 0,
@@ -595,7 +747,7 @@ mod tests {
     /// With no heal to collect, the field must not sway anything.
     #[test]
     fn the_heal_rank_is_inert_when_there_is_no_heal() {
-        let prefs = Preferences { wood_only_pays: true, heal_at: None };
+        let prefs = Preferences { wood_only_pays: true, ..Preferences::default() };
         // `rank` is what sets the field, and `heal_at: None` is how the caller says the heal is
         // unavailable -- no charge, cancelled by gear, or already at full health.
         assert!(!prefs.heal_at.is_some_and(|at| 9999 >= at), "no threshold, so nothing clears it");
@@ -613,6 +765,7 @@ mod tests {
             fire_eaten: 0,
             wood_only: false,
             heals_fully: false,
+            gain: 0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 0,
@@ -622,6 +775,7 @@ mod tests {
             fire_eaten: 0,
             wood_only: false,
             heals_fully: false,
+            gain: 0,
             hoarded: 40.0,
             shed: 0,
             hazard_fall: 0,
@@ -635,6 +789,7 @@ mod tests {
             fire_eaten: 0,
             wood_only: true,
             heals_fully: false,
+            gain: 0,
             hoarded: 40.0,
             shed: 0,
             hazard_fall: 0,
@@ -647,6 +802,7 @@ mod tests {
             fire_eaten: 0,
             wood_only: false,
             heals_fully: false,
+            gain: 0,
             hoarded: 10.0,
             shed: 0,
             hazard_fall: 0,
@@ -656,6 +812,7 @@ mod tests {
             fire_eaten: 0,
             wood_only: false,
             heals_fully: false,
+            gain: 0,
             hoarded: 11.0,
             shed: 0,
             hazard_fall: 0,
@@ -679,6 +836,7 @@ mod tests {
             fire_eaten: 0,
             wood_only: false,
             heals_fully: false,
+            gain: 0,
             hoarded,
             shed,
             hazard_fall: 0,
@@ -870,6 +1028,7 @@ mod tests {
             fire_eaten: 0,
             wood_only: true,
             heals_fully: false,
+            gain: 0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 0,
@@ -879,6 +1038,7 @@ mod tests {
             fire_eaten: 0,
             wood_only: false,
             heals_fully: false,
+            gain: 0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 5,
@@ -890,6 +1050,7 @@ mod tests {
             fire_eaten: 0,
             wood_only: false,
             heals_fully: false,
+            gain: 0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 2,
@@ -899,6 +1060,7 @@ mod tests {
             fire_eaten: 0,
             wood_only: false,
             heals_fully: false,
+            gain: 0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 1,
@@ -910,6 +1072,7 @@ mod tests {
             fire_eaten: 0,
             wood_only: false,
             heals_fully: false,
+            gain: 0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 1,
@@ -919,6 +1082,7 @@ mod tests {
             fire_eaten: 0,
             wood_only: false,
             heals_fully: false,
+            gain: 0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 1,

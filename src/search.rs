@@ -3095,6 +3095,27 @@ mod ranked_tests {
         assert!(adjacency.is_empty(), "{adjacency:?}");
     }
 
+    /// What a word gives the player outranks board hygiene: with a braced tile on the board and
+    /// room for armour, every kill that ends on it is listed before every kill that does not.
+    #[test]
+    fn kills_that_give_armour_are_listed_first() {
+        let mut w = world();
+        // `OYCAACTPORLIGAHJ`: brace the T at index 6.
+        w.board[6].quality.material = Some("woodbraced".into());
+        w.picking.prefs =
+            w.picking.prefs.with_room(crate::pick::Room { armour: 100, ..Default::default() });
+        let list = rank_all(&w, &Modifiers::none(), Goal::RankedKill { need: 3 });
+        let band: Vec<&Candidate> = list.iter().filter(|c| c.tier == Tier::InBand).collect();
+        let gains: Vec<i64> = band.iter().map(|c| c.rank.unwrap().gain).collect();
+        assert!(gains.iter().any(|g| *g > 0), "some kill should end on the braced T");
+        assert!(gains.iter().any(|g| *g == 0));
+        assert!(
+            gains.windows(2).all(|p| p[0] >= p[1]),
+            "a kill without armour is listed above one with it"
+        );
+        assert!(band.iter().filter(|c| c.rank.unwrap().gain > 0).all(|c| c.word.ends_with('T')));
+    }
+
     /// The advisor's top row is the word Diggle would play, or one it cannot tell apart from it.
     ///
     /// A tie is allowed because Diggle's own winner among equals depends on thread scheduling: the

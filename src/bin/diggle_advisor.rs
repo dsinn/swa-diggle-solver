@@ -15,7 +15,7 @@
 //! - **Your turn**: every playable word, in the order Diggle prefers them
 //!   ([`diggle_solver::search::ranked`]). The top row is the word Diggle would type. Each letter
 //!   sits on the colour of the tile it would be typed into; the columns give the expected damage,
-//!   the enemy's lexicon bonus when it is not 1, the health it should give back, and what it does.
+//!   the enemy's lexicon bonus when it is not 1, the health and armour it should give, and what it does.
 //!
 //! **Not modelled**: Diggle's murder backoff, which aims lower after the game warns that a word
 //! would kill a frightened enemy. That warning reaches Diggle through the console, which this does
@@ -121,7 +121,7 @@ const COLUMNS: [(&str, i32, bool); 7] = [
     ("Word", 470, false),
     ("Damage", 84, true),
     ("Bonus", 90, false),
-    ("Heals", 56, true),
+    ("Gain", 120, true),
     ("Spell", 120, false),
     ("Effect", 190, false),
 ];
@@ -393,9 +393,9 @@ fn faded((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
     (mix(r), mix(g), mix(b))
 }
 
-/// The columns whose text carries emoji, drawn by [`ColourText`]: Damage (the rapier's 🤺), Bonus
-/// and Spell.
-const EMOJI_COLUMNS: [i32; 3] = [2, 3, 5];
+/// The columns whose text carries emoji, drawn by [`ColourText`]: Damage (the rapier's 🤺), Bonus,
+/// Gain (❤️ and 🛡️) and Spell.
+const EMOJI_COLUMNS: [i32; 4] = [2, 3, 4, 5];
 
 /// Colour emoji, which GDI cannot draw: GDI renders a colour font's glyphs in one colour, so the
 /// list's own text would show 🔥 as a black outline. Direct2D's text drawing with
@@ -495,7 +495,7 @@ fn cell_text(v: &View, item: usize, sub: i32) -> String {
         2 if r.row.pierces => format!("🤺 {}", r.row.score),
         2 => r.row.score.to_string(),
         3 => r.row.bonus.as_ref().map(|b| b.to_string()).unwrap_or_default(),
-        4 => (r.row.heal > 0).then(|| format!("+{}", r.row.heal)).unwrap_or_default(),
+        4 => diggle_solver::advisor::annotate::gain_text(r.row.gain),
         5 => r.row.spells.join(" "),
         _ => r.row.effect.to_string(),
     }

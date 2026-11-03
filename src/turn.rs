@@ -104,7 +104,8 @@ pub fn plan(
             mods.enemy_status_tick
         ));
     }
-    let armour_room = {
+    // Armour still to gain before the cap. Unknown counts as room — see the note on `picking`.
+    let armour_headroom = {
         let now = cs.int_at("rpg.player.armour");
         let max = cs.int_at("rpg.player.maxHealth").map(|m| {
             if cs.path("rpg.player.gearFlags.maxArmourHalved").is_some() {
@@ -114,10 +115,11 @@ pub fn plan(
             }
         });
         match (now, max) {
-            (Some(a), Some(m)) => a < m,
-            _ => true,
+            (Some(a), Some(m)) => (m - a).max(0),
+            _ => i64::MAX / 4,
         }
     };
+    let armour_room = armour_headroom > 0;
     // **Built before the goal, because the goal now depends on it.** Whether the wood gear is
     // paying decides whether the Well-Rested heal is a floor or merely a rank — see
     // `search::Goal::killing_blow`, and `pick::Rank::heals_fully` for the four tiers.
@@ -141,7 +143,19 @@ pub fn plan(
             .as_ref()
             .filter(|p| p.heals && p.vitals.missing() > 0)
             .map(|p| deciding_health + armour + 2 * p.vitals.missing()),
-    );
+    )
+    // What braced wood and a Diamond played last can give — see `pick::gain`. Bleed is rounded up,
+    // as the advisor shows it: any bleed at all stops regen.
+    .with_room(crate::pick::Room {
+        armour: armour_headroom,
+        health: player.as_ref().map(|p| p.vitals.missing()).unwrap_or(0),
+        bleed: cs
+            .path("rpg.player.statusEffects.bleed")
+            .and_then(|v| v.as_f64())
+            .filter(|b| *b > 0.0)
+            .map(|b| (b.ceil() as i64).max(1))
+            .unwrap_or(0),
+    });
     let goal = Goal::for_enemy(&mods, deciding_health, armour, Some(peak), player.as_ref(), prefs);
     // Built per turn rather than per fight, because the board's tile count is what the target is
     // scaled to and a board can lose tiles mid-fight — the run that died at `l50` watched its

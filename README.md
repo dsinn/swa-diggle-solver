@@ -191,8 +191,10 @@ Diggle drives. The game data (dictionary, scores, tile textures) comes from
   variants and gems near-black; a burning tile has a red ring, letters
   typed into wildcards are handwritten (Segoe Print), and the historical ligatures show as the game
   draws them (Þ, Ð, Æ, Œ, ß, ꙮ). The columns show the expected damage; the enemy's lexicon bonus
-  when it isn't x1, marked with its lexicon's emoji (`x1.50 💀`); the health the word should give back
-  (Well-Rested overkill, wood-kill gear, a Diamond tile played last); the spells you hold that it
+  when it isn't x1, marked with its lexicon's emoji (`x1.50 💀`); what the word gives you
+  (`+3 ❤️ +4 🛡️`: health from Well-Rested overkill, wood-kill gear, or a Diamond played last with
+  its regen; armour from braced wood played last or wood-kill armour gear), as far as it would
+  land under your missing health and armour cap; the spells you hold that it
   qualifies for, shown as their emoji and led by the one to cast when it beats the plain attack
   (`💀` for Turn), in which case the damage and ranking are that spell's; and what it does: `kills`, `scares`,
   `frugal kill`, `overshoots - would kill`, or blank when the enemy simply survives.
@@ -204,6 +206,9 @@ Diggle drives. The game data (dictionary, scores, tile textures) comes from
   Bonuses and spells are marked with colour emoji, one per dictionary (🔥 fire, ❄️ ice, 💀 bone,
   🪵 wood, 🕷️ spider, ❗ profanity, 🪓 axe, 🩸 blood, ⛓️ iron, 🤘 metal, 🍮 slime), so a spell
   checked against a dictionary shares its emoji; the others are 💚 Four heal and 🔤 Vowels, and UwU is just `UwU`.
+- **What a word gives you ranks above board hygiene.** Among words that do the job equally well,
+  the one giving more health and armour comes first; only burning tiles cleared and the wood-only
+  and full-heal payouts rank higher. Diggle plays by the same rule.
 - **Arcade challenges** are followed too: each saves under its own name (Boggling anxiety's is
   `bogglingChallenge`), read from the game's `ui/arcade.lua`. The advisor follows whichever save
   the game wrote last, and the window title names it.
