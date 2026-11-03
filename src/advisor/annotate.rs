@@ -239,8 +239,9 @@ pub fn spell_column(cast: Option<&'static str>, qualifying: Vec<&'static str>) -
 
 /// The emoji for a lexicon, by the name a bonus carries (`Bone`, from `lexiconBonusBone`).
 ///
-/// The user's choices, 2026-11-02: fire, cold, bone, wood, spider and profane. The rest are
-/// filled in to match; the dictionaries are `utils/dictionaries/*.lua`.
+/// The user's choices, 2026-11-02 and -03: fire, cold, bone, wood, spider, slime, metal, and ❗ for
+/// profanity — the mark on the profane book itself, and profane spells do produce `!` tiles. The
+/// rest are filled in to match; the dictionaries are `utils/dictionaries/*.lua`.
 pub fn lexicon_emoji(name: &str) -> Option<&'static str> {
     Some(match name {
         "Fire" => "🔥",
@@ -252,14 +253,15 @@ pub fn lexicon_emoji(name: &str) -> Option<&'static str> {
         "Axe" => "🪓",
         "Blood" => "🩸",
         "Iron" => "⛓️",
-        "Metal" => "⚙️",
-        "Slime" => "🟢",
+        "Metal" => "🤘",
+        "Slime" => "🍮",
         _ => return None,
     })
 }
 
 /// The emoji for a spell, by its `castHeading`. A spell checked against a dictionary shares that
-/// dictionary's emoji, so a Bone bonus and `Cast Turn` read as the same thing.
+/// dictionary's emoji, so a Bone bonus and `Cast Turn` read as the same thing. UwU has none: the
+/// user's call, its name is already the picture.
 pub fn spell_emoji(heading: &str) -> Option<&'static str> {
     match heading {
         "Fire" => lexicon_emoji("Fire"),
@@ -270,7 +272,6 @@ pub fn spell_emoji(heading: &str) -> Option<&'static str> {
         "Turn" | "Turn (if undead)" => lexicon_emoji("Bone"),
         "Four heal" => Some("💚"),
         "Vowels" => Some("🔤"),
-        "UwU" => Some("🥺"),
         _ => None,
     }
 }
@@ -453,6 +454,10 @@ mod tests {
         );
         assert_eq!(spell_column(None, vec!["Fire"]), vec!["🔥 Fire"]);
         assert!(spell_column(None, vec![]).is_empty());
+        assert_eq!(spell_column(None, vec!["UwU"]), vec!["UwU"], "UwU is its own label");
+        assert_eq!(spell_column(Some("Metal"), vec!["Metal"]), vec!["🤘 Cast Metal"]);
+        assert_eq!(lexicon_emoji("Slime"), Some("🍮"));
+        assert_eq!(lexicon_emoji("Swears"), Some("❗"), "the profane book's own mark");
     }
 
     /// Every dictionary the game ships has an emoji, so a bonus never shows a bare name by accident.

@@ -197,8 +197,8 @@ Diggle drives. The game data (dictionary, scores, tile textures) comes from
   case the damage and ranking are that spell's; and what it does: `kills`, `scares`,
   `frugal kill`, `overshoots - would kill`, or blank when the enemy simply survives.
   Bonuses and spells are marked with colour emoji, one per dictionary (🔥 fire, ❄️ ice, 💀 bone,
-  🪵 wood, 🕷️ spider, ❗ profanity, 🪓 axe, 🩸 blood, ⛓️ iron, ⚙️ metal, 🟢 slime), so a spell
-  checked against a dictionary shares its emoji; the others are 💚 Four heal, 🔤 Vowels, 🥺 UwU.
+  🪵 wood, 🕷️ spider, ❗ profanity, 🪓 axe, 🩸 blood, ⛓️ iron, 🤘 metal, 🍮 slime), so a spell
+  checked against a dictionary shares its emoji; the others are 💚 Four heal and 🔤 Vowels, and UwU is just `UwU`.
 - **Between turns** the last list stays up, greyed.
 - **Out of combat** shows only once `combatSaveData` is gone, which is when the reward is taken,
   not when `Finish` is clicked. Nothing on disk marks `Finish`; this is temporary until something
