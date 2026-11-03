@@ -94,7 +94,7 @@ thread_local! {
 /// Columns: header, width, right-aligned.
 const COLUMNS: [(&str, i32, bool); 6] = [
     ("#", 44, true),
-    ("Word", 260, false),
+    ("Word", 340, false),
     ("Damage", 70, true),
     ("Bonus", 64, true),
     ("Heals", 56, true),
@@ -173,9 +173,11 @@ fn worker(hwnd: isize, args: Args) {
             Event::Snapshot(snap) => {
                 let next = View::next(&current, &snap, &res, &mut peaks);
                 if let Ok(newer) = rx.try_recv() {
+                    let stale =
+                        newer.supersedes_a_turn() && !matches!(next.mode, Mode::OutOfCombat);
                     pending = Some(newer);
                     // Peaks only rise within a fight, so the stale turn's reading stays true.
-                    if !matches!(next.mode, Mode::OutOfCombat) {
+                    if stale {
                         continue;
                     }
                 }
@@ -214,7 +216,7 @@ fn main() -> windows::core::Result<()> {
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            760,
+            840,
             720,
             None,
             None,

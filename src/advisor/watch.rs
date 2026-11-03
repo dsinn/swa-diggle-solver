@@ -119,6 +119,14 @@ pub enum Event {
     Unreadable { dir: PathBuf, error: String },
 }
 
+impl Event {
+    /// Does this make a turn ranked from an earlier snapshot not worth showing? Only a newer
+    /// snapshot does: a note that the save could not be read leaves the last good board standing.
+    pub fn supersedes_a_turn(&self) -> bool {
+        matches!(self, Event::Snapshot(_))
+    }
+}
+
 /// One directory change handle, closed on drop.
 struct Watch {
     dir: PathBuf,
@@ -233,6 +241,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A ranked turn is thrown away only for a newer save, never for a note about a broken one.
+    #[test]
+    fn only_a_newer_snapshot_supersedes_a_ranked_turn() {
+        let snap = Event::Snapshot(Snapshot { dir: "x".into(), combat: None, stamp: None });
+        let broken = Event::Unreadable { dir: "x".into(), error: "eof".into() };
+        assert!(snap.supersedes_a_turn());
+        assert!(!broken.supersedes_a_turn());
     }
 
     #[test]

@@ -64,7 +64,7 @@ impl Heals {
         Heals {
             need: plan.deciding_health + plan.armour,
             missing: (max - current).max(0),
-            bleed: cs.int_at("rpg.player.statusEffects.bleed").unwrap_or(0).max(0),
+            bleed: bleed_of(cs),
             rested: plan.player.as_ref().is_some_and(|p| p.heals),
             wood_gear: cs.path("rpg.player.gearFlags.onWoodKillGainHealth").is_some(),
         }
@@ -107,6 +107,18 @@ impl Heals {
             heal += (3 * gems - self.bleed).max(0);
         }
         heal.min(self.missing)
+    }
+}
+
+/// The player's bleed, as a whole number of stacks, and never zero while any is present.
+///
+/// Rounded **up** because presence is what cancels the heals (`rpgview.lua:1080`) — Diggle reads it
+/// as presence too, in [`crate::turn::player_state`] — and a fraction rounded down to zero would
+/// show a heal the game will not give.
+pub fn bleed_of(cs: &Table) -> i64 {
+    match cs.path("rpg.player.statusEffects.bleed").and_then(|v| v.as_f64()) {
+        Some(b) if b > 0.0 => (b.ceil() as i64).max(1),
+        _ => 0,
     }
 }
 
@@ -252,6 +264,21 @@ mod tests {
         assert_eq!(heals(100, 2).of(&tiles, &s, &c), 2, "capped at what is missing");
         let first = cand("TCA", 1, Tier::Fallback, vec![2, 0, 1]);
         assert_eq!(heals(100, 10).of(&tiles, &s, &first), 0, "only when last");
+    }
+
+    /// Any bleed is bleeding, as Diggle reads it, even one the save writes as a fraction.
+    #[test]
+    fn a_fractional_bleed_still_counts() {
+        let cs = |b: &str| {
+            crate::game::save::parse(&format!(
+                "return {{ rpg = {{ player = {{ statusEffects = {{ bleed = {b} }} }} }} }}"
+            ))
+            .unwrap()
+        };
+        assert_eq!(bleed_of(&cs("2.5")), 3);
+        assert_eq!(bleed_of(&cs("0.25")), 1);
+        assert_eq!(bleed_of(&cs("2")), 2);
+        assert_eq!(bleed_of(&crate::game::save::parse("return {}").unwrap()), 0);
     }
 
     #[test]
