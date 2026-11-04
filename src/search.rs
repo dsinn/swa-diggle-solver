@@ -3116,6 +3116,36 @@ mod ranked_tests {
         assert!(band.iter().filter(|c| c.rank.unwrap().gain > 0).all(|c| c.word.ends_with('T')));
     }
 
+    /// Diggle's own search, not just the advisor's list, takes the Silver chain coif's armour into
+    /// its ranking: of the kills on `OYCAACTPORLIGAHJ`, whose `Y` and `H` are silver by default
+    /// material, the word it plays gives as much coif armour as any kill can, and some kill gives
+    /// none.
+    #[test]
+    fn diggle_plays_the_kill_that_gives_coif_armour() {
+        let mut w = world();
+        let need = 3;
+        let goal = Goal::RankedKill { need };
+        w.picking.prefs = w.picking.prefs.with_room(crate::pick::Room {
+            armour: 100,
+            silver_armour: 1,
+            ..Default::default()
+        });
+        let mods = Modifiers::none();
+        let band: Vec<i64> = rank_all(&w, &mods, goal)
+            .iter()
+            .filter(|c| c.tier == Tier::InBand)
+            .map(|c| c.rank.unwrap().gain)
+            .collect();
+        let most = *band.iter().max().unwrap();
+        assert!(most > 0 && band.iter().any(|g| *g == 0), "the fixture must separate them: {most}");
+
+        let out = search(&w.dict, &w.scorer, &w.board, &w.geom, &mods, goal, &w.picking, 8);
+        let played = out.choice_for(goal).expect("a kill is on the board");
+        let typed = Typist::new(&w.board, &w.geom).type_word(&played.word).unwrap();
+        let gain = crate::pick::gain(&w.board, &typed.tiles, &w.scorer, w.picking.prefs.room);
+        assert_eq!(gain, most, "Diggle played {} for {gain} armour, not {most}", played.word);
+    }
+
     /// The advisor's top row is the word Diggle would play, or one it cannot tell apart from it.
     ///
     /// A tie is allowed because Diggle's own winner among equals depends on thread scheduling: the

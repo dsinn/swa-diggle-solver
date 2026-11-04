@@ -89,6 +89,8 @@ pub struct Heals {
     pub armour_room: i64,
     /// `onWoodKillGainArmour` is worn (the Wooden buckler family).
     pub wood_armour: bool,
+    /// Armour per silver tile from the Silver chain coif — [`crate::pick::Room::silver_armour`].
+    pub silver_armour: i64,
 }
 
 impl Heals {
@@ -104,6 +106,7 @@ impl Heals {
             wood_gear: flag("onWoodKillGainHealth"),
             armour_room: plan.picking.prefs.room.armour,
             wood_armour: flag("onWoodKillGainArmour"),
+            silver_armour: plan.picking.prefs.room.silver_armour,
         }
     }
 
@@ -118,9 +121,10 @@ impl Heals {
     /// - **A Diamond tile played last**: its heal and regen, kill or not — [`crate::pick::gains`],
     ///   which is also what Diggle's ranking counts.
     ///
-    /// Armour, from two:
+    /// Armour, from three:
     ///
     /// - **Braced wood played last**: 4 per braced tile — [`crate::pick::gains`] again.
+    /// - **The Silver chain coif**: per silver tile, on any word — [`crate::pick::gains`] too.
     /// - **Wood-kill armour gear**: 4 on a wood-only kill (`onWoodKillGainArmour`).
     ///
     /// A kill is judged as the goals judge it, against post-status health, so this agrees with
@@ -140,6 +144,7 @@ impl Heals {
             armour: self.armour_room,
             health: (self.missing - heal).max(0),
             bleed: self.bleed,
+            silver_armour: self.silver_armour,
         };
         let material = crate::pick::gains(tiles, &c.typed.tiles, scorer, room);
         let mut armour = material.armour;
@@ -374,6 +379,7 @@ mod tests {
             wood_gear: false,
             armour_room: 0,
             wood_armour: false,
+            silver_armour: 0,
         }
     }
 
@@ -492,6 +498,16 @@ mod tests {
         let s = scorer();
         assert_eq!(h.of(&tiles, &s, &cand("EAT", 3, Tier::InBand, vec![0, 1, 2])).armour, 4);
         assert_eq!(h.of(&tiles, &s, &cand("EAT", 2, Tier::Fallback, vec![0, 1, 2])).armour, 0);
+    }
+
+    /// The Silver chain coif shows its armour on a word that does not kill: in `GYM`, `G` and `Y`
+    /// are silver by their default material and `M` is not.
+    #[test]
+    fn the_silver_coif_shows_as_armour_kill_or_not() {
+        let tiles: Vec<Tile> = "GYMA".chars().map(|c| Tile::plain(&c.to_string())).collect();
+        let h = Heals { silver_armour: 1, armour_room: 10, ..heals(100, 0) };
+        let s = scorer();
+        assert_eq!(h.of(&tiles, &s, &cand("GYM", 4, Tier::Fallback, vec![0, 1, 2])).armour, 2);
     }
 
     /// The Gain column: health and armour, each only when there is some.

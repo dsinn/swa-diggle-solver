@@ -155,6 +155,12 @@ pub fn plan(
             .filter(|b| *b > 0.0)
             .map(|b| (b.ceil() as i64).max(1))
             .unwrap_or(0),
+        // The Silver chain coif's armour per silver tile, on every attack — see `pick::gains`.
+        silver_armour: cs
+            .path("rpg.player.gearFlags.onAttackGainArmourWordSilverCount")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as i64)
+            .unwrap_or(0),
     });
     let goal = Goal::for_enemy(&mods, deciding_health, armour, Some(peak), player.as_ref(), prefs);
     // Built per turn rather than per fight, because the board's tile count is what the target is

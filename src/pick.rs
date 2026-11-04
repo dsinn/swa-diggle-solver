@@ -68,6 +68,9 @@ pub struct Room {
     pub health: i64,
     /// Bleed stacks on the player, which eat a Diamond's heal and stop regen.
     pub bleed: i64,
+    /// Armour per silver tile in any attacking word: the value of `onAttackGainArmourWordSilverCount`,
+    /// the Silver chain coif (`items/armourgear.lua:4-29`), zero when it is not worn.
+    pub silver_armour: i64,
 }
 
 impl Preferences {
@@ -309,6 +312,15 @@ impl Rank {
 ///   (`rpgview.lua:1000-1002`), so it counts only if the bleed is gone, and only up to what is still
 ///   missing after the heal.
 ///
+/// And one piece of gear, on every word whether it kills or not:
+///
+/// - **The Silver chain coif** (`onAttackGainArmourWordSilverCount`): `flagVal` armour per silver
+///   tile in the word (`rpg/effects/modifiers/onAttackGainArmourWordSilverCount.lua:8,14`). It is
+///   an `onAttack` effect, run by `rpgview.dealDamage` after every attack (`rpgview.lua:1247`), so
+///   the word need not kill. A tile is silver if its material **or** its border has the `silver`
+///   category (`utils/tiles.lua:97-104`) — see [`is_silver`]. Shares the armour cap with braced
+///   wood, since both go through `affectPlayerArmour` (`rpgview.lua:164-166`).
+///
 /// Armour and health count the same, point for point. Its toxin removal is not counted.
 pub fn gain(tiles: &[Tile], consumed: &[usize], scorer: &Scorer, room: Room) -> i64 {
     let g = gains(tiles, consumed, scorer, room);
@@ -329,10 +341,11 @@ pub fn gains(tiles: &[Tile], consumed: &[usize], scorer: &Scorer, room: Room) ->
     let count = |kind: &dyn Fn(&str) -> bool| {
         consumed.iter().filter(|i| material(i).is_some_and(kind)).count() as i64
     };
-    match consumed.last().and_then(material) {
-        Some("woodbraced") => {
-            Gains { armour: (4 * count(&|m| m == "woodbraced")).min(room.armour.max(0)), health: 0 }
-        }
+    let silver = room.silver_armour
+        * consumed.iter().filter(|&&i| tiles.get(i).is_some_and(|t| is_silver(t, scorer))).count()
+            as i64;
+    let g = match consumed.last().and_then(material) {
+        Some("woodbraced") => Gains { armour: 4 * count(&|m| m == "woodbraced"), health: 0 },
         Some("gemheal") => {
             let val = 3 * count(&|m| m.starts_with("gem"));
             let heal = (val - room.bleed).max(0).min(room.health.max(0));
@@ -340,7 +353,23 @@ pub fn gains(tiles: &[Tile], consumed: &[usize], scorer: &Scorer, room: Room) ->
             Gains { armour: 0, health: heal + regen }
         }
         _ => Gains::default(),
-    }
+    };
+    Gains { armour: (g.armour + silver).min(room.armour.max(0)), ..g }
+}
+
+/// Whether a tile counts as silver: its material or its border has the `silver` category
+/// (`tiles.hasCat`, `utils/tiles.lua:97-104`).
+///
+/// The materials that have it are `silver2`, `silver3`, `silverbleed`, `silvertoxin`, `electrum`,
+/// `electrumbleed` and `electrumtoxin`, and the only border is `silver`
+/// (`rpg/effects/material/*.lua`, `rpg/effects/border/silver.lua`). Matched by name prefix, as
+/// [`wood_only`] matches wood. The letter's own material counts too: `G H Y B` are `silver2` and
+/// `F K W V` are `silver3` by default (`rpg/effects/material/default.lua:18-25`).
+pub fn is_silver(tile: &Tile, scorer: &Scorer) -> bool {
+    tile.quality.border.as_deref() == Some("silver")
+        || scorer
+            .material_name(tile)
+            .is_some_and(|m| m.starts_with("silver") || m.starts_with("electrum"))
 }
 
 /// Is this tile a hazard that wants to reach the bottom of its column?
@@ -652,7 +681,34 @@ mod tests {
     }
 
     fn room(armour: i64, health: i64, bleed: i64) -> Room {
-        Room { armour, health, bleed }
+        Room { armour, health, bleed, silver_armour: 0 }
+    }
+
+    /// The Silver chain coif: `flagVal` armour per silver tile, by material or by border, in any
+    /// word — last or not, kill or not — and capped with everything else at the armour cap.
+    #[test]
+    fn the_silver_coif_gives_armour_per_silver_tile() {
+        let Some(sc) = scorer() else { return };
+        let mut bordered = of("A", "wood");
+        bordered.quality.border = Some("silver".into());
+        let t = vec![of("A", "silver2"), bordered, of("T", "wood"), of("E", "electrum")];
+        let coif = |armour| Room { silver_armour: 1, ..room(armour, 0, 0) };
+        assert_eq!(gains(&t, &[0, 1, 2, 3], &sc, coif(100)).armour, 3, "material, border, electrum");
+        assert_eq!(gains(&t, &[2], &sc, coif(100)).armour, 0, "plain wood is not silver");
+        assert_eq!(gains(&t, &[0, 1, 2, 3], &sc, coif(2)).armour, 2, "only up to the cap");
+        assert_eq!(gains(&t, &[0, 1, 2, 3], &sc, room(100, 0, 0)).armour, 0, "not worn");
+        let doubled = Room { silver_armour: 2, ..room(100, 0, 0) };
+        assert_eq!(gains(&t, &[0, 3], &sc, doubled).armour, 4, "the flag's value is per tile");
+    }
+
+    /// The letters whose default material is silver count without any upgrade
+    /// (`rpg/effects/material/default.lua:18-25`).
+    #[test]
+    fn silver_letters_count_by_their_default_material() {
+        let Some(sc) = scorer() else { return };
+        let t = board(&["G", "H", "Y", "B", "F", "K", "W", "V", "A"]);
+        let silver: Vec<bool> = t.iter().map(|x| is_silver(x, &sc)).collect();
+        assert_eq!(silver, [true, true, true, true, true, true, true, true, false]);
     }
 
     /// Braced wood as the last tile: 4 armour per braced tile in the word
