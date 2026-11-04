@@ -9,7 +9,7 @@
 //!
 //! ## What it shows
 //!
-//! - **Out of combat** when `combatSaveData` does not exist. That is later than the fight really
+//! - **Out of combat** (a banner, no header line) when `combatSaveData` does not exist. That is later than the fight really
 //!   ends — see [`diggle_solver::advisor::mode::classify`] for why, and why it is temporary.
 //! - **Waiting** while a fight is between turns: the last list stays up, greyed.
 //! - **Your turn**: every playable word, in the order Diggle prefers them
@@ -21,6 +21,13 @@
 //! would kill a frightened enemy. That warning reaches Diggle through the console, which this does
 //! not read. You see it on screen.
 //!
+//! ## The window
+//!
+//! Its size, "Stay on top", and whether the log box is shown and how tall it is are remembered
+//! between launches ([`diggle_solver::advisor::settings`]). The log box starts collapsed; drag the
+//! gap under it to resize it. Settings are written half a second after the last change
+//! ([`SAVE_DELAY_MS`]), so a drag is one write rather than hundreds.
+//!
 //! ## Options
 //!
 //! - `--game-dir <path>`: the game checkout. Otherwise `game_dir` from `config.toml` in the working
@@ -31,6 +38,7 @@
 #![windows_subsystem = "windows"]
 
 use diggle_solver::advisor::mode::Mode;
+use diggle_solver::advisor::settings::{self, Settings};
 use diggle_solver::advisor::view::{Resources, View};
 use diggle_solver::advisor::watch::{self, Event};
 use std::cell::RefCell;
@@ -61,7 +69,7 @@ use windows::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, COLOR_WINDOW, DT_CENTER, DT_SINGLELINE, DT_TOP, HFONT, HGDIOBJ, TEXTMETRICW,
     TRANSPARENT,
 };
-use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
+use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC, ScreenToClient};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     ImageList_Create, InitCommonControlsEx, BST_CHECKED, CDDS_ITEMPREPAINT, CDDS_PREPAINT,
@@ -74,19 +82,27 @@ use windows::Win32::UI::Controls::{
     NMLVDISPINFOW, NM_CUSTOMDRAW, WC_LISTVIEWW,
 };
 use windows::Win32::UI::Controls::{LVM_GETCOLUMNWIDTH, LVM_SETCOLUMNWIDTH};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW, LoadCursorW,
-    MoveWindow, PostMessageW, PostQuitMessage, RegisterClassW, SendMessageW, SetWindowPos,
-    SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK, BN_CLICKED, BS_AUTOCHECKBOX,
-    CW_USEDEFAULT, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, HMENU, HWND_NOTOPMOST, HWND_TOPMOST,
-    IDC_ARROW, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_NOTIFY, WM_SETFONT, WM_SIZE,
-    WNDCLASSW, WS_BORDER, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetCursorPos, GetMessageW,
+    GetWindowRect, KillTimer, LoadCursorW, MoveWindow, PostMessageW, PostQuitMessage,
+    RegisterClassW, SendMessageW, SetCursor, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
+    TranslateMessage, BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, CW_USEDEFAULT,
+    ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, HMENU, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST,
+    IDC_ARROW, IDC_SIZENS, MINMAXINFO, MSG, SIZE_RESTORED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_COMMAND,
+    WM_CREATE, WM_DESTROY, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NOTIFY,
+    WM_SETCURSOR, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
 /// Posted to our own window when [`VIEW`] has changed. Never sent anywhere else.
 const WM_VIEW: u32 = WM_APP + 1;
 const ID_TOPMOST: usize = 101;
+const ID_LOG: usize = 102;
+/// The timer that writes the settings once they have stopped changing.
+const ID_SAVE: usize = 1;
+const SAVE_DELAY_MS: u32 = 500;
 /// Static-control styles (`winuser.h`), which the `windows` crate does not expose as constants.
 const SS_CENTER: u32 = 0x1;
 const SS_CENTERIMAGE: u32 = 0x200;
@@ -102,6 +118,7 @@ struct Ui {
     status: HWND,
     notes: HWND,
     topmost: HWND,
+    log_toggle: HWND,
     list: HWND,
     banner: HWND,
     tile_font: HFONT,
@@ -111,8 +128,55 @@ struct Ui {
     colour_text: Option<ColourText>,
 }
 
+/// The window's remembered settings and the state of a splitter drag. Window thread only.
+struct State {
+    settings: Settings,
+    /// Where they are saved; `None` when `LOCALAPPDATA` is unset, and they are not kept.
+    file: Option<PathBuf>,
+    /// Settings changed since the last write.
+    dirty: bool,
+    /// While the gap under the log is being dragged: how far below the log's bottom edge the
+    /// cursor was when the drag began, so the edge does not jump to the cursor.
+    drag: Option<i32>,
+}
+
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
+    static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+}
+
+fn settings_now() -> Settings {
+    STATE.with(|s| s.borrow().as_ref().map(|s| s.settings.clone()).unwrap_or_default())
+}
+
+/// Changes the settings and starts (or restarts) the save timer, if `change` changed them.
+unsafe fn update(hwnd: HWND, change: impl FnOnce(&mut Settings)) {
+    let changed = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let Some(s) = s.as_mut() else { return false };
+        let before = s.settings.clone();
+        change(&mut s.settings);
+        let changed = s.settings != before;
+        s.dirty |= changed;
+        changed
+    });
+    if changed {
+        // Setting a timer that is already running restarts it: this is the debounce.
+        SetTimer(hwnd, ID_SAVE, SAVE_DELAY_MS, None);
+    }
+}
+
+/// Writes the settings if they changed since the last write. A failure is dropped: losing a
+/// window size is not worth interrupting the player for.
+fn save_now() {
+    STATE.with(|s| {
+        if let Some(s) = s.borrow_mut().as_mut().filter(|s| s.dirty) {
+            s.dirty = false;
+            if let Some(file) = &s.file {
+                let _ = s.settings.save(file);
+            }
+        }
+    });
 }
 
 /// Columns: header, width, right-aligned.
@@ -219,6 +283,11 @@ fn worker(hwnd: isize, args: Args) {
 
 fn main() -> windows::core::Result<()> {
     let args = args();
+    let file = std::env::var_os("LOCALAPPDATA").map(|d| settings::path(std::path::Path::new(&d)));
+    let saved = file.as_deref().map(Settings::load).unwrap_or_default();
+    STATE.with(|s| {
+        *s.borrow_mut() = Some(State { settings: saved.clone(), file, dirty: false, drag: None })
+    });
     // SAFETY: standard Win32 window set-up and message loop, all on this thread.
     unsafe {
         let icc = INITCOMMONCONTROLSEX {
@@ -238,14 +307,14 @@ fn main() -> windows::core::Result<()> {
         };
         RegisterClassW(&wc);
         let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
+            if saved.topmost { WS_EX_TOPMOST } else { WINDOW_EX_STYLE(0) },
             class,
             w!("Diggle Advisor"),
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            1250,
-            720,
+            saved.width,
+            saved.height,
             None,
             None,
             instance,
@@ -304,6 +373,13 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
         ID_TOPMOST,
     )?;
+    let log_toggle =
+        child(hwnd, w!("BUTTON"), w!("Show log"), BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0, ID_LOG)?;
+    let saved = settings_now();
+    for (h, on) in [(topmost, saved.topmost), (log_toggle, saved.log_open)] {
+        let check = if on { BST_CHECKED.0 } else { 0 };
+        SendMessageW(h, BM_SETCHECK, WPARAM(check as usize), LPARAM(0));
+    }
     let list = child(
         hwnd,
         WC_LISTVIEWW,
@@ -312,7 +388,7 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         0,
     )?;
     let banner = child(hwnd, w!("STATIC"), w!("Out of combat"), SS_CENTER | SS_CENTERIMAGE, 0)?;
-    for h in [status, notes, topmost, list] {
+    for h in [status, notes, topmost, log_toggle, list] {
         SendMessageW(h, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
     }
     SendMessageW(banner, WM_SETFONT, WPARAM(banner_font.0 as usize), LPARAM(1));
@@ -341,6 +417,7 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         status,
         notes,
         topmost,
+        log_toggle,
         list,
         banner,
         tile_font,
@@ -349,18 +426,79 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
     })
 }
 
+const PAD: i32 = 8;
+/// The header row: the header text, and the two checkboxes on its right.
+const HEADER_HEIGHT: i32 = 40;
+const TOPMOST_WIDTH: i32 = 120;
+const LOG_TOGGLE_WIDTH: i32 = 100;
+/// The list keeps at least this much height however tall the log is dragged.
+const MIN_LIST_HEIGHT: i32 = 80;
+
+/// The log box's top and height in a client area `h` tall, when it is shown: its saved height,
+/// squeezed if the window is too short for it and a usable list.
+fn log_band(h: i32, saved: i32) -> (i32, i32) {
+    let top = PAD + HEADER_HEIGHT + 4;
+    let most = (h - top - PAD - PAD - MIN_LIST_HEIGHT).max(settings::MIN_LOG_HEIGHT);
+    (top, saved.clamp(settings::MIN_LOG_HEIGHT, most))
+}
+
+fn client_height(hwnd: HWND) -> i32 {
+    let mut rc = RECT::default();
+    // SAFETY: reads our own window's client rectangle.
+    let _ = unsafe { GetClientRect(hwnd, &mut rc) };
+    rc.bottom - rc.top
+}
+
+/// Whether client point `y` is on the gap under the shown log: the splitter.
+fn on_splitter(hwnd: HWND, y: i32) -> bool {
+    let s = settings_now();
+    let (top, height) = log_band(client_height(hwnd), s.log_height);
+    s.log_open && y >= top + height && y < top + height + PAD
+}
+
 unsafe fn layout(hwnd: HWND, ui: &Ui) {
     let mut rc = RECT::default();
     let _ = GetClientRect(hwnd, &mut rc);
     let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
-    let pad = 8;
-    let _ = MoveWindow(ui.status, pad, pad, (w - 3 * pad - 120).max(0), 40, true);
-    let _ = MoveWindow(ui.topmost, w - pad - 120, pad, 120, 24, true);
-    let _ = MoveWindow(ui.notes, pad, pad + 44, (w - 2 * pad).max(0), 64, true);
-    let top = pad + 44 + 64 + pad;
+    let s = settings_now();
+    let boxes = TOPMOST_WIDTH + LOG_TOGGLE_WIDTH + PAD;
+    let _ = MoveWindow(ui.status, PAD, PAD, (w - 3 * PAD - boxes).max(0), HEADER_HEIGHT, true);
+    let _ = MoveWindow(ui.log_toggle, w - PAD - boxes, PAD, LOG_TOGGLE_WIDTH, 24, true);
+    let _ = MoveWindow(ui.topmost, w - PAD - TOPMOST_WIDTH, PAD, TOPMOST_WIDTH, 24, true);
+    let (log_top, log_height) = log_band(h, s.log_height);
+    let top = if s.log_open {
+        let _ = MoveWindow(ui.notes, PAD, log_top, (w - 2 * PAD).max(0), log_height, true);
+        log_top + log_height + PAD
+    } else {
+        log_top
+    };
+    let _ = ShowWindow(ui.notes, if s.log_open { SW_SHOW } else { SW_HIDE });
     for c in [ui.list, ui.banner] {
-        let _ = MoveWindow(c, pad, top, (w - 2 * pad).max(0), (h - top - pad).max(0), true);
+        let _ = MoveWindow(c, PAD, top, (w - 2 * PAD).max(0), (h - top - PAD).max(0), true);
     }
+    // The system STATIC class has neither CS_HREDRAW nor CS_VREDRAW, so a resize repaints only
+    // the strip it uncovers. The banner's text is centred and the header's wraps, so both belong
+    // somewhere new after a resize: without this, shrinking left the banner's text where the old
+    // centre was (off the bottom, once the window was short enough) and growing did not bring it
+    // back.
+    for c in [ui.banner, ui.status] {
+        let _ = InvalidateRect(c, None, true);
+    }
+}
+
+/// Re-lays the window out, from inside a message handler.
+unsafe fn relayout(hwnd: HWND) {
+    UI.with(|u| {
+        if let Some(ui) = u.borrow().as_ref() {
+            layout(hwnd, ui);
+        }
+    });
+}
+
+/// The client y out of a mouse message's `lparam`, signed: it goes negative above the window
+/// while the mouse is captured.
+fn mouse_y(lparam: LPARAM) -> i32 {
+    ((lparam.0 >> 16) & 0xffff) as i16 as i32
 }
 
 /// Shows the newest view: the panel for its mode, and the text around it.
@@ -720,11 +858,88 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             Err(_) => LRESULT(-1),
         },
         WM_SIZE => {
-            UI.with(|u| {
-                if let Some(ui) = u.borrow().as_ref() {
-                    layout(hwnd, ui);
+            relayout(hwnd);
+            // Only a restored window's size is kept: reopening at a maximised or minimised size
+            // would be wrong once it is restored.
+            if wparam.0 == SIZE_RESTORED as usize {
+                let mut rc = RECT::default();
+                if GetWindowRect(hwnd, &mut rc).is_ok() {
+                    update(hwnd, |s| {
+                        s.width = rc.right - rc.left;
+                        s.height = rc.bottom - rc.top;
+                    });
+                }
+            }
+            LRESULT(0)
+        }
+        WM_GETMINMAXINFO => {
+            let info = &mut *(lparam.0 as *mut MINMAXINFO);
+            info.ptMinTrackSize.x = settings::MIN_WIDTH;
+            info.ptMinTrackSize.y = settings::MIN_HEIGHT;
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == ID_SAVE => {
+            let _ = KillTimer(hwnd, ID_SAVE);
+            save_now();
+            LRESULT(0)
+        }
+        WM_SETCURSOR if HWND(wparam.0 as _) == hwnd && (lparam.0 & 0xffff) as u32 == HTCLIENT => {
+            let mut pt = Default::default();
+            let _ = GetCursorPos(&mut pt);
+            let _ = ScreenToClient(hwnd, &mut pt);
+            if on_splitter(hwnd, pt.y) {
+                if let Ok(cursor) = LoadCursorW(None, IDC_SIZENS) {
+                    SetCursor(cursor);
+                    return LRESULT(1);
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_LBUTTONDOWN if on_splitter(hwnd, mouse_y(lparam)) => {
+            let s = settings_now();
+            let (top, height) = log_band(client_height(hwnd), s.log_height);
+            let grab = mouse_y(lparam) - (top + height);
+            STATE.with(|st| {
+                if let Some(st) = st.borrow_mut().as_mut() {
+                    st.drag = Some(grab);
                 }
             });
+            SetCapture(hwnd);
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            let drag = STATE.with(|st| st.borrow().as_ref().and_then(|st| st.drag));
+            if let Some(grab) = drag {
+                let h = client_height(hwnd);
+                let (top, _) = log_band(h, 0);
+                // Clamped here, so the height saved is the height on screen.
+                let (_, height) = log_band(h, mouse_y(lparam) - grab - top);
+                update(hwnd, |s| s.log_height = height);
+                relayout(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let _ = ReleaseCapture();
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            STATE.with(|st| {
+                if let Some(st) = st.borrow_mut().as_mut() {
+                    st.drag = None;
+                }
+            });
+            LRESULT(0)
+        }
+        WM_COMMAND if (wparam.0 & 0xffff) == ID_LOG && (wparam.0 >> 16) as u32 == BN_CLICKED => {
+            let on = UI.with(|u| {
+                u.borrow().as_ref().is_some_and(|ui| {
+                    SendMessageW(ui.log_toggle, BM_GETCHECK, WPARAM(0), LPARAM(0)).0
+                        == BST_CHECKED.0 as isize
+                })
+            });
+            update(hwnd, |s| s.log_open = on);
+            relayout(hwnd);
             LRESULT(0)
         }
         WM_VIEW => {
@@ -742,6 +957,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if let Some(ui) = u.borrow().as_ref() {
                     let on = SendMessageW(ui.topmost, BM_GETCHECK, WPARAM(0), LPARAM(0)).0
                         == BST_CHECKED.0 as isize;
+                    update(hwnd, |s| s.topmost = on);
                     let after = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
                     let _ = SetWindowPos(
                         hwnd,
@@ -761,6 +977,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             handled.unwrap_or_else(|| DefWindowProcW(hwnd, msg, wparam, lparam))
         }
         WM_DESTROY => {
+            let _ = KillTimer(hwnd, ID_SAVE);
+            save_now();
             PostQuitMessage(0);
             LRESULT(0)
         }

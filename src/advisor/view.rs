@@ -116,7 +116,8 @@ impl View {
         match &mode {
             Mode::OutOfCombat => {
                 peaks.clear();
-                View { mode, folder, header: "out of combat".into(), ..View::default() }
+                // No header: the banner already says it.
+                View { mode, folder, header: String::new(), ..View::default() }
             }
             Mode::CombatWaiting { state } => View {
                 header: format!("waiting - {state}"),
@@ -324,6 +325,8 @@ mod tests {
         let v = View::next(&live, &snap(None), &res, &mut peaks);
         assert_eq!(v.mode, Mode::OutOfCombat);
         assert!(v.rows.is_empty());
+        // Not the previous fight's header, and not the default's "waiting for a save" either.
+        assert_eq!(v.header, "", "the banner says out of combat; the header must not repeat it");
         assert!(peaks.is_empty());
     }
 
