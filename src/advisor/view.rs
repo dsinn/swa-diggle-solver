@@ -256,7 +256,6 @@ pub fn goal_words(goal: Goal) -> String {
     match goal {
         Goal::RankedKill { need } | Goal::FirstKill { need } => format!("kill: {need}+ damage"),
         Goal::Scare { need, below } => format!("scare: {need}..={} damage", below - 1),
-        Goal::FrugalKill { need, below } => format!("frugal kill: {need}..={} damage", below - 1),
         Goal::MaxDamage => "hardest hit (overkill pays)".into(),
     }
 }
@@ -559,7 +558,6 @@ mod tests {
         use crate::search::Goal;
         assert_eq!(goal_words(Goal::RankedKill { need: 7 }), "kill: 7+ damage");
         assert_eq!(goal_words(Goal::Scare { need: 4, below: 7 }), "scare: 4..=6 damage");
-        assert_eq!(goal_words(Goal::FrugalKill { need: 4, below: 7 }), "frugal kill: 4..=6 damage");
         assert_eq!(goal_words(Goal::MaxDamage), "hardest hit (overkill pays)");
     }
 }

@@ -1131,9 +1131,7 @@ pub const SHRINE_GOBACK_PRESENT: f64 = 0.90;
 ///
 /// The disagreement has at least two sources and we do not need to tell them apart to back out
 /// safely: the game's estimate is of *death*, "possibly by status" (`rpgview.lua:915`), so a
-/// damage-over-time effect can finish an enemy our arithmetic left alive; and `killing_blow`'s
-/// frugal branch deliberately aims at `lethal..lethal+2` to control overkill, which is a kill even
-/// though it is spelled as a band.
+/// damage-over-time effect can finish an enemy our arithmetic left alive.
 ///
 /// Cut from `spike-frames-live/gave-up.png`, which is the frame a live run stopped on with
 /// `BoardNeverSettled` — a modal is what a board that never settles looks like from underneath.

@@ -184,8 +184,8 @@ pub fn bleed_of(cs: &Table) -> i64 {
 
 /// The few words describing what playing this does, given the goal it was ranked for.
 ///
-/// `kill` is the damage that kills, so a word outside the band can still say it kills — a frugal
-/// kill's overshoot, or any hit under `MaxDamage`.
+/// `kill` is the damage that kills, so a word outside the band can still say it kills — any hit
+/// under `MaxDamage`, say.
 ///
 /// **Blank when the enemy simply survives.** A hit that neither kills, scares nor breaks a scare's
 /// ceiling has nothing to say beyond its damage, which has its own column; the user found a
@@ -199,7 +199,6 @@ pub fn effect(goal: Goal, tier: Tier, score: i64, reach: i64, kill: i64) -> &'st
     }
     match (tier, goal) {
         (Tier::InBand, Goal::Scare { .. }) => "scares",
-        (Tier::InBand, Goal::FrugalKill { .. }) => "frugal kill",
         (Tier::InBand, _) => "kills",
         (Tier::Under, _) => "",
         (Tier::Overshoot, _) => "overshoots - would kill",
@@ -607,8 +606,6 @@ mod tests {
             "overshoots - would kill"
         );
         assert_eq!(e(Goal::Scare { need: 2, below: 4 }, Tier::Fallback, 0), "no damage");
-        assert_eq!(e(Goal::FrugalKill { need: 5, below: 7 }, Tier::InBand, 5), "frugal kill");
-        assert_eq!(e(Goal::FrugalKill { need: 5, below: 7 }, Tier::Fallback, 9), "kills");
         assert_eq!(e(Goal::MaxDamage, Tier::Fallback, 9), "kills");
         // A rapier word: it kills on its reach, and lands or not on its damage.
         assert_eq!(effect(Goal::MaxDamage, Tier::Fallback, 3, 9, kill), "kills");

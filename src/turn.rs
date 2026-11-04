@@ -207,14 +207,6 @@ pub fn goal_notes(cs: &Table, name: &str, mods: &Modifiers, goal: Goal) -> Vec<S
             below - 1
         ));
     }
-    // Its own line, because for one run this band borrowed the one above and the log said an
-    // enemy with no nerve at all `can be scared off (None)` while we tried to kill it.
-    if let Goal::FrugalKill { need, below } = goal {
-        notes.push(format!(
-            "  killing {name} frugally: {need}..={} damage keeps the rest charge\n",
-            below - 1
-        ));
-    }
     // The enemy's statuses, whenever it has any.
     //
     // Recorded because a live murder warning could not be explained without them. The game's
@@ -262,19 +254,9 @@ pub fn player_state(
     let status = |k: &str| cs.path(&format!("rpg.player.statusEffects.{k}")).is_some();
     let gear = |k: &str| cs.path(&format!("rpg.player.gearFlags.{k}")).is_some();
 
-    // The charge lives in statusEffects; the gear flag grants the same heal permanently
+    // The stack lives in statusEffects; the gear flag grants the same heal permanently
     // (`rpgview.lua:1082-1083` accepts either source).
-    // **The stack count, not merely the presence.** `affectPlayerStatus` keeps these as numbers and
-    // the HUD draws them as `×4`; reading them with `is_some` threw that away, and the policy above
-    // was left unable to tell one charge from four. A status present but unreadable as a number
-    // counts as one, which is the old behaviour and the safe direction — it hoards.
-    let count = |k: &str| match status(k) {
-        true => cs.int_at(&format!("rpg.player.statusEffects.{k}")).unwrap_or(1).max(1),
-        false => 0,
-    };
-    let charges = count("wellRestedCampfire") + count("wellRestedInn");
-    let consumes_charge = charges > 0;
-    let granted = consumes_charge || gear("wellRestedCampfire") || gear("wellRestedInn");
+    let granted = ["wellRestedCampfire", "wellRestedInn"].iter().any(|k| status(k) || gear(k));
     if !granted {
         return None;
     }
@@ -286,8 +268,6 @@ pub fn player_state(
     Some(crate::search::PlayerState {
         vitals: crate::rested::Vitals { current, max },
         heals: !cancelled,
-        consumes_charge,
-        charges,
         bleeding: status("bleed"),
     })
 }

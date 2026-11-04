@@ -8,7 +8,7 @@
 //! out to be false in general. Live 2026-08-10, a highwayman search with a ceiling stopped every
 //! thread on the first word inside the band — decided by thread scheduling, not by merit — and the
 //! word that happened to win spent a solid gold tile while cheaper words in the same band went
-//! unexamined. [`race_for_band`] (used for [`Goal::Scare`] and [`Goal::FrugalKill`]) and
+//! unexamined. [`race_for_band`] (used for [`Goal::Scare`]) and
 //! [`ranked_kill`] (for [`Goal::RankedKill`]) both pay for a full scan so [`crate::pick::Rank`] can
 //! choose between candidates that are all equally acceptable by score alone. [`Goal::MaxDamage`]
 //! ([`max_damage`]) was never a race either — it needs the single hardest word on the board, which
@@ -143,7 +143,7 @@ pub struct Modifiers {
     /// This enemy cancels overkill healing outright (`rpgview.lua:1084`).
     pub overkill_no_heal: bool,
     /// This enemy turns overkill healing into gold instead (`:1085`), which is the curse described
-    /// in `items/curses.lua:111`. Healing does not happen, so there is no charge to conserve.
+    /// in `items/curses.lua:111`. Healing does not happen.
     pub overkill_heal_to_gold: bool,
     /// The player's gear modifiers, compiled once for this fight (see [`crate::gear`]).
     ///
@@ -596,13 +596,9 @@ impl Outcome {
     /// The fallback direction is a property of the goal, not of the search, and reading it off the
     /// goal is what keeps the two from disagreeing.
     ///
-    /// Two goals carry a ceiling and they want different things when the band comes up empty:
-    ///
-    /// - [`Goal::Scare`]'s ceiling is a **constraint**. Overshooting kills something we meant to
-    ///   frighten off, so the fallback must stay under it: [`Outcome::under`].
-    /// - [`Goal::FrugalKill`]'s ceiling is an **optimisation** — a rest charge saved by not
-    ///   overkilling. Missing it costs a charge; refusing to overshoot costs the fight, and did
-    ///   (see [`Goal::FrugalKill`]). So it falls back like every other kill: hardest hit.
+    /// [`Goal::Scare`] is the one goal with a ceiling, and that ceiling is a **constraint**:
+    /// overshooting kills something we meant to frighten off, so the fallback must stay under it:
+    /// [`Outcome::under`]. Every other goal falls back to the hardest hit.
     ///
     /// ## The rule, and the two runs that paid for it
     ///
@@ -685,28 +681,6 @@ pub enum Goal {
     /// pushes it past the line is also a turn it does not get to attack. And for the enemies that
     /// carry `fear`, mostly humans, the kill would be recorded as murder.
     Scare { need: i64, below: i64 },
-    /// **Kill**, but with an overkill of 0 or 1, to avoid spending a `wellRested` charge.
-    ///
-    /// The same shape as [`Goal::Scare`] and the opposite intent, which is why it is its own variant
-    /// rather than a flag. A scare's ceiling is a **constraint** — going over it kills something we
-    /// meant to frighten off. This ceiling is an **optimisation**, worth a point of damage and not
-    /// one turn more.
-    ///
-    /// ## The run this cost
-    ///
-    /// It was `Goal::Scare { need: lethal, below: lethal + 2 }`, and so it inherited the scare's
-    /// fallback: when nothing lands in the band, play the *gentlest* word available. Against a
-    /// 115+10hp boss on 2026-08-09 that band was `125..=126`, no word came close, and the run played
-    /// `TAD` for 1 damage, then `TEEL` for 1, then `COLOG` for 7, and was killed on turn 9 —
-    /// protecting a rest charge it would never live to use.
-    ///
-    /// A kill we cannot afford tidily is still a kill worth making, so this falls back to the
-    /// hardest hit available. The charge is a saving; the fight is the point.
-    ///
-    /// It also explains a log line that read as nonsense: `can be scared off (None); aiming for
-    /// 125..=126 damage, not a kill`, printed for an enemy with no nerve to break at all. That line
-    /// is [`Goal::Scare`]'s, and this was never a scare.
-    FrugalKill { need: i64, below: i64 },
 }
 
 /// Extra damage aimed for beyond a threshold, to absorb error in our own damage model.
@@ -821,18 +795,9 @@ impl Goal {
         let scare_need = ((health - top) + armour).max(0);
         if scare_need >= below {
             // No non-lethal hit reaches the threshold, so this one dies. **But it is still a
-            // fearable enemy, and that outranks the rested-charge optimisation.**
-            //
-            // `killing_blow`'s frugal branch aims at `lethal..lethal+2` to keep overkill inside the
-            // free heal window — a *player-side* saving, about being well rested and short of
-            // health. Applied here it spends damage we do not need on an enemy the game classes as a
-            // person: `looksLikeAvoidableFirstMurder` (`wordboard.lua:486-497`) needs only
-            // `enemyHasDeathFlag'Murder'` and a `fear`/`terror`/`caution` status to call the kill
-            // avoidable, and it does not care how tidy our overkill was.
-            //
-            // So `player` is dropped on this path and the plain kill is used. Aiming past lethal
-            // could never help here — the charge is worth less than not overshooting something we
-            // would rather have frightened off, and the dev's ordering is the right one.
+            // fearable enemy**, so `player` is dropped on this path and the plain kill is used:
+            // aiming past lethal for a heal spends damage we do not need on an enemy the game
+            // classes as a person (`looksLikeAvoidableFirstMurder`, `wordboard.lua:486-497`).
             return Self::killing_blow(kill, lethal, None, prefs);
         }
         // Buffer both edges by as much as the band can spare. `slack` is the width of the raw
@@ -866,20 +831,18 @@ impl Goal {
         // past its threshold, `below` is 1 because 1 damage kills it, and the floor lifts `need` to
         // exactly 1. There is no hit that both lands and leaves it alive, which is the same
         // conclusion the `scare_need >= below` check above reaches by a different route — so it
-        // ends the same way, killing without the rested-charge optimisation.
+        // ends the same way, killing without chasing a heal.
         if need >= ceiling {
             return Self::killing_blow(kill, lethal, None, prefs);
         }
         Goal::Scare { need, below: ceiling }
     }
 
-    /// The kill, adjusted for what a well-rested charge is worth on this particular wound.
+    /// The kill, adjusted to heal this wound off the Well-Rested overkill heal.
     ///
-    /// Overkill on a killing blow heals `floor(overkill/2)` and spends a charge, but **only if the
-    /// heal is positive** (`rpgview.lua:1086, 1204-1210`) — so an overkill of 1 is free. See
-    /// [`crate::rested`] for the mechanic in full.
-    /// `lethal` is the EXACT damage that kills, unbuffered, because every branch here is arithmetic
-    /// about overkill and a padded threshold would silently shift the free window.
+    /// Overkill on a killing blow heals `floor(overkill/2)` (`rpgview.lua:1086`). See
+    /// [`crate::rested`] for the mechanic in full. `lethal` is the EXACT damage that kills,
+    /// unbuffered, because the heal threshold is arithmetic about overkill.
     fn killing_blow(
         kill: Goal, lethal: i64, player: Option<&PlayerState>, prefs: crate::pick::Preferences,
     ) -> Goal {
@@ -887,24 +850,8 @@ impl Goal {
         if !p.heals {
             return kill;
         }
-        // A gear flag heals without spending, so there is no charge to count and none to hoard.
-        let charges = match p.consumes_charge {
-            true => p.charges,
-            false => crate::rested::FREE,
-        };
-        match crate::rested::aim(p.vitals, charges, p.bleeding) {
+        match crate::rested::aim(p.vitals, p.bleeding) {
             crate::rested::Aim::Best => kill,
-            // Keep the charge: kill with an overkill of 0 or 1, which heals nothing. Only worth
-            // doing when a charge is actually consumable -- a gear flag heals for free, so there is
-            // nothing to protect and a scratch may as well be topped up.
-            //
-            // Deliberately unbuffered, and consistently so: the free window is two wide, and
-            // `affordable_buffer(1)` is 0 — there is no slack here to spend on safety. Falling one
-            // short costs a turn; buffering would cost the charge this branch exists to protect.
-            crate::rested::Aim::Frugal if p.consumes_charge => {
-                Goal::FrugalKill { need: lethal, below: lethal + 2 }
-            }
-            crate::rested::Aim::Frugal => kill,
             // Spend it well: enough overkill that the floored halving covers the whole deficit. If
             // nothing reaches that, the search falls back to its best-scoring word, which is exactly
             // "if we cannot heal fully, use the best scoring answer".
@@ -961,18 +908,6 @@ pub struct PlayerState {
     /// Would overkill heal at all? Either a `wellRested*` status or the matching gear flag grants
     /// it, and `overkillNoHeal` / `overkillHealToGold` cancel it (`rpgview.lua:1081-1085`).
     pub heals: bool,
-    /// Is a limited charge spent doing so? True for the status, false for a gear flag — the
-    /// decrement at `:1204-1210` only touches `statusEffects`, so a gear flag heals for free and
-    /// there is nothing to conserve.
-    pub consumes_charge: bool,
-    /// **How many** `wellRested*` stacks are banked, summed across campfire and inn.
-    ///
-    /// Meaningless when [`PlayerState::consumes_charge`] is false — a gear flag spends nothing, so
-    /// the caller passes [`crate::rested::FREE`] instead of this.
-    ///
-    /// Carried because the count changes the answer and a bool could not say it: see
-    /// [`crate::rested::aim`], and the run that spent itself down to 12/20 protecting four charges.
-    pub charges: i64,
     /// `bleed` skips the heal branch entirely (`:1080`).
     pub bleeding: bool,
 }
@@ -1014,7 +949,7 @@ pub fn search(
         }
         // The same search either way — a band is a band. Only the fallback differs, and that is
         // `Outcome::choice_for`'s business rather than the racer's.
-        Goal::Scare { need, below } | Goal::FrugalKill { need, below } => {
+        Goal::Scare { need, below } => {
             race_for_band(dict, scorer, tiles, geometry, mods, need, Some(below), picking, threads)
         }
         Goal::MaxDamage => max_damage(dict, scorer, tiles, geometry, mods, threads),
@@ -1269,7 +1204,7 @@ pub fn max_damage(
 /// Where a candidate sits in [`ranked`]'s list, in the order the tiers are listed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
-    /// Meets the goal: lethal for a kill, inside the band for a scare or a frugal kill.
+    /// Meets the goal: lethal for a kill, inside the band for a scare.
     InBand,
     /// A scare's safe chip: lands, and stays under the ceiling. See [`Outcome::under`].
     Under,
@@ -1305,7 +1240,7 @@ pub struct Candidate {
 /// model does not. The order is [`Outcome::choice_for`]'s fallback chain carried down the whole
 /// list rather than stopped at its first answer:
 ///
-/// - **kill goals** (`RankedKill`, `FirstKill`, `FrugalKill`): the band by [`crate::pick::Rank`],
+/// - **kill goals** (`RankedKill`, `FirstKill`): the band by [`crate::pick::Rank`],
 ///   then everything else hardest first, since a kill that cannot be made tidily is still a kill;
 /// - **`Scare`**: the band by `Rank`, then the safe chip hardest first, then the overshoots
 ///   *gentlest* first, then the words that do nothing;
@@ -1340,7 +1275,6 @@ pub fn ranked(
     let tier_of = |score: i64, reach: i64| -> Tier {
         match goal {
             Goal::RankedKill { need } | Goal::FirstKill { need } if reach >= need => Tier::InBand,
-            Goal::FrugalKill { need, below } if reach >= need && reach < below => Tier::InBand,
             Goal::Scare { need, below } if reach >= need && reach < below => Tier::InBand,
             Goal::Scare { below, .. } if reach >= below => Tier::Overshoot,
             Goal::Scare { .. } if score >= MIN_MEANINGFUL_DAMAGE => Tier::Under,
@@ -1807,23 +1741,7 @@ mod tests {
         // below `need`, and `need <= below`. That is what makes this direction safe as well as right.
         assert!(played.score < 1000, "the hardest word is still under the floor");
 
-        // The same band, the other intent, the opposite fallback.
-        //
-        // `Goal::FrugalKill` used to *be* a `Goal::Scare`, so it inherited the assertion above and
-        // played the gentlest word when its band came up empty. Against a 115+10hp boss that meant
-        // `TAD` for 1 damage, twice, and a dead run on turn 9 — a rest charge protected to the death.
-        // Its ceiling is a saving, not a rule, so a band it cannot hit is abandoned rather than
-        // obeyed.
-        let frugal = out
-            .choice_for(Goal::FrugalKill { need: 1000, below: 1001 })
-            .expect("something is playable");
-        assert_eq!(
-            frugal.score, best.score,
-            "a kill we cannot make tidily is still a kill: expected {} at {}, got {} at {}",
-            best.word, best.score, frugal.word, frugal.score
-        );
-
-        // And the ordinary kill goals must be unaffected — they have no ceiling, so hitting hard is
+        // The ordinary kill goals must be unaffected — they have no ceiling, so hitting hard is
         // still the right miss.
         assert_eq!(
             out.choice_for(Goal::MaxDamage).map(|f| f.score),
@@ -2657,16 +2575,8 @@ mod rested_goal_tests {
     use super::*;
     use crate::rested::Vitals;
 
-    /// One charge — the last one, so these keep describing the frugal case they were written for.
-    /// The count's own behaviour is [`crate::rested`]'s to test.
-    fn player(current: i64, consumes_charge: bool) -> PlayerState {
-        PlayerState {
-            vitals: Vitals { current, max: 12 },
-            heals: true,
-            consumes_charge,
-            charges: crate::rested::KEEP_IN_RESERVE,
-            bleeding: false,
-        }
+    fn player(current: i64) -> PlayerState {
+        PlayerState { vitals: Vitals { current, max: 12 }, heals: true, bleeding: false }
     }
 
     /// Enemy on 10 with no armour, so the plain kill needs 10.
@@ -2678,12 +2588,10 @@ mod rested_goal_tests {
     }
 
     #[test]
-    fn a_scratch_kills_without_triggering_a_heal() {
-        // Missing 2 of 12. floor(overkill/2) must stay at 0, so overkill of 0 or 1: damage 10 or 11.
-        //
-        // `FrugalKill` and not `Scare`, which is what this asserted until a boss killed the run for
-        // it. The band is identical and the intent is opposite: see `Goal::FrugalKill`.
-        assert_eq!(goal(Some(&player(10, true))), Goal::FrugalKill { need: 10, below: 12 });
+    fn a_scratch_is_healed_too() {
+        // Missing 2 of 12: 4 of overkill buys it back, so 10 + 4, plus `DAMAGE_BUFFER`. No stack is
+        // kept in reserve — the frugal kill that used to aim at `10..=11` here is gone.
+        assert_eq!(goal(Some(&player(10))), Goal::RankedKill { need: 15 });
     }
 
     /// A full top-up is a threshold, so it is bought with the cheapest word that clears it.
@@ -2696,38 +2604,23 @@ mod rested_goal_tests {
     #[test]
     fn a_bad_wound_buys_a_full_top_up_with_the_cheapest_word_that_does_it() {
         // Missing 8, and the heal is half the overkill, so 16 of overkill are needed: damage 26.
-        assert_eq!(goal(Some(&player(4, true))), Goal::RankedKill { need: 27 });
+        assert_eq!(goal(Some(&player(4))), Goal::RankedKill { need: 27 });
     }
 
     #[test]
     fn full_health_kills_normally() {
-        assert_eq!(goal(Some(&player(12, true))), Goal::RankedKill { need: 11 });
-    }
-
-    #[test]
-    fn a_free_heal_is_bought_rather_than_merely_not_avoided() {
-        // A gear flag grants the heal without spending anything (the decrement at :1204-1210 only
-        // touches statusEffects), so there is nothing to conserve.
-        //
-        // This used to read `need: 11` — a plain kill. That was the *absence* of frugality rather
-        // than the presence of a heal: the frugal branch declined to apply and the goal fell through
-        // to the ordinary kill, which aims at nothing in particular and tops up only by luck.
-        //
-        // Missing 2, and the heal is `floor(overkill/2)`, so 4 of overkill buys it back: 10 + 4,
-        // plus `DAMAGE_BUFFER`. Free to ask for, because `need` is a threshold — nothing reaching it
-        // falls back to the best-scoring answer, exactly as a bad wound already does above.
-        assert_eq!(goal(Some(&player(10, false))), Goal::RankedKill { need: 15 });
+        assert_eq!(goal(Some(&player(12))), Goal::RankedKill { need: 11 });
     }
 
     #[test]
     fn bleeding_kills_normally_because_no_heal_can_happen() {
-        let p = PlayerState { bleeding: true, ..player(4, true) };
+        let p = PlayerState { bleeding: true, ..player(4) };
         assert_eq!(goal(Some(&p)), Goal::RankedKill { need: 11 });
     }
 
     #[test]
     fn a_cancelled_heal_kills_normally() {
-        let p = PlayerState { heals: false, ..player(4, true) };
+        let p = PlayerState { heals: false, ..player(4) };
         assert_eq!(goal(Some(&p)), Goal::RankedKill { need: 11 });
     }
 
@@ -2736,7 +2629,7 @@ mod rested_goal_tests {
         // We cannot heal off an enemy we deliberately leave alive -- and not murdering it is worth
         // more than a top-up.
         let m = Modifiers { nerve: Some(crate::flee::Nerve::Fear), ..Modifiers::none() };
-        let p = player(4, true);
+        let p = player(4);
         assert_eq!(
             Goal::for_enemy(&m, 12, 0, Some(12), Some(&p), crate::pick::Preferences::default()),
             Goal::Scare { need: 8, below: 11 }
@@ -2952,15 +2845,6 @@ mod ranked_tests {
         assert!(of(Tier::Fallback).iter().all(|c| c.score < MIN_MEANINGFUL_DAMAGE));
     }
 
-    /// A frugal kill that cannot land in its band falls back to the hardest hit, like any kill.
-    #[test]
-    fn frugal_falls_back_to_hardest() {
-        let w = world();
-        let list = rank_all(&w, &Modifiers::none(), Goal::FrugalKill { need: 1000, below: 1001 });
-        let top = list.iter().map(|c| c.score).max().unwrap();
-        assert_eq!(list[0].score, top);
-    }
-
     #[test]
     fn an_empty_board_ranks_nothing() {
         let mut w = world();
@@ -3159,8 +3043,6 @@ mod ranked_tests {
             Goal::Scare { need: 4, below: 7 },
             Goal::Scare { need: 1000, below: 1001 },
             Goal::Scare { need: 0, below: 1 },
-            Goal::FrugalKill { need: 4, below: 7 },
-            Goal::FrugalKill { need: 1000, below: 1001 },
             Goal::MaxDamage,
         ] {
             cases.push((format!("crypt {goal:?}"), world(), Modifiers::none(), goal));
