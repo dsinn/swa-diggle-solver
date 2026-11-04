@@ -250,10 +250,23 @@ impl Modifiers {
                 overkill_gold,
                 problems,
                 notes,
+                // **Never on the undead.** Skeletons carry no nerve of their own
+                // (`rpg/enemies/skeletons.lua`); the `terror` or `fear` one has came from Turn
+                // undead (`rpg/effects/spell/TurnUndead.lua:38-41`), and a skeleton is always
+                // killed, not scared off. An enemy whose nature cannot be told keeps its nerve.
+                //
+                // Not every fight needs the skeleton dead to proceed — defending a village from the
+                // corruption, or a forest path node, can be got past by scaring it off. Those cases
+                // are out of scope for now; this always kills.
                 nerve: ["fear", "terror", "caution"]
                     .iter()
                     .find(|k| statuses.contains_key(**k))
-                    .and_then(|k| crate::flee::Nerve::from_status(k)),
+                    .and_then(|k| crate::flee::Nerve::from_status(k))
+                    .filter(|_| {
+                        let name = save.str_at("rpg.enemy.name").unwrap_or("");
+                        crate::advisor::bestiary::Bestiary::load(game_dir).undead(name)
+                            != Some(true)
+                    }),
                 immobile: save.path("rpg.enemy.immobile").is_some(),
                 bonuses: lexica.bonus_sets(&statuses),
                 bonus_names: lexica.bonus_names(&statuses),

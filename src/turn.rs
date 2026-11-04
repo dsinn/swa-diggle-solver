@@ -298,6 +298,33 @@ mod tests {
         }
     }
 
+    /// The crypt fixture's enemy, renamed and given Turn undead's `terror` (`TurnUndead.lua:38-41`).
+    fn terrified(name: &str) -> Goal {
+        let src = std::fs::read_to_string("tests/fixtures/combatSaveData-crypt-l0.lua")
+            .unwrap()
+            .replacen("name = \"Amorphous\",", &format!("name = \"{name}\","), 1)
+            .replacen("toxinImmune = -1,", "toxinImmune = -1,\n                terror = 1,", 1)
+            .replacen("health = 3,\n            attacksCycle", "health = 8,\n            attacksCycle", 1);
+        let cs = crate::game::save::parse(&src).unwrap();
+        let letters = crate::letters::Weights::load(&game_dir()).unwrap();
+        plan(&cs, &game_dir(), &letters, &mut HashMap::new()).unwrap().unwrap().goal
+    }
+
+    /// The control: a terrified enemy that is not undead is scared, so the save does reach the
+    /// scare path and the skeleton's kill below is not that path being unreachable.
+    #[test]
+    fn a_terrified_slime_is_scared() {
+        assert!(matches!(terrified("Amorphous"), Goal::Scare { .. }), "{:?}", terrified("Amorphous"));
+    }
+
+    /// Turn undead terrifies the skeleton it hits, and that must not turn the fight into a scare:
+    /// skeletons are always killed.
+    #[test]
+    fn a_skeleton_terrified_by_turn_undead_is_still_killed() {
+        let goal = terrified("Bones McCoy");
+        assert!(!matches!(goal, Goal::Scare { .. }), "{goal:?}");
+    }
+
     /// A board-less save is not a turn to plan.
     #[test]
     fn an_empty_board_has_no_plan() {
