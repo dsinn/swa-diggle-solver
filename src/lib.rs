@@ -146,13 +146,19 @@ mod source_hygiene {
     ///
     /// Read line by line, with each line's ending trimmed, so a `\r\n` checkout cuts in the same
     /// place as a `\n` one. See [`the_cut_is_the_same_for_either_line_ending`].
+    ///
+    /// A test module may be `pub(crate)`, so another module's tests can share its fixtures
+    /// (`turn::tests::halfling_save`); that is still the test half.
     fn shipping_half(text: &str) -> &str {
         let mut offset = 0;
         let mut attribute_at: Option<usize> = None;
         for line in text.split_inclusive('\n') {
             let bare = line.trim_end();
+            let module = bare.strip_prefix("pub(crate) ").unwrap_or(bare);
             match attribute_at {
-                Some(at) if bare.starts_with("mod ") && bare.ends_with('{') => return &text[..at],
+                Some(at) if module.starts_with("mod ") && bare.ends_with('{') => {
+                    return &text[..at]
+                }
                 _ => {}
             }
             attribute_at = (bare == "#[cfg(test)]").then_some(offset);

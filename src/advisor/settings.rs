@@ -1,4 +1,5 @@
-//! The advisor window's own settings: its size, "Stay on top", and the log box. Kept between
+//! The advisor window's own settings: its size, "Stay on top", the log box, and whether to stall on
+//! the halfling's free turns. Kept between
 //! launches in `%LOCALAPPDATA%\DiggleAdvisor\settings.toml` ([`path`]).
 //!
 //! Nothing here goes near the game's folders: the save folder is watched, and a write there would
@@ -19,11 +20,21 @@ pub struct Settings {
     pub log_open: bool,
     /// The log box's height in pixels while it is shown.
     pub log_height: i32,
+    /// "Stall on halfling's even turns": [`crate::turn::Options::stall_on_free_turns`]. On by
+    /// default, so a file written before the box existed loads with it ticked.
+    pub stall_on_free_turns: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { width: 1250, height: 720, topmost: false, log_open: false, log_height: 96 }
+        Settings {
+            width: 1250,
+            height: 720,
+            topmost: false,
+            log_open: false,
+            log_height: 96,
+            stall_on_free_turns: crate::turn::Options::default().stall_on_free_turns,
+        }
     }
 }
 
@@ -81,15 +92,22 @@ mod tests {
     fn missing_file_is_the_defaults() {
         assert_eq!(Settings::load(&scratch("missing")), Settings::default());
         assert!(!Settings::default().log_open, "the log starts collapsed");
+        assert!(Settings::default().stall_on_free_turns, "stalling starts ticked");
     }
 
     #[test]
     fn round_trips_and_creates_the_folder() {
         let file = scratch("round-trip");
-        let s =
-            Settings { width: 900, height: 500, topmost: true, log_open: true, log_height: 150 };
+        let s = Settings {
+            width: 900,
+            height: 500,
+            topmost: true,
+            log_open: true,
+            log_height: 150,
+            stall_on_free_turns: false,
+        };
         s.save(&file).unwrap();
-        assert_eq!(Settings::load(&file), s);
+        assert_eq!(Settings::load(&file), s, "an unticked stall box must stay unticked");
     }
 
     #[test]
@@ -100,6 +118,7 @@ mod tests {
         let s = Settings::load(&file);
         assert!(s.topmost);
         assert_eq!(s.width, Settings::default().width);
+        assert!(s.stall_on_free_turns, "a file from before the stall box loads with it ticked");
     }
 
     #[test]

@@ -34,13 +34,35 @@ pub struct TurnPlan {
     pub notes: Vec<String>,
 }
 
+/// What the caller wants of a turn's decision beyond what the save says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Options {
+    /// **On a turn the enemy cannot hit back, keep an enemy that could run: neither scare nor kill.**
+    ///
+    /// The halfling's `immuneTurnMod2` is what makes such a turn (see [`crate::parity`]); the Turn
+    /// box on screen calls them its even turns. When this is set, an enemy short of its flee
+    /// threshold is hurt only as far as keeps it here, or not at all ([`crate::search::Goal::Hold`]);
+    /// one already past it, which any hit would kill, is dealt nothing. See
+    /// [`crate::search::Modifiers::stall`] for exactly when.
+    ///
+    /// Off, the turn is decided as it was before this existed: usually a scare, or the kill.
+    pub stall_on_free_turns: bool,
+}
+
+impl Default for Options {
+    /// Stalling on: Diggle's setting, and the advisor's until the user unticks it.
+    fn default() -> Self {
+        Options { stall_on_free_turns: true }
+    }
+}
+
 /// Plans one player turn from a combat save. `None` when the save carries no board.
 ///
 /// `peak_health` is the caller's per-fight record of the highest health seen per enemy name: the
 /// enemy's maximum is not in the save, and the flee thresholds are defined against it.
 pub fn plan(
     cs: &Table, game_dir: &Path, letters: &crate::letters::Weights,
-    peak_health: &mut HashMap<String, i64>,
+    peak_health: &mut HashMap<String, i64>, options: Options,
 ) -> Result<Option<TurnPlan>, crate::Error> {
     let mut notes = Vec::new();
     let tiles = tiles_of(cs);
@@ -90,12 +112,19 @@ pub fn plan(
 "
         ));
     }
-    // Printed rather than acted on. The halfling's `immuneTurnMod2` is the only thing that sets
-    // it, it is a per-turn fact that leaves no other trace in a log, and the case it unlocks —
-    // spending a free turn rather than committing an avoidable murder — needs a goal that does
-    // not exist yet. See [`crate::parity`] and `search::MIN_MEANINGFUL_DAMAGE`.
+    // Printed whenever it holds, because it is a per-turn fact that leaves no other trace in a
+    // log. The halfling's `immuneTurnMod2` is the only thing that sets it. See [`crate::parity`].
     if mods.player_dodges {
         notes.push("  the enemy cannot land a hit this turn (immuneTurnMod2)\n".to_string());
+    }
+    // **Should this free turn end nothing?** Each condition is one of `search::Modifiers::stall`'s,
+    // in the same order. Post-status health, because an enemy the status is about to finish dies
+    // whatever we play.
+    mods.stall = options.stall_on_free_turns && mods.player_dodges && deciding_health > 0;
+    if mods.stall {
+        notes.push(format!(
+            "  a free turn: {name} is kept here, neither killed nor scared off, if the board allows\n"
+        ));
     }
     if mods.enemy_status_tick != 0 {
         notes.push(format!(
@@ -161,7 +190,16 @@ pub fn plan(
             .and_then(|v| v.as_f64())
             .map(|v| v as i64)
             .unwrap_or(0),
-    });
+    })
+    // The gauntlet's and the scales' infinitive tiles — see `pick::Infinitives`.
+    .with_infinitives(crate::pick::Infinitives::from_gear(
+        cs.get("gear")
+            .and_then(|v| v.as_table())
+            .into_iter()
+            .flat_map(|t| t.arr.iter())
+            .filter_map(|v| v.as_str()),
+        |f| cs.path(&format!("rpg.player.gearFlags.{f}")).is_some(),
+    ));
     let goal = Goal::for_enemy(&mods, deciding_health, armour, Some(peak), player.as_ref(), prefs);
     // Built per turn rather than per fight, because the board's tile count is what the target is
     // scaled to and a board can lose tiles mid-fight — the run that died at `l50` watched its
@@ -201,11 +239,28 @@ pub fn goal_notes(cs: &Table, name: &str, mods: &Modifiers, goal: Goal) -> Vec<S
         // must stay under — but "aiming for 4..6" reads in English as "6 is allowed", and it
         // sent a reader hunting for a bug in the aim when the aim was correct and only this
         // sentence was wrong.
-        notes.push(format!(
-            "  {name} can be scared off ({:?}); aiming for {need}..={} damage, not a kill\n",
-            mods.nerve,
-            below - 1
-        ));
+        //
+        // An empty band is only ever the stall's — see `search::Goal::for_enemy` — and "aiming for
+        // 1..=0" would say nothing a reader could use.
+        if need >= below {
+            notes.push(format!(
+                "  {name} cannot be hurt without dying ({:?}); dealing nothing, not a kill\n",
+                mods.nerve
+            ));
+        } else {
+            notes.push(format!(
+                "  {name} can be scared off ({:?}); aiming for {need}..={} damage, not a kill\n",
+                mods.nerve,
+                below - 1
+            ));
+        }
+    }
+    if let Goal::Hold { below, lethal } = goal {
+        let edges = match (mods.nerve, below == lethal) {
+            (Some(n), false) => format!("under {below} damage keeps it short of its {n:?}"),
+            _ => format!("under {below} damage keeps it alive"),
+        };
+        notes.push(format!("  {name} is held: {edges}; {lethal} or more kills it\n"));
     }
     // The enemy's statuses, whenever it has any.
     //
@@ -273,7 +328,7 @@ pub fn player_state(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
 
@@ -290,7 +345,9 @@ mod tests {
             let src = std::fs::read_to_string(format!("tests/fixtures/{name}")).unwrap();
             let cs = crate::game::save::parse(&src).unwrap();
             let mut peaks = std::collections::HashMap::new();
-            let plan = plan(&cs, &game_dir(), &letters, &mut peaks).unwrap().expect(name);
+            let plan = plan(&cs, &game_dir(), &letters, &mut peaks, Options::default())
+                .unwrap()
+                .expect(name);
             assert!(!plan.tiles.is_empty(), "{name}");
             assert_ne!(plan.name, "?", "{name}");
             assert_eq!(peaks.get(&plan.name), Some(&plan.health), "{name}");
@@ -304,17 +361,28 @@ mod tests {
             .unwrap()
             .replacen("name = \"Amorphous\",", &format!("name = \"{name}\","), 1)
             .replacen("toxinImmune = -1,", "toxinImmune = -1,\n                terror = 1,", 1)
-            .replacen("health = 3,\n            attacksCycle", "health = 8,\n            attacksCycle", 1);
+            .replacen(
+                "health = 3,\n            attacksCycle",
+                "health = 8,\n            attacksCycle",
+                1,
+            );
         let cs = crate::game::save::parse(&src).unwrap();
         let letters = crate::letters::Weights::load(&game_dir()).unwrap();
-        plan(&cs, &game_dir(), &letters, &mut HashMap::new()).unwrap().unwrap().goal
+        plan(&cs, &game_dir(), &letters, &mut HashMap::new(), Options::default())
+            .unwrap()
+            .unwrap()
+            .goal
     }
 
     /// The control: a terrified enemy that is not undead is scared, so the save does reach the
     /// scare path and the skeleton's kill below is not that path being unreachable.
     #[test]
     fn a_terrified_slime_is_scared() {
-        assert!(matches!(terrified("Amorphous"), Goal::Scare { .. }), "{:?}", terrified("Amorphous"));
+        assert!(
+            matches!(terrified("Amorphous"), Goal::Scare { .. }),
+            "{:?}",
+            terrified("Amorphous")
+        );
     }
 
     /// Turn undead terrifies the skeleton it hits, and that must not turn the fight into a scare:
@@ -333,6 +401,154 @@ mod tests {
             crate::game::save::parse("return { rpg = { enemy = { name = 'x', health = 3 } } }")
                 .unwrap();
         let mut peaks = std::collections::HashMap::new();
-        assert!(plan(&cs, &game_dir(), &letters, &mut peaks).unwrap().is_none());
+        assert!(plan(&cs, &game_dir(), &letters, &mut peaks, Options::default())
+            .unwrap()
+            .is_none());
+    }
+
+    /// The crypt fixture as a halfling sees it: the enemy `terror`ised and down to 1 health, which
+    /// any hit kills, and the player carrying `immuneTurnMod2` (or not) on save turn `save_turn`.
+    ///
+    /// Shared with the advisor's view tests, which drive the same save through the window's ranking.
+    pub(crate) fn halfling_save(save_turn: i64, flag: bool) -> String {
+        let src = std::fs::read_to_string("tests/fixtures/combatSaveData-crypt-l0.lua")
+            .unwrap()
+            .replace("\r\n", "\n");
+        let out = src
+            .replacen("toxinImmune = -1,", "toxinImmune = -1,\n                terror = 1,", 1)
+            .replacen(
+                "health = 3,\n            attacksCycle",
+                "health = 1,\n            attacksCycle",
+                1,
+            )
+            .replacen("turnNumber = 1,", &format!("turnNumber = {save_turn},"), 1);
+        let out = match flag {
+            true => out.replacen(
+                "CampfireGivesWellRested = 1,",
+                "CampfireGivesWellRested = 1,\n                immuneTurnMod2 = 1,",
+                1,
+            ),
+            false => out,
+        };
+        assert_ne!(out, src, "the fixture changed shape; these edits no longer land");
+        out
+    }
+
+    /// [`halfling_save`] on the free turn with a `fear` enemy at its full 12 health: 7 damage would
+    /// frighten it off, so there is room to hurt it and keep it.
+    pub(crate) fn held_save() -> String {
+        halfling_save(2, true).replacen("terror = 1,", "fear = 1,", 1).replacen(
+            "health = 1,\n            attacksCycle",
+            "health = 12,\n            attacksCycle",
+            1,
+        )
+    }
+
+    /// **The hold, from the save.** A frightened enemy short of its threshold on the halfling's even
+    /// turn is kept here rather than scared off; on the next turn, which it can hit on, it is
+    /// scared as usual.
+    #[test]
+    fn a_halfling_holds_a_frightened_enemy_on_a_free_turn_and_scares_it_on_the_next() {
+        let letters = crate::letters::Weights::load(&game_dir()).unwrap();
+        let goal = |src: &str, stall: bool| {
+            let cs = crate::game::save::parse(src).unwrap();
+            plan(
+                &cs,
+                &game_dir(),
+                &letters,
+                &mut HashMap::new(),
+                Options { stall_on_free_turns: stall },
+            )
+            .unwrap()
+            .unwrap()
+            .goal
+        };
+        let free = held_save();
+        assert_eq!(goal(&free, true), Goal::Hold { below: 6, lethal: 11 });
+        assert_eq!(goal(&free, false), Goal::Scare { need: 8, below: 11 }, "unticked: as before");
+        let next = free.replacen("turnNumber = 2,", "turnNumber = 3,", 1);
+        assert_ne!(next, free);
+        assert_eq!(goal(&next, true), Goal::Scare { need: 8, below: 11 }, "the turn it can hit on");
+    }
+
+    /// Plans [`halfling_save`] for an enemy first seen at 8 health, so its flee threshold is known.
+    fn halfling_plan(save_turn: i64, flag: bool, stall: bool) -> TurnPlan {
+        let cs = crate::game::save::parse(&halfling_save(save_turn, flag)).unwrap();
+        let letters = crate::letters::Weights::load(&game_dir()).unwrap();
+        let mut peaks = HashMap::from([("Amorphous".to_string(), 8)]);
+        plan(&cs, &game_dir(), &letters, &mut peaks, Options { stall_on_free_turns: stall })
+            .unwrap()
+            .unwrap()
+    }
+
+    /// **The stall, from the save.** Save turn 2 is the Turn box's 2 and the console's 1: the
+    /// halfling's free turn ([`crate::parity`]). Any hit kills the 1-health enemy, so the goal is
+    /// the empty band that ranks a word dealing nothing first.
+    #[test]
+    fn a_halfling_on_a_free_turn_stalls_rather_than_killing_a_terrified_enemy() {
+        let p = halfling_plan(2, true, true);
+        assert!(p.mods.player_dodges, "the parity read is the precondition");
+        assert!(p.mods.stall);
+        assert_eq!(p.goal, Goal::Scare { need: 1, below: 1 });
+        assert!(
+            p.notes.iter().any(|n| n.contains("neither killed nor scared off")),
+            "{:?}",
+            p.notes
+        );
+    }
+
+    /// Unticked, the same turn is planned exactly as before the option existed: the kill.
+    #[test]
+    fn with_stalling_off_the_free_turn_kills_as_it_always_did() {
+        let p = halfling_plan(2, true, false);
+        assert!(p.mods.player_dodges, "still a free turn, and still reported as one");
+        assert!(!p.mods.stall);
+        assert!(matches!(p.goal, Goal::RankedKill { .. }), "{:?}", p.goal);
+    }
+
+    /// Only the free turn. Save turn 3 is one the enemy can hit on, and a champion without the
+    /// passive has no free turns at all.
+    #[test]
+    fn no_stall_on_a_turn_the_enemy_can_hit_or_without_the_passive() {
+        for (turn, flag) in [(3, true), (1, true), (2, false)] {
+            let p = halfling_plan(turn, flag, true);
+            assert!(!p.mods.stall, "save turn {turn}, flag {flag}");
+            assert!(matches!(p.goal, Goal::RankedKill { .. }), "{turn}/{flag}: {:?}", p.goal);
+        }
+    }
+
+    /// **An enemy that cannot run is held too.** The user's live case, 2026-11-04: John Skeleton on
+    /// the halfling's even turn, every top row a kill. Killing it on the free turn hands the next
+    /// enemy a turn it can hit on, exactly as scaring it would.
+    #[test]
+    fn a_free_turn_holds_an_enemy_that_cannot_run_rather_than_killing_it() {
+        let letters = crate::letters::Weights::load(&game_dir()).unwrap();
+        let goal = |src: &str, stall: bool| {
+            let cs = crate::game::save::parse(src).unwrap();
+            let p = plan(
+                &cs,
+                &game_dir(),
+                &letters,
+                &mut HashMap::new(),
+                Options { stall_on_free_turns: stall },
+            )
+            .unwrap()
+            .unwrap();
+            assert!(p.mods.nerve.is_none(), "the fixture must have no nerve to test this");
+            (p.mods.stall, p.goal)
+        };
+        // No `terror`, and 12 health: anything under 11 keeps it standing.
+        let src = halfling_save(2, true).replacen("\n                terror = 1,", "", 1).replacen(
+            "health = 1,\n            attacksCycle",
+            "health = 12,\n            attacksCycle",
+            1,
+        );
+        assert_eq!(goal(&src, true), (true, Goal::Hold { below: 11, lethal: 11 }));
+        let (stall, unticked) = goal(&src, false);
+        assert!(!stall && matches!(unticked, Goal::RankedKill { .. }), "{unticked:?}");
+        // And the skeleton itself, by name: undead lose their nerve, and are held all the same.
+        let bones = src.replacen("name = \"Amorphous\",", "name = \"John Skeleton\",", 1);
+        assert_ne!(bones, src);
+        assert_eq!(goal(&bones, true), (true, Goal::Hold { below: 11, lethal: 11 }));
     }
 }

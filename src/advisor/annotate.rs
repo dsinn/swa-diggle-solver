@@ -91,6 +91,8 @@ pub struct Heals {
     pub wood_armour: bool,
     /// Armour per silver tile from the Silver chain coif — [`crate::pick::Room::silver_armour`].
     pub silver_armour: i64,
+    /// The gauntlet's or the scales' live links — [`crate::pick::Infinitives`].
+    pub infinitives: crate::pick::Infinitives,
 }
 
 impl Heals {
@@ -107,6 +109,7 @@ impl Heals {
             armour_room: plan.picking.prefs.room.armour,
             wood_armour: flag("onWoodKillGainArmour"),
             silver_armour: plan.picking.prefs.room.silver_armour,
+            infinitives: plan.picking.prefs.infinitives,
         }
     }
 
@@ -154,11 +157,16 @@ impl Heals {
         crate::pick::Gains {
             health: (heal + material.health).min(self.missing),
             armour: armour.min(self.armour_room.max(0)),
+            infinitives: self.infinitives.created(&c.word),
+            infinitives_from: self.infinitives.source,
         }
     }
 }
 
-/// The Gain column's text: `+3 ❤️ +4 🛡️`, each part only when there is some.
+/// The Gain column's text: `+3 ❤️ +4 🛡️ 🧤`, each part only when there is some.
+///
+/// The infinitive is the emoji alone, no count: the user, 2026-11-04, *it's a binary question*.
+/// Each item has exactly one link from any suffix, so a word queues one infinitive or none.
 pub fn gain_text(g: crate::pick::Gains) -> String {
     let mut parts = Vec::new();
     if g.health > 0 {
@@ -166,6 +174,9 @@ pub fn gain_text(g: crate::pick::Gains) -> String {
     }
     if g.armour > 0 {
         parts.push(format!("+{} 🛡️", g.armour));
+    }
+    if let (true, Some(from)) = (g.infinitives > 0, g.infinitives_from) {
+        parts.push(from.emoji().to_string());
     }
     parts.join(" ")
 }
@@ -193,14 +204,19 @@ pub fn bleed_of(cs: &Table) -> i64 {
 ///
 /// `score` is the damage, which decides whether the word lands at all; `reach` is the damage as the
 /// goal measures it ([`crate::search::Modifiers::reach`]), which decides whether it kills.
+///
+/// A [`Tier::Stall`] word says so before anything else: it deals nothing like any zero-damage word,
+/// but it is listed above the killing words on purpose, and "no damage" would not say why.
 pub fn effect(goal: Goal, tier: Tier, score: i64, reach: i64, kill: i64) -> &'static str {
-    if score < MIN_MEANINGFUL_DAMAGE {
-        return "no damage";
-    }
     match (tier, goal) {
+        (Tier::Stall, _) => "stalls - it cannot hit you",
+        _ if score < MIN_MEANINGFUL_DAMAGE => "no damage",
         (Tier::InBand, Goal::Scare { .. }) => "scares",
         (Tier::InBand, _) => "kills",
+        // On a free turn staying alive is the point, so it is worth saying.
+        (Tier::Under, Goal::Hold { .. }) => "holds - it stays",
         (Tier::Under, _) => "",
+        (Tier::Flees, _) => "scares - on a free turn",
         (Tier::Overshoot, _) => "overshoots - would kill",
         (Tier::Fallback, _) if reach >= kill => "kills",
         (Tier::Fallback, _) => "",
@@ -364,6 +380,7 @@ mod tests {
             pierces: false,
             tier,
             rank: None,
+            keep: Default::default(),
             typed: Typed { tiles, wildcards: vec![None; n], corners_used: 0, adjacent: false },
             cast: None,
         }
@@ -379,6 +396,7 @@ mod tests {
             armour_room: 0,
             wood_armour: false,
             silver_armour: 0,
+            infinitives: Default::default(),
         }
     }
 
@@ -512,11 +530,25 @@ mod tests {
     /// The Gain column: health and armour, each only when there is some.
     #[test]
     fn gain_reads_as_hearts_and_shields() {
-        let g = |health, armour| crate::pick::Gains { armour, health };
+        let g = |health, armour| crate::pick::Gains { armour, health, ..Default::default() };
         assert_eq!(gain_text(g(0, 0)), "");
         assert_eq!(gain_text(g(3, 0)), "+3 ❤️");
         assert_eq!(gain_text(g(0, 4)), "+4 🛡️");
         assert_eq!(gain_text(g(3, 4)), "+3 ❤️ +4 🛡️");
+        use crate::pick::InfinitiveSource::*;
+        let inf = |n, from| crate::pick::Gains {
+            infinitives: n,
+            infinitives_from: Some(from),
+            ..g(3, 0)
+        };
+        assert_eq!(gain_text(inf(1, Gauntlet)), "+3 ❤️ 🧤", "last, as the lowest gain, no count");
+        assert_eq!(gain_text(inf(1, Justice)), "+3 ❤️ ⚖️");
+        assert_eq!(
+            gain_text(crate::pick::Gains { health: 0, ..inf(1, Gauntlet) }),
+            "🧤",
+            "alone too"
+        );
+        assert_eq!(gain_text(inf(0, Justice)), "+3 ❤️", "none queued, none shown");
     }
 
     /// Any bleed is bleeding, as Diggle reads it, even one the save writes as a fraction.

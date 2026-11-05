@@ -171,11 +171,33 @@ pub struct Modifiers {
     /// The dev, 2026-08-15: *"make sure the halfling also only fears enemies on even turns"*, in the
     /// console's numbering — which is the same statement as this one, see [`crate::parity`].
     ///
-    /// **Nothing reads this to change a word yet, and that is on purpose** — see
-    /// [`MIN_MEANINGFUL_DAMAGE`] for what the missing half is, and `Goal::for_enemy`'s scare floor
-    /// for why the obvious wiring makes play worse rather than better. It is reported in the turn
-    /// log, which is what makes the next step measurable instead of theoretical.
+    /// **It does not change a word by itself.** Dropping the scare floor to zero on these turns
+    /// would make play worse, not better — see `Goal::for_enemy`'s scare floor. What it feeds is
+    /// [`Modifiers::stall`], which [`crate::turn::plan`] sets from it.
     pub player_dodges: bool,
+    /// **This turn ends nothing: the enemy is neither killed nor scared off if it can be helped.**
+    ///
+    /// Set by [`crate::turn::plan`], and only when every one of these holds:
+    ///
+    /// - the caller asked for it ([`crate::turn::Options::stall_on_free_turns`]);
+    /// - the enemy cannot land a hit this turn ([`Modifiers::player_dodges`]), so keeping it alive
+    ///   costs nothing;
+    /// - the status already on it does not finish it anyway (post-status health above zero).
+    ///
+    /// What it changes:
+    ///
+    /// - **The enemy is held** ([`Goal::Hold`]): ending it now spends the turn it could not hurt us
+    ///   on its leaving, and the next enemy then acts on a turn that can. So the hardest hit that
+    ///   keeps it here comes first, then a word that deals nothing, and a scare or a kill only when
+    ///   the board has nothing else.
+    /// - **An enemy already past its flee threshold** runs at the start of its own turn whatever we play
+    ///   (`rpgview.lua:1691-1695`), so all that is left to decide is not to murder it. Where any hit
+    ///   kills, a word that deals nothing ([`Tier::Stall`]) comes before one that kills
+    ///   ([`Tier::Overshoot`]); without the stall those come the other way round, which is the
+    ///   dev's recorded call for a turn that is *not* free — see `fight::nothing_left_to_lower`.
+    ///
+    /// The turn is free because `enemyCanHit` reads `getPlayerStatus'immune'` (`:1065`).
+    pub stall: bool,
     /// What stands between us and the kill, for the one gear that changes which of it a word must
     /// get through: the rapier. `None` until the turn's plan fills it in ([`crate::turn::plan`]), and
     /// then no word is treated as piercing — see [`Modifiers::reach`].
@@ -279,6 +301,8 @@ impl Modifiers {
                 weapon,
                 enemy_status_tick,
                 player_dodges,
+                // Decided per turn, from more than the save — see `crate::turn::plan`.
+                stall: false,
                 defence: None,
             },
             resolved.geometry,
@@ -306,6 +330,7 @@ impl Modifiers {
             weapon: crate::gear::Weapon::default(),
             enemy_status_tick: 0,
             player_dodges: false,
+            stall: false,
             defence: None,
         }
     }
@@ -568,6 +593,17 @@ pub struct Outcome {
     /// what used to be a two-way branch on `best.score < need`, and does strictly better in the case
     /// that branch never covered: hard words that overshoot, with softer safe ones available.
     pub under: Option<Found>,
+    /// A word that deals **no damage at all** and stays under a band's ceiling — the word to spend a
+    /// free turn on. See [`Modifiers::stall`].
+    ///
+    /// Only collected by [`race_for_band`], and only when `mods.stall` is set, so on every other
+    /// turn it is `None` and [`Outcome::choice_for`] behaves exactly as it did before it existed.
+    /// Among several, the one [`crate::pick::Rank`] likes best, since what the word costs the board
+    /// is the only thing left to tell them apart.
+    pub nothing: Option<Found>,
+    /// On a free turn, `nothing` is the better word to keep the enemy here with than `under`: it
+    /// eats more fire, or as much and spends less gold. See [`Keep`].
+    pub nothing_first: bool,
     /// Longest makeable word seen. Tracked separately because the refresh rule is about LENGTH, and
     /// the highest-scoring word is not necessarily the longest — a short word of gold tiles can
     /// outscore a long one of wood. Free to collect: the only time it matters is when no lethal word
@@ -635,11 +671,28 @@ impl Outcome {
     /// [`Outcome::least`] survives as the last resort, for the case that produced it: a murder
     /// warning backed the band down to `need 0, below 1`, and no word scores zero, so nothing at all
     /// is under that ceiling. The gentlest word is then the least bad of the words that overshoot.
+    ///
+    /// ## On a free turn, nothing before the kill
+    ///
+    /// [`Outcome::nothing`] sits between the safe chip and the overshoot: when the enemy cannot hit
+    /// back this turn, a word that does nothing is better than one that murders. It is only ever
+    /// filled in on such a turn ([`Modifiers::stall`]), so this is the old chain everywhere else.
     pub fn choice_for(&self, goal: Goal) -> Option<&Found> {
         match goal {
-            Goal::Scare { .. } => {
-                self.lethal.as_ref().or(self.under.as_ref()).or(self.least.as_ref())
-            }
+            // On a free turn the chip and the stall both keep the enemy here, and [`Keep`] says
+            // which goes first.
+            Goal::Scare { .. } | Goal::Hold { .. } if self.nothing_first => self
+                .lethal
+                .as_ref()
+                .or(self.nothing.as_ref())
+                .or(self.under.as_ref())
+                .or(self.least.as_ref()),
+            Goal::Scare { .. } | Goal::Hold { .. } => self
+                .lethal
+                .as_ref()
+                .or(self.under.as_ref())
+                .or(self.nothing.as_ref())
+                .or(self.least.as_ref()),
             _ => self.choice(),
         }
     }
@@ -694,6 +747,27 @@ pub enum Goal {
     /// pushes it past the line is also a turn it does not get to attack. And for the enemies that
     /// carry `fear`, mostly humans, the kill would be recorded as murder.
     Scare { need: i64, below: i64 },
+    /// **Keep it here, alive and not yet frightened, on a turn it cannot hit back.** Damage
+    /// strictly less than `below` leaves it standing and short of its flee threshold; damage of
+    /// `lethal` or more kills it. For an enemy that cannot run the two are the same edge. Only on
+    /// a free turn ([`Modifiers::stall`]), and never for an enemy already past its threshold, which
+    /// runs whatever we play.
+    ///
+    /// Why not end it: whatever ends it on this turn — a kill or a scare — spends the one enemy
+    /// turn that could not have hurt us on its leaving, and the next enemy then gets to act on a
+    /// turn that can. Ended on the turn after, its own attack never comes and the next enemy
+    /// opens on a free turn. The user's rule, 2026-11-04: *a word that scares it off should not be
+    /// allowed on the halfling's even turns, because after the current enemy runs off, the next
+    /// enemy will do damage on its first turn* — and the same of a kill, which is what the user
+    /// first asked for: *stop just short of killing them*. It is also the dev's *"the halfling only
+    /// fears enemies on even turns"*, counted from the console.
+    ///
+    /// There is no band. In order: the hardest hit under `below` ([`Tier::Under`]) — the chip makes
+    /// the next turn's kill or scare easier — then a word that deals nothing ([`Tier::Stall`]),
+    /// then a scare after all, gentlest first ([`Tier::Flees`]), and a kill only when nothing else
+    /// is on the board. The scare is kept above the kill as the last resort, because for an enemy
+    /// that can run the kill is the avoidable murder.
+    Hold { below: i64, lethal: i64 },
 }
 
 /// Extra damage aimed for beyond a threshold, to absorb error in our own damage model.
@@ -745,12 +819,13 @@ fn affordable_buffer(slack: i64) -> i64 {
 ///   the opposite by quoting `turnNumber`, which is the *other* numbering. See [`crate::parity`],
 ///   which now holds the conversion and two tests that pin it to files in this repo.
 ///
-///   The remaining work is not the floor. Dropping it to zero on a dodge turn is worse than leaving
-///   it — `Goal::for_enemy` carries the argument. What is worth having is a **stall**: on a turn we
-///   cannot be hit, when every word that lands would commit an avoidable murder, spend the turn
-///   deliberately instead of taking the kill. Today `fight::nothing_left_to_lower` takes the kill,
-///   which is the dev's recorded call for the general case — but the general case is one where the
-///   turn is not free.
+///   The floor still stays. Dropping it to zero on a dodge turn is worse than leaving it —
+///   `Goal::for_enemy` carries the argument. What was worth having is the **stall**, and it now
+///   exists: on a turn we cannot be hit, when every word that lands would commit an avoidable
+///   murder, a word that deals nothing is played instead of the kill. It is a separate tier below
+///   the safe chip ([`Tier::Stall`]), not a lower floor, so it never outranks a word that does
+///   real work short of scaring. See [`Modifiers::stall`] and [`Goal::Hold`]. On a turn that is not free,
+///   `fight::nothing_left_to_lower` still takes the kill, which is the dev's recorded call.
 ///
 /// - **The slime brooch, letting toxin land the kill.** Not a scare consideration at all, which is
 ///   what this comment said before the dev corrected it. `onStatusKillToxinRegen` is
@@ -761,11 +836,27 @@ fn affordable_buffer(slack: i64) -> i64 {
 ///   `not getEstimationAttackAboutToKill() and getEstimationEnemyAboutToDie()` — hold back, and let
 ///   the status finish it.
 ///
-/// Both need machinery that does not exist yet — turn parity, and the enemy's status arithmetic —
-/// so until one of them is built, aiming at zero is a bug rather than a tactic.
+/// The brooch still needs machinery that does not exist — the enemy's status arithmetic — so a band
+/// that aims at zero is still a bug rather than a tactic. The stall above never aims at zero: it
+/// only reorders what to play once nothing in the band is on the board.
 pub const MIN_MEANINGFUL_DAMAGE: i64 = 1;
 
 impl Goal {
+    /// The ranking context this goal's band is judged by.
+    ///
+    /// A band that does not kill — [`Goal::Scare`], [`Goal::Hold`] — ranks without the payouts only
+    /// a kill collects (see [`crate::pick::Preferences::without_kill_payouts`]). The kills that do
+    /// turn up under those goals are their overshoot and are never ranked.
+    pub fn picking(&self, picking: &crate::pick::Context) -> crate::pick::Context {
+        match self {
+            Goal::Scare { .. } | Goal::Hold { .. } => crate::pick::Context {
+                prefs: picking.prefs.without_kill_payouts(),
+                ..picking.clone()
+            },
+            Goal::FirstKill { .. } | Goal::RankedKill { .. } | Goal::MaxDamage => picking.clone(),
+        }
+    }
+
     /// Picks the goal for an enemy, given what modifies it.
     ///
     /// `max_health` is inferred rather than read: the save's enemy block carries
@@ -788,6 +879,13 @@ impl Goal {
         // best board and collects whatever the gear pays. See [`Goal::RankedKill`], and
         // [`Goal::FirstKill`] for what this replaced and why it is still here.
         let kill = Goal::RankedKill { need };
+        // **A free turn ends nothing** — see [`Goal::Hold`]. Ahead of every other goal, overkill
+        // gold included: the gold is still there for the taking on the next turn.
+        if mods.stall {
+            if let Some(hold) = Self::hold(mods, health, armour, max_health) {
+                return hold;
+            }
+        }
         if mods.overkill_gold {
             // Gold scales with the excess, so this one really does want the corpse.
             return Goal::MaxDamage;
@@ -811,6 +909,11 @@ impl Goal {
             // fearable enemy**, so `player` is dropped on this path and the plain kill is used:
             // aiming past lethal for a heal spends damage we do not need on an enemy the game
             // classes as a person (`looksLikeAvoidableFirstMurder`, `wordboard.lua:486-497`).
+            //
+            // On a free turn the empty band is kept instead, as below — see [`Modifiers::stall`].
+            if mods.stall {
+                return Goal::Scare { need: below, below };
+            }
             return Self::killing_blow(kill, lethal, None, prefs);
         }
         // Buffer both edges by as much as the band can spare. `slack` is the width of the raw
@@ -827,16 +930,13 @@ impl Goal {
         // already correct: at 4 health against a threshold of 5, `0+1 .. 3` becomes `1+1 .. 3`, a
         // band one point wide for no reason.
         //
-        // **This floor stays at 1 even when the enemy cannot swing** — see
-        // [`Modifiers::player_dodges`], which is read and reported but deliberately not wired here.
-        // Dropping it to 0 on a dodge turn admits zero-damage words to the band, and a band is
-        // ranked by [`crate::pick::Rank`], which carries **no damage term at all** because every
+        // **This floor stays at 1 even when the enemy cannot swing.** Dropping it to 0 on a dodge
+        // turn admits zero-damage words to the band, and a band is ranked by [`crate::pick::Rank`], which carries **no damage term at all** because every
         // candidate in a band is acceptable by construction. A zero-damage word would therefore win
         // on board tidiness over a word that actually moves the enemy toward its flee threshold, and
         // being unable to be hit this turn does not make that trade good — the work still has to be
-        // done, one turn later, on a turn we *can* be hit. Spending the free turn is only right when
-        // the alternative is worse than nothing, which is a decision the search cannot see. See
-        // [`MIN_MEANINGFUL_DAMAGE`].
+        // done, one turn later, on a turn we *can* be hit. A free turn is answered above, by
+        // [`Goal::Hold`], which never reaches this band. See [`MIN_MEANINGFUL_DAMAGE`].
         let need = (scare_need + b).max(MIN_MEANINGFUL_DAMAGE);
         // The floor can push the floor into the ceiling, and that is not a band.
         //
@@ -845,10 +945,46 @@ impl Goal {
         // exactly 1. There is no hit that both lands and leaves it alive, which is the same
         // conclusion the `scare_need >= below` check above reaches by a different route — so it
         // ends the same way, killing without chasing a heal.
+        //
+        // **Unless the turn is free** ([`Modifiers::stall`]). Then the band stays, empty, and
+        // nothing lands in it; the ranking falls through to a word that deals nothing, and an
+        // enemy already past its threshold runs at the start of its own turn. Only if the board has
+        // no such word does this end in the kill after all — as the gentlest overshoot.
         if need >= ceiling {
+            if mods.stall {
+                return Goal::Scare { need: below, below };
+            }
             return Self::killing_blow(kill, lethal, None, prefs);
         }
         Goal::Scare { need, below: ceiling }
+    }
+
+    /// The [`Goal::Hold`] for a free turn, or `None` when nothing short of a kill can keep the enemy
+    /// here — one already past its flee threshold runs at the start of its own turn whatever we play,
+    /// and [`Goal::for_enemy`]'s scare path decides that turn instead.
+    ///
+    /// Both edges are buffered downward, by as much as the gap can spare: our damage can be off by a
+    /// point either way, and here a point too many ends the enemy on the turn we meant to keep it
+    /// through. Floored at 1, the ceiling that admits only a word dealing nothing.
+    fn hold(mods: &Modifiers, health: i64, armour: i64, max_health: Option<i64>) -> Option<Goal> {
+        let lethal = health + armour;
+        let below_lethal = (lethal - DAMAGE_BUFFER).max(MIN_MEANINGFUL_DAMAGE);
+        // An enemy that can run must be kept short of running too. `immobile` cannot run
+        // (`rpgview.lua:1646`), so it only has the one edge.
+        let nerve = mods.nerve.filter(|_| !mods.immobile);
+        let Some(top) = nerve.zip(max_health).and_then(|(n, max)| n.leaves_at_or_below(max)) else {
+            return Some(Goal::Hold { below: below_lethal, lethal: below_lethal });
+        };
+        // Judged on health, not on the damage to reach the threshold: armour keeps that above zero
+        // for an enemy already on its way out.
+        if health <= top {
+            return None;
+        }
+        let scare_need = (health - top) + armour;
+        // The scare's own ceiling, buffered as [`Goal::Scare`] buffers it, is where killing starts.
+        let ceiling = lethal - affordable_buffer(lethal - 1 - scare_need);
+        let below = (scare_need - DAMAGE_BUFFER).max(MIN_MEANINGFUL_DAMAGE);
+        Some(Goal::Hold { below, lethal: ceiling })
     }
 
     /// The kill, adjusted to heal this wound off the Well-Rested overkill heal.
@@ -953,6 +1089,7 @@ pub fn search(
     dict: &Dictionary, scorer: &Scorer, tiles: &[Tile], geometry: &Geometry, mods: &Modifiers,
     goal: Goal, picking: &crate::pick::Context, threads: usize,
 ) -> Outcome {
+    let picking = &goal.picking(picking);
     match goal {
         Goal::FirstKill { need } => {
             race_for_band(dict, scorer, tiles, geometry, mods, need, None, picking, threads)
@@ -964,6 +1101,11 @@ pub fn search(
         // `Outcome::choice_for`'s business rather than the racer's.
         Goal::Scare { need, below } => {
             race_for_band(dict, scorer, tiles, geometry, mods, need, Some(below), picking, threads)
+        }
+        // A band with nothing in it, under the hold's ceiling: `under` is the chip, `nothing` the
+        // stall, and `least` the gentlest of the rest, which is a scare whenever the board has one.
+        Goal::Hold { below, .. } => {
+            race_for_band(dict, scorer, tiles, geometry, mods, below, Some(below), picking, threads)
         }
         Goal::MaxDamage => max_damage(dict, scorer, tiles, geometry, mods, threads),
     }
@@ -1032,6 +1174,7 @@ pub fn ranked_kill(
                         let reach = mods.reach(word, score);
                         if reach >= need {
                             let rank = crate::pick::rank(
+                                word,
                                 tiles,
                                 geometry,
                                 &typed.tiles,
@@ -1107,6 +1250,8 @@ pub fn ranked_kill(
         least: None,
         // Likewise: with no ceiling there is nothing to stay under.
         under: None,
+        nothing: None,
+        nothing_first: false,
         longest: longest.into_inner().unwrap(),
         words_considered: considered.into_inner(),
     }
@@ -1209,6 +1354,8 @@ pub fn max_damage(
         // ceiling this goal does not have.
         least: None,
         under: None,
+        nothing: None,
+        nothing_first: false,
         longest: longest.into_inner().unwrap(),
         words_considered: considered.into_inner(),
     }
@@ -1221,6 +1368,13 @@ pub enum Tier {
     InBand,
     /// A scare's safe chip: lands, and stays under the ceiling. See [`Outcome::under`].
     Under,
+    /// A deliberate wasted turn: deals nothing, on a turn the enemy cannot hit back. Only when
+    /// [`Modifiers::stall`] is set; otherwise these words are [`Tier::Fallback`]. Ordered among
+    /// themselves by [`crate::pick::Rank`], as the band is. See [`Outcome::nothing`].
+    Stall,
+    /// A [`Goal::Hold`]'s last resort before a kill: frightens it off on the free turn the hold
+    /// exists to keep it through. Gentlest first.
+    Flees,
     /// A scare's overshoot: would break the ceiling. See [`Outcome::least`].
     Overshoot,
     /// Everything else, hardest hit first — or, for a scare, the words that do no damage at all.
@@ -1240,6 +1394,8 @@ pub struct Candidate {
     pub tier: Tier,
     /// Only for [`Tier::InBand`], where it is what orders the band — as in the search.
     pub rank: Option<crate::pick::Rank>,
+    /// What the word costs the board, for every tier: see [`Keep`].
+    pub keep: Keep,
     /// Which tiles the word consumes, so a caller can show them.
     pub typed: crate::typist::Typed,
     /// The spell to cast for [`Candidate::score`], when one beats the plain attack.
@@ -1256,7 +1412,11 @@ pub struct Candidate {
 /// - **kill goals** (`RankedKill`, `FirstKill`): the band by [`crate::pick::Rank`],
 ///   then everything else hardest first, since a kill that cannot be made tidily is still a kill;
 /// - **`Scare`**: the band by `Rank`, then the safe chip hardest first, then the overshoots
-///   *gentlest* first, then the words that do nothing;
+///   *gentlest* first, then the words that do nothing — except on a free turn
+///   ([`Modifiers::stall`]), when the words that do nothing move up ahead of the overshoots, as
+///   [`Tier::Stall`], ordered by `Rank`;
+/// - **`Hold`**: the safe chip hardest first, then the words that do nothing by `Rank`, then the
+///   scares and then the kills, each gentlest first;
 /// - **`MaxDamage`**: hardest first.
 ///
 /// "Hardest" is [`Modifiers::hits_harder`] and "gentlest" is [`Modifiers::reach`], the same as the
@@ -1279,6 +1439,7 @@ pub fn ranked(
     if tiles.is_empty() {
         return Vec::new();
     }
+    let picking = &goal.picking(picking);
     let typist = Typist::new(tiles, geometry);
     let corner_count = geometry.corner_count();
     let words = dict.words();
@@ -1291,6 +1452,11 @@ pub fn ranked(
             Goal::Scare { need, below } if reach >= need && reach < below => Tier::InBand,
             Goal::Scare { below, .. } if reach >= below => Tier::Overshoot,
             Goal::Scare { .. } if score >= MIN_MEANINGFUL_DAMAGE => Tier::Under,
+            Goal::Scare { .. } if mods.stall => Tier::Stall,
+            Goal::Hold { lethal, .. } if reach >= lethal => Tier::Overshoot,
+            Goal::Hold { below, .. } if reach >= below => Tier::Flees,
+            Goal::Hold { .. } if score >= MIN_MEANINGFUL_DAMAGE => Tier::Under,
+            Goal::Hold { .. } => Tier::Stall,
             _ => Tier::Fallback,
         }
     };
@@ -1324,8 +1490,9 @@ pub fn ranked(
                         );
                         let reach = mods.reach(word, score);
                         let tier = tier_of(score, reach);
-                        let rank = (tier == Tier::InBand).then(|| {
+                        let rank = matches!(tier, Tier::InBand | Tier::Stall).then(|| {
                             crate::pick::rank(
+                                word,
                                 tiles,
                                 geometry,
                                 &typed.tiles,
@@ -1342,6 +1509,7 @@ pub fn ranked(
                             pierces: mods.pierces(word),
                             tier,
                             rank,
+                            keep: Keep::of(tiles, &typed.tiles, scorer),
                             typed,
                             cast,
                         });
@@ -1362,18 +1530,78 @@ pub fn ranked(
 /// the search's own fallbacks.
 fn order(mods: &Modifiers, a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
+    // On a free turn the chip and the stall are one group, ordered by [`Keep`] before the tier.
+    let keeps = |t: Tier| mods.stall && matches!(t, Tier::Under | Tier::Stall);
+    let group = |t: Tier| if keeps(t) { Tier::Under as usize } else { t as usize };
+    let keep = match keeps(a.tier) && keeps(b.tier) {
+        true => b.keep.versus(&a.keep),
+        false => Equal,
+    };
     let tier = |t: Tier| t as usize;
-    tier(a.tier).cmp(&tier(b.tier)).then_with(|| {
+    let first = group(a.tier).cmp(&group(b.tier)).then(keep);
+    first.then_with(|| tier(a.tier).cmp(&tier(b.tier))).then_with(|| {
         let within = match (a.tier, a.rank, b.rank) {
-            (Tier::InBand, Some(ra), Some(rb)) if ra.better_than(&rb) => Less,
-            (Tier::InBand, Some(ra), Some(rb)) if rb.better_than(&ra) => Greater,
-            (Tier::Overshoot, ..) => a.reach.cmp(&b.reach),
+            (Tier::InBand | Tier::Stall, Some(ra), Some(rb)) if ra.better_than(&rb) => Less,
+            (Tier::InBand | Tier::Stall, Some(ra), Some(rb)) if rb.better_than(&ra) => Greater,
+            (Tier::Overshoot | Tier::Flees, ..) => a.reach.cmp(&b.reach),
             _ => Equal,
         };
         within
             .then_with(|| mods.hits_harder((&b.word, b.score), (&a.word, a.score)))
             .then_with(|| a.word.cmp(&b.word))
     })
+}
+
+/// What a word that keeps the enemy here does to the board, on a free turn ([`Modifiers::stall`]):
+/// the burning tiles it clears, then the gold and wildcards it spends. Compared before the damage,
+/// and before whether the word chips at all.
+///
+/// The user, 2026-11-04, twice. Stalling with three burning tiles on the board, *none of the top
+/// candidates* ate all three; and *when stalling, it's not using logic to conserve gold tiles and
+/// wildcards*. Both for one reason: the chip was the hardest hit under the ceiling and nothing
+/// else, so it was the word with the most gold in it, and a burning tile scores nothing, so the word
+/// that clears the fire was a weak chip or a stall, listed below every harder chip.
+///
+/// On a turn the enemy cannot hit, the chip's damage only softens it for the next turn, and that
+/// is the turn the gold and wildcards are for: spending a `Q` to chip is spending the kill. The
+/// burning board, meanwhile, is damage the player takes now, every turn it stands (see
+/// [`crate::pick::Rank::fire_eaten`] for why a count). So the order is the same as
+/// [`crate::pick::Rank`]'s own, fire before hoarding, with the damage after both.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Keep {
+    /// [`crate::pick::fire_eaten`]. More is better.
+    pub fire: usize,
+    /// [`crate::pick::hoarded`]. Less is better.
+    pub hoarded: f64,
+}
+
+impl Keep {
+    pub fn of(tiles: &[Tile], consumed: &[usize], scorer: &Scorer) -> Self {
+        Keep {
+            fire: crate::pick::fire_eaten(tiles, consumed),
+            hoarded: crate::pick::hoarded(tiles, consumed, scorer),
+        }
+    }
+
+    /// `Greater` is the better word to keep it here with.
+    pub fn versus(&self, other: &Keep) -> std::cmp::Ordering {
+        self.fire.cmp(&other.fire).then_with(|| {
+            other.hoarded.partial_cmp(&self.hoarded).unwrap_or(std::cmp::Ordering::Equal)
+        })
+    }
+
+    /// Is this chip better than `other`'s? [`Keep`] first on a free turn, then the harder hit.
+    /// Off a free turn plain [`Modifiers::hits_harder`], as it always was.
+    fn chips_better(&self, mods: &Modifiers, a: (&str, i64), other: &Keep, b: (&str, i64)) -> bool {
+        let keep = if mods.stall { self.versus(other) } else { std::cmp::Ordering::Equal };
+        keep.then_with(|| mods.hits_harder(a, b)).is_gt()
+    }
+}
+
+impl From<&crate::pick::Rank> for Keep {
+    fn from(rank: &crate::pick::Rank) -> Self {
+        Keep { fire: rank.fire_eaten, hoarded: rank.hoarded }
+    }
 }
 
 pub fn race_for_kill(
@@ -1411,7 +1639,8 @@ pub fn race_for_band(
     let lethal: Mutex<Option<(Found, crate::pick::Rank)>> = Mutex::new(None);
     let best: Mutex<Option<Found>> = Mutex::new(None);
     let least: Mutex<Option<Found>> = Mutex::new(None);
-    let under: Mutex<Option<Found>> = Mutex::new(None);
+    let under: Mutex<Option<(Found, Keep)>> = Mutex::new(None);
+    let nothing: Mutex<Option<(Found, crate::pick::Rank)>> = Mutex::new(None);
     let longest: Mutex<Option<Found>> = Mutex::new(None);
     let considered = std::sync::atomic::AtomicUsize::new(0);
 
@@ -1419,12 +1648,14 @@ pub fn race_for_band(
         for (slice, part) in words.chunks(chunk).enumerate() {
             let (stop, lethal, best, least, under, longest, considered, typist, mods) =
                 (&stop, &lethal, &best, &least, &under, &longest, &considered, &typist, mods);
+            let nothing = &nothing;
             scope.spawn(move || {
                 let mut seen = 0usize;
                 let mut local_lethal: Option<(Found, crate::pick::Rank)> = None;
                 let mut local_best: Option<Found> = None;
                 let mut local_least: Option<Found> = None;
-                let mut local_under: Option<Found> = None;
+                let mut local_under: Option<(Found, Keep)> = None;
+                let mut local_nothing: Option<(Found, crate::pick::Rank)> = None;
                 let mut local_longest: Option<Found> = None;
                 for word in part {
                     // Checked periodically rather than every word: an atomic load per word would
@@ -1458,6 +1689,7 @@ pub fn race_for_band(
                         // Ranked, not raced. Every word in the band ends the exchange the same way,
                         // so the tiles it spends are the only thing left to choose on.
                         let rank = crate::pick::rank(
+                            word,
                             tiles,
                             geometry,
                             &typed.tiles,
@@ -1509,14 +1741,34 @@ pub fn race_for_band(
                     // The hardest word that still cannot break a ceiling. Every word reaching this
                     // line missed the band, so `reach < below` here also means `reach < need` — the
                     // in-between words left above. See [`Outcome::under`].
-                    if score >= MIN_MEANINGFUL_DAMAGE
+                    if score >= MIN_MEANINGFUL_DAMAGE && below.is_some_and(|b| reach < b) {
+                        let keep = Keep::of(tiles, &typed.tiles, scorer);
+                        if local_under.as_ref().is_none_or(|(u, uk)| {
+                            keep.chips_better(mods, (word, score), uk, (&u.word, u.score))
+                        }) {
+                            local_under = Some((Found { word: word.clone(), score, slice }, keep));
+                        }
+                    }
+                    // The word to waste a free turn on — see [`Outcome::nothing`]. Ranked, because
+                    // they all do the same nothing and differ only in what they leave behind.
+                    if mods.stall
+                        && score < MIN_MEANINGFUL_DAMAGE
                         && below.is_some_and(|b| reach < b)
-                        && local_under
-                            .as_ref()
-                            .map(|u| mods.hits_harder((word, score), (&u.word, u.score)).is_gt())
-                            .unwrap_or(true)
                     {
-                        local_under = Some(Found { word: word.clone(), score, slice });
+                        let rank = crate::pick::rank(
+                            word,
+                            tiles,
+                            geometry,
+                            &typed.tiles,
+                            scorer,
+                            &picking.target,
+                            picking.prefs,
+                            reach,
+                        );
+                        if local_nothing.as_ref().is_none_or(|(_, cur)| rank.better_than(cur)) {
+                            local_nothing =
+                                Some((Found { word: word.clone(), score, slice }, rank));
+                        }
                     }
                     if local_longest
                         .as_ref()
@@ -1555,15 +1807,18 @@ pub fn race_for_band(
                         *l = Some(lst);
                     }
                 }
-                if let Some(lu) = local_under {
+                if let Some((lu, lk)) = local_under {
                     let mut u = under.lock().unwrap();
-                    if u.as_ref()
-                        .map(|cur| {
-                            mods.hits_harder((&lu.word, lu.score), (&cur.word, cur.score)).is_gt()
-                        })
-                        .unwrap_or(true)
-                    {
-                        *u = Some(lu);
+                    if u.as_ref().is_none_or(|(cur, ck)| {
+                        lk.chips_better(mods, (&lu.word, lu.score), ck, (&cur.word, cur.score))
+                    }) {
+                        *u = Some((lu, lk));
+                    }
+                }
+                if let Some((ln, rank)) = local_nothing {
+                    let mut n = nothing.lock().unwrap();
+                    if n.as_ref().is_none_or(|(_, cur)| rank.better_than(cur)) {
+                        *n = Some((ln, rank));
                     }
                 }
                 if let Some(ll) = local_longest {
@@ -1579,13 +1834,21 @@ pub fn race_for_band(
         }
     });
 
+    let under = under.into_inner().unwrap();
+    let nothing = nothing.into_inner().unwrap();
+    let nothing_first = match (&nothing, &under) {
+        (Some((_, rank)), Some((_, chip))) => mods.stall && Keep::from(rank).versus(chip).is_gt(),
+        _ => false,
+    };
     Outcome {
         lethal: lethal.into_inner().unwrap().map(|(f, _)| f),
         best: best.into_inner().unwrap(),
         least: least.into_inner().unwrap(),
         // Stays `None` when no ceiling was given, because the collector above requires one. That is
         // the `race_for_kill` case, where nothing is out of bounds and `best` is already the answer.
-        under: under.into_inner().unwrap(),
+        under: under.map(|(f, _)| f),
+        nothing: nothing.map(|(f, _)| f),
+        nothing_first,
         longest: longest.into_inner().unwrap(),
         words_considered: considered.into_inner(),
     }
@@ -1784,6 +2047,8 @@ mod tests {
             best: Some(Found { word: "VENEPUNCTURE".into(), score: 40, slice: 0 }),
             least: Some(Found { word: "AT".into(), score: 2, slice: 0 }),
             under: None,
+            nothing: None,
+            nothing_first: false,
             longest: Some(Found { word: "VENEPUNCTURE".into(), score: 40, slice: 0 }),
             words_considered: 900,
         };
@@ -1809,6 +2074,8 @@ mod tests {
             best: Some(Found { word: "VENEPUNCTURE".into(), score: 29, slice: 0 }),
             least: Some(Found { word: "SE".into(), score: 1, slice: 0 }),
             under: Some(Found { word: "VENEPUNCTURE".into(), score: 29, slice: 0 }),
+            nothing: None,
+            nothing_first: false,
             longest: Some(Found { word: "VENEPUNCTURE".into(), score: 29, slice: 0 }),
             words_considered: 900,
         };
@@ -1833,6 +2100,8 @@ mod tests {
             best: Some(Found { word: "SISSOO".into(), score: 25, slice: 0 }),
             least: Some(Found { word: "AA".into(), score: 1, slice: 0 }),
             under: Some(Found { word: "MIL".into(), score: 3, slice: 0 }),
+            nothing: None,
+            nothing_first: false,
             longest: Some(Found { word: "SISSOO".into(), score: 25, slice: 0 }),
             words_considered: 900,
         };
@@ -1847,6 +2116,88 @@ mod tests {
         let mut hit = out.clone();
         hit.lethal = Some(Found { word: "LOWN".into(), score: 4, slice: 0 });
         assert_eq!(hit.choice_for(goal).map(|f| f.word.as_str()), Some("LOWN"));
+    }
+
+    /// **On a free turn, nothing comes before the kill** — and after everything that does real work.
+    #[test]
+    fn a_free_turn_spends_itself_on_nothing_before_it_kills() {
+        let out = Outcome {
+            lethal: None,
+            best: Some(Found { word: "SISSOO".into(), score: 25, slice: 0 }),
+            least: Some(Found { word: "AA".into(), score: 1, slice: 0 }),
+            under: None,
+            nothing: Some(Found { word: "O".into(), score: 0, slice: 0 }),
+            nothing_first: false,
+            longest: Some(Found { word: "SISSOO".into(), score: 25, slice: 0 }),
+            words_considered: 900,
+        };
+        let goal = Goal::Scare { need: 1, below: 1 };
+        assert_eq!(out.choice_for(goal).map(|f| f.word.as_str()), Some("O"));
+        // Without the stall the field is never filled, and the gentlest overshoot is played.
+        let no_stall = Outcome { nothing: None, ..out.clone() };
+        assert_eq!(no_stall.choice_for(goal).map(|f| f.word.as_str()), Some("AA"));
+        // A safe chip still beats doing nothing: it moves the band toward the board.
+        let chip = Outcome {
+            under: Some(Found { word: "MIL".into(), score: 3, slice: 0 }),
+            ..out.clone()
+        };
+        assert_eq!(
+            chip.choice_for(Goal::Scare { need: 4, below: 6 }).map(|f| &*f.word),
+            Some("MIL")
+        );
+        // A hold falls back the same way: the chip, then nothing, then the gentlest of the rest.
+        let hold = Goal::Hold { below: 4, lethal: 9 };
+        assert_eq!(chip.choice_for(hold).map(|f| &*f.word), Some("MIL"));
+        assert_eq!(out.choice_for(hold).map(|f| &*f.word), Some("O"));
+        assert_eq!(no_stall.choice_for(hold).map(|f| &*f.word), Some("AA"));
+    }
+
+    /// The producer of [`Outcome::nothing`], against the real dictionary: the crypt board's single
+    /// letters score zero, so on a free turn there is a word to waste it on — and only then.
+    #[test]
+    fn the_search_finds_a_word_that_deals_nothing_only_when_stalling() {
+        if !present() {
+            return;
+        }
+        let dict = Dictionary::load(&game_dir()).unwrap();
+        let scorer = Scorer::new(&game_dir()).unwrap();
+        let tiles = crypt_board();
+        let goal = Goal::Scare { need: 1, below: 1 };
+        let run = |mods: &Modifiers| {
+            race_for_band(
+                &dict,
+                &scorer,
+                &tiles,
+                &Geometry::default(),
+                mods,
+                1,
+                Some(1),
+                &crate::pick::Context::default(),
+                8,
+            )
+        };
+        let stalling = run(&Modifiers { stall: true, ..Modifiers::none() });
+        let nothing = stalling.nothing.as_ref().expect("the crypt board has a zero-damage word");
+        assert_eq!(nothing.score, 0, "{}", nothing.word);
+        assert_eq!(stalling.choice_for(goal).map(|f| f.score), Some(0));
+
+        let ordinary = run(&Modifiers::none());
+        assert!(ordinary.nothing.is_none());
+        let played = ordinary.choice_for(goal).expect("something is playable");
+        assert!(played.score >= 1, "not stalling, so a word that lands: {}", played.word);
+
+        // The advisor's list agrees: the stall tier heads it, and holds only zero-damage words.
+        let mods = Modifiers { stall: true, ..Modifiers::none() };
+        let ctx = crate::pick::Context::default();
+        let list = ranked(&dict, &scorer, &tiles, &Geometry::default(), &mods, goal, &ctx, 8);
+        assert_eq!(list[0].tier, Tier::Stall);
+        let stalls: Vec<&Candidate> = list.iter().filter(|c| c.tier == Tier::Stall).collect();
+        assert!(stalls.iter().all(|c| c.score == 0 && c.rank.is_some()));
+        assert!(
+            stalls.iter().any(|c| c.word == nothing.word),
+            "{} not in the stall tier",
+            nothing.word
+        );
     }
 
     /// The producer, against the real dictionary — the tests above only exercise the consumer.
@@ -1911,6 +2262,8 @@ mod tests {
             best: Some(Found { word: "CAT".into(), score: 9, slice: 0 }),
             least: None,
             under: None,
+            nothing: None,
+            nothing_first: false,
             longest: Some(Found { word: "CAT".into(), score: 9, slice: 0 }),
             words_considered: 1,
         };
@@ -1922,6 +2275,8 @@ mod tests {
             best: Some(Found { word: "CAT".into(), score: 4, slice: 0 }),
             least: None,
             under: None,
+            nothing: None,
+            nothing_first: false,
             longest: Some(Found { word: "CAT".into(), score: 4, slice: 0 }),
             words_considered: 1,
         };
@@ -1942,6 +2297,8 @@ mod tests {
             best: Some(Found { word: "JAY".into(), score: 20, slice: 0 }),
             least: None,
             under: None,
+            nothing: None,
+            nothing_first: false,
             longest: Some(Found { word: "OATMEALS".into(), score: 12, slice: 1 }),
             words_considered: 10,
         };
@@ -2306,6 +2663,7 @@ mod tests {
             );
             (score >= need).then(|| {
                 crate::pick::rank(
+                    word,
                     &board,
                     &geom,
                     &typed.tiles,
@@ -2581,6 +2939,138 @@ mod scare_goal_tests {
             Goal::RankedKill { need: 2 }
         );
     }
+
+    /// **The stall keeps the band that has no room in it.** At 1 health past its threshold, any hit
+    /// kills; on a free turn the goal stays a scare, empty, so the ranking reaches a word that deals
+    /// nothing before it reaches one that kills.
+    #[test]
+    fn a_free_turn_keeps_the_empty_band_instead_of_killing() {
+        let stalling = Modifiers { stall: true, ..feared() };
+        let prefs = crate::pick::Preferences::default();
+        assert_eq!(
+            Goal::for_enemy(&stalling, 1, 0, Some(12), None, prefs),
+            Goal::Scare { need: 1, below: 1 }
+        );
+        // The control: the same enemy on a turn that is not free is killed.
+        assert_eq!(
+            Goal::for_enemy(&feared(), 1, 0, Some(12), None, prefs),
+            Goal::RankedKill { need: 2 }
+        );
+    }
+
+    /// **A free turn holds an enemy that has not yet broken, rather than scaring it.** The user's
+    /// rule: a scare on the halfling's even turn spends the turn the enemy could not hurt us on its
+    /// leaving, and the next enemy acts on one that can.
+    #[test]
+    fn a_free_turn_holds_an_enemy_short_of_its_flee_threshold() {
+        let stalling = Modifiers { stall: true, ..feared() };
+        let prefs = crate::pick::Preferences::default();
+        // 12 of 12, fleeing at 5 or below: 7 damage scares it, 12 kills it. Held under 6, one point
+        // of buffer short of the scare; the scare's own ceiling stays where it was.
+        assert_eq!(
+            Goal::for_enemy(&feared(), 12, 0, Some(12), None, prefs),
+            Goal::Scare { need: 8, below: 11 },
+            "the control: not a free turn, so the ordinary scare"
+        );
+        assert_eq!(
+            Goal::for_enemy(&stalling, 12, 0, Some(12), None, prefs),
+            Goal::Hold { below: 6, lethal: 11 }
+        );
+        // Armour counts toward both edges, as it does for the scare.
+        assert_eq!(
+            Goal::for_enemy(&stalling, 12, 3, Some(12), None, prefs),
+            Goal::Hold { below: 9, lethal: 14 }
+        );
+        // One point from breaking: no hit that lands is safe, so only a word that deals nothing.
+        assert_eq!(
+            Goal::for_enemy(&stalling, 6, 0, Some(12), None, prefs),
+            Goal::Hold { below: 1, lethal: 5 }
+        );
+    }
+
+    /// **Every enemy is held, not only the ones that can run**: a kill on a free turn hands the next
+    /// enemy a turn it can hit on, as a scare does. Overkill gold and `immobile` included.
+    #[test]
+    fn a_free_turn_holds_an_enemy_with_no_nerve_short_of_the_kill() {
+        let prefs = crate::pick::Preferences::default();
+        let plain = Modifiers { stall: true, ..Modifiers::none() };
+        assert_eq!(
+            Goal::for_enemy(&Modifiers::none(), 15, 0, Some(15), None, prefs),
+            Goal::RankedKill { need: 16 },
+            "the control: not a free turn"
+        );
+        assert_eq!(
+            Goal::for_enemy(&plain, 15, 0, Some(15), None, prefs),
+            Goal::Hold { below: 14, lethal: 14 }
+        );
+        assert_eq!(
+            Goal::for_enemy(&plain, 5, 3, None, None, prefs),
+            Goal::Hold { below: 7, lethal: 7 },
+            "armour counts, and no maximum is needed"
+        );
+        assert_eq!(
+            Goal::for_enemy(&plain, 1, 0, None, None, prefs),
+            Goal::Hold { below: 1, lethal: 1 },
+            "on 1 health, only a word that deals nothing keeps it"
+        );
+        let gold = Modifiers { overkill_gold: true, stall: true, ..Modifiers::none() };
+        assert_eq!(
+            Goal::for_enemy(&gold, 15, 0, None, None, prefs),
+            Goal::Hold { below: 14, lethal: 14 }
+        );
+        // Immobile with fear: it cannot run, so only the kill is an edge.
+        let stuck = Modifiers { immobile: true, ..Modifiers { stall: true, ..feared() } };
+        assert_eq!(
+            Goal::for_enemy(&stuck, 12, 0, Some(12), None, prefs),
+            Goal::Hold { below: 11, lethal: 11 }
+        );
+    }
+
+    /// Already past its threshold, it runs at the start of its own turn whatever we play short of
+    /// killing it — so a free turn changes nothing, and the ordinary scare stands.
+    #[test]
+    fn a_free_turn_cannot_hold_an_enemy_already_past_its_threshold() {
+        let stalling = Modifiers { stall: true, ..feared() };
+        let prefs = crate::pick::Preferences::default();
+        for (health, max) in [(4, 12), (2, 6)] {
+            assert_eq!(
+                Goal::for_enemy(&stalling, health, 0, Some(max), None, prefs),
+                Goal::for_enemy(&feared(), health, 0, Some(max), None, prefs),
+                "{health} of {max}"
+            );
+            assert!(matches!(
+                Goal::for_enemy(&stalling, health, 0, Some(max), None, prefs),
+                Goal::Scare { .. }
+            ));
+        }
+    }
+
+    /// Every hold leaves the enemy short of breaking and alive, for every damage it admits.
+    #[test]
+    fn no_hold_admits_a_hit_that_scares_or_kills() {
+        let prefs = crate::pick::Preferences::default();
+        let mut holds = 0;
+        for nerve in [Nerve::Fear, Nerve::Terror, Nerve::Caution] {
+            let stalling = Modifiers { stall: true, nerve: Some(nerve), ..Modifiers::none() };
+            for max in 2..=20 {
+                for health in 1..=max {
+                    for armour in 0..=3 {
+                        let g = Goal::for_enemy(&stalling, health, armour, Some(max), None, prefs);
+                        let Goal::Hold { below, lethal } = g else { continue };
+                        holds += 1;
+                        assert!(below >= MIN_MEANINGFUL_DAMAGE && below <= lethal, "{g:?}");
+                        let at = format!("{nerve:?} {health}+{armour}/{max} under {g:?}");
+                        for damage in 0..below {
+                            let left = health - (damage - armour).max(0);
+                            assert!(left > 0, "{damage} kills {at}");
+                            assert!(!nerve.would_leave(left, max), "{damage} scares {at}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(holds > 100, "only {holds} holds: the sweep is not reaching the hold");
+    }
 }
 
 #[cfg(test)]
@@ -2795,8 +3285,10 @@ mod ranked_tests {
         match t {
             Tier::InBand => 0,
             Tier::Under => 1,
-            Tier::Overshoot => 2,
-            Tier::Fallback => 3,
+            Tier::Stall => 2,
+            Tier::Flees => 3,
+            Tier::Overshoot => 4,
+            Tier::Fallback => 5,
         }
     }
 
@@ -2856,6 +3348,42 @@ mod ranked_tests {
         assert!(over.iter().all(|c| c.score >= below));
         assert!(over.windows(2).all(|p| p[0].score <= p[1].score), "overshoots go gentlest first");
         assert!(of(Tier::Fallback).iter().all(|c| c.score < MIN_MEANINGFUL_DAMAGE));
+    }
+
+    /// A hold: the safe chip hardest first, then nothing, then the scares and the kills, each
+    /// gentlest first — and the head of the list is the word Diggle would play.
+    #[test]
+    fn hold_orders_chip_then_nothing_then_scares_then_kills() {
+        let w = world();
+        let (below, lethal) = (4, 7);
+        let goal = Goal::Hold { below, lethal };
+        let mods = Modifiers { stall: true, ..Modifiers::none() };
+        let list = rank_all(&w, &mods, goal);
+        assert_tiers_in_order(&list);
+        let of = |t: Tier| -> Vec<&Candidate> { list.iter().filter(|c| c.tier == t).collect() };
+        assert!(of(Tier::InBand).is_empty(), "a hold has no band");
+        let (under, stall, flees, over) =
+            (of(Tier::Under), of(Tier::Stall), of(Tier::Flees), of(Tier::Overshoot));
+        // Every tier present, or the order proves nothing.
+        for (name, t) in [("under", &under), ("stall", &stall), ("flees", &flees), ("over", &over)]
+        {
+            assert!(!t.is_empty(), "this board has no {name} word for {goal:?}");
+        }
+        assert!(under.iter().all(|c| c.score >= 1 && c.score < below));
+        assert!(under.windows(2).all(|p| p[0].score >= p[1].score), "chip hardest first");
+        assert!(stall.iter().all(|c| c.score == 0));
+        assert!(flees.iter().all(|c| c.score >= below && c.score < lethal));
+        assert!(flees.windows(2).all(|p| p[0].score <= p[1].score), "scares gentlest first");
+        assert!(over.iter().all(|c| c.score >= lethal));
+
+        let out = search(&w.dict, &w.scorer, &w.board, &w.geom, &mods, goal, &w.picking, 8);
+        let played = out.choice_for(goal).expect("something is playable");
+        assert_eq!(
+            played.score, list[0].score,
+            "Diggle plays {}, the list leads {}",
+            played.word, list[0].word
+        );
+        assert!(played.score >= 1 && played.score < below);
     }
 
     #[test]
@@ -3013,6 +3541,90 @@ mod ranked_tests {
         assert!(band.iter().filter(|c| c.rank.unwrap().gain > 0).all(|c| c.word.ends_with('T')));
     }
 
+    /// The wood gear pays on a kill, so a scare is not ranked by it. A live save with the Wooden
+    /// idol buckler listed every all-wood scare above every other scare, for a payout no scare gets.
+    #[test]
+    fn a_scare_is_not_ranked_by_the_wood_kill_payout() {
+        let mut w = world();
+        w.picking.prefs.wood_only_pays = true;
+        let mods = Modifiers::none();
+        let wood = |goal| {
+            rank_all(&w, &mods, goal)
+                .iter()
+                .filter(|c| c.tier == Tier::InBand)
+                .filter(|c| c.rank.unwrap().wood_only)
+                .count()
+        };
+        assert!(wood(Goal::RankedKill { need: 3 }) > 0, "the fixture must have wood-only kills");
+        let scare = Goal::Scare { need: 3, below: 1000 };
+        assert_eq!(wood(scare), 0, "a scare collects no wood payout");
+        assert_eq!(wood(Goal::Hold { below: 1000, lethal: 1000 }), 0);
+
+        // Diggle's search agrees: the same word as with no wood gear at all.
+        let play = |w: &World| {
+            search(&w.dict, &w.scorer, &w.board, &w.geom, &mods, scare, &w.picking, 8)
+                .choice_for(scare)
+                .map(|f| f.word.clone())
+        };
+        let with = play(&w);
+        w.picking.prefs.wood_only_pays = false;
+        assert_eq!(with, play(&w));
+    }
+
+    /// A free-turn hold, every word under the ceiling: the words that keep the enemy here, best first,
+    /// and the word Diggle would play.
+    fn hold_everything(w: &World) -> (Vec<Candidate>, String) {
+        let mods = Modifiers { stall: true, ..Modifiers::none() };
+        let goal = Goal::Hold { below: 1000, lethal: 1000 };
+        let list = rank_all(w, &mods, goal);
+        let out = search(&w.dict, &w.scorer, &w.board, &w.geom, &mods, goal, &w.picking, 8);
+        let played = out.choice_for(goal).expect("something keeps it here").word.clone();
+        (list, played)
+    }
+
+    /// The user, stalling with three burning tiles: none of the top candidates ate all three. On a
+    /// free turn the fire comes off before the chip's damage is asked about.
+    #[test]
+    fn a_free_turn_eats_the_most_fire_first() {
+        let mut w = world();
+        // `OYCAACTPORLIGAHJ`: set the A, C and T of `ACT` burning.
+        for i in [4, 5, 6] {
+            w.board[i].quality.burn = Some(3);
+        }
+        let (list, played) = hold_everything(&w);
+        let most = list.iter().map(|c| c.keep.fire).max().unwrap();
+        assert_eq!(most, 3, "some word must eat all three");
+        assert_eq!(list[0].keep.fire, 3, "{} listed first", list[0].word);
+        let hardest = list.iter().max_by_key(|c| c.score).unwrap();
+        assert!(hardest.keep.fire < 3, "the fixture must separate fire from damage");
+        let typed = Typist::new(&w.board, &w.geom).type_word(&played).unwrap();
+        assert_eq!(crate::pick::fire_eaten(&w.board, &typed.tiles), 3, "Diggle played {played}");
+
+        // Off a free turn nothing changes: the chip is still the hardest hit.
+        let mods = Modifiers::none();
+        let goal = Goal::Scare { need: 1000, below: 1000 };
+        let out = search(&w.dict, &w.scorer, &w.board, &w.geom, &mods, goal, &w.picking, 8);
+        let chip = out.under.expect("a chip");
+        assert_eq!(chip.score, hardest.score, "{} is not the hardest chip", chip.word);
+    }
+
+    /// The user: *when stalling, it's not using logic to conserve gold tiles and wildcards.* The
+    /// chip was the hardest hit, so it spent the gold that makes the next turn's kill.
+    #[test]
+    fn a_free_turn_keeps_the_gold_for_the_next_turn() {
+        let w = world();
+        let (list, played) = hold_everything(&w);
+        assert!(list.iter().any(|c| c.keep.hoarded > 0.0), "the fixture must have gold to spend");
+        let hardest = list.iter().max_by_key(|c| c.score).unwrap();
+        assert!(hardest.keep.hoarded > 0.0, "the hardest chip spends gold: {}", hardest.word);
+        assert_eq!(list[0].keep.hoarded, 0.0, "{} listed first", list[0].word);
+        let typed = Typist::new(&w.board, &w.geom).type_word(&played).unwrap();
+        assert_eq!(crate::pick::hoarded(&w.board, &typed.tiles, &w.scorer), 0.0, "{played}");
+        // Of the words that spend nothing, still the hardest hit.
+        let free = list.iter().filter(|c| c.keep.hoarded == 0.0).map(|c| c.score).max();
+        assert_eq!(Some(list[0].score), free);
+    }
+
     /// Diggle's own search, not just the advisor's list, takes the Silver chain coif's armour into
     /// its ranking: of the kills on `OYCAACTPORLIGAHJ`, whose `Y` and `H` are silver by default
     /// material, the word it plays gives as much coif armour as any kill can, and some kill gives
@@ -3082,9 +3694,15 @@ mod ranked_tests {
         for name in ["combatSaveData-crypt-l0.lua", "combatSaveData-l1-depleted.lua"] {
             let src = std::fs::read_to_string(format!("tests/fixtures/{name}")).unwrap();
             let cs = crate::game::save::parse(&src).unwrap();
-            let plan = crate::turn::plan(&cs, &game_dir(), &letters, &mut Default::default())
-                .unwrap()
-                .unwrap();
+            let plan = crate::turn::plan(
+                &cs,
+                &game_dir(),
+                &letters,
+                &mut Default::default(),
+                Default::default(),
+            )
+            .unwrap()
+            .unwrap();
             let fw = World {
                 dict: Dictionary::load(&game_dir()).unwrap(),
                 scorer: Scorer::new(&game_dir()).unwrap(),

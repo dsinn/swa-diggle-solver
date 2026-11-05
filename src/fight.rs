@@ -77,6 +77,9 @@ fn nothing_left_to_lower(goal: Goal) -> bool {
             need <= crate::search::MIN_MEANINGFUL_DAMAGE
                 && below <= crate::search::MIN_MEANINGFUL_DAMAGE + 1
         }
+        // A hold is down to its floor when only a word that deals nothing is under its ceiling.
+        // A warning on one of those means the status on the enemy kills it whatever we play.
+        Goal::Hold { below, .. } => below <= crate::search::MIN_MEANINGFUL_DAMAGE,
         _ => true,
     }
 }
@@ -560,7 +563,14 @@ impl Fight<'_> {
         turns: usize, peak_health: &mut std::collections::HashMap<String, i64>,
         murder_backoff: &mut i64, last_seen_at: &mut (i64, i64), select_failures: &mut usize,
     ) -> Result<Option<Outcome>, crate::Error> {
-        let Some(plan) = crate::turn::plan(cs, &self.game_dir, self.letters, peak_health)? else {
+        let Some(plan) = crate::turn::plan(
+            cs,
+            &self.game_dir,
+            self.letters,
+            peak_health,
+            crate::turn::Options::default(),
+        )?
+        else {
             std::thread::sleep(crate::timing::POLL_ARRIVAL);
             return Ok(None);
         };
@@ -625,6 +635,16 @@ impl Fight<'_> {
                     "  aiming {} lower after a murder warning: {goal:?}
 ",
                     murder_backoff
+                ));
+            }
+            // A hold's chip was called murder: lower both edges by the same disagreement. Floored
+            // at a ceiling of 1, which admits only words that deal nothing.
+            if let Goal::Hold { below, lethal } = goal {
+                let shift =
+                    |edge: i64| (edge - *murder_backoff).max(crate::search::MIN_MEANINGFUL_DAMAGE);
+                goal = Goal::Hold { below: shift(below), lethal: shift(lethal) };
+                log.push_str(&format!(
+                    "  aiming {murder_backoff} lower after a murder warning: {goal:?}\n"
                 ));
             }
         }

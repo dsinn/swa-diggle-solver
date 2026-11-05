@@ -110,6 +110,7 @@ impl View {
     /// and is cleared when the fight ends.
     pub fn next(
         prev: &View, snap: &Snapshot, res: &Resources, peaks: &mut HashMap<String, i64>,
+        options: crate::turn::Options,
     ) -> View {
         let folder = snap.dir.join(&snap.file).display().to_string();
         let mode = classify(snap);
@@ -128,7 +129,7 @@ impl View {
             },
             Mode::CombatPlayerTurn => {
                 let cs = snap.combat.as_ref().expect("a player turn has a save");
-                match Self::turn(cs, res, peaks) {
+                match Self::turn(cs, res, peaks, options) {
                     Ok(v) => View { folder, ..v },
                     Err(e) => View {
                         mode,
@@ -143,8 +144,10 @@ impl View {
 
     fn turn(
         cs: &crate::game::save::Table, res: &Resources, peaks: &mut HashMap<String, i64>,
+        options: crate::turn::Options,
     ) -> Result<View, crate::Error> {
-        let Some(mut plan) = crate::turn::plan(cs, &res.game_dir, &res.letters, peaks)? else {
+        let Some(mut plan) = crate::turn::plan(cs, &res.game_dir, &res.letters, peaks, options)?
+        else {
             return Ok(View { mode: Mode::CombatPlayerTurn, ..View::default() });
         };
         // The player can cast, so the search scores each word by its best option — see
@@ -256,7 +259,12 @@ pub fn drawn_material<'a>(
 pub fn goal_words(goal: Goal) -> String {
     match goal {
         Goal::RankedKill { need } | Goal::FirstKill { need } => format!("kill: {need}+ damage"),
+        // Empty only when stalling: any hit kills, and the enemy cannot hit back this turn.
+        Goal::Scare { need, below } if need >= below => "spare: deal nothing".into(),
         Goal::Scare { need, below } => format!("scare: {need}..={} damage", below - 1),
+        // A free turn: keep it here, short of its flee threshold. See `search::Goal::Hold`.
+        Goal::Hold { below, .. } if below <= 1 => "hold: deal nothing, don't scare".into(),
+        Goal::Hold { below, .. } => format!("hold: under {below} damage, don't scare"),
         Goal::MaxDamage => "hardest hit (overkill pays)".into(),
     }
 }
@@ -288,7 +296,13 @@ mod tests {
     fn a_player_turn_lists_live_rows_with_a_cell_per_letter() {
         let res = res();
         let mut peaks = Default::default();
-        let v = View::next(&View::default(), &snap(Some(&turn())), &res, &mut peaks);
+        let v = View::next(
+            &View::default(),
+            &snap(Some(&turn())),
+            &res,
+            &mut peaks,
+            Default::default(),
+        );
         assert_eq!(v.mode, Mode::CombatPlayerTurn);
         assert!(v.live);
         assert!(!v.rows.is_empty() && v.rows.len() <= crate::advisor::annotate::ROW_CAP);
@@ -308,9 +322,15 @@ mod tests {
     fn waiting_keeps_the_last_list_but_greys_it() {
         let res = res();
         let mut peaks = Default::default();
-        let live = View::next(&View::default(), &snap(Some(&turn())), &res, &mut peaks);
+        let live = View::next(
+            &View::default(),
+            &snap(Some(&turn())),
+            &res,
+            &mut peaks,
+            Default::default(),
+        );
         let wait = turn().replace("\"PlayerTurn\"", "\"WaitPhase\"");
-        let v = View::next(&live, &snap(Some(&wait)), &res, &mut peaks);
+        let v = View::next(&live, &snap(Some(&wait)), &res, &mut peaks, Default::default());
         assert_eq!(v.mode, Mode::CombatWaiting { state: "WaitPhase".into() });
         assert!(!v.live);
         assert_eq!(v.rows.len(), live.rows.len());
@@ -321,8 +341,14 @@ mod tests {
     fn out_of_combat_clears_the_list_and_the_peaks() {
         let res = res();
         let mut peaks = Default::default();
-        let live = View::next(&View::default(), &snap(Some(&turn())), &res, &mut peaks);
-        let v = View::next(&live, &snap(None), &res, &mut peaks);
+        let live = View::next(
+            &View::default(),
+            &snap(Some(&turn())),
+            &res,
+            &mut peaks,
+            Default::default(),
+        );
+        let v = View::next(&live, &snap(None), &res, &mut peaks, Default::default());
         assert_eq!(v.mode, Mode::OutOfCombat);
         assert!(v.rows.is_empty());
         // Not the previous fight's header, and not the default's "waiting for a save" either.
@@ -335,7 +361,13 @@ mod tests {
     fn an_unreadable_save_is_noted_without_losing_the_list() {
         let res = res();
         let mut peaks = Default::default();
-        let live = View::next(&View::default(), &snap(Some(&turn())), &res, &mut peaks);
+        let live = View::next(
+            &View::default(),
+            &snap(Some(&turn())),
+            &res,
+            &mut peaks,
+            Default::default(),
+        );
         let v = live.unreadable(std::path::Path::new("saves"), "unexpected eof");
         assert!(
             v.notes.contains("unreadable") && v.notes.contains("unexpected eof"),
@@ -395,7 +427,13 @@ mod tests {
             "turnState = \"PlayerTurn\", gearFlags = { spellFire = 1 },",
             1,
         );
-        let v = View::next(&View::default(), &snap(Some(&held)), &res, &mut Default::default());
+        let v = View::next(
+            &View::default(),
+            &snap(Some(&held)),
+            &res,
+            &mut Default::default(),
+            Default::default(),
+        );
         let fire = res.lexica.words_for("fire").unwrap();
         let mut cast = 0;
         for r in &v.rows {
@@ -408,8 +446,13 @@ mod tests {
             cast += r.row.spells.len();
         }
         assert!(cast > 0, "no row cast Fire, so this proves nothing");
-        let plain =
-            View::next(&View::default(), &snap(Some(&turn())), &res, &mut Default::default());
+        let plain = View::next(
+            &View::default(),
+            &snap(Some(&turn())),
+            &res,
+            &mut Default::default(),
+            Default::default(),
+        );
         assert!(plain.rows.iter().all(|r| r.row.spells.is_empty()), "no spell held, none shown");
     }
 
@@ -435,10 +478,20 @@ mod tests {
             s
         };
         let row = |v: &View| v.rows.iter().find(|r| r.row.word == "ACETABULUM").cloned();
-        let plain =
-            View::next(&View::default(), &snap(Some(&save(false))), &res, &mut Default::default());
-        let cast =
-            View::next(&View::default(), &snap(Some(&save(true))), &res, &mut Default::default());
+        let plain = View::next(
+            &View::default(),
+            &snap(Some(&save(false))),
+            &res,
+            &mut Default::default(),
+            Default::default(),
+        );
+        let cast = View::next(
+            &View::default(),
+            &snap(Some(&save(true))),
+            &res,
+            &mut Default::default(),
+            Default::default(),
+        );
         let (plain, cast) = (row(&plain).expect("spellable"), row(&cast).expect("spellable"));
         assert!(plain.row.score > 0);
         assert_eq!(cast.row.score, plain.row.score * 2);
@@ -468,7 +521,13 @@ mod tests {
             s
         };
         let view = |rapier: bool| {
-            View::next(&View::default(), &snap(Some(&save(rapier))), &res, &mut Default::default())
+            View::next(
+                &View::default(),
+                &snap(Some(&save(rapier))),
+                &res,
+                &mut Default::default(),
+                Default::default(),
+            )
         };
         let row = |v: &View, w: &str| v.rows.iter().find(|r| r.row.word == w).cloned();
         let (plain, rapier) = (view(false), view(true));
@@ -518,6 +577,7 @@ mod tests {
                 &snap(Some(&save(curse, bonus))),
                 &res,
                 &mut Default::default(),
+                Default::default(),
             )
         };
         let started = std::time::Instant::now();
@@ -562,5 +622,75 @@ mod tests {
         assert_eq!(goal_words(Goal::RankedKill { need: 7 }), "kill: 7+ damage");
         assert_eq!(goal_words(Goal::Scare { need: 4, below: 7 }), "scare: 4..=6 damage");
         assert_eq!(goal_words(Goal::MaxDamage), "hardest hit (overkill pays)");
+        assert_eq!(goal_words(Goal::Scare { need: 1, below: 1 }), "spare: deal nothing");
+        assert_eq!(
+            goal_words(Goal::Hold { below: 4, lethal: 9 }),
+            "hold: under 4 damage, don't scare"
+        );
+        assert_eq!(
+            goal_words(Goal::Hold { below: 1, lethal: 9 }),
+            "hold: deal nothing, don't scare"
+        );
+    }
+
+    /// The hold in the window: on the free turn the top row hurts the enemy without frightening it
+    /// off, and every scare is listed below the words that keep it here.
+    #[test]
+    fn a_free_turn_lists_a_chip_above_every_scare() {
+        use crate::search::Tier;
+        let res = res();
+        let v = View::next(
+            &View::default(),
+            &snap(Some(&crate::turn::tests::held_save())),
+            &res,
+            &mut Default::default(),
+            Default::default(),
+        );
+        assert!(v.header.contains("hold: under 6 damage"), "{}", v.header);
+        let top = &v.rows.first().expect("a ranked list").row;
+        assert_eq!(top.tier, Tier::Under, "{} first", top.word);
+        assert!(top.score >= 1 && top.score < 6, "{} scores {}", top.word, top.score);
+        let first_scare = v.rows.iter().position(|r| r.row.tier == Tier::Flees);
+        let last_keep =
+            v.rows.iter().rposition(|r| matches!(r.row.tier, Tier::Under | Tier::Stall));
+        if let (Some(s), Some(k)) = (first_scare, last_keep) {
+            assert!(k < s, "a scare at row {s} is above a word that keeps it, at row {k}");
+            assert_eq!(v.rows[s].row.effect, "scares - on a free turn");
+        }
+        assert!(v.rows.iter().all(|r| r.row.tier != Tier::InBand), "no word is aimed at a scare");
+    }
+
+    /// **The checkbox, end to end.** One halfling save on a free turn, a terrified enemy on 1
+    /// health: ticked, the top row deals nothing and says why; unticked, it kills, as the advisor
+    /// did before the box existed. Both lists hold the same words — only the order differs.
+    #[test]
+    fn the_stall_box_decides_whether_a_free_turn_spares_or_kills() {
+        use crate::search::Tier;
+        let res = res();
+        let save = crate::turn::tests::halfling_save(2, true);
+        let view = |stall: bool| {
+            let mut peaks = HashMap::from([("Amorphous".to_string(), 8)]);
+            View::next(
+                &View::default(),
+                &snap(Some(&save)),
+                &res,
+                &mut peaks,
+                crate::turn::Options { stall_on_free_turns: stall },
+            )
+        };
+        let (on, off) = (view(true), view(false));
+
+        let top = &on.rows.first().expect("a ranked list").row;
+        assert_eq!(top.tier, Tier::Stall, "{} first", top.word);
+        assert_eq!(top.score, 0);
+        assert_eq!(top.effect, "stalls - it cannot hit you");
+        assert!(on.header.contains("spare: deal nothing"), "{}", on.header);
+        // The kills are still there, just below.
+        assert!(on.rows.iter().any(|r| r.row.tier == Tier::Overshoot), "no kill listed at all");
+
+        let top = &off.rows.first().expect("a ranked list").row;
+        assert_eq!(top.effect, "kills", "{} first, unticked", top.word);
+        assert!(off.rows.iter().all(|r| r.row.tier != Tier::Stall));
+        assert!(off.header.contains("kill"), "{}", off.header);
     }
 }

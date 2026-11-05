@@ -17,15 +17,22 @@
 //!   sits on the colour of the tile it would be typed into; the columns give the expected damage,
 //!   the enemy's lexicon bonus when it is not 1, the health and armour it should give, and what it does.
 //!
+//! **Stalling** on the halfling's free turns is the checkbox "Stall on halfling's even turns": even
+//! as the game's Turn box counts them, the turns its `immuneTurnMod2` passive means the enemy cannot
+//! hit back. Ticked (the default), an enemy that could run is kept rather than scared off on those
+//! turns: the top rows hurt it without frightening it, or deal nothing, and a scare or a kill comes
+//! only after them ([`diggle_solver::search::Goal::Hold`], [`diggle_solver::search::Modifiers::stall`]).
+//! Unticked, those turns are ranked like any other. Changing it re-ranks the turn on screen at once.
+//!
 //! **Not modelled**: Diggle's murder backoff, which aims lower after the game warns that a word
 //! would kill a frightened enemy. That warning reaches Diggle through the console, which this does
 //! not read. You see it on screen.
 //!
 //! ## The window
 //!
-//! Its size, "Stay on top", and whether the log box is shown and how tall it is are remembered
-//! between launches ([`diggle_solver::advisor::settings`]). The log box starts collapsed; drag the
-//! gap under it to resize it. Settings are written half a second after the last change
+//! Its size, "Stay on top", "Stall on halfling's even turns", and whether the log box is shown and
+//! how tall it is are remembered between launches ([`diggle_solver::advisor::settings`]). The log
+//! box starts collapsed; drag the gap under it to resize it. Settings are written half a second after the last change
 //! ([`SAVE_DELAY_MS`]), so a drag is one write rather than hundreds.
 //!
 //! ## Options
@@ -100,12 +107,35 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const WM_VIEW: u32 = WM_APP + 1;
 const ID_TOPMOST: usize = 101;
 const ID_LOG: usize = 102;
+const ID_STALL: usize = 103;
 /// The timer that writes the settings once they have stopped changing.
 const ID_SAVE: usize = 1;
 const SAVE_DELAY_MS: u32 = 500;
 /// Static-control styles (`winuser.h`), which the `windows` crate does not expose as constants.
 const SS_CENTER: u32 = 0x1;
 const SS_CENTERIMAGE: u32 = 0x200;
+
+/// What the worker is told: a change in the save folder, or a change of the window's options.
+enum Input {
+    Watch(Event),
+    Options(diggle_solver::turn::Options),
+}
+
+/// The window's way to tell the worker that the options changed. Set once, before the window opens.
+static TO_WORKER: OnceLock<Mutex<mpsc::Sender<Input>>> = OnceLock::new();
+
+/// Tells the worker the options changed. A failure means it has stopped, and there is nothing to
+/// re-rank.
+fn tell_worker(options: diggle_solver::turn::Options) {
+    if let Some(tx) = TO_WORKER.get() {
+        let _ = tx.lock().unwrap().send(Input::Options(options));
+    }
+}
+
+/// The options [`Settings`] holds, as the turn planner takes them.
+fn options_of(s: &Settings) -> diggle_solver::turn::Options {
+    diggle_solver::turn::Options { stall_on_free_turns: s.stall_on_free_turns }
+}
 
 /// The latest view, written by the worker and read by the window.
 static VIEW: OnceLock<Mutex<View>> = OnceLock::new();
@@ -119,6 +149,7 @@ struct Ui {
     notes: HWND,
     topmost: HWND,
     log_toggle: HWND,
+    stall: HWND,
     list: HWND,
     banner: HWND,
     tile_font: HFONT,
@@ -240,7 +271,14 @@ fn publish(hwnd: isize, v: View) {
 ///
 /// Events arriving while a turn is being ranked are coalesced: only the newest snapshot is ranked,
 /// and a result whose save has already moved on is dropped rather than shown.
-fn worker(hwnd: isize, args: Args) {
+///
+/// A change of options re-ranks the last snapshot, so ticking a box changes the list on screen
+/// without waiting for the game to write again. Options are never coalesced away: each is applied
+/// as it arrives, and only the ranking it asks for is shared with a snapshot arriving alongside.
+fn worker(
+    hwnd: isize, args: Args, tx: mpsc::Sender<Input>, rx: mpsc::Receiver<Input>,
+    mut options: diggle_solver::turn::Options,
+) {
     let res = match Resources::load(&args.game_dir) {
         Ok(r) => r,
         Err(e) => {
@@ -251,22 +289,52 @@ fn worker(hwnd: isize, args: Args) {
     if args.dirs.is_empty() {
         return publish(hwnd, View { header: "APPDATA is not set".into(), ..View::default() });
     }
-    let (tx, rx) = mpsc::channel();
-    watch::spawn(args.dirs, watch::arcade_saves(&args.game_dir), tx);
+    // The watcher speaks `Event`; this thread listens for `Input`. One forwarding thread joins
+    // them, and ends when either side hangs up.
+    let (events, from_watch) = mpsc::channel();
+    watch::spawn(args.dirs, watch::arcade_saves(&args.game_dir), events);
+    std::thread::spawn(move || {
+        for e in from_watch {
+            if tx.send(Input::Watch(e)).is_err() {
+                return;
+            }
+        }
+    });
     let mut peaks: HashMap<String, i64> = HashMap::new();
     let mut current = View::default();
-    let mut pending: Option<Event> = None;
+    // The last snapshot ranked, for re-ranking it when the options change.
+    let mut last: Option<diggle_solver::advisor::mode::Snapshot> = None;
+    let mut pending: Option<Input> = None;
     loop {
-        let Some(mut event) = pending.take().or_else(|| rx.recv().ok()) else { return };
-        while let Ok(newer) = rx.try_recv() {
-            event = newer;
+        let Some(first) = pending.take().or_else(|| rx.recv().ok()) else { return };
+        let mut event: Option<Event> = None;
+        let mut rerank = false;
+        for input in std::iter::once(first).chain(std::iter::from_fn(|| rx.try_recv().ok())) {
+            match input {
+                Input::Watch(e) => event = Some(e),
+                Input::Options(o) => {
+                    rerank |= o != options;
+                    options = o;
+                }
+            }
         }
+        let event = match (event, rerank, &last) {
+            (Some(e), ..) => e,
+            (None, true, Some(snap)) => Event::Snapshot(snap.clone()),
+            _ => continue,
+        };
         match event {
             Event::Snapshot(snap) => {
-                let next = View::next(&current, &snap, &res, &mut peaks);
+                let next = View::next(&current, &snap, &res, &mut peaks, options);
+                last = Some(snap);
                 if let Ok(newer) = rx.try_recv() {
-                    let stale =
-                        newer.supersedes_a_turn() && !matches!(next.mode, Mode::OutOfCombat);
+                    let stale = match &newer {
+                        Input::Watch(e) => {
+                            e.supersedes_a_turn() && !matches!(next.mode, Mode::OutOfCombat)
+                        }
+                        // Ranked under the options just replaced, so not worth showing.
+                        Input::Options(o) => *o != options,
+                    };
                     pending = Some(newer);
                     // Peaks only rise within a fight, so the stale turn's reading stays true.
                     if stale {
@@ -321,7 +389,10 @@ fn main() -> windows::core::Result<()> {
             None,
         )?;
         let raw = hwnd.0 as isize;
-        std::thread::spawn(move || worker(raw, args));
+        let (tx, rx) = mpsc::channel();
+        let _ = TO_WORKER.set(Mutex::new(tx.clone()));
+        let options = options_of(&saved);
+        std::thread::spawn(move || worker(raw, args, tx, rx, options));
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
@@ -375,8 +446,17 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
     )?;
     let log_toggle =
         child(hwnd, w!("BUTTON"), w!("Show log"), BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0, ID_LOG)?;
+    let stall = child(
+        hwnd,
+        w!("BUTTON"),
+        w!("Stall on halfling's even turns"),
+        BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
+        ID_STALL,
+    )?;
     let saved = settings_now();
-    for (h, on) in [(topmost, saved.topmost), (log_toggle, saved.log_open)] {
+    for (h, on) in
+        [(topmost, saved.topmost), (log_toggle, saved.log_open), (stall, saved.stall_on_free_turns)]
+    {
         let check = if on { BST_CHECKED.0 } else { 0 };
         SendMessageW(h, BM_SETCHECK, WPARAM(check as usize), LPARAM(0));
     }
@@ -388,7 +468,7 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         0,
     )?;
     let banner = child(hwnd, w!("STATIC"), w!("Out of combat"), SS_CENTER | SS_CENTERIMAGE, 0)?;
-    for h in [status, notes, topmost, log_toggle, list] {
+    for h in [status, notes, topmost, log_toggle, stall, list] {
         SendMessageW(h, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
     }
     SendMessageW(banner, WM_SETFONT, WPARAM(banner_font.0 as usize), LPARAM(1));
@@ -418,6 +498,7 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         notes,
         topmost,
         log_toggle,
+        stall,
         list,
         banner,
         tile_font,
@@ -427,10 +508,11 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
 }
 
 const PAD: i32 = 8;
-/// The header row: the header text, and the two checkboxes on its right.
+/// The header row: the header text, and the three checkboxes on its right.
 const HEADER_HEIGHT: i32 = 40;
 const TOPMOST_WIDTH: i32 = 120;
 const LOG_TOGGLE_WIDTH: i32 = 100;
+const STALL_WIDTH: i32 = 230;
 /// The list keeps at least this much height however tall the log is dragged.
 const MIN_LIST_HEIGHT: i32 = 80;
 
@@ -461,9 +543,11 @@ unsafe fn layout(hwnd: HWND, ui: &Ui) {
     let _ = GetClientRect(hwnd, &mut rc);
     let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
     let s = settings_now();
-    let boxes = TOPMOST_WIDTH + LOG_TOGGLE_WIDTH + PAD;
+    let boxes = STALL_WIDTH + PAD + LOG_TOGGLE_WIDTH + PAD + TOPMOST_WIDTH;
     let _ = MoveWindow(ui.status, PAD, PAD, (w - 3 * PAD - boxes).max(0), HEADER_HEIGHT, true);
-    let _ = MoveWindow(ui.log_toggle, w - PAD - boxes, PAD, LOG_TOGGLE_WIDTH, 24, true);
+    let _ = MoveWindow(ui.stall, w - PAD - boxes, PAD, STALL_WIDTH, 24, true);
+    let log_left = w - PAD - TOPMOST_WIDTH - PAD - LOG_TOGGLE_WIDTH;
+    let _ = MoveWindow(ui.log_toggle, log_left, PAD, LOG_TOGGLE_WIDTH, 24, true);
     let _ = MoveWindow(ui.topmost, w - PAD - TOPMOST_WIDTH, PAD, TOPMOST_WIDTH, 24, true);
     let (log_top, log_height) = log_band(h, s.log_height);
     let top = if s.log_open {
@@ -940,6 +1024,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             });
             update(hwnd, |s| s.log_open = on);
             relayout(hwnd);
+            LRESULT(0)
+        }
+        WM_COMMAND if (wparam.0 & 0xffff) == ID_STALL && (wparam.0 >> 16) as u32 == BN_CLICKED => {
+            let on = UI.with(|u| {
+                u.borrow().as_ref().is_some_and(|ui| {
+                    SendMessageW(ui.stall, BM_GETCHECK, WPARAM(0), LPARAM(0)).0
+                        == BST_CHECKED.0 as isize
+                })
+            });
+            update(hwnd, |s| s.stall_on_free_turns = on);
+            tell_worker(options_of(&settings_now()));
             LRESULT(0)
         }
         WM_VIEW => {

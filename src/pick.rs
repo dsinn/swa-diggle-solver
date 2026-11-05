@@ -53,6 +53,111 @@ pub struct Preferences {
     pub heal_at: Option<i64>,
     /// How much of what a word can give the player would land — see [`gain`].
     pub room: Room,
+    /// The suffix links that would queue infinitive tiles — see [`Infinitives`].
+    pub infinitives: Infinitives,
+}
+
+/// The gear that turns a suffixed word into new tiles, and which of its links are live.
+///
+/// Each link is an `onSubmitSuffix<FROM>to<TO>` flag. Submitting a word whose suffix is `FROM`
+/// queues `TO` onto the board (`utils/effects.lua:126-140`): one in five times as a single tile,
+/// gold or `silver3`, else letter by letter (`ui/objects/tile.lua:377-392`). It runs `onSubmit`, so
+/// the word need not kill. The suffix is `cacheSuffix`'s, the longest registered one strictly
+/// shorter than the word (`utils/effects.lua:106-118`), which is [`crate::gear::table::SUFFIXES_LONGEST_FIRST`].
+///
+/// Two items, the user's pick, 2026-11-04, each with its own emoji:
+///
+/// ```text
+///   Infinitives gauntlet  suffixGauntlet*  🧤  ING>ED ED>ES ES>LY LY>ING
+///   Scales of justice     scalesOfJustice  ⚖️  ED>ES ES>LY LY>ING ING>ER ER>EST EST>ED
+/// ```
+///
+/// (`items/infinitives.lua:214-260,271-348`, `items/scalesofjustice.lua:25-114`.) The gauntlet's
+/// partial forms (`suffixGauntlet01111` and the rest) carry only some links, and a link can be
+/// switched off by an `…Inactive` status until a shrine wakes it — but the game leaves inactive
+/// flags out of `gearFlags` (`rpgview.lua:2458`), so reading the flags is enough for both.
+///
+/// The other ER/EST gear (Ostrich feather, Heart of gold, the lesser scales,
+/// `items/erestgear.lua`) has links of the same kind and is not counted: not asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Infinitives {
+    /// Live links, as bits over the source's [`InfinitiveSource::links`].
+    live: u8,
+    pub source: Option<InfinitiveSource>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfinitiveSource {
+    Gauntlet,
+    Justice,
+}
+
+impl InfinitiveSource {
+    pub fn emoji(self) -> &'static str {
+        match self {
+            InfinitiveSource::Gauntlet => "🧤",
+            InfinitiveSource::Justice => "⚖️",
+        }
+    }
+
+    /// The item's links, `(FROM, TO)`.
+    pub fn links(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            InfinitiveSource::Gauntlet => {
+                &[("ING", "ED"), ("ED", "ES"), ("ES", "LY"), ("LY", "ING")]
+            }
+            InfinitiveSource::Justice => &[
+                ("ED", "ES"),
+                ("ES", "LY"),
+                ("LY", "ING"),
+                ("ING", "ER"),
+                ("ER", "EST"),
+                ("EST", "ED"),
+            ],
+        }
+    }
+}
+
+impl Infinitives {
+    /// From the save's `gear` list and its `gearFlags`. The scales are the gauntlet plus the scales
+    /// of balance, crafted (`items/scalesofjustice.lua:40-43`), so they win when both could match.
+    pub fn from_gear<'a>(
+        gear: impl IntoIterator<Item = &'a str>, has_flag: impl Fn(&str) -> bool,
+    ) -> Self {
+        let gear: Vec<&str> = gear.into_iter().collect();
+        let source = if gear.contains(&"scalesOfJustice") {
+            InfinitiveSource::Justice
+        } else if gear.iter().any(|g| g.starts_with("suffixGauntlet")) {
+            InfinitiveSource::Gauntlet
+        } else {
+            return Infinitives::default();
+        };
+        let live = source
+            .links()
+            .iter()
+            .enumerate()
+            .filter(|(_, (from, to))| has_flag(&format!("onSubmitSuffix{from}to{to}")))
+            .fold(0u8, |bits, (i, _)| bits | 1 << i);
+        Infinitives { live, source: Some(source) }
+    }
+
+    /// How many infinitives submitting `word` queues: one per live link from its suffix.
+    pub fn created(&self, word: &str) -> i64 {
+        let Some(source) = self.source else { return 0 };
+        let word = word.to_ascii_uppercase();
+        let Some(suffix) = crate::gear::table::SUFFIXES_LONGEST_FIRST
+            .iter()
+            .find(|s| word.len() > s.len() && word.ends_with(*s))
+        else {
+            return 0;
+        };
+        source
+            .links()
+            .iter()
+            .enumerate()
+            .filter(|(i, (from, _))| self.live & (1 << i) != 0 && from == suffix)
+            .count() as i64
+    }
 }
 
 /// How much a word's armour and healing can actually give, this turn.
@@ -129,9 +234,26 @@ impl Preferences {
         Preferences { heal_at: damage, ..self }
     }
 
+    /// The same preferences for a word that is **not meant to kill**: a scare, a hold, a stall.
+    ///
+    /// Both payouts this clears are paid only on a killing blow. The wood gear's
+    /// `onWoodKill*` flags fire on *"defeating an enemy with a word that only contains wooden
+    /// tiles"*, and the Well-Rested heal is `floor(overkill/2)` of a kill (`rpgview.lua:1086`). A
+    /// word that leaves the enemy standing collects neither, so ranking a scare by them prefers an
+    /// all-wood word for a reward that never comes and spends the board's wood doing it. What the
+    /// word itself gives — [`gain`], from its own tiles — is untouched, because that lands either way.
+    pub fn without_kill_payouts(self) -> Self {
+        Preferences { wood_only_pays: false, heal_at: None, ..self }
+    }
+
     /// Records how much armour and healing would land — see [`gain`].
     pub fn with_room(self, room: Room) -> Self {
         Preferences { room, ..self }
+    }
+
+    /// Records the suffix links that would queue infinitive tiles — see [`Infinitives`].
+    pub fn with_infinitives(self, infinitives: Infinitives) -> Self {
+        Preferences { infinitives, ..self }
     }
 }
 
@@ -241,6 +363,12 @@ pub struct Rank {
     /// burns (see [`Rank::fire_eaten`]), and below the wood-only and full-heal payouts, which the
     /// dev ordered and which already stand for gain of their own.
     pub gain: i64,
+    /// Infinitive tile sets this word queues from the Infinitives gauntlet or the Scales of
+    /// justice: see [`Infinitives`]. Higher is better.
+    ///
+    /// **The lowest of the gains**, the user's call, 2026-11-04: below health and armour, above
+    /// every board-hygiene term.
+    pub infinitives: i64,
     /// What this word spends from the board's stock of tiles worth keeping. **Lower** is better.
     ///
     /// See [`hoarded`]. Ranked below `wood_only`, which is a payout the gear actually pays, and above
@@ -284,6 +412,9 @@ impl Rank {
         }
         if self.gain != other.gain {
             return self.gain > other.gain;
+        }
+        if self.infinitives != other.infinitives {
+            return self.infinitives > other.infinitives;
         }
         if self.hoarded != other.hoarded {
             return self.hoarded < other.hoarded;
@@ -333,6 +464,10 @@ pub fn gain(tiles: &[Tile], consumed: &[usize], scorer: &Scorer, room: Room) -> 
 pub struct Gains {
     pub armour: i64,
     pub health: i64,
+    /// Infinitive tile sets queued, and the gear queuing them: see [`Infinitives`]. Filled by the
+    /// advisor, which has the word; [`gains`] leaves it empty.
+    pub infinitives: i64,
+    pub infinitives_from: Option<InfinitiveSource>,
 }
 
 /// [`gain`], kept apart, for a caller that shows the two separately.
@@ -345,12 +480,14 @@ pub fn gains(tiles: &[Tile], consumed: &[usize], scorer: &Scorer, room: Room) ->
         * consumed.iter().filter(|&&i| tiles.get(i).is_some_and(|t| is_silver(t, scorer))).count()
             as i64;
     let g = match consumed.last().and_then(material) {
-        Some("woodbraced") => Gains { armour: 4 * count(&|m| m == "woodbraced"), health: 0 },
+        Some("woodbraced") => {
+            Gains { armour: 4 * count(&|m| m == "woodbraced"), ..Gains::default() }
+        }
         Some("gemheal") => {
             let val = 3 * count(&|m| m.starts_with("gem"));
             let heal = (val - room.bleed).max(0).min(room.health.max(0));
             let regen = if room.bleed > val { 0 } else { val.min(room.health.max(0) - heal) };
-            Gains { armour: 0, health: heal + regen }
+            Gains { health: heal + regen, ..Gains::default() }
         }
         _ => Gains::default(),
     };
@@ -548,19 +685,23 @@ pub fn remaining_counts(tiles: &[Tile], consumed: &[usize]) -> [usize; ALPHABET]
     )
 }
 
+/// How many burning tiles the word takes off the board. See [`Rank::fire_eaten`].
+pub fn fire_eaten(tiles: &[Tile], consumed: &[usize]) -> usize {
+    consumed.iter().filter(|&&i| tiles.get(i).and_then(|t| t.burn()).is_some_and(|b| b > 0)).count()
+}
+
 /// The full ranking for one candidate.
+#[allow(clippy::too_many_arguments)]
 pub fn rank(
-    tiles: &[Tile], geometry: &crate::geometry::Geometry, consumed: &[usize], scorer: &Scorer,
-    target: &Target, prefs: Preferences, damage: i64,
+    word: &str, tiles: &[Tile], geometry: &crate::geometry::Geometry, consumed: &[usize],
+    scorer: &Scorer, target: &Target, prefs: Preferences, damage: i64,
 ) -> Rank {
     Rank {
-        fire_eaten: consumed
-            .iter()
-            .filter(|&&i| tiles.get(i).and_then(|t| t.burn()).is_some_and(|b| b > 0))
-            .count(),
+        fire_eaten: fire_eaten(tiles, consumed),
         wood_only: prefs.wood_only_pays && wood_only(tiles, consumed, scorer),
         heals_fully: prefs.heal_at.is_some_and(|at| damage >= at),
         gain: gain(tiles, consumed, scorer, prefs.room),
+        infinitives: prefs.infinitives.created(word),
         hoarded: hoarded(tiles, consumed, scorer),
         shed: shed(tiles, consumed),
         hazard_fall: hazard_fall(tiles, geometry, consumed, scorer),
@@ -656,6 +797,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 0,
+            infinitives: 0,
             deviation: 0.0,
         };
         // Neither of these clears the board, so a threshold rule calls them equal. They are not.
@@ -752,6 +894,7 @@ mod tests {
             hoarded,
             shed: 0,
             hazard_fall: 0,
+            infinitives: 0,
             deviation,
         };
         assert!(r(0, true, 4, 0.0, 11.6).better_than(&r(0, true, 0, 0.0, 11.0)), "FUD over DAU");
@@ -784,6 +927,7 @@ mod tests {
             hoarded,
             shed: 0,
             hazard_fall: 0,
+            infinitives: 0,
             deviation: 0.0,
         };
         let both = tier(true, true, 99.0);
@@ -825,6 +969,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 0,
+            infinitives: 0,
             deviation: 9.0,
         };
         let golden = Rank {
@@ -835,6 +980,7 @@ mod tests {
             hoarded: 40.0,
             shed: 0,
             hazard_fall: 0,
+            infinitives: 0,
             deviation: 0.0,
         };
         assert!(plain.better_than(&golden), "a tidier board is not worth a Q");
@@ -849,6 +995,7 @@ mod tests {
             hoarded: 40.0,
             shed: 0,
             hazard_fall: 0,
+            infinitives: 0,
             deviation: 9.0,
         };
         assert!(paid.better_than(&plain), "a payout in hand outranks a tile kept back");
@@ -862,6 +1009,7 @@ mod tests {
             hoarded: 10.0,
             shed: 0,
             hazard_fall: 0,
+            infinitives: 0,
             deviation: 0.0,
         };
         let gold_and_wild = Rank {
@@ -872,6 +1020,7 @@ mod tests {
             hoarded: 11.0,
             shed: 0,
             hazard_fall: 0,
+            infinitives: 0,
             deviation: 0.0,
         };
         assert!(gold_only.better_than(&gold_and_wild), "no reason to spend a wildcard as well");
@@ -896,6 +1045,7 @@ mod tests {
             hoarded,
             shed,
             hazard_fall: 0,
+            infinitives: 0,
             deviation,
         };
         // Nothing else to separate them, so getting rid of the ash decides it.
@@ -1078,6 +1228,52 @@ mod tests {
         }
     }
 
+    /// Which words queue infinitives, read off the live links: the longest registered suffix
+    /// decides, a bare suffix is not a suffixed word, and an inactive link queues nothing.
+    #[test]
+    fn infinitives_follow_the_live_links_from_the_word_suffix() {
+        // The burning-board save's gauntlet: ING>ED, ED>ES, ES>LY live, LY>ING inactive.
+        let flags = ["onSubmitSuffixINGtoED", "onSubmitSuffixEDtoES", "onSubmitSuffixEStoLY"];
+        let has = |f: &str| flags.contains(&f);
+        let g = Infinitives::from_gear(["goldIdol", "suffixGauntlet"], has);
+        assert_eq!(g.source, Some(InfinitiveSource::Gauntlet));
+        assert_eq!(g.created("ROASTED"), 1);
+        assert_eq!(g.created("singing"), 1, "case does not matter");
+        assert_eq!(g.created("LOVELY"), 0, "LY>ING is inactive");
+        assert_eq!(g.created("ED"), 0, "the suffix must be shorter than the word");
+        assert_eq!(g.created("BIGGEST"), 0, "EST is the suffix, and the gauntlet has no EST link");
+        assert_eq!(g.created("CAT"), 0);
+
+        // The scales take over from the gauntlet, and carry the ER/EST links.
+        let all = |f: &str| f.starts_with("onSubmitSuffix");
+        let j = Infinitives::from_gear(["scalesOfJustice"], all);
+        assert_eq!(j.source, Some(InfinitiveSource::Justice));
+        assert_eq!(j.created("BIGGEST"), 1);
+        assert_eq!(j.created("ROASTED"), 1);
+        assert_eq!(j.created("SINGING"), 1, "ING>ER, not the gauntlet's ING>ED");
+
+        // Flags without the item are some other gear's, and are not counted.
+        assert_eq!(Infinitives::from_gear(["scalesOfBalance"], all).created("BIGGEST"), 0);
+    }
+
+    /// The lowest of the gains: below health and armour, above the board-hygiene terms.
+    #[test]
+    fn infinitives_rank_below_gain_and_above_hoarding() {
+        let r = |gain: i64, infinitives: i64, hoarded: f64| Rank {
+            fire_eaten: 0,
+            wood_only: false,
+            heals_fully: false,
+            gain,
+            infinitives,
+            hoarded,
+            shed: 0,
+            hazard_fall: 0,
+            deviation: 0.0,
+        };
+        assert!(r(1, 0, 0.0).better_than(&r(0, 2, 0.0)), "a point of health or armour first");
+        assert!(r(0, 1, 50.0).better_than(&r(0, 0, 0.0)), "then infinitives, gold or not");
+    }
+
     #[test]
     fn a_payout_outranks_tidier_letters_and_wood_outranks_a_falling_hazard() {
         let wood = Rank {
@@ -1088,6 +1284,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 0,
+            infinitives: 0,
             deviation: 99.0,
         };
         let hazard = Rank {
@@ -1098,6 +1295,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 5,
+            infinitives: 0,
             deviation: 1.0,
         };
         assert!(wood.better_than(&hazard), "a wood-only kill outranks any number of falls");
@@ -1110,6 +1308,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 2,
+            infinitives: 0,
             deviation: 50.0,
         };
         let tidy = Rank {
@@ -1120,6 +1319,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 1,
+            infinitives: 0,
             deviation: 0.0,
         };
         assert!(falls.better_than(&tidy), "a falling hazard outranks a tidier board");
@@ -1132,6 +1332,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 1,
+            infinitives: 0,
             deviation: 3.0,
         };
         let b = Rank {
@@ -1142,6 +1343,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 1,
+            infinitives: 0,
             deviation: 4.0,
         };
         assert!(a.better_than(&b), "with the payouts equal, lower deviation wins");
