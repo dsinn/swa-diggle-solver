@@ -354,6 +354,16 @@ pub struct Rank {
     /// floor drops to plain lethal whenever the wood payout is live, and this field carries the heal
     /// into the comparison instead — see [`crate::search::Goal::killing_blow`].
     pub heals_fully: bool,
+    /// Hazard tiles (`!` and bombs, see [`is_hazard`]) this word drops all the way to the bottom
+    /// row, where a `!` falls off at the start of the next turn (`tileboard.lua:179`). Higher is
+    /// better. See [`hazards_cleared`].
+    ///
+    /// **Above [`Rank::gain`]**, the user's call, 2026-11-04, on a board where every top kill ended
+    /// on a braced E for 4 armour and the kills that brought the `!` down gave none. A `!` takes one
+    /// of the board's tiles out of play for as long as it stands, so getting rid of it is worth more
+    /// than one word's armour. Only reaching the bottom counts here; a partial fall is still the
+    /// board-hygiene term [`Rank::hazard_fall`], below everything that pays.
+    pub hazards_cleared: usize,
     /// Health and armour this word gives the player, as far as they would land: see [`gain`].
     /// Higher is better.
     ///
@@ -409,6 +419,9 @@ impl Rank {
         }
         if self.heals_fully != other.heals_fully {
             return self.heals_fully;
+        }
+        if self.hazards_cleared != other.hazards_cleared {
+            return self.hazards_cleared > other.hazards_cleared;
         }
         if self.gain != other.gain {
             return self.gain > other.gain;
@@ -537,6 +550,26 @@ pub fn is_hazard(tile: &Tile, scorer: &Scorer) -> bool {
 /// A hazard that is itself consumed contributes nothing: it is gone, and a gone tile cannot fall.
 /// That understates such a move rather than overstating it, which is the safe direction — the tile
 /// left the board, which is the outcome the falling was for.
+/// How many hazard tiles removing `consumed` brings down to the bottom row (row 1, `layout.rs:55`).
+///
+/// A hazard already on the bottom row is not counted: it falls off whatever is played, so no word
+/// earns it. Nor is one the word consumes, which [`hazard_fall`] also leaves out.
+pub fn hazards_cleared(
+    tiles: &[Tile], geometry: &crate::geometry::Geometry, consumed: &[usize], scorer: &Scorer,
+) -> usize {
+    let removed: Vec<(usize, usize)> =
+        consumed.iter().filter_map(|&i| geometry.position(i)).collect();
+    tiles
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| is_hazard(t, scorer) && !consumed.contains(i))
+        .filter_map(|(i, _)| geometry.position(i))
+        .filter(|&(col, row)| {
+            row > 1 && row - removed.iter().filter(|&&(c, r)| c == col && r < row).count() == 1
+        })
+        .count()
+}
+
 pub fn hazard_fall(
     tiles: &[Tile], geometry: &crate::geometry::Geometry, consumed: &[usize], scorer: &Scorer,
 ) -> usize {
@@ -700,6 +733,7 @@ pub fn rank(
         fire_eaten: fire_eaten(tiles, consumed),
         wood_only: prefs.wood_only_pays && wood_only(tiles, consumed, scorer),
         heals_fully: prefs.heal_at.is_some_and(|at| damage >= at),
+        hazards_cleared: hazards_cleared(tiles, geometry, consumed, scorer),
         gain: gain(tiles, consumed, scorer, prefs.room),
         infinitives: prefs.infinitives.created(word),
         hoarded: hoarded(tiles, consumed, scorer),
@@ -797,6 +831,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 0,
+            hazards_cleared: 0,
             infinitives: 0,
             deviation: 0.0,
         };
@@ -894,6 +929,7 @@ mod tests {
             hoarded,
             shed: 0,
             hazard_fall: 0,
+            hazards_cleared: 0,
             infinitives: 0,
             deviation,
         };
@@ -927,6 +963,7 @@ mod tests {
             hoarded,
             shed: 0,
             hazard_fall: 0,
+            hazards_cleared: 0,
             infinitives: 0,
             deviation: 0.0,
         };
@@ -969,6 +1006,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 0,
+            hazards_cleared: 0,
             infinitives: 0,
             deviation: 9.0,
         };
@@ -980,6 +1018,7 @@ mod tests {
             hoarded: 40.0,
             shed: 0,
             hazard_fall: 0,
+            hazards_cleared: 0,
             infinitives: 0,
             deviation: 0.0,
         };
@@ -995,6 +1034,7 @@ mod tests {
             hoarded: 40.0,
             shed: 0,
             hazard_fall: 0,
+            hazards_cleared: 0,
             infinitives: 0,
             deviation: 9.0,
         };
@@ -1009,6 +1049,7 @@ mod tests {
             hoarded: 10.0,
             shed: 0,
             hazard_fall: 0,
+            hazards_cleared: 0,
             infinitives: 0,
             deviation: 0.0,
         };
@@ -1020,6 +1061,7 @@ mod tests {
             hoarded: 11.0,
             shed: 0,
             hazard_fall: 0,
+            hazards_cleared: 0,
             infinitives: 0,
             deviation: 0.0,
         };
@@ -1045,6 +1087,7 @@ mod tests {
             hoarded,
             shed,
             hazard_fall: 0,
+            hazards_cleared: 0,
             infinitives: 0,
             deviation,
         };
@@ -1256,6 +1299,40 @@ mod tests {
         assert_eq!(Infinitives::from_gear(["scalesOfBalance"], all).created("BIGGEST"), 0);
     }
 
+    /// The live board, cut to one column: `A D ! P` bottom to top. Only removing both tiles under
+    /// the `!` brings it to the bottom row; one of them is a fall of 1 and clears nothing.
+    #[test]
+    fn a_hazard_is_cleared_only_when_it_reaches_the_bottom_row() {
+        let Some(sc) = scorer() else { return };
+        let g = Geometry { rows_per_col: vec![4], ..Default::default() };
+        let tiles = board(&["A", "D", "!", "P"]);
+        assert_eq!(hazards_cleared(&tiles, &g, &[0, 1], &sc), 1);
+        assert_eq!(hazards_cleared(&tiles, &g, &[1], &sc), 0, "row 2 is not the bottom");
+        assert_eq!(hazards_cleared(&tiles, &g, &[3], &sc), 0, "above it does nothing");
+        let low = board(&["!", "D", "A", "P"]);
+        assert_eq!(hazards_cleared(&low, &g, &[1, 2], &sc), 0, "already at the bottom: not earned");
+    }
+
+    /// The user, on that board: a kill that clears the `!` beats one that ends on braced wood for
+    /// 4 armour.
+    #[test]
+    fn clearing_a_hazard_outranks_a_gain() {
+        let r = |hazards_cleared: usize, gain: i64| Rank {
+            fire_eaten: 0,
+            wood_only: true,
+            heals_fully: false,
+            hazards_cleared,
+            gain,
+            infinitives: 0,
+            hoarded: 0.0,
+            shed: 0,
+            hazard_fall: 0,
+            deviation: 0.0,
+        };
+        assert!(r(1, 0).better_than(&r(0, 4)));
+        assert!(r(1, 4).better_than(&r(1, 0)), "and the gain still breaks the tie");
+    }
+
     /// The lowest of the gains: below health and armour, above the board-hygiene terms.
     #[test]
     fn infinitives_rank_below_gain_and_above_hoarding() {
@@ -1263,6 +1340,7 @@ mod tests {
             fire_eaten: 0,
             wood_only: false,
             heals_fully: false,
+            hazards_cleared: 0,
             gain,
             infinitives,
             hoarded,
@@ -1284,6 +1362,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 0,
+            hazards_cleared: 0,
             infinitives: 0,
             deviation: 99.0,
         };
@@ -1295,6 +1374,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 5,
+            hazards_cleared: 0,
             infinitives: 0,
             deviation: 1.0,
         };
@@ -1308,6 +1388,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 2,
+            hazards_cleared: 0,
             infinitives: 0,
             deviation: 50.0,
         };
@@ -1319,6 +1400,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 1,
+            hazards_cleared: 0,
             infinitives: 0,
             deviation: 0.0,
         };
@@ -1332,6 +1414,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 1,
+            hazards_cleared: 0,
             infinitives: 0,
             deviation: 3.0,
         };
@@ -1343,6 +1426,7 @@ mod tests {
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 1,
+            hazards_cleared: 0,
             infinitives: 0,
             deviation: 4.0,
         };

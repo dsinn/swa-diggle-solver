@@ -714,8 +714,12 @@ fn cell_text(v: &View, item: usize, sub: i32) -> String {
         0 => (item + 1).to_string(),
         1 => r.row.word.clone(),
         // The fencer before the number, so the numbers stay lined up on the right.
-        2 if r.row.pierces => format!("🤺 {}", r.row.score),
-        2 => r.row.score.to_string(),
+        2 => {
+            let fencer = if r.row.pierces { "🤺 " } else { "" };
+            let toxin =
+                if r.row.toxin > 0 { format!(" +{} 🧪", r.row.toxin) } else { String::new() };
+            format!("{fencer}{}{toxin}", r.row.score)
+        }
         3 => r.row.bonus.as_ref().map(|b| b.to_string()).unwrap_or_default(),
         4 => diggle_solver::advisor::annotate::gain_text(r.row.gain),
         5 => r.row.spells.join(" "),

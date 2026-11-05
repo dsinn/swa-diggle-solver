@@ -198,6 +198,9 @@ pub struct Modifiers {
     ///
     /// The turn is free because `enemyCanHit` reads `getPlayerStatus'immune'` (`:1065`).
     pub stall: bool,
+    /// What one stack of toxin a word applies costs this enemy: 1, 2 while `toxinWeak`, 0 while
+    /// `toxinImmune` (`baseStatusDamage`, `rpgview.lua:1262-1284`). See [`Modifiers::toxin`].
+    pub toxin_scale: i64,
     /// What stands between us and the kill, for the one gear that changes which of it a word must
     /// get through: the rapier. `None` until the turn's plan fills it in ([`crate::turn::plan`]), and
     /// then no word is treated as piercing — see [`Modifiers::reach`].
@@ -255,6 +258,12 @@ impl Modifiers {
         // is the case that matters, and it under-rates the turn's total by about 4.
         let enemy_status_tick =
             crate::gear::status_tick(&statuses, crate::gear::WeaponBonus::default(), None);
+        let toxin_scale =
+            match (statuses.contains_key("toxinImmune"), statuses.contains_key("toxinWeak")) {
+                (true, _) => 0,
+                (false, true) => 2,
+                (false, false) => 1,
+            };
         // One line for the whole deferred status model, not one per piece of it.
         if let Some(note) = crate::gear::weapon::deferred_status_model(&statuses, &weapon) {
             problems.push(note);
@@ -303,6 +312,7 @@ impl Modifiers {
                 player_dodges,
                 // Decided per turn, from more than the save — see `crate::turn::plan`.
                 stall: false,
+                toxin_scale,
                 defence: None,
             },
             resolved.geometry,
@@ -331,8 +341,42 @@ impl Modifiers {
             enemy_status_tick: 0,
             player_dodges: false,
             stall: false,
+            toxin_scale: 1,
             defence: None,
         }
+    }
+
+    /// The toxin damage this word adds, as health the enemy loses at the start of its next turn.
+    ///
+    /// Two sources, the user's request, 2026-11-04: *serrated tiles (and other gear items) can add
+    /// toxin to the enemy, and the number of toxin stacks should add to the damage for ranking.*
+    ///
+    /// - **A toxin tile that starts the word**: `bronzetoxin`, `silvertoxin`, `goldtoxin` and
+    ///   `electrumtoxin` are `active` only as `wordTiles[1]`, and then add 3 toxin per **serrated**
+    ///   tile in the word, bleed and toxin kinds alike (`countEachMaterialWithCat(wordTiles,
+    ///   'serrated')*3`, `rpg/effects/material/bronzetoxin.lua:2-8`).
+    /// - **The weapon flags**, [`crate::gear::WeaponBonus::toxin`]: the Bastard sword, the CEI
+    ///   dagger and `toxinAttack` (`rpgview.lua:868-912`).
+    ///
+    /// Toxin damage is the stack count (`baseStatusDamage`, `rpgview.lua:1260-1273`), paid at the
+    /// start of the enemy's turn **before it acts** (`:1610-1612`) and routed to health past armour
+    /// (`:1297-1298`). So it is damage in every sense a goal asks about: it kills before the enemy's
+    /// attack, it counts toward a flee threshold, and on a free turn it can end the enemy just as a
+    /// kill would — which is why [`scored`] folds it in rather than ranking it on the side. Counting
+    /// it against health plus armour is cautious, never optimistic: it skips the armour, so it can
+    /// only do more than this says. What it does not earn is anything paid on the word's own blow:
+    /// overkill gold, the Well-Rested heal and the wood-kill gear.
+    pub fn toxin(&self, scorer: &Scorer, word: &str, consumed: &[Tile]) -> i64 {
+        let serrated = |m: &str| m.ends_with("toxin") || m.ends_with("bleed");
+        let tile = match consumed.first().and_then(|t| scorer.material_name(t)) {
+            Some(m) if m.ends_with("toxin") => {
+                let serrated_tiles =
+                    consumed.iter().filter(|t| scorer.material_name(t).is_some_and(serrated));
+                3 * serrated_tiles.count() as i64
+            }
+            _ => 0,
+        };
+        (tile + self.weapon.bonus_for(word, consumed).toxin) * self.toxin_scale
     }
 
     /// This word's damage ignores the enemy's armour: the rapier is held, the word starts and ends
@@ -490,7 +534,9 @@ pub fn scored_cast(
         Some(book) => book.best_cast(word, score),
         None => (score, None),
     };
-    ((score + mods.weapon.bonus_for(word, consumed).damage_delta).max(0), cast)
+    let direct = (score + mods.weapon.bonus_for(word, consumed).damage_delta).max(0);
+    // The toxin it applies, which the enemy pays before it acts: see [`Modifiers::toxin`].
+    (direct + mods.toxin(scorer, word, consumed), cast)
 }
 
 /// A word the search found worth reporting.
@@ -601,9 +647,6 @@ pub struct Outcome {
     /// Among several, the one [`crate::pick::Rank`] likes best, since what the word costs the board
     /// is the only thing left to tell them apart.
     pub nothing: Option<Found>,
-    /// On a free turn, `nothing` is the better word to keep the enemy here with than `under`: it
-    /// eats more fire, or as much and spends less gold. See [`Keep`].
-    pub nothing_first: bool,
     /// Longest makeable word seen. Tracked separately because the refresh rule is about LENGTH, and
     /// the highest-scoring word is not necessarily the longest — a short word of gold tiles can
     /// outscore a long one of wood. Free to collect: the only time it matters is when no lethal word
@@ -679,14 +722,6 @@ impl Outcome {
     /// filled in on such a turn ([`Modifiers::stall`]), so this is the old chain everywhere else.
     pub fn choice_for(&self, goal: Goal) -> Option<&Found> {
         match goal {
-            // On a free turn the chip and the stall both keep the enemy here, and [`Keep`] says
-            // which goes first.
-            Goal::Scare { .. } | Goal::Hold { .. } if self.nothing_first => self
-                .lethal
-                .as_ref()
-                .or(self.nothing.as_ref())
-                .or(self.under.as_ref())
-                .or(self.least.as_ref()),
             Goal::Scare { .. } | Goal::Hold { .. } => self
                 .lethal
                 .as_ref()
@@ -1134,7 +1169,8 @@ pub fn ranked_kill(
     // The winner and the rank it won with, together: comparing a candidate needs the incumbent's
     // rank, and recomputing it per comparison would walk the board again for nothing.
     let lethal: Mutex<Option<(Found, crate::pick::Rank)>> = Mutex::new(None);
-    let best: Mutex<Option<Found>> = Mutex::new(None);
+    let best: Mutex<Option<Hardest>> = Mutex::new(None);
+    let ranker = Ranker { tiles, geometry, scorer, picking };
     let longest: Mutex<Option<Found>> = Mutex::new(None);
     let considered = std::sync::atomic::AtomicUsize::new(0);
     let cursor = std::sync::atomic::AtomicUsize::new(0);
@@ -1146,7 +1182,7 @@ pub fn ranked_kill(
             scope.spawn(move || {
                 let mut seen = 0usize;
                 let mut local_lethal: Option<(Found, crate::pick::Rank)> = None;
-                let mut local_best: Option<Found> = None;
+                let mut local_best: Option<Hardest> = None;
                 let mut local_longest: Option<Found> = None;
                 loop {
                     let start = cursor.fetch_add(CLAIM, Ordering::Relaxed);
@@ -1192,13 +1228,17 @@ pub fn ranked_kill(
                                     Some((Found { word: word.clone(), score, slice }, rank));
                             }
                         }
-                        if local_best
-                            .as_ref()
-                            .map(|b| mods.hits_harder((word, score), (&b.word, b.score)).is_gt())
-                            .unwrap_or(true)
-                        {
-                            local_best = Some(Found { word: word.clone(), score, slice });
-                        }
+                        let at = &typed.tiles;
+                        Hardest::offer(
+                            &mut local_best,
+                            mods,
+                            ranker,
+                            word,
+                            score,
+                            slice,
+                            at,
+                            reach,
+                        );
                         if local_longest
                             .as_ref()
                             .map(|b| word.chars().count() > b.word.chars().count())
@@ -1218,15 +1258,7 @@ pub fn ranked_kill(
                     }
                 }
                 if let Some(lb) = local_best {
-                    let mut b = best.lock().unwrap();
-                    if b.as_ref()
-                        .map(|cur| {
-                            mods.hits_harder((&lb.word, lb.score), (&cur.word, cur.score)).is_gt()
-                        })
-                        .unwrap_or(true)
-                    {
-                        *b = Some(lb);
-                    }
+                    Hardest::merge(&mut best.lock().unwrap(), mods, ranker, lb);
                 }
                 if let Some(ll) = local_longest {
                     let mut g = longest.lock().unwrap();
@@ -1243,7 +1275,7 @@ pub fn ranked_kill(
 
     Outcome {
         lethal: lethal.into_inner().unwrap().map(|(f, _)| f),
-        best: best.into_inner().unwrap(),
+        best: best.into_inner().unwrap().map(|h| h.found),
         // No ceiling on this goal, so nothing ever asks for the gentlest word — see
         // `Outcome::choice_for`. Left unset rather than collected, so that a goal which *did* want
         // it and came through here would fail loudly instead of quietly playing the hardest hit.
@@ -1251,7 +1283,6 @@ pub fn ranked_kill(
         // Likewise: with no ceiling there is nothing to stay under.
         under: None,
         nothing: None,
-        nothing_first: false,
         longest: longest.into_inner().unwrap(),
         words_considered: considered.into_inner(),
     }
@@ -1355,7 +1386,6 @@ pub fn max_damage(
         least: None,
         under: None,
         nothing: None,
-        nothing_first: false,
         longest: longest.into_inner().unwrap(),
         words_considered: considered.into_inner(),
     }
@@ -1394,8 +1424,6 @@ pub struct Candidate {
     pub tier: Tier,
     /// Only for [`Tier::InBand`], where it is what orders the band — as in the search.
     pub rank: Option<crate::pick::Rank>,
-    /// What the word costs the board, for every tier: see [`Keep`].
-    pub keep: Keep,
     /// Which tiles the word consumes, so a caller can show them.
     pub typed: crate::typist::Typed,
     /// The spell to cast for [`Candidate::score`], when one beats the plain attack.
@@ -1490,7 +1518,10 @@ pub fn ranked(
                         );
                         let reach = mods.reach(word, score);
                         let tier = tier_of(score, reach);
-                        let rank = matches!(tier, Tier::InBand | Tier::Stall).then(|| {
+                        // Every tier that is ordered by the ranking, in full or on a tie: all but
+                        // the gentlest-first ones.
+                        let ranked = !matches!(tier, Tier::Overshoot | Tier::Flees);
+                        let rank = ranked.then(|| {
                             crate::pick::rank(
                                 word,
                                 tiles,
@@ -1509,7 +1540,6 @@ pub fn ranked(
                             pierces: mods.pierces(word),
                             tier,
                             rank,
-                            keep: Keep::of(tiles, &typed.tiles, scorer),
                             typed,
                             cast,
                         });
@@ -1530,77 +1560,124 @@ pub fn ranked(
 /// the search's own fallbacks.
 fn order(mods: &Modifiers, a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
-    // On a free turn the chip and the stall are one group, ordered by [`Keep`] before the tier.
-    let keeps = |t: Tier| mods.stall && matches!(t, Tier::Under | Tier::Stall);
-    let group = |t: Tier| if keeps(t) { Tier::Under as usize } else { t as usize };
-    let keep = match keeps(a.tier) && keeps(b.tier) {
-        true => b.keep.versus(&a.keep),
-        false => Equal,
-    };
     let tier = |t: Tier| t as usize;
-    let first = group(a.tier).cmp(&group(b.tier)).then(keep);
-    first.then_with(|| tier(a.tier).cmp(&tier(b.tier))).then_with(|| {
-        let within = match (a.tier, a.rank, b.rank) {
-            (Tier::InBand | Tier::Stall, Some(ra), Some(rb)) if ra.better_than(&rb) => Less,
-            (Tier::InBand | Tier::Stall, Some(ra), Some(rb)) if rb.better_than(&ra) => Greater,
-            (Tier::Overshoot | Tier::Flees, ..) => a.reach.cmp(&b.reach),
-            _ => Equal,
+    let rank = || match (a.rank, b.rank) {
+        (Some(ra), Some(rb)) if ra.better_than(&rb) => Less,
+        (Some(ra), Some(rb)) if rb.better_than(&ra) => Greater,
+        _ => Equal,
+    };
+    let harder = || mods.hits_harder((&b.word, b.score), (&a.word, a.score));
+    tier(a.tier).cmp(&tier(b.tier)).then_with(|| {
+        let within = match a.tier {
+            // A band: every word in it reaches the goal, so the ranking decides and damage only
+            // breaks its ties.
+            Tier::InBand => rank().then_with(harder),
+            // Gentlest first: the least it can do past the line.
+            Tier::Overshoot | Tier::Flees => a.reach.cmp(&b.reach),
+            // Short of the goal, a stall's chips and its words that deal nothing included: the
+            // hardest hit, and the ranking between equals. See [`Hardest`].
+            Tier::Under | Tier::Stall | Tier::Fallback => harder().then_with(rank),
         };
-        within
-            .then_with(|| mods.hits_harder((&b.word, b.score), (&a.word, a.score)))
-            .then_with(|| a.word.cmp(&b.word))
+        within.then_with(|| a.word.cmp(&b.word))
     })
 }
 
-/// What a word that keeps the enemy here does to the board, on a free turn ([`Modifiers::stall`]):
-/// the burning tiles it clears, then the gold and wildcards it spends. Compared before the damage,
-/// and before whether the word chips at all.
-///
-/// The user, 2026-11-04, twice. Stalling with three burning tiles on the board, *none of the top
-/// candidates* ate all three; and *when stalling, it's not using logic to conserve gold tiles and
-/// wildcards*. Both for one reason: the chip was the hardest hit under the ceiling and nothing
-/// else, so it was the word with the most gold in it, and a burning tile scores nothing, so the word
-/// that clears the fire was a weak chip or a stall, listed below every harder chip.
-///
-/// On a turn the enemy cannot hit, the chip's damage only softens it for the next turn, and that
-/// is the turn the gold and wildcards are for: spending a `Q` to chip is spending the kill. The
-/// burning board, meanwhile, is damage the player takes now, every turn it stands (see
-/// [`crate::pick::Rank::fire_eaten`] for why a count). So the order is the same as
-/// [`crate::pick::Rank`]'s own, fire before hoarding, with the damage after both.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Keep {
-    /// [`crate::pick::fire_eaten`]. More is better.
-    pub fire: usize,
-    /// [`crate::pick::hoarded`]. Less is better.
-    pub hoarded: f64,
+/// Ranks a word with the turn's shared [`crate::pick::Rank`]. Bundled so the collectors below can
+/// rank a word only when they need to, which is when two words tie on damage.
+#[derive(Clone, Copy)]
+struct Ranker<'a> {
+    tiles: &'a [Tile],
+    geometry: &'a Geometry,
+    scorer: &'a Scorer,
+    picking: &'a crate::pick::Context,
 }
 
-impl Keep {
-    pub fn of(tiles: &[Tile], consumed: &[usize], scorer: &Scorer) -> Self {
-        Keep {
-            fire: crate::pick::fire_eaten(tiles, consumed),
-            hoarded: crate::pick::hoarded(tiles, consumed, scorer),
+impl Ranker<'_> {
+    fn rank(&self, word: &str, consumed: &[usize], reach: i64) -> crate::pick::Rank {
+        crate::pick::rank(
+            word,
+            self.tiles,
+            self.geometry,
+            consumed,
+            self.scorer,
+            &self.picking.target,
+            self.picking.prefs,
+            reach,
+        )
+    }
+}
+
+/// The hardest hit seen so far — [`Outcome::best`] and [`Outcome::under`] — with what it needs to
+/// be ranked if another word ties it.
+///
+/// **Hardest first, then the shared ranking.** The user, 2026-11-04: a turn where nothing reaches
+/// the goal plays the hardest hit, and when two words hit equally hard the one the ranking prefers
+/// — more fire eaten, a `!` brought down, more health or armour, less gold spent — is the better
+/// of them, exactly as it is between two kills. A stall is that same turn with a ceiling
+/// (*it should behave the same as a turn where none of the candidates kill the target*), so the
+/// chip under the ceiling is chosen this way too, and a word that deals nothing is simply the
+/// weakest hit. Before this, a tie went to whichever thread saw its word first: on one live save
+/// twenty words hit the hold's 12 and the one played gave nothing while others gave 4 armour.
+///
+/// The rank is computed lazily, on the first tie, because most words lose on damage alone and the
+/// board walk would be wasted on them.
+struct Hardest {
+    found: Found,
+    consumed: Vec<usize>,
+    reach: i64,
+    rank: Option<crate::pick::Rank>,
+}
+
+impl Hardest {
+    /// Keeps `word` in `slot` if it hits harder, or as hard and ranks better.
+    #[allow(clippy::too_many_arguments)]
+    fn offer(
+        slot: &mut Option<Hardest>, mods: &Modifiers, ranker: Ranker, word: &str, score: i64,
+        slice: usize, consumed: &[usize], reach: i64,
+    ) {
+        let fresh = || Hardest {
+            found: Found { word: word.to_string(), score, slice },
+            consumed: consumed.to_vec(),
+            reach,
+            rank: None,
+        };
+        let Some(cur) = slot.as_mut() else {
+            *slot = Some(fresh());
+            return;
+        };
+        match mods.hits_harder((word, score), (&cur.found.word, cur.found.score)) {
+            std::cmp::Ordering::Less => {}
+            std::cmp::Ordering::Greater => *slot = Some(fresh()),
+            std::cmp::Ordering::Equal => {
+                let mine = ranker.rank(word, consumed, reach);
+                if mine.better_than(&cur.ranked(ranker)) {
+                    *slot = Some(Hardest { rank: Some(mine), ..fresh() });
+                }
+            }
         }
     }
 
-    /// `Greater` is the better word to keep it here with.
-    pub fn versus(&self, other: &Keep) -> std::cmp::Ordering {
-        self.fire.cmp(&other.fire).then_with(|| {
-            other.hoarded.partial_cmp(&self.hoarded).unwrap_or(std::cmp::Ordering::Equal)
-        })
+    /// The same comparison between two threads' winners.
+    fn merge(slot: &mut Option<Hardest>, mods: &Modifiers, ranker: Ranker, mut other: Hardest) {
+        let Some(cur) = slot.as_mut() else {
+            *slot = Some(other);
+            return;
+        };
+        let wins = match mods
+            .hits_harder((&other.found.word, other.found.score), (&cur.found.word, cur.found.score))
+        {
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Equal => other.ranked(ranker).better_than(&cur.ranked(ranker)),
+        };
+        if wins {
+            *slot = Some(other);
+        }
     }
 
-    /// Is this chip better than `other`'s? [`Keep`] first on a free turn, then the harder hit.
-    /// Off a free turn plain [`Modifiers::hits_harder`], as it always was.
-    fn chips_better(&self, mods: &Modifiers, a: (&str, i64), other: &Keep, b: (&str, i64)) -> bool {
-        let keep = if mods.stall { self.versus(other) } else { std::cmp::Ordering::Equal };
-        keep.then_with(|| mods.hits_harder(a, b)).is_gt()
-    }
-}
-
-impl From<&crate::pick::Rank> for Keep {
-    fn from(rank: &crate::pick::Rank) -> Self {
-        Keep { fire: rank.fire_eaten, hoarded: rank.hoarded }
+    fn ranked(&mut self, ranker: Ranker) -> crate::pick::Rank {
+        let (word, consumed, reach) = (&self.found.word, &self.consumed, self.reach);
+        *self.rank.get_or_insert_with(|| ranker.rank(word, consumed, reach))
     }
 }
 
@@ -1637,9 +1714,10 @@ pub fn race_for_band(
     // price for the same reason, and hoarding a gold tile is worth more than the milliseconds.
     let stop = AtomicBool::new(false);
     let lethal: Mutex<Option<(Found, crate::pick::Rank)>> = Mutex::new(None);
-    let best: Mutex<Option<Found>> = Mutex::new(None);
+    let best: Mutex<Option<Hardest>> = Mutex::new(None);
+    let ranker = Ranker { tiles, geometry, scorer, picking };
     let least: Mutex<Option<Found>> = Mutex::new(None);
-    let under: Mutex<Option<(Found, Keep)>> = Mutex::new(None);
+    let under: Mutex<Option<Hardest>> = Mutex::new(None);
     let nothing: Mutex<Option<(Found, crate::pick::Rank)>> = Mutex::new(None);
     let longest: Mutex<Option<Found>> = Mutex::new(None);
     let considered = std::sync::atomic::AtomicUsize::new(0);
@@ -1652,9 +1730,9 @@ pub fn race_for_band(
             scope.spawn(move || {
                 let mut seen = 0usize;
                 let mut local_lethal: Option<(Found, crate::pick::Rank)> = None;
-                let mut local_best: Option<Found> = None;
+                let mut local_best: Option<Hardest> = None;
                 let mut local_least: Option<Found> = None;
-                let mut local_under: Option<(Found, Keep)> = None;
+                let mut local_under: Option<Hardest> = None;
                 let mut local_nothing: Option<(Found, crate::pick::Rank)> = None;
                 let mut local_longest: Option<Found> = None;
                 for word in part {
@@ -1720,13 +1798,8 @@ pub fn race_for_band(
                         }
                         continue;
                     }
-                    if local_best
-                        .as_ref()
-                        .map(|b| mods.hits_harder((word, score), (&b.word, b.score)).is_gt())
-                        .unwrap_or(true)
-                    {
-                        local_best = Some(Found { word: word.clone(), score, slice });
-                    }
+                    let at = &typed.tiles;
+                    Hardest::offer(&mut local_best, mods, ranker, word, score, slice, at, reach);
                     // The gentlest word that still does something. A zero-scoring word is the
                     // gentlest of all and is never the answer — see `MIN_MEANINGFUL_DAMAGE` — so
                     // this is the minimum over words that actually land, not over all of them.
@@ -1742,12 +1815,17 @@ pub fn race_for_band(
                     // line missed the band, so `reach < below` here also means `reach < need` — the
                     // in-between words left above. See [`Outcome::under`].
                     if score >= MIN_MEANINGFUL_DAMAGE && below.is_some_and(|b| reach < b) {
-                        let keep = Keep::of(tiles, &typed.tiles, scorer);
-                        if local_under.as_ref().is_none_or(|(u, uk)| {
-                            keep.chips_better(mods, (word, score), uk, (&u.word, u.score))
-                        }) {
-                            local_under = Some((Found { word: word.clone(), score, slice }, keep));
-                        }
+                        let at = &typed.tiles;
+                        Hardest::offer(
+                            &mut local_under,
+                            mods,
+                            ranker,
+                            word,
+                            score,
+                            slice,
+                            at,
+                            reach,
+                        );
                     }
                     // The word to waste a free turn on — see [`Outcome::nothing`]. Ranked, because
                     // they all do the same nothing and differ only in what they leave behind.
@@ -1786,15 +1864,7 @@ pub fn race_for_band(
                     }
                 }
                 if let Some(lb) = local_best {
-                    let mut b = best.lock().unwrap();
-                    if b.as_ref()
-                        .map(|cur| {
-                            mods.hits_harder((&lb.word, lb.score), (&cur.word, cur.score)).is_gt()
-                        })
-                        .unwrap_or(true)
-                    {
-                        *b = Some(lb);
-                    }
+                    Hardest::merge(&mut best.lock().unwrap(), mods, ranker, lb);
                 }
                 if let Some(lst) = local_least {
                     let mut l = least.lock().unwrap();
@@ -1807,13 +1877,8 @@ pub fn race_for_band(
                         *l = Some(lst);
                     }
                 }
-                if let Some((lu, lk)) = local_under {
-                    let mut u = under.lock().unwrap();
-                    if u.as_ref().is_none_or(|(cur, ck)| {
-                        lk.chips_better(mods, (&lu.word, lu.score), ck, (&cur.word, cur.score))
-                    }) {
-                        *u = Some((lu, lk));
-                    }
+                if let Some(lu) = local_under {
+                    Hardest::merge(&mut under.lock().unwrap(), mods, ranker, lu);
                 }
                 if let Some((ln, rank)) = local_nothing {
                     let mut n = nothing.lock().unwrap();
@@ -1834,21 +1899,14 @@ pub fn race_for_band(
         }
     });
 
-    let under = under.into_inner().unwrap();
-    let nothing = nothing.into_inner().unwrap();
-    let nothing_first = match (&nothing, &under) {
-        (Some((_, rank)), Some((_, chip))) => mods.stall && Keep::from(rank).versus(chip).is_gt(),
-        _ => false,
-    };
     Outcome {
         lethal: lethal.into_inner().unwrap().map(|(f, _)| f),
-        best: best.into_inner().unwrap(),
+        best: best.into_inner().unwrap().map(|h| h.found),
         least: least.into_inner().unwrap(),
         // Stays `None` when no ceiling was given, because the collector above requires one. That is
         // the `race_for_kill` case, where nothing is out of bounds and `best` is already the answer.
-        under: under.map(|(f, _)| f),
-        nothing: nothing.map(|(f, _)| f),
-        nothing_first,
+        under: under.into_inner().unwrap().map(|h| h.found),
+        nothing: nothing.into_inner().unwrap().map(|(f, _)| f),
         longest: longest.into_inner().unwrap(),
         words_considered: considered.into_inner(),
     }
@@ -2048,7 +2106,6 @@ mod tests {
             least: Some(Found { word: "AT".into(), score: 2, slice: 0 }),
             under: None,
             nothing: None,
-            nothing_first: false,
             longest: Some(Found { word: "VENEPUNCTURE".into(), score: 40, slice: 0 }),
             words_considered: 900,
         };
@@ -2075,7 +2132,6 @@ mod tests {
             least: Some(Found { word: "SE".into(), score: 1, slice: 0 }),
             under: Some(Found { word: "VENEPUNCTURE".into(), score: 29, slice: 0 }),
             nothing: None,
-            nothing_first: false,
             longest: Some(Found { word: "VENEPUNCTURE".into(), score: 29, slice: 0 }),
             words_considered: 900,
         };
@@ -2101,7 +2157,6 @@ mod tests {
             least: Some(Found { word: "AA".into(), score: 1, slice: 0 }),
             under: Some(Found { word: "MIL".into(), score: 3, slice: 0 }),
             nothing: None,
-            nothing_first: false,
             longest: Some(Found { word: "SISSOO".into(), score: 25, slice: 0 }),
             words_considered: 900,
         };
@@ -2127,7 +2182,6 @@ mod tests {
             least: Some(Found { word: "AA".into(), score: 1, slice: 0 }),
             under: None,
             nothing: Some(Found { word: "O".into(), score: 0, slice: 0 }),
-            nothing_first: false,
             longest: Some(Found { word: "SISSOO".into(), score: 25, slice: 0 }),
             words_considered: 900,
         };
@@ -2263,7 +2317,6 @@ mod tests {
             least: None,
             under: None,
             nothing: None,
-            nothing_first: false,
             longest: Some(Found { word: "CAT".into(), score: 9, slice: 0 }),
             words_considered: 1,
         };
@@ -2276,7 +2329,6 @@ mod tests {
             least: None,
             under: None,
             nothing: None,
-            nothing_first: false,
             longest: Some(Found { word: "CAT".into(), score: 4, slice: 0 }),
             words_considered: 1,
         };
@@ -2298,7 +2350,6 @@ mod tests {
             least: None,
             under: None,
             nothing: None,
-            nothing_first: false,
             longest: Some(Found { word: "OATMEALS".into(), score: 12, slice: 1 }),
             words_considered: 10,
         };
@@ -3571,58 +3622,124 @@ mod ranked_tests {
         assert_eq!(with, play(&w));
     }
 
-    /// A free-turn hold, every word under the ceiling: the words that keep the enemy here, best first,
-    /// and the word Diggle would play.
-    fn hold_everything(w: &World) -> (Vec<Candidate>, String) {
-        let mods = Modifiers { stall: true, ..Modifiers::none() };
-        let goal = Goal::Hold { below: 1000, lethal: 1000 };
-        let list = rank_all(w, &mods, goal);
-        let out = search(&w.dict, &w.scorer, &w.board, &w.geom, &mods, goal, &w.picking, 8);
-        let played = out.choice_for(goal).expect("something keeps it here").word.clone();
-        (list, played)
-    }
-
-    /// The user, stalling with three burning tiles: none of the top candidates ate all three. On a
-    /// free turn the fire comes off before the chip's damage is asked about.
+    /// A toxin tile adds 3 per serrated tile, bleed kinds included, but only when it starts the
+    /// word; `toxinWeak` doubles it and `toxinImmune` zeroes it.
     #[test]
-    fn a_free_turn_eats_the_most_fire_first() {
+    fn a_toxin_tile_that_starts_the_word_adds_three_per_serrated_tile() {
         let mut w = world();
-        // `OYCAACTPORLIGAHJ`: set the A, C and T of `ACT` burning.
-        for i in [4, 5, 6] {
-            w.board[i].quality.burn = Some(3);
-        }
-        let (list, played) = hold_everything(&w);
-        let most = list.iter().map(|c| c.keep.fire).max().unwrap();
-        assert_eq!(most, 3, "some word must eat all three");
-        assert_eq!(list[0].keep.fire, 3, "{} listed first", list[0].word);
-        let hardest = list.iter().max_by_key(|c| c.score).unwrap();
-        assert!(hardest.keep.fire < 3, "the fixture must separate fire from damage");
-        let typed = Typist::new(&w.board, &w.geom).type_word(&played).unwrap();
-        assert_eq!(crate::pick::fire_eaten(&w.board, &typed.tiles), 3, "Diggle played {played}");
-
-        // Off a free turn nothing changes: the chip is still the hardest hit.
-        let mods = Modifiers::none();
-        let goal = Goal::Scare { need: 1000, below: 1000 };
-        let out = search(&w.dict, &w.scorer, &w.board, &w.geom, &mods, goal, &w.picking, 8);
-        let chip = out.under.expect("a chip");
-        assert_eq!(chip.score, hardest.score, "{} is not the hardest chip", chip.word);
+        // `OYCAACTPORLIGAHJ`.
+        w.board[0].quality.material = Some("electrumtoxin".into());
+        w.board[1].quality.material = Some("bronzebleed".into());
+        let t = |i: &[usize]| i.iter().map(|&i| w.board[i].clone()).collect::<Vec<_>>();
+        let m = Modifiers::none();
+        assert_eq!(m.toxin(&w.scorer, "OC", &t(&[0, 2])), 3, "the toxin tile is serrated itself");
+        assert_eq!(m.toxin(&w.scorer, "OY", &t(&[0, 1])), 6, "a bleed tile is serrated too");
+        assert_eq!(m.toxin(&w.scorer, "YO", &t(&[1, 0])), 0, "not first, not active");
+        assert_eq!(
+            Modifiers { toxin_scale: 2, ..Modifiers::none() }.toxin(&w.scorer, "OY", &t(&[0, 1])),
+            12
+        );
+        assert_eq!(
+            Modifiers { toxin_scale: 0, ..Modifiers::none() }.toxin(&w.scorer, "OY", &t(&[0, 1])),
+            0
+        );
     }
 
-    /// The user: *when stalling, it's not using logic to conserve gold tiles and wildcards.* The
-    /// chip was the hardest hit, so it spent the gold that makes the next turn's kill.
+    /// Toxin is paid before the enemy acts, so it counts as damage everywhere a goal looks,
+    /// including a free-turn hold's ceiling: a word that would only reach it with its toxin
+    /// overshoots.
     #[test]
-    fn a_free_turn_keeps_the_gold_for_the_next_turn() {
-        let w = world();
-        let (list, played) = hold_everything(&w);
-        assert!(list.iter().any(|c| c.keep.hoarded > 0.0), "the fixture must have gold to spend");
-        let hardest = list.iter().max_by_key(|c| c.score).unwrap();
-        assert!(hardest.keep.hoarded > 0.0, "the hardest chip spends gold: {}", hardest.word);
-        assert_eq!(list[0].keep.hoarded, 0.0, "{} listed first", list[0].word);
-        let typed = Typist::new(&w.board, &w.geom).type_word(&played).unwrap();
-        assert_eq!(crate::pick::hoarded(&w.board, &typed.tiles, &w.scorer), 0.0, "{played}");
-        // Of the words that spend nothing, still the hardest hit.
-        let free = list.iter().filter(|c| c.keep.hoarded == 0.0).map(|c| c.score).max();
-        assert_eq!(Some(list[0].score), free);
+    fn toxin_counts_toward_a_hold_ceiling() {
+        let mut w = world();
+        w.board[0].quality.material = Some("electrumtoxin".into());
+        let mods = Modifiers { stall: true, ..Modifiers::none() };
+        // The same enemy, immune: the direct hit alone.
+        let immune = Modifiers { toxin_scale: 0, ..Modifiers { stall: true, ..Modifiers::none() } };
+        let open = Goal::Hold { below: 1000, lethal: 1000 };
+        let o = rank_all(&w, &immune, open)
+            .into_iter()
+            .find(|c| c.typed.tiles.first() == Some(&0))
+            .expect("some word starts on the O");
+        // A ceiling the direct hit stays under and the toxin does not.
+        let below = o.score + 2;
+        let goal = Goal::Hold { below, lethal: below };
+        let tier = |m: &Modifiers| {
+            rank_all(&w, m, goal)
+                .into_iter()
+                .find(|c| c.word == o.word && c.typed.tiles == o.typed.tiles)
+                .unwrap()
+                .tier
+        };
+        assert_eq!(tier(&immune), Tier::Under, "{} stays under on its direct hit", o.word);
+        assert_ne!(tier(&mods), Tier::Under, "{} would finish it with toxin", o.word);
+    }
+
+    /// Every word short of the goal, in the advisor's order: hardest first, and between two that hit
+    /// equally hard, the one the shared ranking prefers. On a free-turn hold, a word that deals
+    /// nothing is just the weakest hit and comes last.
+    fn assert_hardest_then_ranked(list: &[Candidate], mods: &Modifiers) -> usize {
+        let short = |c: &&Candidate| matches!(c.tier, Tier::Under | Tier::Stall | Tier::Fallback);
+        let rows: Vec<&Candidate> = list.iter().filter(short).collect();
+        let mut ties = 0;
+        for p in rows.windows(2) {
+            let (a, b) = (p[0], p[1]);
+            let harder = mods.hits_harder((&a.word, a.score), (&b.word, b.score));
+            assert_ne!(harder, std::cmp::Ordering::Less, "{} above the harder {}", a.word, b.word);
+            if harder == std::cmp::Ordering::Equal && a.tier == b.tier {
+                let (ra, rb) = (a.rank.unwrap(), b.rank.unwrap());
+                assert!(
+                    !rb.better_than(&ra),
+                    "{} ranks above {} at the same damage",
+                    b.word,
+                    a.word
+                );
+                ties += ra.better_than(&rb) as usize;
+            }
+        }
+        ties
+    }
+
+    /// The user, 2026-11-04: a stall *should behave the same as a turn where none of the
+    /// candidates kill the target*, and both play the hardest hit with the ranking between equals.
+    /// The fixture's braced T gives armour to the words that end on it, which is what separates
+    /// words of equal damage.
+    #[test]
+    fn short_of_the_goal_the_hardest_hit_wins_and_the_rank_breaks_ties() {
+        let mut w = world();
+        w.board[6].quality.material = Some("woodbraced".into());
+        w.picking.prefs =
+            w.picking.prefs.with_room(crate::pick::Room { armour: 100, ..Default::default() });
+
+        // Nothing kills a 1000-health enemy.
+        let none = Modifiers::none();
+        let kill = Goal::RankedKill { need: 1000 };
+        let list = rank_all(&w, &none, kill);
+        assert!(list.iter().all(|c| c.tier == Tier::Fallback));
+        assert!(assert_hardest_then_ranked(&list, &none) > 0, "the fixture must have a ranked tie");
+        let out = search(&w.dict, &w.scorer, &w.board, &w.geom, &none, kill, &w.picking, 8);
+        let best = out.choice_for(kill).unwrap();
+        let head = &list[0];
+        assert_eq!(
+            (best.score, &head.rank),
+            (head.score, &list.iter().find(|c| c.word == best.word).unwrap().rank),
+            "Diggle plays the head, or one tied with it"
+        );
+
+        // A free-turn hold: the same order under the ceiling, the zero-damage words last.
+        let stall = Modifiers { stall: true, ..Modifiers::none() };
+        let hold = Goal::Hold { below: 9, lethal: 9 };
+        let list = rank_all(&w, &stall, hold);
+        assert_hardest_then_ranked(&list, &stall);
+        let first_nothing = list.iter().position(|c| c.tier == Tier::Stall);
+        let last_chip = list.iter().rposition(|c| c.tier == Tier::Under);
+        if let (Some(n), Some(c)) = (first_nothing, last_chip) {
+            assert!(c < n, "a word that deals nothing is the weakest hit");
+        }
+        let out = search(&w.dict, &w.scorer, &w.board, &w.geom, &stall, hold, &w.picking, 8);
+        let chip = out.choice_for(hold).unwrap();
+        let mine = list.iter().find(|c| c.word == chip.word).unwrap();
+        assert_eq!(mine.score, list[0].score, "Diggle's chip is as hard as the list's head");
+        assert!(!list[0].rank.unwrap().better_than(&mine.rank.unwrap()), "and ranks with it");
     }
 
     /// Diggle's own search, not just the advisor's list, takes the Silver chain coif's armour into

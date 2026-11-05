@@ -294,8 +294,22 @@ pub fn goal_notes(cs: &Table, name: &str, mods: &Modifiers, goal: Goal) -> Vec<S
 ///
 /// The dropped quality mattered too: a wood or gold tile scored as an ordinary letter, so even a
 /// board that happened to parse to the right length would have been mis-scored.
+///
+/// ## The saved list is the board **and then the queue**
+///
+/// `getDataForSave` writes the grid column by column and then appends `letterQueue`, the tiles
+/// waiting to drop in (`tileboard.lua:2448-2474`). Loading puts the whole list into the queue and
+/// spawns the board from its front, `columns` heights when the board is ragged
+/// (`tileboard.lua:2520-2537`). So the board is the first [`crate::geometry::Geometry::total_tiles`]
+/// entries, which already counts those heights, and anything past that is not on the board. Read as
+/// board, a live save's twelve queued tiles became a 28-tile "board" on a 4x4 shape: every word was
+/// typed against tiles that were not there, and the hazard ranking could not place the `!`.
 pub fn tiles_of(save: &Table) -> Vec<crate::observe::board::Tile> {
-    save.table_at("tileboard").map(crate::observe::board::tiles_from).unwrap_or_default()
+    let mut tiles =
+        save.table_at("tileboard").map(crate::observe::board::tiles_from).unwrap_or_default();
+    let on_board = crate::geometry::Geometry::from_save(save, tiles.len()).geometry.total_tiles();
+    tiles.truncate(on_board);
+    tiles
 }
 
 /// The player's side of the killing-blow decision, from `combatSaveData`.
@@ -495,6 +509,25 @@ pub(crate) mod tests {
             "{:?}",
             p.notes
         );
+    }
+
+    /// The saved tile list is the board and then the queue (`tileboard.lua:2468-2474`), so tiles
+    /// past the board's size are not on it.
+    #[test]
+    fn the_saved_queue_is_not_read_as_board() {
+        let src = std::fs::read_to_string("tests/fixtures/combatSaveData-crypt-l0.lua").unwrap();
+        let cs = crate::game::save::parse(&src).unwrap();
+        let board = tiles_of(&cs);
+        assert_eq!(board.len(), 16, "the fixture is a full 4x4 board");
+        let queued = src.replacen("    tileboard = {", "    tileboard = {\n", 1);
+        let n = queued.find("    tileboard = {\n").unwrap() + "    tileboard = {\n".len();
+        let close = n + queued[n..].find("\n    },").unwrap();
+        let with_queue =
+            format!("{}\n        \"!\",\n        \"Q\",{}", &queued[..close], &queued[close..]);
+        let cs = crate::game::save::parse(&with_queue).unwrap();
+        assert_eq!(tiles_of(&cs).len(), 16, "the two queued tiles are left out");
+        let same = tiles_of(&cs).iter().zip(&board).all(|(a, b)| a.letter == b.letter);
+        assert!(same, "and the board itself is untouched");
     }
 
     /// Unticked, the same turn is planned exactly as before the option existed: the kill.

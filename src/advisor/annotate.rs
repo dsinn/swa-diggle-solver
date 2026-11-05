@@ -17,7 +17,12 @@ pub const ROW_CAP: usize = 500;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
     pub word: String,
+    /// The word's direct damage, as the game shows it. [`Row::toxin`] is on top of it.
     pub score: i64,
+    /// Toxin the word applies, paid by the enemy before it acts: see
+    /// [`crate::search::Modifiers::toxin`]. The ranking counts it as damage; the table shows it
+    /// beside the hit, `33 +3 🧪`.
+    pub toxin: i64,
     pub tier: Tier,
     /// The enemy's lexicon multiplier for this word, when it is not 1.
     pub bonus: Option<Bonus>,
@@ -341,12 +346,18 @@ pub fn rows(
             })
             .collect()
     };
+    let toxin_of = |c: &Candidate| {
+        let consumed: Vec<Tile> =
+            c.typed.tiles.iter().filter_map(|&i| plan.tiles.get(i).cloned()).collect();
+        plan.mods.toxin(scorer, &c.word, &consumed)
+    };
     cands
         .iter()
         .take(cap)
         .map(|c| Row {
             word: c.word.clone(),
-            score: c.score,
+            score: c.score - toxin_of(c),
+            toxin: toxin_of(c),
             tier: c.tier,
             bonus: bonus_of(&plan.mods, &c.word),
             gain: heals.of(&plan.tiles, scorer, c),
@@ -380,7 +391,6 @@ mod tests {
             pierces: false,
             tier,
             rank: None,
-            keep: Default::default(),
             typed: Typed { tiles, wildcards: vec![None; n], corners_used: 0, adjacent: false },
             cast: None,
         }
