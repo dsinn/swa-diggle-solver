@@ -13,20 +13,29 @@ Tested against game version v53.2.
 
 ### Added
 
-- **Diggle Advisor** (`diggle_advisor`): a window that shows Diggle's ranking of every playable word
-  while you play the game yourself. It sends no input and reads only the Steam save folder, never
-  LOVE's. It shows:
-  - each letter on its tile in the material's sampled face and ink colours, with rings for metal
-    borders, inlaid wood, variants and fire, the historical ligature glyphs, and wildcards drawn
-    handwritten;
-  - columns for damage, the lexicon bonus (shown as its multiplier and emoji), what the word gives
-    you (`+3 ❤️ +4 🛡️`), the held spells it qualifies for, and what it does to the enemy.
-  - Each word is scored by its best cast, so Turn undead doubles bone words against the undead.
-    The enemy bestiary is read from the game's files.
-  - It follows arcade challenge saves (Boggling anxiety) as well as normal runs.
-  - It remembers its size, "Stay on top", the log's visibility and height, and the halfling stall
-    toggle, in `%LOCALAPPDATA%\DiggleAdvisor\settings.toml`.
-- `search::ranked`: every typeable word, in the order Diggle would fall back through them.
+#### Diggle Advisor
+
+`diggle_advisor`, a new binary: a window that shows Diggle's ranking of every playable word while
+you play the game yourself. It sends no input and reads only the Steam save folder, never LOVE's
+(`src/advisor/watch.rs`).
+
+- It renders each letter on its tile in the material's sampled face and ink colours, with rings for
+  metal borders, inlaid wood, variants and fire, the historical ligature glyphs, and wildcards drawn
+  handwritten.
+- There are columns for damage, the lexicon bonus (its multiplier and emoji), what the word gives
+  you (`+3 ❤️ +4 🛡️`), the held spells it qualifies for, and what it does to the enemy.
+- Each word is scored by its best cast (`SpellBook`, `src/spells.rs`), so Turn undead doubles bone
+  words against the undead. The save doesn't record undeadness, so `advisor::bestiary` reads it
+  from the game's enemy and name files.
+- It follows arcade challenge saves (Boggling anxiety) as well as normal runs.
+- It remembers its size, "Stay on top", the log's visibility and height, and the halfling stall
+  toggle, in `%LOCALAPPDATA%\DiggleAdvisor\settings.toml`.
+- To support it, a turn's plan is built outside the fight loop (`turn::plan`), and
+  `search::ranked` lists every typeable word in the order Diggle would fall back through them.
+  `ranked_head_matches_choice_for_on_every_fixture` holds its head to Diggle's own choice.
+
+#### Misc
+
 - Rewards are chosen by their bonus, which the v53.2 reward screen now prints.
 - Modelled in the ranking:
   - The rapier: a word that starts and ends with the same letter ignores armour. Words that don't
@@ -51,7 +60,10 @@ Tested against game version v53.2.
 
 - The shrine word lists are regenerated for v53.2's dictionary.
 - A reward bonus no longer hides the offers listed after it.
-- Diggle presses nothing while an event's v53.2 combat cutscene plays.
+- Diggle presses nothing while an event's combat cutscene plays (`ui/rpgcutscene.lua`, new in v53.2
+  for random character encounters: the Highwayman, Woodsman and Injured paladin events). The
+  cutscene binds affirmative to *skip*, so `clear_text_screen` could skip it and spend its later
+  presses on the event's choices; it now waits the cutscene out.
 - The saved board is read without its letter queue, so words are no longer typed against tiles
   that aren't there.
 - Skeletons are always killed, even when Turn undead has terrified them.
