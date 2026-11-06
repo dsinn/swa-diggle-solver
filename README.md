@@ -14,8 +14,9 @@ Git on purpose, not gitignored — a local `.git/info/exclude` entry that never 
 to keep the slop that comes with the process off the record while the reasoning that survives it
 stays in the doc comments.
 
-**Tested against game version v52.4.** That is the only number in this file, because it is the only
-one a reader cannot get more reliably by asking the repo.
+**Tested against game version v53.2** (the anomaly run below was on v52.4). Those are the only
+version numbers in this file, because they are the only ones a reader cannot get more reliably by
+asking the repo.
 
 **The game is never modified.** Everything here observes the running process — screen captures
 compared against templates, and the verbose console on stdout — and acts through Win32 `SendInput`.
