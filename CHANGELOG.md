@@ -18,8 +18,16 @@ behaviour freely.
   Versed's +50% (`spells::tile_school`).
 - **Ice and burn from a gem count as damage**, like toxin: a Chrysocolla first ticks its ice, a
   Corundum its burn, before the enemy acts. The damage column shows each, `30 +1 ❄️`.
-- Advisor's Gain column shows the `!` marks a word clears (`2❗`) and the Bookkeepers bassanello's
-  wildcards (`+2 🃏`); those wildcards also count in the ranking.
+- **Gems queued by gear count in the ranking.** The dragon (a fire word queues a Corundum), the
+  walrus (an ice word, a Chrysocolla) and the unicorn (a letter four times, a Diamond), staves and
+  trinkets alike, rank a word that queues a gem above the infinitives. The Gain column shows it,
+  `+1 💎` (`pick::GemQueue`).
+- The Bookkeepers bassanello's wildcards count in the ranking, as the lowest of the tile gains,
+  below the infinitives.
+- Both are counted **net of what the word spends**: a word that uses up two Corundums to queue one,
+  or two wildcards to queue one, is ranked as having lost one (`pick::TileLedger`).
+- Advisor's Gain column shows the `!` marks a word clears (`2❗`) and the bassanello's wildcards
+  (`+2 ⬜`).
 - Advisor's effect column names the spell its damage assumes (`kills, cast Metal`), and says how
   sure a kill is: `kills - no margin` at exactly lethal, `kills - status finishes it` when the hit
   leaves the enemy alive and its status kills it before it acts.

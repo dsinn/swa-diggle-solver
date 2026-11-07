@@ -157,6 +157,9 @@ pub struct Modifiers {
     /// Only the auxiliary dictionaries the plan will ask about — usually none. Carried as word sets
     /// rather than a `Lexica` so `Modifiers` stays cheap to clone.
     pub dicts: Vec<(crate::gear::Dict, HashSet<String>)>,
+    /// The gear that queues gems on submission, for the ranking — see [`crate::pick::GemQueue`].
+    /// Built here because this is where the dictionaries are loaded.
+    pub gems: crate::pick::GemQueue,
     /// The gear that changes damage *after* the word is scored — see [`crate::gear::weapon`].
     pub weapon: crate::gear::Weapon,
     /// Health the enemy loses to the status already on it, at the start of its next turn.
@@ -333,6 +336,7 @@ impl Modifiers {
 
         Ok((
             Modifiers {
+                gems: crate::pick::GemQueue::from_save(save, &lexica),
                 excluded: lexica.excluded_words(&statuses),
                 resist_cornerless: statuses.contains_key("resistCornerless"),
                 overkill_gold,
@@ -397,6 +401,7 @@ impl Modifiers {
             plan: crate::gear::Plan::default(),
             fight: crate::gear::FightFacts::default(),
             dicts: Vec::new(),
+            gems: Default::default(),
             weapon: crate::gear::Weapon::default(),
             enemy_status_tick: 0,
             player_dodges: false,
@@ -1346,8 +1351,7 @@ pub fn ranked_kill(
                                     geometry,
                                     &typed.tiles,
                                     scorer,
-                                    &picking.target,
-                                    picking.prefs,
+                                    picking,
                                     reach - mods.status_damage(scorer, word, &consumed),
                                 );
                                 let take = match &local_lethal {
@@ -1690,8 +1694,7 @@ pub fn ranked(
                                     geometry,
                                     &typed.tiles,
                                     scorer,
-                                    &picking.target,
-                                    picking.prefs,
+                                    picking,
                                     reach - mods.status_damage(scorer, word, &consumed),
                                 )
                             });
@@ -1792,8 +1795,7 @@ impl Ranker<'_> {
             self.geometry,
             consumed,
             self.scorer,
-            &self.picking.target,
-            self.picking.prefs,
+            self.picking,
             reach - self.mods.status_damage(self.scorer, word, &tiles),
         )
     }
@@ -1965,8 +1967,7 @@ pub fn race_for_band(
                                 geometry,
                                 &typed.tiles,
                                 scorer,
-                                &picking.target,
-                                picking.prefs,
+                                picking,
                                 reach - mods.status_damage(scorer, word, &consumed),
                             );
                             // **Only a band ranks.** With no ceiling this is `race_for_kill`, whose
@@ -2062,8 +2063,7 @@ pub fn race_for_band(
                                 geometry,
                                 &typed.tiles,
                                 scorer,
-                                &picking.target,
-                                picking.prefs,
+                                picking,
                                 reach - mods.status_damage(scorer, word, &consumed),
                             );
                             if local_nothing.as_ref().is_none_or(|(_, cur)| rank.better_than(cur)) {
@@ -3014,6 +3014,7 @@ mod tests {
         let picking = crate::pick::Context {
             target: crate::letters::Weights::load(&game_dir()).unwrap().target(board.len()),
             prefs: crate::pick::Preferences::default(),
+            gems: Default::default(),
         };
         let need = 3;
 
@@ -3035,16 +3036,7 @@ mod tests {
                 geom.corner_count(),
             );
             (score >= need).then(|| {
-                crate::pick::rank(
-                    word,
-                    &board,
-                    &geom,
-                    &typed.tiles,
-                    &scorer,
-                    &picking.target,
-                    picking.prefs,
-                    score,
-                )
+                crate::pick::rank(word, &board, &geom, &typed.tiles, &scorer, &picking, score)
             })
         };
         let winner = rank_of(&won.word).expect("the winning word must itself be lethal");
@@ -3640,6 +3632,7 @@ mod ranked_tests {
         let picking = crate::pick::Context {
             target: crate::letters::Weights::load(&game_dir()).unwrap().target(board.len()),
             prefs: crate::pick::Preferences::default(),
+            gems: Default::default(),
         };
         World {
             dict: Dictionary::load(&game_dir()).unwrap(),

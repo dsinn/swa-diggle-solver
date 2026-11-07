@@ -281,6 +281,8 @@ impl Preferences {
 pub struct Context {
     pub target: Target,
     pub prefs: Preferences,
+    /// The gear that queues gems on submission — see [`GemQueue`].
+    pub gems: GemQueue,
 }
 
 /// How good a lethal candidate is, beyond the fact that it kills.
@@ -388,20 +390,29 @@ pub struct Rank {
     /// burns (see [`Rank::fire_eaten`]), and below the wood-only and full-heal payouts, which the
     /// dev ordered and which already stand for gain of their own.
     pub gain: i64,
-    /// Wildcards this word queues from the Bookkeepers bassanello: see [`wildcards_queued`]. Higher
-    /// is better.
+    /// The worth of the gems this word queues ([`GemQueue`]) **net of** the kept tiles it spends
+    /// ([`hoarded`]), floored at zero. Higher is better. See [`TileLedger`].
     ///
-    /// **Below health and armour, above the infinitives**, the order this was written in,
-    /// 2026-11-06, when the user asked for these wildcards to count. A wildcard spells whatever a
-    /// later word needs, which is worth more than an infinitive's fixed letters; health and armour
-    /// keep their place above it as what the player is given outright.
-    pub wildcards: i64,
+    /// **Above the infinitives**, the user's call, 2026-11-07, and net because *if the inputs
+    /// require more tiles that we want to save than it outputs, that's bad*. A word that spends as
+    /// much as it queues, or more, scores zero here, and its loss is judged where every other
+    /// word's is: [`Rank::hoarded`], which carries the whole net figure, so a word that spends two
+    /// Corundums to queue one ranks there as having spent one.
+    pub gems_queued: f64,
     /// Infinitive tile sets this word queues from the Infinitives gauntlet or the Scales of
     /// justice: see [`Infinitives`]. Higher is better.
     ///
-    /// **The lowest of the gains**, the user's call, 2026-11-04: below health and armour, above
-    /// every board-hygiene term.
+    /// Below health and armour, the user's call, 2026-11-04, and below the gems, 2026-11-07.
     pub infinitives: i64,
+    /// Wildcards this word queues from the Bookkeepers bassanello ([`wildcards_queued`]), net of
+    /// whatever of its spending the gems did not already pay back, floored at zero. Higher is
+    /// better. See [`TileLedger`].
+    ///
+    /// **The lowest of the tile gains**, the user's call, 2026-11-07, which moved it below the
+    /// infinitives where it had sat above them since 2026-11-06. Net for the same reason as the
+    /// gems: a wood-only word spends wildcards too (their material is `wood0`), and one that spends
+    /// two to queue one has lost a wildcard, not gained one.
+    pub wildcards: f64,
     /// What this word spends from the board's stock of tiles worth keeping. **Lower** is better.
     ///
     /// See [`hoarded`]. Ranked below `wood_only`, which is a payout the gear actually pays, and above
@@ -449,11 +460,14 @@ impl Rank {
         if self.gain != other.gain {
             return self.gain > other.gain;
         }
-        if self.wildcards != other.wildcards {
-            return self.wildcards > other.wildcards;
+        if self.gems_queued != other.gems_queued {
+            return self.gems_queued > other.gems_queued;
         }
         if self.infinitives != other.infinitives {
             return self.infinitives > other.infinitives;
+        }
+        if self.wildcards != other.wildcards {
+            return self.wildcards > other.wildcards;
         }
         if self.hoarded != other.hoarded {
             return self.hoarded < other.hoarded;
@@ -510,6 +524,9 @@ pub struct Gains {
     /// Wildcards queued: see [`wildcards_queued`]. Filled by the advisor, which has the word;
     /// [`gains`] leaves it at zero.
     pub wildcards: i64,
+    /// Gems queued by a gem staff: see [`GemQueue`]. Filled by the advisor, which has the word;
+    /// [`gains`] leaves it at zero.
+    pub gems: i64,
     /// `!` marks this word clears off the board: see [`exclamations_cleared`]. Filled by the
     /// advisor, which reads the falloff gear from the save; [`gains`] leaves it at zero.
     pub exclamations: usize,
@@ -722,6 +739,158 @@ pub fn wildcards_queued(
     per_run * crate::gear::facts::count_runs(&word.to_ascii_uppercase()) as i64
 }
 
+/// What a gem queued by gear is worth, priced as [`hoarded`] prices one spent: a gem's own `score = 3`
+/// (`rpg/effects/material/gem{fire,ice,heal}.lua`). The queued tile's letter is random, so only the
+/// material is known, and the material is what makes it worth keeping.
+pub const GEM_WORTH: f64 = 3.0;
+
+/// The gear that queues a gem when a word is submitted — tiles [`hoarded`] would rather keep.
+///
+/// The user, 2026-11-07: *when we have an item that can queue a tile that we want to save, such as
+/// the staff of the dragon that enqueues a corundum tile on fire word submission, rank that over the
+/// infinitives gauntlet and scales of justice gain* — net of what the word spends, because a word
+/// that uses up more of those tiles than it brings back is a loss. See [`Rank::gems_queued`].
+///
+/// Three `onSubmit` modifiers, so the word need not kill, each queuing `flagVal` gems through
+/// `tileboard.queueFlaggedTile`, which nothing turns away (`tileboard.lua:373-377`):
+///
+/// | flag                               | worn on                                   | when the word …                        | queues     |
+/// |------------------------------------|-------------------------------------------|----------------------------------------|------------|
+/// | `onSubmitFireDictWordQueueGemfire` | Corundum dragon, Staff of the dragon      | is in the `fire` dictionary            | Corundum   |
+/// | `onSubmitIceDictWordQueueGemice`   | Chrysocolla walrus, Staff of the walrus   | is in the `ice` dictionary             | Chrysocolla|
+/// | `onSubmit4MatchingQueueGemheal`    | Diamond unicorn, Staff of the unicorn     | has one letter at least four times     | Diamond    |
+///
+/// (`items/gemstaves.lua`, `rpg/effects/modifiers/<flag>.lua`.) The dictionaries are the game's own,
+/// read at run time ([`crate::lexica`]), as `dictionaries.fire.find` reads them. "Four matching" is
+/// `words.hash(word)`'s most common count over the word's characters (`utils/words.lua:162-174`).
+///
+/// **Not modelled:** `onCastFullColumnQueueGemheal` (`items/boardshapes.lua`), a Diamond for a spell
+/// cast through the board's middle column. It hangs on which spell is cast and on the board's shape,
+/// neither of which the ranking sees.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GemQueue {
+    pub fire: i64,
+    pub ice: i64,
+    pub four_matching: i64,
+    fire_words: std::sync::Arc<std::collections::HashSet<String>>,
+    ice_words: std::sync::Arc<std::collections::HashSet<String>>,
+}
+
+impl GemQueue {
+    /// Reads the flags from `rpg.player.gearFlags` and the word lists from `lexica`.
+    pub fn from_save(cs: &crate::game::save::Table, lexica: &crate::lexica::Lexica) -> Self {
+        let flag = |f: &str| {
+            cs.path(&format!("rpg.player.gearFlags.{f}"))
+                .and_then(|v| v.as_f64())
+                .map(|v| v as i64)
+                .unwrap_or(0)
+        };
+        let words = |key: &str, n: i64| match n > 0 {
+            true => std::sync::Arc::new(lexica.words_for(key).cloned().unwrap_or_default()),
+            false => Default::default(),
+        };
+        let (fire, ice) =
+            (flag("onSubmitFireDictWordQueueGemfire"), flag("onSubmitIceDictWordQueueGemice"));
+        GemQueue {
+            fire,
+            ice,
+            four_matching: flag("onSubmit4MatchingQueueGemheal"),
+            fire_words: words("fire", fire),
+            ice_words: words("ice", ice),
+        }
+    }
+
+    /// For tests: the given counts, with the word lists.
+    pub fn with_words(fire: (i64, &[&str]), ice: (i64, &[&str]), four_matching: i64) -> Self {
+        let set =
+            |w: &[&str]| std::sync::Arc::new(w.iter().map(|s| s.to_ascii_uppercase()).collect());
+        GemQueue {
+            fire: fire.0,
+            ice: ice.0,
+            four_matching,
+            fire_words: set(fire.1),
+            ice_words: set(ice.1),
+        }
+    }
+
+    /// How many gems submitting `word` queues.
+    pub fn queued(&self, word: &str) -> i64 {
+        if self.fire <= 0 && self.ice <= 0 && self.four_matching <= 0 {
+            return 0;
+        }
+        let upper = word.to_ascii_uppercase();
+        let mut n = 0;
+        if self.fire > 0 && self.fire_words.contains(&upper) {
+            n += self.fire;
+        }
+        if self.ice > 0 && self.ice_words.contains(&upper) {
+            n += self.ice;
+        }
+        if self.four_matching > 0 {
+            let mut counts = std::collections::HashMap::new();
+            for c in upper.chars() {
+                *counts.entry(c).or_insert(0) += 1;
+            }
+            if counts.values().any(|&k| k >= 4) {
+                n += self.four_matching;
+            }
+        }
+        n
+    }
+}
+
+/// The kept tiles a word spends against the ones its gear queues, all priced alike: what
+/// [`hoarded`] charges for a spent tile, [`GEM_WORTH`] for a queued gem, [`WILDCARD_WORTH`] for a
+/// queued wildcard.
+///
+/// The user, 2026-11-07, for both the gem staves and the bassanello: count a queued tile as a gain
+/// only net of what the word spends, and rank the gems above the infinitives and the wildcards
+/// below them. So the spending is paid back in that order:
+///
+/// ```text
+///   gems_net      = max(0, gems - spent)                      Rank::gems_queued
+///   wildcards_net = max(0, wildcards - max(0, spent - gems))  Rank::wildcards
+///   net_spent     = spent - gems - wildcards                  Rank::hoarded (lower is better)
+/// ```
+///
+/// With neither item worn, `net_spent` is [`hoarded`] and the two gains are zero: the ranking is as
+/// it was.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TileLedger {
+    /// [`hoarded`]: the worth of the kept tiles the word uses up.
+    pub spent: f64,
+    /// The worth of the gems queued.
+    pub gems: f64,
+    /// The worth of the wildcards queued.
+    pub wildcards: f64,
+}
+
+impl TileLedger {
+    pub fn of(
+        word: &str, tiles: &[Tile], consumed: &[usize], scorer: &Scorer, picking: &Context,
+    ) -> Self {
+        let prefs = picking.prefs;
+        TileLedger {
+            spent: hoarded(tiles, consumed, scorer, prefs.room.health > 0),
+            gems: GEM_WORTH * picking.gems.queued(word) as f64,
+            wildcards: WILDCARD_WORTH
+                * wildcards_queued(word, tiles, consumed, scorer, prefs.wildcards_per_run) as f64,
+        }
+    }
+
+    pub fn gems_net(&self) -> f64 {
+        (self.gems - self.spent).max(0.0)
+    }
+
+    pub fn wildcards_net(&self) -> f64 {
+        (self.wildcards - (self.spent - self.gems).max(0.0)).max(0.0)
+    }
+
+    pub fn net_spent(&self) -> f64 {
+        self.spent - self.gems - self.wildcards
+    }
+}
+
 /// Does this word use nothing but wood?
 ///
 /// Empty is not wood-only: a word that used no tiles could not have killed anything, and answering
@@ -876,8 +1045,10 @@ pub fn fire_eaten(tiles: &[Tile], consumed: &[usize]) -> usize {
 #[allow(clippy::too_many_arguments)]
 pub fn rank(
     word: &str, tiles: &[Tile], geometry: &crate::geometry::Geometry, consumed: &[usize],
-    scorer: &Scorer, target: &Target, prefs: Preferences, damage: i64,
+    scorer: &Scorer, picking: &Context, damage: i64,
 ) -> Rank {
+    let (target, prefs) = (&picking.target, picking.prefs);
+    let ledger = TileLedger::of(word, tiles, consumed, scorer, picking);
     Rank {
         fire_eaten: fire_eaten(tiles, consumed),
         wood_only: prefs.wood_only_pays
@@ -886,9 +1057,10 @@ pub fn rank(
         heals_fully: prefs.heal_at.is_some_and(|at| damage >= at),
         hazards_cleared: hazards_cleared(tiles, geometry, consumed, scorer),
         gain: gain(tiles, consumed, scorer, prefs.room),
-        wildcards: wildcards_queued(word, tiles, consumed, scorer, prefs.wildcards_per_run),
+        gems_queued: ledger.gems_net(),
         infinitives: prefs.infinitives.created(word),
-        hoarded: hoarded(tiles, consumed, scorer, prefs.room.health > 0),
+        wildcards: ledger.wildcards_net(),
+        hoarded: ledger.net_spent(),
         shed: shed(tiles, consumed),
         hazard_fall: hazard_fall(tiles, geometry, consumed, scorer),
         deviation: target.deviation(&remaining_counts(tiles, consumed)),
@@ -1015,12 +1187,13 @@ mod tests {
             wood_only: wood,
             heals_fully: false,
             gain: 0,
+            gems_queued: 0.0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
             deviation: 0.0,
         };
         // Neither of these clears the board, so a threshold rule calls them equal. They are not.
@@ -1098,24 +1271,72 @@ mod tests {
 
     /// Below health and armour, above the infinitives and everything after them.
     #[test]
-    fn wildcards_rank_between_the_gains_and_the_infinitives() {
-        let r = |gain: i64, wildcards: i64, infinitives: i64, hoarded: f64| Rank {
+    fn tile_gains_rank_gems_then_infinitives_then_wildcards() {
+        let r = |gain: i64, gems: f64, infinitives: i64, wildcards: f64, hoarded: f64| Rank {
             fire_eaten: 0,
             wood_only: false,
             heals_fully: false,
             hazards_cleared: 0,
             gain,
-            wildcards,
+            gems_queued: gems,
             infinitives,
+            wildcards,
             hoarded,
             shed: 0,
             hazard_fall: 0,
             deviation: 0.0,
         };
-        assert!(r(4, 0, 0, 0.0).better_than(&r(0, 3, 0, 0.0)), "armour first");
-        assert!(r(0, 1, 0, 0.0).better_than(&r(0, 0, 1, 0.0)), "then wildcards");
-        assert!(r(0, 2, 0, 0.0).better_than(&r(0, 1, 0, 0.0)), "more of them");
-        assert!(r(0, 1, 0, 1.0).better_than(&r(0, 0, 0, 0.0)), "worth spending one to get one");
+        assert!(r(4, 0.0, 0, 0.0, 0.0).better_than(&r(0, 3.0, 0, 0.0, 0.0)), "armour first");
+        assert!(r(0, 3.0, 0, 0.0, 0.0).better_than(&r(0, 0.0, 1, 0.0, 0.0)), "then gems");
+        assert!(r(0, 0.0, 1, 0.0, 0.0).better_than(&r(0, 0.0, 0, 3.0, 0.0)), "then infinitives");
+        assert!(r(0, 0.0, 0, 1.0, 9.0).better_than(&r(0, 0.0, 0, 0.0, 0.0)), "then wildcards");
+    }
+
+    /// Spending is paid back by the gems first, then by the wildcards; what is left is hoarding.
+    #[test]
+    fn the_ledger_nets_spending_against_what_is_queued() {
+        let l = |spent: f64, gems: f64, wildcards: f64| {
+            let l = TileLedger { spent, gems, wildcards };
+            (l.gems_net(), l.wildcards_net(), l.net_spent())
+        };
+        assert_eq!(l(0.0, 0.0, 0.0), (0.0, 0.0, 0.0), "nothing either way");
+        assert_eq!(l(5.0, 0.0, 0.0), (0.0, 0.0, 5.0), "no gear: hoarding as before");
+        assert_eq!(l(0.0, 3.0, 0.0), (3.0, 0.0, -3.0), "a Corundum for free");
+        assert_eq!(l(3.0, 3.0, 0.0), (0.0, 0.0, 0.0), "one Corundum spent to queue one");
+        assert_eq!(l(6.0, 3.0, 0.0), (0.0, 0.0, 3.0), "two spent to queue one: a loss of one");
+        assert_eq!(l(2.0, 0.0, 1.0), (0.0, 0.0, 1.0), "two wildcards spent to queue one");
+        assert_eq!(l(1.0, 0.0, 2.0), (0.0, 1.0, -1.0), "one wildcard spent to queue two");
+        assert_eq!(l(4.0, 3.0, 2.0), (0.0, 1.0, -1.0), "the gem pays back first, the rest after");
+    }
+
+    /// The gem staves queue on the game's dictionaries and on four of a letter.
+    #[test]
+    fn gem_gear_queues_on_its_words() {
+        let q = GemQueue::with_words((1, &["blaze"]), (2, &["frost"]), 1);
+        assert_eq!(q.queued("BLAZE"), 1, "a fire word, any case");
+        assert_eq!(q.queued("frost"), 2, "per flag");
+        assert_eq!(q.queued("CAT"), 0);
+        assert_eq!(q.queued("BEEKEEPER"), 1, "five Es");
+        assert_eq!(q.queued("BOOKKEEPER"), 0, "three is not four");
+        assert_eq!(GemQueue::default().queued("BLAZE"), 0, "not worn");
+    }
+
+    /// The real save flag and dictionary: the Staff of the dragon's fire words.
+    #[test]
+    fn the_staff_of_the_dragon_reads_the_fire_dictionary() {
+        let game = PathBuf::from("../sternly-worded-adventures");
+        let Ok(lex) = crate::lexica::Lexica::load(&game) else { return };
+        let fire = lex.words_for("fire").expect("fire dictionary");
+        let word = fire.iter().min().unwrap().clone();
+        let cs = crate::game::save::parse(
+            "return { rpg = { player = { gearFlags = { onSubmitFireDictWordQueueGemfire = 1 } } } }",
+        )
+        .unwrap();
+        let q = GemQueue::from_save(&cs, &lex);
+        assert_eq!(q.queued(&word), 1, "{word}");
+        assert_eq!(q.queued("ZZZZQ"), 0);
+        let bare = crate::game::save::parse("return {}").unwrap();
+        assert_eq!(GemQueue::from_save(&bare, &lex), GemQueue::default());
     }
 
     /// The letters whose default material is silver count without any upgrade
@@ -1166,12 +1387,13 @@ mod tests {
             wood_only: wood,
             heals_fully: false,
             gain,
+            gems_queued: 0.0,
             hoarded,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
             deviation,
         };
         assert!(r(0, true, 4, 0.0, 11.6).better_than(&r(0, true, 0, 0.0, 11.0)), "FUD over DAU");
@@ -1201,12 +1423,13 @@ mod tests {
             wood_only: wood,
             heals_fully: heal,
             gain: 0,
+            gems_queued: 0.0,
             hoarded,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
             deviation: 0.0,
         };
         let both = tier(true, true, 99.0);
@@ -1245,12 +1468,13 @@ mod tests {
             wood_only: false,
             heals_fully: false,
             gain: 0,
+            gems_queued: 0.0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
             deviation: 9.0,
         };
         let golden = Rank {
@@ -1258,12 +1482,13 @@ mod tests {
             wood_only: false,
             heals_fully: false,
             gain: 0,
+            gems_queued: 0.0,
             hoarded: 40.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
             deviation: 0.0,
         };
         assert!(plain.better_than(&golden), "a tidier board is not worth a Q");
@@ -1275,12 +1500,13 @@ mod tests {
             wood_only: true,
             heals_fully: false,
             gain: 0,
+            gems_queued: 0.0,
             hoarded: 40.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
             deviation: 9.0,
         };
         assert!(paid.better_than(&plain), "a payout in hand outranks a tile kept back");
@@ -1291,12 +1517,13 @@ mod tests {
             wood_only: false,
             heals_fully: false,
             gain: 0,
+            gems_queued: 0.0,
             hoarded: 10.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
             deviation: 0.0,
         };
         let gold_and_wild = Rank {
@@ -1304,12 +1531,13 @@ mod tests {
             wood_only: false,
             heals_fully: false,
             gain: 0,
+            gems_queued: 0.0,
             hoarded: 11.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
             deviation: 0.0,
         };
         assert!(gold_only.better_than(&gold_and_wild), "no reason to spend a wildcard as well");
@@ -1331,12 +1559,13 @@ mod tests {
             wood_only: false,
             heals_fully: false,
             gain: 0,
+            gems_queued: 0.0,
             hoarded,
             shed,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
             deviation,
         };
         // Nothing else to separate them, so getting rid of the ash decides it.
@@ -1572,7 +1801,8 @@ mod tests {
             hazards_cleared,
             gain,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
+            gems_queued: 0.0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 0,
@@ -1592,7 +1822,8 @@ mod tests {
             hazards_cleared: 0,
             gain,
             infinitives,
-            wildcards: 0,
+            wildcards: 0.0,
+            gems_queued: 0.0,
             hoarded,
             shed: 0,
             hazard_fall: 0,
@@ -1609,12 +1840,13 @@ mod tests {
             wood_only: true,
             heals_fully: false,
             gain: 0,
+            gems_queued: 0.0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
             deviation: 99.0,
         };
         let hazard = Rank {
@@ -1622,12 +1854,13 @@ mod tests {
             wood_only: false,
             heals_fully: false,
             gain: 0,
+            gems_queued: 0.0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 5,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
             deviation: 1.0,
         };
         assert!(wood.better_than(&hazard), "a wood-only kill outranks any number of falls");
@@ -1637,12 +1870,13 @@ mod tests {
             wood_only: false,
             heals_fully: false,
             gain: 0,
+            gems_queued: 0.0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 2,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
             deviation: 50.0,
         };
         let tidy = Rank {
@@ -1650,12 +1884,13 @@ mod tests {
             wood_only: false,
             heals_fully: false,
             gain: 0,
+            gems_queued: 0.0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 1,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
             deviation: 0.0,
         };
         assert!(falls.better_than(&tidy), "a falling hazard outranks a tidier board");
@@ -1665,12 +1900,13 @@ mod tests {
             wood_only: false,
             heals_fully: false,
             gain: 0,
+            gems_queued: 0.0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 1,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
             deviation: 3.0,
         };
         let b = Rank {
@@ -1678,12 +1914,13 @@ mod tests {
             wood_only: false,
             heals_fully: false,
             gain: 0,
+            gems_queued: 0.0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 1,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0,
+            wildcards: 0.0,
             deviation: 4.0,
         };
         assert!(a.better_than(&b), "with the payouts equal, lower deviation wins");
@@ -1732,11 +1969,31 @@ mod tests {
         let g = Geometry { rows_per_col: vec![3], ..Default::default() };
         let tiles = vec![of("C", "wood"), of("A", "wood"), of("T", "wood")];
         let prefs = Preferences { wood_only_pays: true, kill_at: Some(10), ..Default::default() };
-        let r =
-            |damage| rank("CAT", &tiles, &g, &[0, 1, 2], &sc, &Target::default(), prefs, damage);
+        let r = |damage| {
+            rank(
+                "CAT",
+                &tiles,
+                &g,
+                &[0, 1, 2],
+                &sc,
+                &Context { prefs, ..Default::default() },
+                damage,
+            )
+        };
         assert!(r(10).wood_only, "the blow kills");
         assert!(!r(9).wood_only, "the toxin would finish it");
         let open = Preferences { kill_at: None, ..prefs };
-        assert!(rank("CAT", &tiles, &g, &[0, 1, 2], &sc, &Target::default(), open, 0).wood_only);
+        assert!(
+            rank(
+                "CAT",
+                &tiles,
+                &g,
+                &[0, 1, 2],
+                &sc,
+                &Context { prefs: open, ..Default::default() },
+                0
+            )
+            .wood_only
+        );
     }
 }

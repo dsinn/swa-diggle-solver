@@ -81,7 +81,7 @@ impl std::fmt::Display for Bonus {
 }
 
 /// What the player can get back this turn — health and armour — and what decides it.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Heals {
     /// Damage that kills: post-status health plus armour, the figure every goal aims against.
     pub need: i64,
@@ -101,6 +101,8 @@ pub struct Heals {
     pub infinitives: crate::pick::Infinitives,
     /// The bassanello's wildcards per run — [`crate::pick::Preferences::wildcards_per_run`].
     pub wildcards_per_run: i64,
+    /// The gem staves' queues — [`crate::pick::GemQueue`].
+    pub gems: crate::pick::GemQueue,
 }
 
 impl Heals {
@@ -119,6 +121,7 @@ impl Heals {
             silver_armour: plan.picking.prefs.room.silver_armour,
             infinitives: plan.picking.prefs.infinitives,
             wildcards_per_run: plan.picking.prefs.wildcards_per_run,
+            gems: plan.picking.gems.clone(),
         }
     }
 
@@ -179,14 +182,19 @@ impl Heals {
                 scorer,
                 self.wildcards_per_run,
             ),
+            gems: self.gems.queued(&c.word),
             exclamations: 0,
         }
     }
 }
 
-/// The Gain column's text: `+3 ❤️ +4 🛡️ +2 🃏 🧤 2❗`, each part only when there is some.
+/// The Gain column's text: `+3 ❤️ +4 🛡️ +1 💎 🧤 +2 ⬜ 2❗`, each part only when there is some, the
+/// tile gains in the order they rank.
 ///
-/// `🃏` is the wildcards the Bookkeepers bassanello queues, [`crate::pick::wildcards_queued`] — the
+/// `💎` is the gems a gem staff queues, [`crate::pick::GemQueue`] — the user, 2026-11-07. Like the
+/// wildcards, the count is what is queued, before what the word spends.
+///
+/// `⬜` is the wildcards the Bookkeepers bassanello queues, [`crate::pick::wildcards_queued`] — the
 /// user, 2026-11-06. Signed like health and armour, because they are given to the player.
 ///
 /// The last is the `!` marks the word clears, [`crate::pick::exclamations_cleared`] — the user,
@@ -202,11 +210,14 @@ pub fn gain_text(g: crate::pick::Gains) -> String {
     if g.armour > 0 {
         parts.push(format!("+{} 🛡️", g.armour));
     }
-    if g.wildcards > 0 {
-        parts.push(format!("+{} 🃏", g.wildcards));
+    if g.gems > 0 {
+        parts.push(format!("+{} 💎", g.gems));
     }
     if let (true, Some(from)) = (g.infinitives > 0, g.infinitives_from) {
         parts.push(from.emoji().to_string());
+    }
+    if g.wildcards > 0 {
+        parts.push(format!("+{} ⬜", g.wildcards));
     }
     // A count, not a sign: these leave the board, and `+2` beside a heal would read as more of them.
     if g.exclamations > 0 {
@@ -497,6 +508,7 @@ mod tests {
             silver_armour: 0,
             infinitives: Default::default(),
             wildcards_per_run: 0,
+            gems: Default::default(),
         }
     }
 
@@ -651,7 +663,7 @@ mod tests {
             infinitives_from: Some(from),
             ..g(3, 0)
         };
-        assert_eq!(gain_text(inf(1, Gauntlet)), "+3 ❤️ 🧤", "last, as the lowest gain, no count");
+        assert_eq!(gain_text(inf(1, Gauntlet)), "+3 ❤️ 🧤", "no count");
         assert_eq!(gain_text(inf(1, Justice)), "+3 ❤️ ⚖️");
         assert_eq!(
             gain_text(crate::pick::Gains { health: 0, ..inf(1, Gauntlet) }),
@@ -663,7 +675,9 @@ mod tests {
         assert_eq!(gain_text(bang(2)), "+4 🛡️ 2❗");
         assert_eq!(gain_text(bang(0)), "+4 🛡️", "none cleared, none shown");
         let wild = |n| crate::pick::Gains { wildcards: n, ..inf(1, Gauntlet) };
-        assert_eq!(gain_text(wild(2)), "+3 ❤️ +2 🃏 🧤", "between the gains, as ranked");
+        assert_eq!(gain_text(wild(2)), "+3 ❤️ 🧤 +2 ⬜", "after the infinitive, as ranked");
+        let gem = |n| crate::pick::Gains { gems: n, ..wild(2) };
+        assert_eq!(gain_text(gem(1)), "+3 ❤️ +1 💎 🧤 +2 ⬜", "before the infinitive, as ranked");
         assert_eq!(gain_text(wild(0)), "+3 ❤️ 🧤", "none queued, none shown");
     }
 

@@ -611,7 +611,7 @@ mod tests {
             let n = runs(&r.row.word) as i64;
             assert_eq!(r.row.gain.wildcards, n, "{}", r.row.word);
             let text = crate::advisor::annotate::gain_text(r.row.gain);
-            assert_eq!(text.contains(&format!("+{n} 🃏")), n > 0, "{}: {text}", r.row.word);
+            assert_eq!(text.contains(&format!("+{n} ⬜")), n > 0, "{}: {text}", r.row.word);
         }
         assert!(
             runs(&worn.rows[0].row.word) > 0,
@@ -619,6 +619,52 @@ mod tests {
             worn.rows[0].row.word
         );
         assert!(view(false).rows.iter().all(|r| r.row.gain.wildcards == 0), "not worn");
+    }
+
+    /// The Staff of the dragon, the user's ask, 2026-11-07: a fire word queues a Corundum, which
+    /// ranks above the infinitives, and the Gain column shows it.
+    #[test]
+    fn the_staff_of_the_dragons_corundum_ranks_and_shows() {
+        let res = res();
+        let fire = res.lexica.words_for("fire").unwrap().clone();
+        let board: String = "COALHEATSIREBURN".chars().map(|c| format!("\"{c}\", ")).collect();
+        let save = |worn: bool| {
+            let mut s = turn();
+            let a = s.find("tileboard = {").unwrap();
+            let b = a + s[a..].find('}').unwrap();
+            s.replace_range(a..=b, &format!("tileboard = {{ {board} }}"));
+            if worn {
+                s = s.replacen(
+                    "gearFlags = {",
+                    "gearFlags = { onSubmitFireDictWordQueueGemfire = 1,",
+                    1,
+                );
+            }
+            s
+        };
+        let view = |worn: bool| {
+            View::next(
+                &View::default(),
+                &snap(Some(&save(worn))),
+                &res,
+                &mut Default::default(),
+                Default::default(),
+            )
+        };
+        let worn = view(true);
+        assert!(worn.rows.iter().any(|r| !fire.contains(&r.row.word)), "plain words compete");
+        for r in &worn.rows {
+            let n = i64::from(fire.contains(&r.row.word));
+            assert_eq!(r.row.gain.gems, n, "{}", r.row.word);
+            let text = crate::advisor::annotate::gain_text(r.row.gain);
+            assert_eq!(text.contains("+1 💎"), n > 0, "{}: {text}", r.row.word);
+        }
+        let top = &worn.rows[0].row.word;
+        assert!(fire.contains(top), "the top row is a fire word: {top}");
+        let bare = view(false);
+        assert!(bare.rows.iter().all(|r| r.row.gain.gems == 0), "not worn");
+        let plain = &bare.rows[0].row.word;
+        assert!(!fire.contains(plain), "the control: unworn, the top row is not one: {plain}");
     }
 
     /// The user's chest, 2026-11-06: a priest with Adept (`arcaneSpellEffectBonus5 = 10`) and one

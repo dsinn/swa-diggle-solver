@@ -221,7 +221,11 @@ pub fn plan(
     // Unknown counts as **room available**, the opposite of how unknown health is treated when
     // deciding whether to fight. The asymmetry is deliberate: guessing wrong about health can
     // end the save, while guessing wrong here costs a slightly worse word.
-    let picking = crate::pick::Context { target: letters.target(tiles.len()), prefs };
+    let picking = crate::pick::Context {
+        target: letters.target(tiles.len()),
+        prefs,
+        gems: mods.gems.clone(),
+    };
     Ok(Some(TurnPlan {
         tiles,
         geom,
