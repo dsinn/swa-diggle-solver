@@ -7,6 +7,51 @@ behaviour freely.
 
 ## [Unreleased]
 
+### Added
+
+- **The word's tiles are chosen, not only its letters.** Where two tiles carry the same letter, the
+  ranking tries each and keeps the better: a serrated, toxin, gem or braced tile where its position
+  pays, the plain twin where it would do nothing (`typist::placements`). Diggle plays the tiles
+  that were scored.
+- **Spell tiles boost the word.** A Corundum or Chrysocolla first (a Chrysocolla last too), a
+  Diamond last, or a Multiocular O makes a plain word a spell of its school, boosted by Adept or
+  Versed's +50% (`spells::tile_school`).
+- **Ice and burn from a gem count as damage**, like toxin: a Chrysocolla first ticks its ice, a
+  Corundum its burn, before the enemy acts. The damage column shows each, `30 +1 ❄️`.
+- Advisor's Gain column shows the `!` marks a word clears (`2❗`) and the Bookkeepers bassanello's
+  wildcards (`+2 🃏`); those wildcards also count in the ranking.
+- Advisor's effect column names the spell its damage assumes (`kills, cast Metal`), and says how
+  sure a kill is: `kills - no margin` at exactly lethal, `kills - status finishes it` when the hit
+  leaves the enemy alive and its status kills it before it acts.
+- `score_check <combatSaveData>`: scores every listed word with the game's own Lua (`words.score`,
+  the modifier files, the spells) and lists any where the solver promises more damage than the game
+  deals.
+- `diggle_advisor --timing-log` writes a timing log, `%LOCALAPPDATA%\DiggleAdvisor\timing.log`, for
+  each save from the game's write to the list on screen.
+- Groundwork for Diggle to cast spells: which "Submit as" slot holds the spell, which key casts it,
+  and a check for spells the game has that the solver does not model (`src/cast.rs`). Not yet
+  pressed.
+
+### Changed
+
+- **Gems are kept like gold.** A Corundum or Chrysocolla, and a Diamond while at full health, is
+  spent only when a plainer word would not do the job; between equal placements the plain twin is
+  shown.
+- Diggle is scored as casting the best spell, as the Advisor's user is. Pressing the button is not
+  written yet, so until it is Diggle can land short where a spell scored higher.
+- Advisor draws Corundum a clear red.
+
+### Fixed
+
+- **Words the Advisor called kills fell short.** With `alwaysCastSpell` (the game's default), a word
+  with exactly one spell is cast as that spell: a metal word under Book of metal hits only for what
+  your missing armour does not absorb, and a lone Four heal or Vowels hits for nothing. Both are now
+  scored that way.
+- The halved armour cap rounds up, as the game's does; odd maximum health made Metal look a point
+  stronger.
+- An enemy finished by poison gives no buckler or Well-Rested heal, and the Advisor no longer
+  shows one.
+
 ## [0.2.0] - 2026-11-06
 
 Tested against game version v53.2.

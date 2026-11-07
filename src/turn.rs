@@ -137,8 +137,10 @@ pub fn plan(
     let armour_headroom = {
         let now = cs.int_at("rpg.player.armour");
         let max = cs.int_at("rpg.player.maxHealth").map(|m| {
+            // `math.ceil(maxHealth / 2)` (`rpgview.lua:66`, `overworld.lua:18`): rounded up, so
+            // an odd maximum leaves one more armour to fill than `m / 2` says.
             if cs.path("rpg.player.gearFlags.maxArmourHalved").is_some() {
-                m / 2
+                (m + 1) / 2
             } else {
                 m
             }
@@ -199,14 +201,21 @@ pub fn plan(
             .flat_map(|t| t.arr.iter())
             .filter_map(|v| v.as_str()),
         |f| cs.path(&format!("rpg.player.gearFlags.{f}")).is_some(),
-    ));
+    ))
+    // The bassanello's wildcards per run of repeated letters — see `pick::wildcards_queued`.
+    .with_wildcards_per_run(
+        cs.path("rpg.player.gearFlags.onSubmitWoodQueueWoodornateWildcardPerRun")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as i64)
+            .unwrap_or(0),
+    );
     let goal = Goal::for_enemy(&mods, deciding_health, armour, Some(peak), player.as_ref(), prefs);
     // Built per turn rather than per fight, because the board's tile count is what the target is
     // scaled to and a board can lose tiles mid-fight — the run that died at `l50` watched its
     // board collapse from 16 tiles to one. A target built once at 16 would have been describing a
     // board that no longer existed.
     // Room for more armour, which is what decides whether `onWoodKillGainArmour` is worth
-    // constraining a word for. The cap is `maxHealth / (maxArmourHalved and 2 or 1)`
+    // constraining a word for. The cap is `ceil(maxHealth / (maxArmourHalved and 2 or 1))`
     // (`overworld.lua:18`), read from the same `combatSaveData` the gear flags come from.
     //
     // Unknown counts as **room available**, the opposite of how unknown health is treated when

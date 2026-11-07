@@ -17,18 +17,19 @@ pub const ROW_CAP: usize = 500;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
     pub word: String,
-    /// The word's direct damage, as the game shows it. [`Row::toxin`] is on top of it.
+    /// The word's direct damage, as the game shows it. [`Row::afflictions`] is on top of it.
     pub score: i64,
-    /// Toxin the word applies, paid by the enemy before it acts: see
-    /// [`crate::search::Modifiers::toxin`]. The ranking counts it as damage; the table shows it
-    /// beside the hit, `33 +3 🧪`.
-    pub toxin: i64,
+    /// Toxin, ice and burn the word applies, paid by the enemy before it acts: see
+    /// [`crate::search::Modifiers::afflictions`]. The ranking counts them as damage; the table
+    /// shows them beside the hit, `33 +3 🧪 +1 ❄️` ([`afflictions_text`]).
+    pub afflictions: crate::search::Afflictions,
     pub tier: Tier,
     /// The enemy's lexicon multiplier for this word, when it is not 1.
     pub bonus: Option<Bonus>,
     /// Health and armour this word is expected to give. Zero for most words.
     pub gain: crate::pick::Gains,
-    pub effect: &'static str,
+    /// What the word does, and the spell to cast for it when one is assumed: `kills, cast Metal`.
+    pub effect: String,
     /// Each letter as typed, with the board index of the tile it goes into.
     pub letters: Vec<Letter>,
     /// The headings of the held spells this word would cast (`Fire`, `Four heal`).
@@ -98,6 +99,8 @@ pub struct Heals {
     pub silver_armour: i64,
     /// The gauntlet's or the scales' live links — [`crate::pick::Infinitives`].
     pub infinitives: crate::pick::Infinitives,
+    /// The bassanello's wildcards per run — [`crate::pick::Preferences::wildcards_per_run`].
+    pub wildcards_per_run: i64,
 }
 
 impl Heals {
@@ -115,6 +118,7 @@ impl Heals {
             wood_armour: flag("onWoodKillGainArmour"),
             silver_armour: plan.picking.prefs.room.silver_armour,
             infinitives: plan.picking.prefs.infinitives,
+            wildcards_per_run: plan.picking.prefs.wildcards_per_run,
         }
     }
 
@@ -139,11 +143,15 @@ impl Heals {
     /// Diggle's arithmetic rather than with a second reading of the same save. And on the word's
     /// reach, so a rapier word's overkill is counted past health alone, as `rpgview.lua:1207` does.
     pub fn of(&self, tiles: &[Tile], scorer: &Scorer, c: &Candidate) -> crate::pick::Gains {
-        let kills = c.reach >= self.need;
+        // Judged on the blow: an enemy the toxin finishes dies at the start of its turn, with no
+        // word (`rpgview.enemyDeathChecks`, `rpgview.lua:1152-1170`), so neither the overkill heal
+        // nor the wood-kill gear — the buckler — pays. The user's report, 2026-11-06.
+        let blow = c.reach - c.afflictions.total();
+        let kills = blow >= self.need;
         let wood_kill = kills && crate::pick::wood_only(tiles, &c.typed.tiles, scorer);
         let mut heal = 0;
         if self.rested && self.bleed == 0 && kills {
-            heal += crate::rested::heal_from(c.reach, self.need);
+            heal += crate::rested::heal_from(blow, self.need);
         }
         if self.wood_gear && self.bleed == 0 && wood_kill {
             heal += 4;
@@ -164,11 +172,25 @@ impl Heals {
             armour: armour.min(self.armour_room.max(0)),
             infinitives: self.infinitives.created(&c.word),
             infinitives_from: self.infinitives.source,
+            wildcards: crate::pick::wildcards_queued(
+                &c.word,
+                tiles,
+                &c.typed.tiles,
+                scorer,
+                self.wildcards_per_run,
+            ),
+            exclamations: 0,
         }
     }
 }
 
-/// The Gain column's text: `+3 ❤️ +4 🛡️ 🧤`, each part only when there is some.
+/// The Gain column's text: `+3 ❤️ +4 🛡️ +2 🃏 🧤 2❗`, each part only when there is some.
+///
+/// `🃏` is the wildcards the Bookkeepers bassanello queues, [`crate::pick::wildcards_queued`] — the
+/// user, 2026-11-06. Signed like health and armour, because they are given to the player.
+///
+/// The last is the `!` marks the word clears, [`crate::pick::exclamations_cleared`] — the user,
+/// 2026-11-06.
 ///
 /// The infinitive is the emoji alone, no count: the user, 2026-11-04, *it's a binary question*.
 /// Each item has exactly one link from any suffix, so a word queues one infinitive or none.
@@ -180,10 +202,27 @@ pub fn gain_text(g: crate::pick::Gains) -> String {
     if g.armour > 0 {
         parts.push(format!("+{} 🛡️", g.armour));
     }
+    if g.wildcards > 0 {
+        parts.push(format!("+{} 🃏", g.wildcards));
+    }
     if let (true, Some(from)) = (g.infinitives > 0, g.infinitives_from) {
         parts.push(from.emoji().to_string());
     }
+    // A count, not a sign: these leave the board, and `+2` beside a heal would read as more of them.
+    if g.exclamations > 0 {
+        parts.push(format!("{}❗", g.exclamations));
+    }
     parts.join(" ")
+}
+
+/// What follows the hit in the damage column: ` +3 🧪 +1 ❄️ +2 🔥`, each only when there is some,
+/// and empty when there is none.
+pub fn afflictions_text(a: crate::search::Afflictions) -> String {
+    [(a.toxin, "🧪"), (a.ice, "❄️"), (a.burn, "🔥")]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, emoji)| format!(" +{n} {emoji}"))
+        .collect()
 }
 
 /// The player's bleed, as a whole number of stacks, and never zero while any is present.
@@ -212,19 +251,56 @@ pub fn bleed_of(cs: &Table) -> i64 {
 ///
 /// A [`Tier::Stall`] word says so before anything else: it deals nothing like any zero-damage word,
 /// but it is listed above the killing words on purpose, and "no damage" would not say why.
-pub fn effect(goal: Goal, tier: Tier, score: i64, reach: i64, kill: i64) -> &'static str {
+///
+/// ## How sure a kill is
+///
+/// The user, 2026-11-07: words called kills *often fall one damage short*. Two ways a kill can look
+/// like that, each now said rather than folded into "kills":
+///
+/// - **The blow does not kill; its status does.** `after` is the toxin, ice and burn the word
+///   applies ([`crate::search::Afflictions`]): if the blow alone, `reach - after`, falls short of
+///   `kill`, the enemy is left standing on the hit and dies at the start of its turn, before it
+///   acts (`rpgview.lua:1667-1676`) — `kills - status finishes it`.
+/// - **No margin.** A kill goal aims [`crate::search::DAMAGE_BUFFER`] past lethal, so its band
+///   carries that margin; the fallback tier does not — a hardest-hit list (overkill gold) and the
+///   words short of the band land there. One reaching lethal but not the margin is
+///   `kills - no margin`, the one most exposed to a point of model error.
+pub fn effect(
+    goal: Goal, tier: Tier, score: i64, reach: i64, kill: i64, after: i64,
+) -> &'static str {
+    let sure = |label: &'static str, margin: bool| {
+        if reach - after < kill {
+            "kills - status finishes it"
+        } else if !margin && reach < kill + crate::search::DAMAGE_BUFFER {
+            "kills - no margin"
+        } else {
+            label
+        }
+    };
     match (tier, goal) {
         (Tier::Stall, _) => "stalls - it cannot hit you",
         _ if score < MIN_MEANINGFUL_DAMAGE => "no damage",
         (Tier::InBand, Goal::Scare { .. }) => "scares",
-        (Tier::InBand, _) => "kills",
+        (Tier::InBand, Goal::RankedKill { .. } | Goal::FirstKill { .. }) => sure("kills", true),
+        (Tier::InBand, _) => sure("kills", false),
         // On a free turn staying alive is the point, so it is worth saying.
         (Tier::Under, Goal::Hold { .. }) => "holds - it stays",
         (Tier::Under, _) => "",
         (Tier::Flees, _) => "scares - on a free turn",
         (Tier::Overshoot, _) => "overshoots - would kill",
-        (Tier::Fallback, _) if reach >= kill => "kills",
+        (Tier::Fallback, _) if reach >= kill => sure("kills", false),
         (Tier::Fallback, _) => "",
+    }
+}
+
+/// The effect, with the spell its damage assumes: the user's call, 2026-11-07, *assume that the
+/// player using Advisor will cast a spell when indicated in the effect column*. The damage shown
+/// is the cast's, so the row has to say to cast it.
+pub fn with_cast(effect: &str, cast: Option<&str>) -> String {
+    match (effect, cast) {
+        (_, None) => effect.to_string(),
+        ("", Some(spell)) => format!("cast {spell}"),
+        (e, Some(spell)) => format!("{e}, cast {spell}"),
     }
 }
 
@@ -333,6 +409,12 @@ pub fn rows(
     cands: &[Candidate], cap: usize,
 ) -> Vec<Row> {
     let heals = Heals::from_save(plan, cs);
+    let flag = |f: &str| cs.path(&format!("rpg.player.gearFlags.{f}"));
+    let falloff = crate::pick::Falloff {
+        rows: 1 + flag("tileboard!bottom+").and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0)
+            as usize,
+        to_wildcard: flag("tileFalloffWildcardInstead").is_some(),
+    };
     // One entry per tile, as the game's spell checks see them: a ligature is one tile (`TH`), and
     // a wildcard is the letter typed into it.
     let tile_letters = |c: &Candidate| -> Vec<String> {
@@ -346,22 +428,28 @@ pub fn rows(
             })
             .collect()
     };
-    let toxin_of = |c: &Candidate| {
-        let consumed: Vec<Tile> =
-            c.typed.tiles.iter().filter_map(|&i| plan.tiles.get(i).cloned()).collect();
-        plan.mods.toxin(scorer, &c.word, &consumed)
-    };
     cands
         .iter()
         .take(cap)
         .map(|c| Row {
             word: c.word.clone(),
-            score: c.score - toxin_of(c),
-            toxin: toxin_of(c),
+            score: c.score - c.afflictions.total(),
+            afflictions: c.afflictions,
             tier: c.tier,
             bonus: bonus_of(&plan.mods, &c.word),
-            gain: heals.of(&plan.tiles, scorer, c),
-            effect: effect(plan.goal, c.tier, c.score, c.reach, heals.need),
+            gain: crate::pick::Gains {
+                exclamations: crate::pick::exclamations_cleared(
+                    &plan.tiles,
+                    &plan.geom,
+                    &c.typed.tiles,
+                    falloff,
+                ),
+                ..heals.of(&plan.tiles, scorer, c)
+            },
+            effect: with_cast(
+                effect(plan.goal, c.tier, c.score, c.reach, heals.need, c.afflictions.total()),
+                c.cast,
+            ),
             pierces: c.pierces,
             letters: letters_of(&plan.tiles, c),
             spells: spell_column(c.cast, spells.qualifying(&c.word, &tile_letters(c))),
@@ -393,6 +481,7 @@ mod tests {
             rank: None,
             typed: Typed { tiles, wildcards: vec![None; n], corners_used: 0, adjacent: false },
             cast: None,
+            afflictions: Default::default(),
         }
     }
 
@@ -407,6 +496,7 @@ mod tests {
             wood_armour: false,
             silver_armour: 0,
             infinitives: Default::default(),
+            wildcards_per_run: 0,
         }
     }
 
@@ -482,7 +572,17 @@ mod tests {
             h.of(&tiles, &s, &cand("EAT", 2, Tier::Fallback, vec![0, 1, 2])).health,
             0,
             "no kill"
-        );
+        ); // The user's report, 2026-11-06: a kill the toxin makes is no kill for the buckler.
+        let poisoned = Candidate {
+            afflictions: crate::search::Afflictions { toxin: 2, ..Default::default() },
+            ..cand("EAT", 3, Tier::InBand, vec![0, 1, 2])
+        };
+        assert_eq!(h.of(&tiles, &s, &poisoned).health, 0, "the poison kills, not the blow");
+        let both = Candidate {
+            afflictions: crate::search::Afflictions { toxin: 2, ..Default::default() },
+            ..cand("EAT", 5, Tier::InBand, vec![0, 1, 2])
+        };
+        assert_eq!(h.of(&tiles, &s, &both).health, 4, "the blow kills on its own");
     }
 
     /// A Diamond last: `3 × gems − bleed` healing and `3 × gems` regen
@@ -559,6 +659,23 @@ mod tests {
             "alone too"
         );
         assert_eq!(gain_text(inf(0, Justice)), "+3 ❤️", "none queued, none shown");
+        let bang = |n| crate::pick::Gains { exclamations: n, ..g(0, 4) };
+        assert_eq!(gain_text(bang(2)), "+4 🛡️ 2❗");
+        assert_eq!(gain_text(bang(0)), "+4 🛡️", "none cleared, none shown");
+        let wild = |n| crate::pick::Gains { wildcards: n, ..inf(1, Gauntlet) };
+        assert_eq!(gain_text(wild(2)), "+3 ❤️ +2 🃏 🧤", "between the gains, as ranked");
+        assert_eq!(gain_text(wild(0)), "+3 ❤️ 🧤", "none queued, none shown");
+    }
+
+    #[test]
+    fn afflictions_follow_the_hit() {
+        use crate::search::Afflictions;
+        assert_eq!(afflictions_text(Afflictions::default()), "");
+        assert_eq!(afflictions_text(Afflictions { toxin: 3, ..Default::default() }), " +3 🧪");
+        assert_eq!(
+            afflictions_text(Afflictions { toxin: 3, ice: 1, burn: 2 }),
+            " +3 🧪 +1 ❄️ +2 🔥"
+        );
     }
 
     /// Any bleed is bleeding, as Diggle reads it, even one the save writes as a fraction.
@@ -630,7 +747,7 @@ mod tests {
     #[test]
     fn effects_match_goal_and_tier() {
         let kill = 5;
-        let e = |goal: Goal, tier: Tier, score: i64| effect(goal, tier, score, score, kill);
+        let e = |goal: Goal, tier: Tier, score: i64| effect(goal, tier, score, score, kill, 0);
         assert_eq!(e(Goal::RankedKill { need: 5 }, Tier::InBand, 6), "kills");
         assert_eq!(
             e(Goal::RankedKill { need: 5 }, Tier::Fallback, 3),
@@ -650,8 +767,32 @@ mod tests {
         assert_eq!(e(Goal::Scare { need: 2, below: 4 }, Tier::Fallback, 0), "no damage");
         assert_eq!(e(Goal::MaxDamage, Tier::Fallback, 9), "kills");
         // A rapier word: it kills on its reach, and lands or not on its damage.
-        assert_eq!(effect(Goal::MaxDamage, Tier::Fallback, 3, 9, kill), "kills");
-        assert_eq!(effect(Goal::MaxDamage, Tier::Fallback, 0, 4, kill), "no damage");
+        assert_eq!(effect(Goal::MaxDamage, Tier::Fallback, 3, 9, kill, 0), "kills");
+        assert_eq!(effect(Goal::MaxDamage, Tier::Fallback, 0, 4, kill, 0), "no damage");
+        // The user's report, 2026-11-07: say how sure a kill is.
+        assert_eq!(e(Goal::MaxDamage, Tier::Fallback, 5), "kills - no margin", "lethal exactly");
+        assert_eq!(e(Goal::MaxDamage, Tier::Fallback, 6), "kills", "one past it");
+        assert_eq!(
+            effect(Goal::MaxDamage, Tier::Fallback, 7, 7, kill, 3),
+            "kills - status finishes it",
+            "the blow leaves it on 1"
+        );
+        assert_eq!(
+            effect(Goal::RankedKill { need: 6 }, Tier::InBand, 7, 7, kill, 2),
+            "kills",
+            "the blow alone is lethal, and a kill band already carries the margin"
+        );
+        assert_eq!(
+            effect(Goal::RankedKill { need: 6 }, Tier::InBand, 6, 6, kill, 2),
+            "kills - status finishes it"
+        );
+    }
+
+    #[test]
+    fn the_effect_names_the_spell_to_cast() {
+        assert_eq!(with_cast("kills", Some("Metal")), "kills, cast Metal");
+        assert_eq!(with_cast("", Some("Fire")), "cast Fire");
+        assert_eq!(with_cast("kills", None), "kills");
     }
 
     /// The row shows each letter against the tile it is typed into — wildcards as their letter.

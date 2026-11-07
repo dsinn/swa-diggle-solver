@@ -49,6 +49,18 @@ pub const SPECIAL: (u8, u8, u8) = (25, 25, 25);
 /// out no lighter than braced wood, while in the game plain wood reads clearly paler.
 const PLAIN_WOOD_LIGHTEN: f64 = 0.4;
 
+/// How much brighter Corundum's face is drawn than its sampled median, every channel scaled alike
+/// so the hue stays. **The user's call**, 2026-11-07: *the corundum tile should be more red*. The
+/// sheet's face is a dark maroon, (92, 20, 27), that the game lifts with a glow
+/// (`ui/graphics/tiles/gemfire_glow.png`) the list cannot draw; scaled, it is a clear red.
+const CORUNDUM_BRIGHTEN: f64 = 2.2;
+
+/// Scales every channel of `c` by `by`, capped at 255.
+fn brighten((r, g, b): (u8, u8, u8), by: f64) -> (u8, u8, u8) {
+    let scale = |c: u8| (c as f64 * by).round().min(255.0) as u8;
+    (scale(r), scale(g), scale(b))
+}
+
 /// How far inlaid wood's gold lettering is lightened, once its sampled colour is spent on the
 /// ring. The user's call, 2026-11-02: ring in the gold, letters lighter than it.
 const INLAID_INK_LIGHTEN: f64 = 0.5;
@@ -130,6 +142,10 @@ impl Palette {
         match material {
             Some("wood") => {
                 let face = lighten(s.face, PLAIN_WOOD_LIGHTEN);
+                Face { colour: face, ink: readable(face, s.ink), ring }
+            }
+            Some("gemfire") => {
+                let face = brighten(s.face, CORUNDUM_BRIGHTEN);
                 Face { colour: face, ink: readable(face, s.ink), ring }
             }
             // Inlaid wood's own gold goes to the ring, and its letters are lifted above it.
@@ -317,6 +333,18 @@ mod tests {
         let p = Palette::load(&game_dir());
         let (wood, braced) = (p.face(Some("wood")).colour, p.face(Some("woodbraced")).colour);
         assert!(luma(wood) > luma(braced) + 10.0, "wood {wood:?} vs braced {braced:?}");
+    }
+
+    /// Corundum is drawn a clear red, brighter than its dark sampled face, and still readable.
+    #[test]
+    fn corundum_is_drawn_red() {
+        let p = Palette::load(std::path::Path::new("../sternly-worded-adventures"));
+        let f = p.face(Some("gemfire"));
+        let (r, g, b) = f.colour;
+        assert!(r >= 180 && r as u32 > 3 * g.max(b) as u32, "a clear red: {:?}", f.colour);
+        assert!(contrast(f.colour, f.ink) >= MIN_CONTRAST);
+        assert_eq!(brighten((92, 20, 27), CORUNDUM_BRIGHTEN), (202, 44, 59));
+        assert_eq!(brighten((200, 0, 0), 2.0), (255, 0, 0), "capped");
     }
 
     /// Inlaid wood is ringed in its own gold lettering colour, and its letters are lighter still.

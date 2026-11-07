@@ -657,11 +657,13 @@ impl Fight<'_> {
             log.push_str(&format!("turn {turns}: nothing playable on {letters}\n"));
             return Ok(Some(Outcome::NoPlayableWord { turns, board: letters }));
         };
-        let typist = crate::typist::Typist::new(&tiles, &geom);
-        let Some(typed) = typist.type_word(&found.word) else {
+        // The placement the search scored, not a fresh typing of the word: which of two `B` tiles
+        // starts it can be the toxin it was chosen for (`crate::typist::Typist::placements`).
+        let typed = found.typed.clone();
+        if typed.tiles.is_empty() {
             log.push_str(&format!("turn {turns}: {} is not realizable\n", found.word));
             return Ok(Some(Outcome::NotRealizable { turns, word: found.word }));
-        };
+        }
         let steps: Vec<(usize, Option<char>)> = typed.steps().collect();
         // **Our own health, beside the enemy's.** The run of 2026-08-16 1037Z printed Raziel falling
         // 189 → 69 and never once said how the player was doing, so the death at turn 7 had to be
@@ -684,7 +686,8 @@ impl Fight<'_> {
         // `WILDCARD_WORTH`. If a gold word won while costing ten times a silver word that also
         // killed, the fault is above `hoarded` in `Rank::better_than` rather than in the pricing —
         // and the log now tells those two apart instead of leaving both open.
-        let hoard = crate::pick::hoarded(&tiles, &typed.tiles, self.scorer);
+        let hoard =
+            crate::pick::hoarded(&tiles, &typed.tiles, self.scorer, picking.prefs.room.health > 0);
         log.push_str(&format!(
             "turn {turns}: {name} {health}+{armour}hp, us {us}hp, board {letters}\n  \
              play **{}** (scores {}, tiles {:?}, {} corners, hoards {hoard:.1}{})\n",

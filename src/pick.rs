@@ -51,10 +51,20 @@ pub struct Preferences {
     /// `lethal + 2 * missing`, because the heal is `floor(overkill/2)` capped at the deficit
     /// (`rpgview.lua:1195-1196`). See [`Rank::heals_fully`] for why this is a rank and not a floor.
     pub heal_at: Option<i64>,
+    /// The damage a **blow** must reach to be the kill, toxin left out — the goal's own threshold
+    /// on a kill goal, `None` otherwise. [`Rank::wood_only`] counts only a blow that clears it:
+    /// an enemy the poison finishes dies with no word (`rpgview.enemyDeathChecks`,
+    /// `rpgview.lua:1152-1170`), so the wood-kill gear pays nothing — the user's report,
+    /// 2026-11-06, of a buckler heal listed for a poison kill. [`rank`]'s `damage` is the blow's.
+    pub kill_at: Option<i64>,
     /// How much of what a word can give the player would land — see [`gain`].
     pub room: Room,
     /// The suffix links that would queue infinitive tiles — see [`Infinitives`].
     pub infinitives: Infinitives,
+    /// Ornate wooden wildcards queued per run of repeated letters in a word made only of wood: the
+    /// value of `onSubmitWoodQueueWoodornateWildcardPerRun`, the Bookkeepers bassanello, zero when
+    /// it is not worn. See [`wildcards_queued`].
+    pub wildcards_per_run: i64,
 }
 
 /// The gear that turns a suffixed word into new tiles, and which of its links are live.
@@ -166,7 +176,7 @@ impl Infinitives {
 /// does not know, because then the ranking is what it was before gain existed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Room {
-    /// Armour the player can still gain before the cap, `maxHealth / (maxArmourHalved and 2 or 1)`
+    /// Armour the player can still gain before the cap, `ceil(maxHealth / (maxArmourHalved and 2 or 1))`
     /// (`overworld.lua:18`).
     pub armour: i64,
     /// Health missing.
@@ -209,7 +219,7 @@ impl Preferences {
     ///   the heal branch outright while `bleed` is set. At full health the heal is thrown away. So
     ///   it pays only when **injured and not bleeding**.
     /// - **`onWoodKillGainArmour`** is not a heal. Bleeding does not cancel it and full health does
-    ///   not waste it — but armour caps at `maxHealth / (maxArmourHalved and 2 or 1)`
+    ///   not waste it — but armour caps at `ceil(maxHealth / (maxArmourHalved and 2 or 1))`
     ///   (`overworld.lua:18`), so it pays only while there is **room for more armour**.
     /// - **`onWoodKillQueueWoodbraced`** queues a braced wooden tile and cares about none of the
     ///   above. It pays **always**.
@@ -243,7 +253,7 @@ impl Preferences {
     /// all-wood word for a reward that never comes and spends the board's wood doing it. What the
     /// word itself gives — [`gain`], from its own tiles — is untouched, because that lands either way.
     pub fn without_kill_payouts(self) -> Self {
-        Preferences { wood_only_pays: false, heal_at: None, ..self }
+        Preferences { wood_only_pays: false, heal_at: None, kill_at: None, ..self }
     }
 
     /// Records how much armour and healing would land — see [`gain`].
@@ -254,6 +264,11 @@ impl Preferences {
     /// Records the suffix links that would queue infinitive tiles — see [`Infinitives`].
     pub fn with_infinitives(self, infinitives: Infinitives) -> Self {
         Preferences { infinitives, ..self }
+    }
+
+    /// Records the bassanello's wildcards per run — see [`wildcards_queued`].
+    pub fn with_wildcards_per_run(self, wildcards_per_run: i64) -> Self {
+        Preferences { wildcards_per_run, ..self }
     }
 }
 
@@ -373,6 +388,14 @@ pub struct Rank {
     /// burns (see [`Rank::fire_eaten`]), and below the wood-only and full-heal payouts, which the
     /// dev ordered and which already stand for gain of their own.
     pub gain: i64,
+    /// Wildcards this word queues from the Bookkeepers bassanello: see [`wildcards_queued`]. Higher
+    /// is better.
+    ///
+    /// **Below health and armour, above the infinitives**, the order this was written in,
+    /// 2026-11-06, when the user asked for these wildcards to count. A wildcard spells whatever a
+    /// later word needs, which is worth more than an infinitive's fixed letters; health and armour
+    /// keep their place above it as what the player is given outright.
+    pub wildcards: i64,
     /// Infinitive tile sets this word queues from the Infinitives gauntlet or the Scales of
     /// justice: see [`Infinitives`]. Higher is better.
     ///
@@ -425,6 +448,9 @@ impl Rank {
         }
         if self.gain != other.gain {
             return self.gain > other.gain;
+        }
+        if self.wildcards != other.wildcards {
+            return self.wildcards > other.wildcards;
         }
         if self.infinitives != other.infinitives {
             return self.infinitives > other.infinitives;
@@ -481,6 +507,12 @@ pub struct Gains {
     /// advisor, which has the word; [`gains`] leaves it empty.
     pub infinitives: i64,
     pub infinitives_from: Option<InfinitiveSource>,
+    /// Wildcards queued: see [`wildcards_queued`]. Filled by the advisor, which has the word;
+    /// [`gains`] leaves it at zero.
+    pub wildcards: i64,
+    /// `!` marks this word clears off the board: see [`exclamations_cleared`]. Filled by the
+    /// advisor, which reads the falloff gear from the save; [`gains`] leaves it at zero.
+    pub exclamations: usize,
 }
 
 /// [`gain`], kept apart, for a caller that shows the two separately.
@@ -570,6 +602,86 @@ pub fn hazards_cleared(
         .count()
 }
 
+/// How the start of the player's turn takes `!` tiles off the board (`tileboard.onPlayerTurn`,
+/// `tileboard.lua:1263-1278`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Falloff {
+    /// The bottom rows a `!` falls off from: `1 + tileboard!bottom+` (`:1266`).
+    pub rows: usize,
+    /// `tileFalloffWildcardInstead`: a falling tile turns into a wildcard and stays put
+    /// (`:1762-1777`), so nothing above it comes down.
+    pub to_wildcard: bool,
+}
+
+impl Default for Falloff {
+    fn default() -> Self {
+        Falloff { rows: 1, to_wildcard: false }
+    }
+}
+
+/// How many `!` marks playing `consumed` takes off the board that would otherwise stay — the
+/// user's request, 2026-11-06, for the advisor's Gain column.
+///
+/// The game's rule, at the start of the next turn (`tileboard.lua:1263-1278`):
+///
+/// - in the bottom [`Falloff::rows`] of each column, every `!` and every digit tile falls off
+///   (`isExclamationOrNumberTile`, `:1200-1202`), top of the zone first
+///   (`haveTilesOnRowsFallOffIf`, `:1755-1790`) — **and again** while anything fell, so a `!`
+///   that drops into the zone behind a fallen one goes too;
+/// - then each `!!`, `!!!` or `!!!!` left in that zone loses one mark (`reduceDownMultiExclamation`,
+///   `:1204-1221`, run by `doToBottomTiles`, `:1029-1038`).
+///
+/// A word helps by taking tiles out from under them, which brings them down (`layout.rs:55`: row 1
+/// is the bottom). Counted as the marks that go with the word played **minus** the marks that go
+/// whatever is played, so a `!` already at the bottom earns no word anything. A `!` is never in a
+/// word itself — it is unselectable (`tileboard.lua:179`).
+///
+/// Not modelled: what the enemy's turn and the refill add before the check. Both land on top of a
+/// column or on random tiles, so this is what the board does if the enemy leaves it alone.
+pub fn exclamations_cleared(
+    tiles: &[Tile], geometry: &crate::geometry::Geometry, consumed: &[usize], falloff: Falloff,
+) -> usize {
+    let with = marks_falling(tiles, geometry, consumed, falloff);
+    with.saturating_sub(marks_falling(tiles, geometry, &[], falloff))
+}
+
+/// The `!` marks the start of the next turn takes off, once `consumed` is gone.
+fn marks_falling(
+    tiles: &[Tile], geometry: &crate::geometry::Geometry, consumed: &[usize], falloff: Falloff,
+) -> usize {
+    let falls = |l: &str| l == "!" || l.parse::<i64>().is_ok();
+    let mut total = 0;
+    let mut start = 0;
+    for &rows in &geometry.rows_per_col {
+        // Bottom first, as the tiles left above the word settle.
+        let mut col: Vec<&str> = (start..start + rows)
+            .filter(|i| !consumed.contains(i))
+            .filter_map(|i| tiles.get(i).map(|t| t.letter.as_str()))
+            .collect();
+        start += rows;
+        loop {
+            let mut fell = false;
+            for r in (0..falloff.rows.min(col.len())).rev() {
+                if falls(col[r]) {
+                    total += usize::from(col[r] == "!");
+                    if falloff.to_wildcard {
+                        col[r] = ".";
+                    } else {
+                        col.remove(r);
+                    }
+                    fell = true;
+                }
+            }
+            if !fell {
+                break;
+            }
+        }
+        let multi = |l: &&&str| l.len() > 1 && l.bytes().all(|b| b == b'!');
+        total += col.iter().take(falloff.rows).filter(multi).count();
+    }
+    total
+}
+
 pub fn hazard_fall(
     tiles: &[Tile], geometry: &crate::geometry::Geometry, consumed: &[usize], scorer: &Scorer,
 ) -> usize {
@@ -585,6 +697,29 @@ pub fn hazard_fall(
         total += removed.iter().filter(|&&(c, r)| c == col && r < row).count();
     }
     total
+}
+
+/// Wildcards submitting `word` on the `consumed` tiles queues, given `per_run` from
+/// [`Preferences::wildcards_per_run`].
+///
+/// The Bookkeepers bassanello (`items/doublesgear.lua:48-94`): *"if each tile is wooden also queues
+/// an ornate wooden wildcard per set"*. Its modifier, `onSubmitWoodQueueWoodornateWildcardPerRun`,
+/// runs `onSubmit`, so the word need not kill, and queues `runsCount * flagVal` of them
+/// (`rpg/effects/modifiers/onSubmitWoodQueueWoodornateWildcardPerRun.lua:14-24`), with nothing that
+/// can turn one away (`tileboard.queueSpecial`, `tileboard.lua:367-371`).
+///
+/// - **Each tile wooden** is `tiles.eachHasCat(wordTiles, 'wood')`, a material or border with the
+///   `wood` category (`utils/tiles.lua:97-105,181`). No border has one, and the materials that do
+///   are the `wood*` ones, a wildcard's `wood0` among them — exactly [`wood_only`].
+/// - **Runs** are `words.countRuns(word)` (`utils/words.lua:194-206`), [`crate::gear::facts::count_runs`]:
+///   one per set of repeated letters, so `BOOKKEEPER` is 3 and `AAA` is 1.
+pub fn wildcards_queued(
+    word: &str, tiles: &[Tile], consumed: &[usize], scorer: &Scorer, per_run: i64,
+) -> i64 {
+    if per_run <= 0 || !wood_only(tiles, consumed, scorer) {
+        return 0;
+    }
+    per_run * crate::gear::facts::count_runs(&word.to_ascii_uppercase()) as i64
 }
 
 /// Does this word use nothing but wood?
@@ -640,22 +775,36 @@ const GOLD: &str = "gold";
 /// and falls out of pricing preciousness at value rather than counting tiles. Nothing was added for
 /// it; a flat cost would have been the same amount of code and less true.
 ///
-/// A tile has one preciousness, so the two reasons are `max`ed rather than summed: a wildcard that
+/// A tile has one preciousness, so the reasons are `max`ed rather than summed: a wildcard that
 /// gear has turned gold is priced as gold, which it is.
-pub fn hoarded(tiles: &[Tile], consumed: &[usize], scorer: &Scorer) -> f64 {
+///
+/// ## Attack gems, and the Diamond when no healing is wanted
+///
+/// The user, 2026-11-07: *implement the same for attack tiles like corundum, chrysocolla, and when
+/// we don't need healing, diamond.* A **Corundum** (`gemfire`) or **Chrysocolla** (`gemice`) is the
+/// board's arcane spell in reserve — at the front of a word it adds its status and, with Adept, half
+/// as much damage again (see [`crate::spells::tile_school`]) — so a kill that a plainer word would
+/// also have made should not spend one. A **Diamond** (`gemheal`) is a heal in reserve, and is
+/// free to spend only while `heal_wanted`: health is missing ([`Room::health`]).
+///
+/// Priced like gold, at the tile's own worth: `score = 3` for each gem
+/// (`rpg/effects/material/gem*.lua`). So a gem costs more than a plain wildcard and less than the
+/// cheapest gold, and two words that spend the same gold fall to the one that keeps its gems.
+pub fn hoarded(tiles: &[Tile], consumed: &[usize], scorer: &Scorer, heal_wanted: bool) -> f64 {
     consumed
         .iter()
         .filter_map(|&i| tiles.get(i))
         .map(|t| {
-            let gold = match scorer.material_name(t) {
-                Some(GOLD) => scorer.tile_score(t),
+            let kept = match scorer.material_name(t) {
+                Some(GOLD | "gemfire" | "gemice") => scorer.tile_score(t),
+                Some("gemheal") if !heal_wanted => scorer.tile_score(t),
                 _ => 0.0,
             };
             let wild = match t.letter == WILDCARD {
                 true => WILDCARD_WORTH,
                 false => 0.0,
             };
-            gold.max(wild)
+            kept.max(wild)
         })
         .sum()
 }
@@ -731,12 +880,15 @@ pub fn rank(
 ) -> Rank {
     Rank {
         fire_eaten: fire_eaten(tiles, consumed),
-        wood_only: prefs.wood_only_pays && wood_only(tiles, consumed, scorer),
+        wood_only: prefs.wood_only_pays
+            && prefs.kill_at.is_none_or(|at| damage >= at)
+            && wood_only(tiles, consumed, scorer),
         heals_fully: prefs.heal_at.is_some_and(|at| damage >= at),
         hazards_cleared: hazards_cleared(tiles, geometry, consumed, scorer),
         gain: gain(tiles, consumed, scorer, prefs.room),
+        wildcards: wildcards_queued(word, tiles, consumed, scorer, prefs.wildcards_per_run),
         infinitives: prefs.infinitives.created(word),
-        hoarded: hoarded(tiles, consumed, scorer),
+        hoarded: hoarded(tiles, consumed, scorer, prefs.room.health > 0),
         shed: shed(tiles, consumed),
         hazard_fall: hazard_fall(tiles, geometry, consumed, scorer),
         deviation: target.deviation(&remaining_counts(tiles, consumed)),
@@ -777,14 +929,18 @@ mod tests {
         }
         assert_eq!(sc.material_name(&tiles[2]).as_deref(), Some("wood"), "E is not");
 
-        assert_eq!(hoarded(&tiles, &[2, 3], &sc), 0.0, "a word of plain letters spends nothing");
+        assert_eq!(
+            hoarded(&tiles, &[2, 3], &sc, false),
+            0.0,
+            "a word of plain letters spends nothing"
+        );
         // `score.Q = 40`, `score.Z` falls through to `score.gold = 10`
         // (`rpg/effects/material/default.lua:33-41`). So the two are not interchangeable, which is
         // the whole of the deferred "spend the cheapest gold" refinement, arriving for free.
-        let q = hoarded(&tiles, &[0], &sc);
-        let z = hoarded(&tiles, &[1], &sc);
+        let q = hoarded(&tiles, &[0], &sc, false);
+        let z = hoarded(&tiles, &[1], &sc, false);
         assert!(z > 0.0 && q > z, "Q ({q}) should cost more to spend than Z ({z})");
-        assert_eq!(hoarded(&tiles, &[0, 1], &sc), q + z, "and spending both costs both");
+        assert_eq!(hoarded(&tiles, &[0, 1], &sc, false), q + z, "and spending both costs both");
     }
 
     /// A wildcard is worth nothing to the scorer and something to us.
@@ -797,15 +953,46 @@ mod tests {
         let Some(sc) = scorer() else { return };
         let tiles = board(&[".", "Z", "E"]);
         assert_eq!(sc.tile_score(&tiles[0]), 0.0, "the game scores a wildcard at nothing");
-        assert_eq!(hoarded(&tiles, &[0], &sc), WILDCARD_WORTH, "and we still would rather keep it");
+        assert_eq!(
+            hoarded(&tiles, &[0], &sc, false),
+            WILDCARD_WORTH,
+            "and we still would rather keep it"
+        );
 
         // The point of the number being small: burning a wildcard must never look worse than
         // burning gold, or the rule would spend the reserve to protect the convenience.
         assert!(
-            hoarded(&tiles, &[0], &sc) < hoarded(&tiles, &[1], &sc),
+            hoarded(&tiles, &[0], &sc, false) < hoarded(&tiles, &[1], &sc, false),
             "a wildcard has to cost less than the cheapest gold tile"
         );
-        assert_eq!(hoarded(&tiles, &[2], &sc), 0.0, "and a plain letter is free to spend");
+        assert_eq!(hoarded(&tiles, &[2], &sc, false), 0.0, "and a plain letter is free to spend");
+    }
+
+    /// The user's rule, 2026-11-07: Corundum and Chrysocolla are kept like gold, a Diamond only while
+    /// nothing needs healing, each at its own worth — above a wildcard, below the cheapest gold.
+    #[test]
+    fn attack_gems_are_kept_and_a_diamond_until_healing_is_wanted() {
+        let Some(sc) = scorer() else { return };
+        let tiles = vec![
+            of("F", "gemice"),
+            of("T", "gemfire"),
+            of("E", "gemheal"),
+            of("A", "wood"),
+            Tile::plain("Z"),
+            Tile::plain("."),
+        ];
+        for i in [0, 1, 2] {
+            let gem = hoarded(&tiles, &[i], &sc, false);
+            assert_eq!(gem, sc.tile_score(&tiles[i]), "tile {i} costs its worth");
+            assert!(gem > WILDCARD_WORTH && gem < hoarded(&tiles, &[4], &sc, false), "tile {i}");
+        }
+        assert_eq!(hoarded(&tiles, &[2], &sc, true), 0.0, "a Diamond is free when injured");
+        assert_eq!(hoarded(&tiles, &[0, 1], &sc, true), 6.0, "the attack gems never are");
+        assert_eq!(hoarded(&tiles, &[3], &sc, false), 0.0, "plain wood stays free");
+        // A gem wildcard is priced as the gem: one preciousness, the larger.
+        let mut wild_gem = Tile::plain(".");
+        wild_gem.quality.material = Some("gemice".into());
+        assert_eq!(hoarded(&[wild_gem], &[0], &sc, false), 3.0);
     }
 
     /// Fire is cleared by the count, and a partial clear is real progress.
@@ -833,6 +1020,7 @@ mod tests {
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
+            wildcards: 0,
             deviation: 0.0,
         };
         // Neither of these clears the board, so a threshold rule calls them equal. They are not.
@@ -870,12 +1058,64 @@ mod tests {
         bordered.quality.border = Some("silver".into());
         let t = vec![of("A", "silver2"), bordered, of("T", "wood"), of("E", "electrum")];
         let coif = |armour| Room { silver_armour: 1, ..room(armour, 0, 0) };
-        assert_eq!(gains(&t, &[0, 1, 2, 3], &sc, coif(100)).armour, 3, "material, border, electrum");
+        assert_eq!(
+            gains(&t, &[0, 1, 2, 3], &sc, coif(100)).armour,
+            3,
+            "material, border, electrum"
+        );
         assert_eq!(gains(&t, &[2], &sc, coif(100)).armour, 0, "plain wood is not silver");
         assert_eq!(gains(&t, &[0, 1, 2, 3], &sc, coif(2)).armour, 2, "only up to the cap");
         assert_eq!(gains(&t, &[0, 1, 2, 3], &sc, room(100, 0, 0)).armour, 0, "not worn");
         let doubled = Room { silver_armour: 2, ..room(100, 0, 0) };
         assert_eq!(gains(&t, &[0, 3], &sc, doubled).armour, 4, "the flag's value is per tile");
+    }
+
+    /// The Bookkeepers bassanello: `runs * flagVal` wildcards for a word whose every tile is wood,
+    /// kill or not (`rpg/effects/modifiers/onSubmitWoodQueueWoodornateWildcardPerRun.lua`).
+    #[test]
+    fn the_bassanello_queues_a_wildcard_per_run_of_an_all_wood_word() {
+        let Some(sc) = scorer() else { return };
+        let wood =
+            |w: &str| -> Vec<Tile> { w.chars().map(|c| of(&c.to_string(), "wood")).collect() };
+        let t = wood("BOOKKEEPER");
+        let all: Vec<usize> = (0..t.len()).collect();
+        assert_eq!(wildcards_queued("BOOKKEEPER", &t, &all, &sc, 1), 3, "the item's own example");
+        assert_eq!(wildcards_queued("bookkeeper", &t, &all, &sc, 2), 6, "per flag, any case");
+        assert_eq!(wildcards_queued("BOOKKEEPER", &t, &all, &sc, 0), 0, "not worn");
+        // As the board deals them, B and K are silver, so the same word pays nothing.
+        let dealt = board(&["B", "O", "O", "K", "K", "E", "E", "P", "E", "R"]);
+        assert_eq!(wildcards_queued("BOOKKEEPER", &dealt, &all, &sc, 1), 0, "not all wood");
+        let t =
+            vec![of("T", "wood"), of(".", "wood0"), of("S", "woodbraced"), of("S", "woodornate")];
+        assert_eq!(wildcards_queued("TOSS", &t, &[0, 1, 2, 3], &sc, 1), 1, "every wood counts");
+        assert_eq!(
+            wildcards_queued("TOAST", &wood("TOAST"), &[0, 1, 2, 3, 4], &sc, 1),
+            0,
+            "no run"
+        );
+        assert_eq!(wildcards_queued("AAA", &wood("AAA"), &[0, 1, 2], &sc, 1), 1, "a run is a set");
+    }
+
+    /// Below health and armour, above the infinitives and everything after them.
+    #[test]
+    fn wildcards_rank_between_the_gains_and_the_infinitives() {
+        let r = |gain: i64, wildcards: i64, infinitives: i64, hoarded: f64| Rank {
+            fire_eaten: 0,
+            wood_only: false,
+            heals_fully: false,
+            hazards_cleared: 0,
+            gain,
+            wildcards,
+            infinitives,
+            hoarded,
+            shed: 0,
+            hazard_fall: 0,
+            deviation: 0.0,
+        };
+        assert!(r(4, 0, 0, 0.0).better_than(&r(0, 3, 0, 0.0)), "armour first");
+        assert!(r(0, 1, 0, 0.0).better_than(&r(0, 0, 1, 0.0)), "then wildcards");
+        assert!(r(0, 2, 0, 0.0).better_than(&r(0, 1, 0, 0.0)), "more of them");
+        assert!(r(0, 1, 0, 1.0).better_than(&r(0, 0, 0, 0.0)), "worth spending one to get one");
     }
 
     /// The letters whose default material is silver count without any upgrade
@@ -931,6 +1171,7 @@ mod tests {
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
+            wildcards: 0,
             deviation,
         };
         assert!(r(0, true, 4, 0.0, 11.6).better_than(&r(0, true, 0, 0.0, 11.0)), "FUD over DAU");
@@ -965,6 +1206,7 @@ mod tests {
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
+            wildcards: 0,
             deviation: 0.0,
         };
         let both = tier(true, true, 99.0);
@@ -1008,6 +1250,7 @@ mod tests {
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
+            wildcards: 0,
             deviation: 9.0,
         };
         let golden = Rank {
@@ -1020,6 +1263,7 @@ mod tests {
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
+            wildcards: 0,
             deviation: 0.0,
         };
         assert!(plain.better_than(&golden), "a tidier board is not worth a Q");
@@ -1036,6 +1280,7 @@ mod tests {
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
+            wildcards: 0,
             deviation: 9.0,
         };
         assert!(paid.better_than(&plain), "a payout in hand outranks a tile kept back");
@@ -1051,6 +1296,7 @@ mod tests {
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
+            wildcards: 0,
             deviation: 0.0,
         };
         let gold_and_wild = Rank {
@@ -1063,6 +1309,7 @@ mod tests {
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
+            wildcards: 0,
             deviation: 0.0,
         };
         assert!(gold_only.better_than(&gold_and_wild), "no reason to spend a wildcard as well");
@@ -1089,6 +1336,7 @@ mod tests {
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
+            wildcards: 0,
             deviation,
         };
         // Nothing else to separate them, so getting rid of the ash decides it.
@@ -1324,6 +1572,7 @@ mod tests {
             hazards_cleared,
             gain,
             infinitives: 0,
+            wildcards: 0,
             hoarded: 0.0,
             shed: 0,
             hazard_fall: 0,
@@ -1343,6 +1592,7 @@ mod tests {
             hazards_cleared: 0,
             gain,
             infinitives,
+            wildcards: 0,
             hoarded,
             shed: 0,
             hazard_fall: 0,
@@ -1364,6 +1614,7 @@ mod tests {
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
+            wildcards: 0,
             deviation: 99.0,
         };
         let hazard = Rank {
@@ -1376,6 +1627,7 @@ mod tests {
             hazard_fall: 5,
             hazards_cleared: 0,
             infinitives: 0,
+            wildcards: 0,
             deviation: 1.0,
         };
         assert!(wood.better_than(&hazard), "a wood-only kill outranks any number of falls");
@@ -1390,6 +1642,7 @@ mod tests {
             hazard_fall: 2,
             hazards_cleared: 0,
             infinitives: 0,
+            wildcards: 0,
             deviation: 50.0,
         };
         let tidy = Rank {
@@ -1402,6 +1655,7 @@ mod tests {
             hazard_fall: 1,
             hazards_cleared: 0,
             infinitives: 0,
+            wildcards: 0,
             deviation: 0.0,
         };
         assert!(falls.better_than(&tidy), "a falling hazard outranks a tidier board");
@@ -1416,6 +1670,7 @@ mod tests {
             hazard_fall: 1,
             hazards_cleared: 0,
             infinitives: 0,
+            wildcards: 0,
             deviation: 3.0,
         };
         let b = Rank {
@@ -1428,10 +1683,60 @@ mod tests {
             hazard_fall: 1,
             hazards_cleared: 0,
             infinitives: 0,
+            wildcards: 0,
             deviation: 4.0,
         };
         assert!(a.better_than(&b), "with the payouts equal, lower deviation wins");
         assert!(!b.better_than(&a));
         assert!(!a.better_than(&a), "better_than is strict");
+    }
+
+    /// `A D ! P`, bottom to top: the `!` is cleared once both tiles under it go, as in
+    /// [`hazards_cleared`]; one of them is not enough, and one already at the bottom earns nothing.
+    #[test]
+    fn exclamations_are_cleared_from_the_bottom_row() {
+        let g = Geometry { rows_per_col: vec![4], ..Default::default() };
+        let one = Falloff::default();
+        let tiles = board(&["A", "D", "!", "P"]);
+        assert_eq!(exclamations_cleared(&tiles, &g, &[0, 1], one), 1);
+        assert_eq!(exclamations_cleared(&tiles, &g, &[1], one), 0, "row 2 is not the bottom");
+        assert_eq!(exclamations_cleared(&tiles, &g, &[3], one), 0, "above it does nothing");
+        let low = board(&["!", "D", "A", "P"]);
+        assert_eq!(exclamations_cleared(&low, &g, &[1, 2], one), 0, "falls whatever is played");
+        // `tileboard!bottom+`: two bottom rows, so one tile out from under is enough.
+        let two = Falloff { rows: 2, ..one };
+        assert_eq!(exclamations_cleared(&tiles, &g, &[1], two), 1);
+    }
+
+    /// The falloff repeats while anything fell (`tileboard.lua:1264-1276`), so a stack of `!` and
+    /// digits comes off whole; with `tileFalloffWildcardInstead` the first becomes a wildcard and
+    /// holds the rest up. A `!!` loses one mark and stays.
+    #[test]
+    fn exclamations_cascade_and_multi_marks_lose_one() {
+        let g = Geometry { rows_per_col: vec![5], ..Default::default() };
+        let one = Falloff::default();
+        let stack = board(&["A", "!", "3", "!", "B"]);
+        assert_eq!(exclamations_cleared(&stack, &g, &[0], one), 2, "both, the digit between");
+        let held = Falloff { to_wildcard: true, ..one };
+        assert_eq!(exclamations_cleared(&stack, &g, &[0], held), 1, "the wildcard holds the rest");
+        let multi = board(&["A", "!!", "B", "C", "D"]);
+        assert_eq!(exclamations_cleared(&multi, &g, &[0], one), 1, "one mark of two");
+    }
+
+    /// A wood-only word earns the wood-kill credit only if its blow makes the kill: an enemy the
+    /// poison finishes dies with no word, so the buckler pays nothing. `rank`'s damage is the
+    /// blow's, toxin left out.
+    #[test]
+    fn a_poison_kill_earns_no_wood_credit() {
+        let Some(sc) = scorer() else { return };
+        let g = Geometry { rows_per_col: vec![3], ..Default::default() };
+        let tiles = vec![of("C", "wood"), of("A", "wood"), of("T", "wood")];
+        let prefs = Preferences { wood_only_pays: true, kill_at: Some(10), ..Default::default() };
+        let r =
+            |damage| rank("CAT", &tiles, &g, &[0, 1, 2], &sc, &Target::default(), prefs, damage);
+        assert!(r(10).wood_only, "the blow kills");
+        assert!(!r(9).wood_only, "the toxin would finish it");
+        let open = Preferences { kill_at: None, ..prefs };
+        assert!(rank("CAT", &tiles, &g, &[0, 1, 2], &sc, &Target::default(), open, 0).wood_only);
     }
 }

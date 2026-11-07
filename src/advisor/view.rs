@@ -129,7 +129,8 @@ impl View {
             },
             Mode::CombatPlayerTurn => {
                 let cs = snap.combat.as_ref().expect("a player turn has a save");
-                match Self::turn(cs, res, peaks, options) {
+                let always_cast = crate::spells::always_cast_from_config(&snap.dir);
+                match Self::turn(cs, res, peaks, options, always_cast) {
                     Ok(v) => View { folder, ..v },
                     Err(e) => View {
                         mode,
@@ -144,17 +145,22 @@ impl View {
 
     fn turn(
         cs: &crate::game::save::Table, res: &Resources, peaks: &mut HashMap<String, i64>,
-        options: crate::turn::Options,
+        options: crate::turn::Options, always_cast: bool,
     ) -> Result<View, crate::Error> {
+        let started = std::time::Instant::now();
         let Some(mut plan) = crate::turn::plan(cs, &res.game_dir, &res.letters, peaks, options)?
         else {
             return Ok(View { mode: Mode::CombatPlayerTurn, ..View::default() });
         };
         // The player can cast, so the search scores each word by its best option — see
         // `crate::spells`. Diggle's own plan leaves this `None`.
-        let book =
+        let mut book =
             crate::spells::SpellBook::from_save(cs, &res.lexica, res.bestiary.undead(&plan.name));
+        book.always_cast = always_cast;
+        book.choose = true;
         plan.mods.spells = Some(book.clone());
+        let planned = started.elapsed();
+        let ranking = std::time::Instant::now();
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
         let list = crate::search::ranked(
             &res.dict,
@@ -166,6 +172,8 @@ impl View {
             &plan.picking,
             threads,
         );
+        let ranked = ranking.elapsed();
+        let annotating = std::time::Instant::now();
         let mut notes = plan.notes.clone();
         notes.extend(crate::turn::goal_notes(cs, &plan.name, &plan.mods, plan.goal));
         if book.turn_undead_unknown() {
@@ -201,6 +209,21 @@ impl View {
                 ListRow { row, cells }
             })
             .collect();
+        super::telemetry::note(
+            "rank",
+            format_args!(
+                "turn {} vs {} on {} tiles ({} wildcards), goal {:?}: plan {}, search {} ({} candidates, {threads} threads), rows {}",
+                cs.int_at("rpg.player.turnNumber").unwrap_or(-1),
+                plan.name,
+                plan.tiles.len(),
+                plan.tiles.iter().filter(|t| t.is_wildcard()).count(),
+                plan.goal,
+                super::telemetry::ms(planned),
+                super::telemetry::ms(ranked),
+                list.len(),
+                super::telemetry::since(annotating),
+            ),
+        );
         let us = match (cs.int_at("rpg.player.health"), cs.int_at("rpg.player.maxHealth")) {
             (Some(h), Some(m)) => format!("{h}/{m}"),
             _ => "?".into(),
@@ -547,6 +570,85 @@ mod tests {
         assert!(!singes.row.pierces);
         assert_eq!(singes.row.tier, crate::search::Tier::Fallback);
         assert!(!plain.notes.contains("rapier"));
+    }
+
+    /// The bassanello, the user's ask, 2026-11-06: a wood-only word with a run of repeated
+    /// letters queues a wildcard per run, so it ranks above an equal word without one, and the
+    /// Gain column says so.
+    #[test]
+    fn the_bassanellos_wildcards_rank_and_show() {
+        let res = res();
+        // Wood letters only, so every word on it is wood-only: TOSS and LESS have a run, and plenty
+        // of words have none.
+        let board: String = "TOSSERLINEATQQQQ".chars().map(|c| format!("\"{c}\", ")).collect();
+        let save = |worn: bool| {
+            let mut s = turn();
+            let a = s.find("tileboard = {").unwrap();
+            let b = a + s[a..].find('}').unwrap();
+            s.replace_range(a..=b, &format!("tileboard = {{ {board} }}"));
+            if worn {
+                s = s.replacen(
+                    "gearFlags = {",
+                    "gearFlags = { onSubmitWoodQueueWoodornateWildcardPerRun = 1,",
+                    1,
+                );
+            }
+            s
+        };
+        let view = |worn: bool| {
+            View::next(
+                &View::default(),
+                &snap(Some(&save(worn))),
+                &res,
+                &mut Default::default(),
+                Default::default(),
+            )
+        };
+        let runs = |w: &str| crate::gear::facts::count_runs(w);
+        let worn = view(true);
+        assert!(!worn.rows.is_empty());
+        for r in &worn.rows {
+            let n = runs(&r.row.word) as i64;
+            assert_eq!(r.row.gain.wildcards, n, "{}", r.row.word);
+            let text = crate::advisor::annotate::gain_text(r.row.gain);
+            assert_eq!(text.contains(&format!("+{n} 🃏")), n > 0, "{}: {text}", r.row.word);
+        }
+        assert!(
+            runs(&worn.rows[0].row.word) > 0,
+            "the top row queues a wildcard: {}",
+            worn.rows[0].row.word
+        );
+        assert!(view(false).rows.iter().all(|r| r.row.gain.wildcards == 0), "not worn");
+    }
+
+    /// The user's chest, 2026-11-06: a priest with Adept (`arcaneSpellEffectBonus5 = 10`) and one
+    /// Chrysocolla F on the board. `FIRWOOD` started on it is an arcane spell, 20 x 1.5 = 30, and
+    /// its 4 ice tick 1 before the chest acts: 31 in all, past `DRIFTWOOD`'s 30, which uses the F
+    /// mid-word where it does nothing. Before, `DRIFTWOOD` was listed first and `FIRWOOD` at 20.
+    #[test]
+    fn a_chrysocolla_first_casts_arcane_and_freezes() {
+        let res = res();
+        let src =
+            std::fs::read_to_string("tests/fixtures/combatSaveData-chest-chrysocolla.lua").unwrap();
+        let v = View::next(
+            &View::default(),
+            &snap(Some(&src)),
+            &res,
+            &mut Default::default(),
+            Default::default(),
+        );
+        let row = |w: &str| v.rows.iter().position(|r| r.row.word == w).expect(w);
+        let (fir, drift) = (row("FIRWOOD"), row("DRIFTWOOD"));
+        let f = &v.rows[fir];
+        assert_eq!(f.row.letters[0].tile, 14, "FIRWOOD starts on the Chrysocolla");
+        assert_eq!((f.row.score, f.row.afflictions.ice), (30, 1), "boosted, and the ice ticks");
+        let d = &v.rows[drift];
+        assert_eq!((d.row.score, d.row.afflictions.total()), (30, 0), "mid-word, it does nothing");
+        assert!(fir < drift, "FIRWOOD is listed above DRIFTWOOD");
+        // Ending on it is active too: an arcane spell, but the ice comes only from the front.
+        let whiff = &v.rows[row("WHIFF")];
+        assert_eq!(whiff.row.letters.last().map(|l| l.tile), Some(14));
+        assert_eq!((whiff.row.score, whiff.row.afflictions.ice), (24, 0), "16 x 1.5");
     }
 
     /// Boggling anxiety: a 5x5 board (erudite) under the letter-chaining curse with the chain

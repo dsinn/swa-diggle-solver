@@ -22,6 +22,7 @@
 //! one written most recently is followed.
 
 use super::mode::{Snapshot, Stamp};
+use super::telemetry;
 use crate::game::save::Table;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -159,10 +160,26 @@ pub fn load_if_changed(path: &Path, last: &mut Option<Option<Stamp>>) -> Load {
         return Load::Unchanged;
     }
     *last = Some(now);
-    let parsed = std::fs::read(path)
+    let read_at = std::time::Instant::now();
+    let bytes = std::fs::read(path);
+    let read = read_at.elapsed();
+    let parse_at = std::time::Instant::now();
+    let parsed = bytes
         .map_err(|e| e.to_string())
         .and_then(|bytes| String::from_utf8(bytes).map_err(|e| e.to_string()))
         .and_then(|src| crate::game::save::parse(&src).map_err(|e| e.to_string()));
+    telemetry::note(
+        "watch",
+        format_args!(
+            "read {} ({} bytes, written {} ago) in {}, parsed in {}{}",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            stamp.0,
+            telemetry::age(stamp.1),
+            telemetry::ms(read),
+            telemetry::since(parse_at),
+            if parsed.is_err() { " - UNREADABLE" } else { "" },
+        ),
+    );
     match parsed {
         Ok(t) => Load::Fresh((t, stamp)),
         Err(e) => Load::Unreadable(e),
@@ -233,6 +250,10 @@ fn wait(watches: &[Watch], timeout: Duration) -> Option<usize> {
     Some(i)
 }
 
+/// How many events the watcher has sent, numbering them in the timing log so the worker's lines can
+/// name the snapshot they are about.
+pub static SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Runs the watcher on its own thread until the receiving end hangs up.
 ///
 /// `arcade` is [`arcade_saves`]: the challenge saves followed alongside [`COMBAT_SAVE`].
@@ -247,6 +268,9 @@ pub fn spawn(
         let mut since: Option<SystemTime> = None;
         let mut last: Option<Option<Stamp>> = None;
         let mut watches: Vec<Watch> = Vec::new();
+        // What started this pass, for the timing log: a save found on the 2 s poll rather than by
+        // a notification is a notification missed, and up to two seconds lost.
+        let mut woken = "start";
         loop {
             // Open watches for folders that have appeared since the last pass.
             for d in &dirs {
@@ -263,7 +287,15 @@ pub fn spawn(
             }
             let path = following.join(&file);
             let event = match load_if_changed(&path, &mut last) {
-                Load::Unchanged => None,
+                Load::Unchanged => {
+                    if woken == "notified" {
+                        telemetry::note(
+                            "watch",
+                            format_args!("{file} unchanged; another file in the folder moved"),
+                        );
+                    }
+                    None
+                }
                 Load::Absent => {
                     since = Some(SystemTime::now());
                     Some(Event::Snapshot(Snapshot {
@@ -287,16 +319,32 @@ pub fn spawn(
                 }
             };
             if let Some(e) = event {
+                let n = SENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                telemetry::note("watch", format_args!("sent #{n} (found by {woken})"));
                 if tx.send(e).is_err() {
                     return;
                 }
             }
-            let Some(fired) = wait(&watches, FALLBACK) else { continue };
+            let Some(fired) = wait(&watches, FALLBACK) else {
+                woken = "the 2s poll";
+                continue;
+            };
+            woken = "notified";
+            let quiet_from = std::time::Instant::now();
+            let mut more = 0;
             let mut active = watches[fired].dir.clone();
             // Let the writes finish: keep waiting while anything is still changing.
             while let Some(again) = wait(&watches, DEBOUNCE) {
                 active = watches[again].dir.clone();
+                more += 1;
             }
+            telemetry::note(
+                "watch",
+                format_args!(
+                    "notified; quiet after {} ({more} more notifications)",
+                    telemetry::since(quiet_from)
+                ),
+            );
             if active != following {
                 following = active;
                 file = choose_save(&following, &names, COMBAT_SAVE, None);

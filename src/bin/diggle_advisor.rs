@@ -35,17 +35,23 @@
 //! box starts collapsed; drag the gap under it to resize it. Settings are written half a second after the last change
 //! ([`SAVE_DELAY_MS`]), so a drag is one write rather than hundreds.
 //!
+//! With `--timing-log`, each save's way from the game's write to the list on screen is timed, step
+//! by step, in `%LOCALAPPDATA%\DiggleAdvisor\timing.log` ([`diggle_solver::advisor::telemetry`]).
+//!
 //! ## Options
 //!
 //! - `--game-dir <path>`: the game checkout. Otherwise `game_dir` from `config.toml` in the working
 //!   directory, else `../sternly-worded-adventures`.
 //! - `--dir <path>` (repeatable): watch these folders instead of the save folder. For testing
 //!   against a copied save.
+//! - `--timing-log`: write the timing log above. Off unless asked for — the user's call,
+//!   2026-11-07.
 
 #![windows_subsystem = "windows"]
 
 use diggle_solver::advisor::mode::Mode;
 use diggle_solver::advisor::settings::{self, Settings};
+use diggle_solver::advisor::telemetry;
 use diggle_solver::advisor::view::{Resources, View};
 use diggle_solver::advisor::watch::{self, Event};
 use std::cell::RefCell;
@@ -230,16 +236,20 @@ const ROW_HEIGHT: i32 = 36;
 struct Args {
     game_dir: PathBuf,
     dirs: Vec<PathBuf>,
+    /// `--timing-log`: write [`telemetry`]'s log.
+    timing_log: bool,
 }
 
 fn args() -> Args {
     let mut game_dir = None;
     let mut dirs = Vec::new();
+    let mut timing_log = false;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--game-dir" => game_dir = it.next().map(PathBuf::from),
             "--dir" => dirs.extend(it.next().map(PathBuf::from)),
+            "--timing-log" => timing_log = true,
             _ => {}
         }
     }
@@ -255,12 +265,16 @@ fn args() -> Args {
             dirs = watch::save_dirs(&PathBuf::from(appdata));
         }
     }
-    Args { game_dir, dirs }
+    Args { game_dir, dirs, timing_log }
 }
+
+/// When the last view was published, so the window can log how long it waited to draw it.
+static PUBLISHED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
 /// Publishes a view and tells the window. `hwnd` is carried as an integer so it can cross threads.
 fn publish(hwnd: isize, v: View) {
     *view().lock().unwrap() = v;
+    *PUBLISHED.lock().unwrap() = Some(std::time::Instant::now());
     // SAFETY: posting to our own window; a failure only means it has closed.
     unsafe {
         let _ = PostMessageW(HWND(hwnd as _), WM_VIEW, WPARAM(0), LPARAM(0));
@@ -279,8 +293,15 @@ fn worker(
     hwnd: isize, args: Args, tx: mpsc::Sender<Input>, rx: mpsc::Receiver<Input>,
     mut options: diggle_solver::turn::Options,
 ) {
+    let loading = std::time::Instant::now();
     let res = match Resources::load(&args.game_dir) {
-        Ok(r) => r,
+        Ok(r) => {
+            telemetry::note(
+                "work",
+                format_args!("game data loaded in {}", telemetry::since(loading)),
+            );
+            r
+        }
         Err(e) => {
             let header = format!("cannot load the game data from {}: {e}", args.game_dir.display());
             return publish(hwnd, View { header, ..View::default() });
@@ -305,13 +326,23 @@ fn worker(
     // The last snapshot ranked, for re-ranking it when the options change.
     let mut last: Option<diggle_solver::advisor::mode::Snapshot> = None;
     let mut pending: Option<Input> = None;
+    // Watch events received, numbered as the watcher numbers them (`watch::SENT`): one channel,
+    // in order.
+    let mut got = 0u64;
     loop {
         let Some(first) = pending.take().or_else(|| rx.recv().ok()) else { return };
         let mut event: Option<Event> = None;
         let mut rerank = false;
+        let mut skipped = Vec::new();
         for input in std::iter::once(first).chain(std::iter::from_fn(|| rx.try_recv().ok())) {
             match input {
-                Input::Watch(e) => event = Some(e),
+                Input::Watch(e) => {
+                    got += 1;
+                    if event.is_some() {
+                        skipped.push(got - 1);
+                    }
+                    event = Some(e)
+                }
                 Input::Options(o) => {
                     rerank |= o != options;
                     options = o;
@@ -323,9 +354,22 @@ fn worker(
             (None, true, Some(snap)) => Event::Snapshot(snap.clone()),
             _ => continue,
         };
+        if !skipped.is_empty() {
+            telemetry::note("work", format_args!("skipping #{skipped:?}, a newer one is queued"));
+        }
         match event {
             Event::Snapshot(snap) => {
+                let working = std::time::Instant::now();
                 let next = View::next(&current, &snap, &res, &mut peaks, options);
+                telemetry::note(
+                    "work",
+                    format_args!(
+                        "#{got}{}: {:?} in {}",
+                        if rerank { " re-ranked for new options" } else { "" },
+                        next.mode,
+                        telemetry::since(working)
+                    ),
+                );
                 last = Some(snap);
                 if let Ok(newer) = rx.try_recv() {
                     let stale = match &newer {
@@ -338,6 +382,10 @@ fn worker(
                     pending = Some(newer);
                     // Peaks only rise within a fight, so the stale turn's reading stays true.
                     if stale {
+                        telemetry::note(
+                            "work",
+                            format_args!("#{got} dropped unshown: something newer arrived"),
+                        );
                         continue;
                     }
                 }
@@ -351,7 +399,11 @@ fn worker(
 
 fn main() -> windows::core::Result<()> {
     let args = args();
-    let file = std::env::var_os("LOCALAPPDATA").map(|d| settings::path(std::path::Path::new(&d)));
+    let local = std::env::var_os("LOCALAPPDATA");
+    if let (true, Some(d)) = (args.timing_log, &local) {
+        telemetry::init(&telemetry::path(std::path::Path::new(d)));
+    }
+    let file = local.map(|d| settings::path(std::path::Path::new(&d)));
     let saved = file.as_deref().map(Settings::load).unwrap_or_default();
     STATE.with(|s| {
         *s.borrow_mut() = Some(State { settings: saved.clone(), file, dirty: false, drag: None })
@@ -716,9 +768,8 @@ fn cell_text(v: &View, item: usize, sub: i32) -> String {
         // The fencer before the number, so the numbers stay lined up on the right.
         2 => {
             let fencer = if r.row.pierces { "🤺 " } else { "" };
-            let toxin =
-                if r.row.toxin > 0 { format!(" +{} 🧪", r.row.toxin) } else { String::new() };
-            format!("{fencer}{}{toxin}", r.row.score)
+            let after = diggle_solver::advisor::annotate::afflictions_text(r.row.afflictions);
+            format!("{fencer}{}{after}", r.row.score)
         }
         3 => r.row.bonus.as_ref().map(|b| b.to_string()).unwrap_or_default(),
         4 => diggle_solver::advisor::annotate::gain_text(r.row.gain),
@@ -1042,11 +1093,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_VIEW => {
+            let waited = PUBLISHED.lock().unwrap().map(|t| t.elapsed());
+            let drawing = std::time::Instant::now();
             UI.with(|u| {
                 if let Some(ui) = u.borrow().as_ref() {
                     refresh(hwnd, ui);
                 }
             });
+            telemetry::note(
+                "window",
+                format_args!(
+                    "shown {} after publishing, updated in {}",
+                    waited.map(telemetry::ms).unwrap_or_default(),
+                    telemetry::since(drawing)
+                ),
+            );
             LRESULT(0)
         }
         WM_COMMAND

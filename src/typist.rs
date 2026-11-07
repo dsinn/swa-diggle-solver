@@ -39,6 +39,11 @@
 //!
 //! So the words this accepts are exactly the ones the keyboard can chain — fewer than a mouse could
 //! drag, which is the user's call (2026-11-03): they type.
+//!
+//! **Which tiles fill those words is a different call, and it went the other way** (2026-11-06):
+//! the user clicks the whole word, so any tile with the right letter may fill a slot. Typing still
+//! decides which words exist and how they split into tiles; [`Typist::placements`] then offers each
+//! other choice of tile, and the search scores them all.
 
 use crate::geometry::Geometry;
 use crate::observe::board::Tile;
@@ -46,8 +51,15 @@ use crate::observe::board::Tile;
 /// The game's wildcard tile.
 const WILDCARD: &str = ".";
 
+/// The most placements [`Typist::placements`] returns for one word, the typed one included.
+///
+/// A bound on the work, not a reason: with twins merged into classes a real board stays far below
+/// it, and the typed placement is always first, so a word cut short is never scored worse than
+/// typing would.
+pub const MAX_PLACEMENTS: usize = 64;
+
 /// What typing a word actually consumed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Typed {
     /// Dump indices of the tiles the word used, in selection order.
     pub tiles: Vec<usize>,
@@ -90,6 +102,14 @@ pub struct Typist<'a> {
     corner_first: Vec<usize>,
     /// Slots excluded by a locked row or column, or by the tile's own `unselectable`.
     usable: Vec<bool>,
+}
+
+/// What [`Typist::place`] carries down its walk unchanged, and the keys it has already kept.
+struct Walk<'w> {
+    wants: &'w [String],
+    options: &'w [Vec<usize>],
+    members: &'w [Vec<usize>],
+    seen: &'w mut std::collections::HashSet<Vec<(usize, String)>>,
 }
 
 /// One entry of the word being built. Mirrors `wordTiles`.
@@ -192,6 +212,211 @@ impl<'a> Typist<'a> {
             return None;
         }
         Some(Typed { tiles, wildcards, corners_used, adjacent })
+    }
+
+    /// Every way of **clicking** `word` with the segmentation typing found: [`Typist::type_word`]'s
+    /// tiles first, then each other choice of tile for its slots.
+    ///
+    /// The user's call, 2026-11-06: *they click the whole word* rather than type it, so which of two
+    /// `B` tiles comes first is theirs to choose. That matters because some materials pay only in
+    /// one position: the serrated tiles (`*toxin`, `*bleed`), `gemfire` and `gemice` as the
+    /// **first** tile (`active = wordTiles[1]==tile`), and `woodbraced`, `gemheal` and `gemice` as
+    /// the **last** (`wordTiles[#wordTiles]==tile`), `rpg/effects/material/*.lua`. Typing always
+    /// takes the game's first match in its corner-first scan, so a board with `BREAKABLY` on it and
+    /// a `silvertoxin` second `B` scored the word without its toxin, though one click would add it.
+    ///
+    /// A click is never refused for position — `wordboard.select` takes any selectable tile; the
+    /// chaining curse checks adjacency only on submit, which is checked here as typing checks it.
+    ///
+    /// **What varies is the tile behind each slot, not the slots.** A slot holding `CH` takes another
+    /// `CH` tile, never a `C` and an `H`; a single letter takes any tile with that letter or a
+    /// wildcard that admits it. So a word typing cannot make is still not offered — a segmentation
+    /// search is a separate, larger change.
+    ///
+    /// **Tiles that cannot be told apart are not permuted.** Without the curse, two tiles with the
+    /// same letter, the same quality and the same corner standing score identically wherever they
+    /// go, so they share one class and the class takes its tiles in typing's order — which keeps the
+    /// typed placement exactly as it was and keeps the count small. What that gives up is the
+    /// purely positional tiebreak between twins ([`crate::pick::hazard_fall`], the board's
+    /// deviation, `wordScoreBonusAdjacent`). Under the curse adjacency is everything, so every tile
+    /// is its own class. At most [`MAX_PLACEMENTS`] are returned either way.
+    pub fn placements(&self, word: &str) -> Vec<Typed> {
+        let Some(typed) = self.type_word(word) else { return Vec::new() };
+        // What each slot must read as: the tile's letters, or the letter typed into a wildcard.
+        let wants: Vec<String> = typed
+            .steps()
+            .map(|(i, wild)| match wild {
+                Some(c) => c.to_ascii_uppercase().to_string(),
+                None => self.letters[i].clone(),
+            })
+            .collect();
+
+        // Classes of interchangeable tiles. Under the curse every tile is its own.
+        let mut class_of = vec![usize::MAX; self.tiles.len()];
+        let mut reps: Vec<usize> = Vec::new();
+        for (i, class) in class_of.iter_mut().enumerate() {
+            if !self.usable[i] {
+                continue;
+            }
+            let twin = (!self.geometry.adjacency_required)
+                .then(|| {
+                    reps.iter().position(|&r| {
+                        self.tiles[r] == self.tiles[i]
+                            && self.geometry.is_corner(r) == self.geometry.is_corner(i)
+                    })
+                })
+                .flatten();
+            *class = match twin {
+                Some(c) => c,
+                None => {
+                    reps.push(i);
+                    reps.len() - 1
+                }
+            };
+        }
+        // Each class's tiles in the order they are handed out: the ones typing used, as it used
+        // them, then the rest in the game's scan order.
+        let mut members: Vec<Vec<usize>> = vec![Vec::new(); reps.len()];
+        let scan = typed.tiles.iter().chain(&self.corner_first).copied().chain(0..self.tiles.len());
+        for i in scan {
+            if class_of[i] != usize::MAX && !members[class_of[i]].contains(&i) {
+                members[class_of[i]].push(i);
+            }
+        }
+        // The classes that can fill each slot, the one typing chose first.
+        // A wildcard stands in for a slot typing filled with a real letter only if it is a special
+        // one: a plain wildcard is worth nothing (`wood0`) and costs a hoarded tile, so it never
+        // beats the letter, and offering it roughly doubled the work on a board with three of them.
+        let special =
+            |q: &crate::observe::board::Quality| q.material.is_some() || q.border.is_some();
+        let fits = |rep: usize, want: &str, real_slot: bool| -> bool {
+            let l = &self.letters[rep];
+            if l == want {
+                return true;
+            }
+            if l != WILDCARD || want.len() != 1 {
+                return false;
+            }
+            if real_slot && !special(&self.tiles[rep].quality) {
+                return false;
+            }
+            match self.tiles[rep].quality.ligature.as_deref() {
+                None => true,
+                Some(p) => pattern_admits(p, want.as_bytes()[0]),
+            }
+        };
+        let ends = |j: usize| j == 0 || j + 1 == wants.len();
+        let options: Vec<Vec<usize>> = wants
+            .iter()
+            .zip(&typed.tiles)
+            .enumerate()
+            .map(|(j, (want, &chosen))| {
+                let own = class_of[chosen];
+                // Mid-word, a wildcard for a real letter changes only what the word spends, and on
+                // a board with three bordered wildcards that alone doubled the ranking's time
+                // (0.21s to 0.43s, measured 2026-11-06). The ends are where a gem wildcard pays.
+                let real_slot = self.letters[chosen] != WILDCARD;
+                if real_slot && !ends(j) {
+                    return std::iter::once(own)
+                        .chain((0..reps.len()).filter(|&c| {
+                            c != own
+                                && self.letters[reps[c]] != WILDCARD
+                                && fits(reps[c], want, true)
+                        }))
+                        .collect();
+                }
+                std::iter::once(own)
+                    .chain((0..reps.len()).filter(|&c| c != own && fits(reps[c], want, real_slot)))
+                    .collect()
+            })
+            .collect();
+
+        let own: Vec<usize> = typed.tiles.iter().map(|&i| class_of[i]).collect();
+        let mut seen = std::collections::HashSet::from([self.score_key(&own, &wants)]);
+        let mut out = vec![typed.clone()];
+        let mut used = vec![0usize; reps.len()];
+        let mut seq: Vec<usize> = Vec::with_capacity(wants.len());
+        let mut walk =
+            Walk { wants: &wants, options: &options, members: &members, seen: &mut seen };
+        self.place(&mut walk, &mut used, &mut seq, &mut out);
+        out
+    }
+
+    /// What a placement's worth depends on, as classes and the letter each slot reads as: every
+    /// tile as a multiset, and which one is first and which last — the only positions a material
+    /// pays in (see [`Typist::placements`]). Two placements with the same key score alike, so only
+    /// the first is kept. Under the curse the order is adjacency, so the whole sequence is the key.
+    fn score_key(&self, seq: &[usize], wants: &[String]) -> Vec<(usize, String)> {
+        let pairs: Vec<(usize, String)> = seq.iter().copied().zip(wants.iter().cloned()).collect();
+        if self.geometry.adjacency_required || pairs.len() < 3 {
+            return pairs;
+        }
+        let (first, last) = (pairs[0].clone(), pairs[pairs.len() - 1].clone());
+        let mut middle = pairs[1..pairs.len() - 1].to_vec();
+        middle.sort();
+        std::iter::once(first).chain(std::iter::once(last)).chain(middle).collect()
+    }
+
+    /// [`Typist::placements`]' depth-first walk over class sequences.
+    fn place(
+        &self, walk: &mut Walk, used: &mut [usize], seq: &mut Vec<usize>, out: &mut Vec<Typed>,
+    ) {
+        let (wants, options, members) = (walk.wants, walk.options, walk.members);
+        if out.len() >= MAX_PLACEMENTS {
+            return;
+        }
+        let j = seq.len();
+        if j == wants.len() {
+            if !walk.seen.insert(self.score_key(seq, wants)) {
+                return;
+            }
+            // The classes become tiles in hand-out order, so the sequence typing chose rebuilds its
+            // own placement — which is already first in `out`.
+            let mut taken = vec![0usize; members.len()];
+            let tiles: Vec<usize> = seq
+                .iter()
+                .map(|&c| {
+                    taken[c] += 1;
+                    members[c][taken[c] - 1]
+                })
+                .collect();
+            if tiles == out[0].tiles {
+                return;
+            }
+            let wildcards = tiles
+                .iter()
+                .zip(wants)
+                .map(|(&i, w)| {
+                    (self.letters[i] == WILDCARD)
+                        .then(|| w.as_bytes()[0].to_ascii_lowercase() as char)
+                })
+                .collect();
+            let corners_used = tiles.iter().filter(|&&i| self.geometry.is_corner(i)).count();
+            let adjacent = tiles.windows(2).all(|p| self.geometry.tiles_adjacent(p[0], p[1]));
+            if self.geometry.adjacency_required && !adjacent {
+                return;
+            }
+            out.push(Typed { tiles, wildcards, corners_used, adjacent });
+            return;
+        }
+        for &c in &options[j] {
+            if used[c] >= members[c].len() {
+                continue;
+            }
+            // Under the curse each class is one tile, so the chain can be pruned as it is built.
+            if self.geometry.adjacency_required {
+                if let Some(&prev) = seq.last() {
+                    if !self.geometry.tiles_adjacent(members[prev][0], members[c][0]) {
+                        continue;
+                    }
+                }
+            }
+            used[c] += 1;
+            seq.push(c);
+            self.place(walk, used, seq, out);
+            seq.pop();
+            used[c] -= 1;
+        }
     }
 
     fn step(
@@ -865,5 +1090,49 @@ mod tests {
         let g = strip(2);
         // Typing T takes the wildcard; typing H then finds "TH" and swaps to the real tile.
         assert_eq!(typed(&t, &g, "TH"), Some(vec![1]));
+    }
+
+    /// Typing takes the first B in scan order; a click can start the word on the other one, and
+    /// that is what [`Typist::placements`] offers second. The user's `BREAKABLY`, 2026-11-06.
+    #[test]
+    fn placements_offer_the_other_twin_first() {
+        let mut t = plain("BOB");
+        t[2].quality.material = Some("silvertoxin".into());
+        let g = strip(3);
+        let all = Typist::new(&t, &g).placements("BO");
+        assert_eq!(all[0], Typist::new(&t, &g).type_word("BO").unwrap(), "typing's own first");
+        assert_eq!(
+            all.iter().map(|p| p.tiles.clone()).collect::<Vec<_>>(),
+            [vec![0, 1], vec![2, 1]]
+        );
+        // Both Bs in the word: either may start it.
+        let both: Vec<Vec<usize>> =
+            Typist::new(&t, &g).placements("BOB").into_iter().map(|p| p.tiles).collect();
+        assert_eq!(both, [vec![0, 1, 2], vec![2, 1, 0]]);
+    }
+
+    /// Twins — same letter, same quality, same corner standing — score alike wherever they go, so
+    /// they are not permuted: sixteen plain As give only corner-or-not per slot.
+    #[test]
+    fn placements_do_not_permute_twins() {
+        let t = plain("AAAAAAAAAAAAAAAA");
+        let g = Geometry::default();
+        let all = Typist::new(&t, &g).placements("AA");
+        assert_eq!(all.len(), 4, "{all:?}");
+        assert_eq!(all[0].tiles, vec![0, 12], "typing's corners first");
+        assert_eq!(all.iter().map(|p| p.corners_used).collect::<Vec<_>>(), [2, 1, 1, 0]);
+    }
+
+    /// A special wildcard can stand in for a letter typing found a real tile for, and is then typed
+    /// into; a plain one is not offered, since it is worth nothing and costs a hoarded tile.
+    #[test]
+    fn placements_can_use_a_special_wildcard_instead() {
+        let mut t = plain("A..");
+        t[2].quality.material = Some("gemfire".into());
+        let g = strip(3);
+        let all = Typist::new(&t, &g).placements("A");
+        assert_eq!(all.len(), 2, "the gem wildcard, never the plain one: {all:?}");
+        assert_eq!(all[1].tiles, vec![2]);
+        assert_eq!(all[1].wildcards, vec![Some('a')]);
     }
 }

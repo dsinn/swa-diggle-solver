@@ -137,8 +137,9 @@ pub struct Modifiers {
     /// What each of [`Modifiers::bonuses`] is called, in the same order: the lexicon's name as its
     /// status key spells it, `lexiconBonusBone` → `Bone`. For showing a bonus, not for scoring.
     pub bonus_names: Vec<String>,
-    /// The spells the player holds, when the caller can cast them — see [`crate::spells`].
-    /// `None` for Diggle, which never presses the cast buttons; the advisor fills it in.
+    /// The spells the player holds — see [`crate::spells`]. Filled from the save, and both Diggle
+    /// and the advisor are scored as casting the best spell. `None` only in tests that want the
+    /// plain attack alone.
     pub spells: Option<crate::spells::SpellBook>,
     /// This enemy cancels overkill healing outright (`rpgview.lua:1084`).
     pub overkill_no_heal: bool,
@@ -201,6 +202,19 @@ pub struct Modifiers {
     /// What one stack of toxin a word applies costs this enemy: 1, 2 while `toxinWeak`, 0 while
     /// `toxinImmune` (`baseStatusDamage`, `rpgview.lua:1262-1284`). See [`Modifiers::toxin`].
     pub toxin_scale: i64,
+    /// What a word's own ice costs this enemy before it acts: 1, 2 while `iceWeak`, and 0 while
+    /// `iceImmune` **or already iced** — ice ticks a flat amount however many stacks there are
+    /// (`baseStatusDamage`, `rpgview.lua:1303-1307`), and ice already on it is in
+    /// [`Modifiers::enemy_status_tick`]. See [`Modifiers::afflictions`].
+    pub ice_tick: i64,
+    /// The same for burn: `ceil(maxHealth / 16)`, or `/ 8` while `burnWeak` (`rpgview.lua:1300-1302`),
+    /// and 0 while `burnImmune` or already burning. 1 when the enemy's maximum health is not in the
+    /// save, the cautious guess [`crate::gear::status_tick`] makes too.
+    pub burn_tick: i64,
+    /// The schools' power, for a word its own tiles make a spell of — see
+    /// [`crate::spells::tile_school`]. `None` while `noCastSpell` is held, which keeps every gem
+    /// tile inactive (`wordboard.lua:103-118`): no boost, and no ice or burn either.
+    pub tile_spells: Option<crate::spells::Power>,
     /// What stands between us and the kill, for the one gear that changes which of it a word must
     /// get through: the rapier. `None` until the turn's plan fills it in ([`crate::turn::plan`]), and
     /// then no word is treated as piercing — see [`Modifiers::reach`].
@@ -213,6 +227,21 @@ pub struct Modifiers {
 pub struct Defence {
     pub health: i64,
     pub armour: i64,
+}
+
+/// The statuses a word applies, as the damage each costs the enemy before it acts — see
+/// [`Modifiers::afflictions`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Afflictions {
+    pub toxin: i64,
+    pub ice: i64,
+    pub burn: i64,
+}
+
+impl Afflictions {
+    pub fn total(&self) -> i64 {
+        self.toxin + self.ice + self.burn
+    }
 }
 
 impl Modifiers {
@@ -253,6 +282,12 @@ impl Modifiers {
             .filter_map(|d| lexica.words_for(d.key()).map(|w| (d, w.clone())))
             .collect();
         let weapon = crate::gear::Weapon::from_save(&crate::gear::Gear::from_save(save), save);
+        // The spells held. Diggle is scored as casting the best of them — the user's call,
+        // 2026-11-07, with the button press stubbed (see `crate::spells`) — and as the game casts a
+        // lone one for it. The advisor replaces this book with one carrying the user's config.
+        let undead = crate::advisor::bestiary::Bestiary::load(game_dir)
+            .undead(save.str_at("rpg.enemy.name").unwrap_or(""));
+        let spells = crate::spells::SpellBook::from_save(save, &lexica, undead);
         // The status a word *applies* is not in this number — it is per word, and the band the
         // search filters on is per word too. `bonusBastard` trading 6 damage for 3 bleed and 3 toxin
         // is the case that matters, and it under-rates the turn's total by about 4.
@@ -264,6 +299,28 @@ impl Modifiers {
                 (false, true) => 2,
                 (false, false) => 1,
             };
+        // A flat tick only adds when nothing of the kind is on the enemy yet.
+        let fresh = |s: &str| {
+            !statuses.contains_key(&format!("{s}Immune"))
+                && statuses.get(s).is_none_or(|v| *v <= 0.0)
+        };
+        let ice_tick = match (fresh("ice"), statuses.contains_key("iceWeak")) {
+            (false, _) => 0,
+            (true, true) => 2,
+            (true, false) => 1,
+        };
+        let burn_tick = if fresh("burn") {
+            let divisor = if statuses.contains_key("burnWeak") { 8.0 } else { 16.0 };
+            save.int_at("rpg.enemy.maxHealth")
+                .map(|m| (m as f64 / divisor).ceil() as i64)
+                .unwrap_or(1)
+        } else {
+            0
+        };
+        let tile_spells = save
+            .path("rpg.player.gearFlags.noCastSpell")
+            .is_none()
+            .then(|| crate::spells::Power::from_save(save));
         // One line for the whole deferred status model, not one per piece of it.
         if let Some(note) = crate::gear::weapon::deferred_status_model(&statuses, &weapon) {
             problems.push(note);
@@ -301,7 +358,7 @@ impl Modifiers {
                 immobile: save.path("rpg.enemy.immobile").is_some(),
                 bonuses: lexica.bonus_sets(&statuses),
                 bonus_names: lexica.bonus_names(&statuses),
-                spells: None,
+                spells: Some(spells),
                 overkill_no_heal: statuses.contains_key("overkillNoHeal"),
                 overkill_heal_to_gold: statuses.contains_key("overkillHealToGold"),
                 plan,
@@ -313,6 +370,9 @@ impl Modifiers {
                 // Decided per turn, from more than the save — see `crate::turn::plan`.
                 stall: false,
                 toxin_scale,
+                ice_tick,
+                burn_tick,
+                tile_spells,
                 defence: None,
             },
             resolved.geometry,
@@ -342,8 +402,43 @@ impl Modifiers {
             player_dodges: false,
             stall: false,
             toxin_scale: 1,
+            ice_tick: 1,
+            burn_tick: 1,
+            tile_spells: Some(crate::spells::Power::default()),
             defence: None,
         }
+    }
+
+    /// What this word's statuses cost the enemy at the start of its next turn, before it acts:
+    /// [`Modifiers::toxin`], and the ice and burn a gem tile starting the word inflicts.
+    ///
+    /// - **A Chrysocolla first** (`gemice`) inflicts 4 ice per gem in the word, **a Corundum first**
+    ///   (`gemfire`) 3 burn per gem (`rpg/effects/material/gemice.lua:11-13`, `gemfire.lua:7-9`).
+    ///   Each status ticks a flat amount whatever the stacks — [`Modifiers::ice_tick`],
+    ///   [`Modifiers::burn_tick`] — so the count of gems decides only that there is some.
+    /// - Paid like toxin, through `getStatusEffectHealthDeltasFor` before the enemy acts
+    ///   (`rpgview.lua:1328-1341,1610-1612`), so it is damage to every goal and earns nothing a
+    ///   blow would: no overkill gold, no Well-Rested heal, no wood-kill gear.
+    ///
+    /// The user's report, 2026-11-06: against a chest, `FIRWOOD` on a Chrysocolla F did more than
+    /// the listed `DRIFTWOOD`, because the ice and the arcane boost (see [`scored_cast`]) were not
+    /// counted.
+    pub fn afflictions(&self, scorer: &Scorer, word: &str, consumed: &[Tile]) -> Afflictions {
+        let first =
+            match (&self.tile_spells, consumed.first().and_then(|t| scorer.material_name(t))) {
+                (Some(_), Some(m)) => m,
+                _ => "",
+            };
+        Afflictions {
+            toxin: self.toxin(scorer, word, consumed),
+            ice: if first == "gemice" { self.ice_tick } else { 0 },
+            burn: if first == "gemfire" { self.burn_tick } else { 0 },
+        }
+    }
+
+    /// [`Modifiers::afflictions`], added up: the part of a word's damage that lands after the blow.
+    pub fn status_damage(&self, scorer: &Scorer, word: &str, consumed: &[Tile]) -> i64 {
+        self.afflictions(scorer, word, consumed).total()
     }
 
     /// The toxin damage this word adds, as health the enemy loses at the start of its next turn.
@@ -530,13 +625,40 @@ pub fn scored_cast(
     // removes 6 from a seven-letter word (`rpgview.lua:871-876`). Clamped at zero because the game
     // takes `math.max(0, damageByPlayer-effectiveArmour)` downstream and a negative here would
     // otherwise read as healing.
+    // **A plain attack its own tiles make a spell of** is boosted by that school's power
+    // (`wordboard.lua:611-612`, and `rpgview.lua:1021-1022` for the estimate): a Chrysocolla
+    // starting the word, with Adept, is 1.5x. A held spell cast instead is boosted only as itself
+    // (`spell and not TrueTrueSpell`), so it is offered the unboosted score, and the plain attack
+    // keeps a tie as it always has.
+    let plain = match (&mods.tile_spells, crate::spells::tile_school(scorer, consumed)) {
+        (Some(power), Some(school)) => power.boost(score, school),
+        _ => score,
+    };
+    // What the word does: the plain attack, or a spell — chosen, or cast for us when it is the
+    // only one ([`crate::spells::SpellBook::attack`]).
     let (score, cast) = match &mods.spells {
-        Some(book) => book.best_cast(word, score),
-        None => (score, None),
+        Some(book) => book.attack(word, &tile_letters(word, consumed), score, plain),
+        None => (plain, None),
     };
     let direct = (score + mods.weapon.bonus_for(word, consumed).damage_delta).max(0);
-    // The toxin it applies, which the enemy pays before it acts: see [`Modifiers::toxin`].
-    (direct + mods.toxin(scorer, word, consumed), cast)
+    // The statuses it applies, which the enemy pays before it acts: see
+    // [`Modifiers::afflictions`].
+    (direct + mods.status_damage(scorer, word, consumed), cast)
+}
+
+/// Each tile's letters as typed, in word order: a ligature's run of letters, or the one typed into a
+/// wildcard — what Four heal reads off `wordTiles` (`rpg/effects/spell/Heal4.lua:17-34`).
+fn tile_letters(word: &str, consumed: &[Tile]) -> Vec<String> {
+    let mut at = 0;
+    consumed
+        .iter()
+        .map(|t| {
+            let n = if t.letter == "." { 1 } else { t.letter.len().max(1) };
+            let s = word.get(at..at + n).unwrap_or_default().to_string();
+            at += n;
+            s
+        })
+        .collect()
 }
 
 /// A word the search found worth reporting.
@@ -546,6 +668,10 @@ pub struct Found {
     pub score: i64,
     /// Which dictionary slice found it — useful for seeing whether the split is pulling its weight.
     pub slice: usize,
+    /// The tiles to click for it, which is no longer simply what typing the word would take: see
+    /// [`crate::typist::Typist::placements`]. Carried so the player plays the placement that was
+    /// scored rather than re-deriving one.
+    pub typed: crate::typist::Typed,
 }
 
 /// The result of a search.
@@ -888,7 +1014,12 @@ impl Goal {
                 prefs: picking.prefs.without_kill_payouts(),
                 ..picking.clone()
             },
-            Goal::FirstKill { .. } | Goal::RankedKill { .. } | Goal::MaxDamage => picking.clone(),
+            // The blow must make the kill for what pays on it — see `Preferences::kill_at`.
+            Goal::FirstKill { need } | Goal::RankedKill { need } => crate::pick::Context {
+                prefs: crate::pick::Preferences { kill_at: Some(*need), ..picking.prefs },
+                ..picking.clone()
+            },
+            Goal::MaxDamage => picking.clone(),
         }
     }
 
@@ -1170,7 +1301,7 @@ pub fn ranked_kill(
     // rank, and recomputing it per comparison would walk the board again for nothing.
     let lethal: Mutex<Option<(Found, crate::pick::Rank)>> = Mutex::new(None);
     let best: Mutex<Option<Hardest>> = Mutex::new(None);
-    let ranker = Ranker { tiles, geometry, scorer, picking };
+    let ranker = Ranker { mods, tiles, geometry, scorer, picking };
     let longest: Mutex<Option<Found>> = Mutex::new(None);
     let considered = std::sync::atomic::AtomicUsize::new(0);
     let cursor = std::sync::atomic::AtomicUsize::new(0);
@@ -1194,57 +1325,70 @@ pub fn ranked_kill(
                         if mods.excluded.contains(word) {
                             continue;
                         }
-                        let Some(typed) = typist.type_word(word) else { continue };
-                        let consumed: Vec<Tile> =
-                            typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
-                        let score = scored(
-                            scorer,
-                            mods,
-                            word,
-                            &consumed,
-                            Some(&typed),
-                            typed.corners_used,
-                            corner_count,
-                        );
-                        // Measured as the goal is: see [`Modifiers::reach`].
-                        let reach = mods.reach(word, score);
-                        if reach >= need {
-                            let rank = crate::pick::rank(
-                                word,
-                                tiles,
-                                geometry,
-                                &typed.tiles,
+                        for typed in typist.placements(word) {
+                            let consumed: Vec<Tile> =
+                                typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
+                            let score = scored(
                                 scorer,
-                                &picking.target,
-                                picking.prefs,
+                                mods,
+                                word,
+                                &consumed,
+                                Some(&typed),
+                                typed.corners_used,
+                                corner_count,
+                            );
+                            // Measured as the goal is: see [`Modifiers::reach`].
+                            let reach = mods.reach(word, score);
+                            if reach >= need {
+                                let rank = crate::pick::rank(
+                                    word,
+                                    tiles,
+                                    geometry,
+                                    &typed.tiles,
+                                    scorer,
+                                    &picking.target,
+                                    picking.prefs,
+                                    reach - mods.status_damage(scorer, word, &consumed),
+                                );
+                                let take = match &local_lethal {
+                                    Some((_, cur)) => rank.better_than(cur),
+                                    None => true,
+                                };
+                                if take {
+                                    local_lethal = Some((
+                                        Found {
+                                            word: word.clone(),
+                                            score,
+                                            slice,
+                                            typed: typed.clone(),
+                                        },
+                                        rank,
+                                    ));
+                                }
+                            }
+                            let at = &typed;
+                            Hardest::offer(
+                                &mut local_best,
+                                mods,
+                                ranker,
+                                word,
+                                score,
+                                slice,
+                                at,
                                 reach,
                             );
-                            let take = match &local_lethal {
-                                Some((_, cur)) => rank.better_than(cur),
-                                None => true,
-                            };
-                            if take {
-                                local_lethal =
-                                    Some((Found { word: word.clone(), score, slice }, rank));
+                            if local_longest
+                                .as_ref()
+                                .map(|b| word.chars().count() > b.word.chars().count())
+                                .unwrap_or(true)
+                            {
+                                local_longest = Some(Found {
+                                    word: word.clone(),
+                                    score,
+                                    slice,
+                                    typed: typed.clone(),
+                                });
                             }
-                        }
-                        let at = &typed.tiles;
-                        Hardest::offer(
-                            &mut local_best,
-                            mods,
-                            ranker,
-                            word,
-                            score,
-                            slice,
-                            at,
-                            reach,
-                        );
-                        if local_longest
-                            .as_ref()
-                            .map(|b| word.chars().count() > b.word.chars().count())
-                            .unwrap_or(true)
-                        {
-                            local_longest = Some(Found { word: word.clone(), score, slice });
                         }
                     }
                 }
@@ -1322,31 +1466,44 @@ pub fn max_damage(
                         if mods.excluded.contains(word) {
                             continue;
                         }
-                        let Some(typed) = typist.type_word(word) else { continue };
-                        let consumed: Vec<Tile> =
-                            typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
-                        let score = scored(
-                            scorer,
-                            mods,
-                            word,
-                            &consumed,
-                            Some(&typed),
-                            typed.corners_used,
-                            corner_count,
-                        );
-                        if local_best
-                            .as_ref()
-                            .map(|b| mods.hits_harder((word, score), (&b.word, b.score)).is_gt())
-                            .unwrap_or(true)
-                        {
-                            local_best = Some(Found { word: word.clone(), score, slice });
-                        }
-                        if local_longest
-                            .as_ref()
-                            .map(|b| word.chars().count() > b.word.chars().count())
-                            .unwrap_or(true)
-                        {
-                            local_longest = Some(Found { word: word.clone(), score, slice });
+                        for typed in typist.placements(word) {
+                            let consumed: Vec<Tile> =
+                                typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
+                            let score = scored(
+                                scorer,
+                                mods,
+                                word,
+                                &consumed,
+                                Some(&typed),
+                                typed.corners_used,
+                                corner_count,
+                            );
+                            if local_best
+                                .as_ref()
+                                .map(|b| {
+                                    mods.hits_harder((word, score), (&b.word, b.score)).is_gt()
+                                })
+                                .unwrap_or(true)
+                            {
+                                local_best = Some(Found {
+                                    word: word.clone(),
+                                    score,
+                                    slice,
+                                    typed: typed.clone(),
+                                });
+                            }
+                            if local_longest
+                                .as_ref()
+                                .map(|b| word.chars().count() > b.word.chars().count())
+                                .unwrap_or(true)
+                            {
+                                local_longest = Some(Found {
+                                    word: word.clone(),
+                                    score,
+                                    slice,
+                                    typed: typed.clone(),
+                                });
+                            }
                         }
                     }
                 }
@@ -1428,6 +1585,9 @@ pub struct Candidate {
     pub typed: crate::typist::Typed,
     /// The spell to cast for [`Candidate::score`], when one beats the plain attack.
     pub cast: Option<&'static str>,
+    /// The part of [`Candidate::score`] that is status — toxin, ice, burn — paid at the start of
+    /// the enemy's turn, so a kill it makes pays nothing the blow would: [`Modifiers::afflictions`].
+    pub afflictions: Afflictions,
 }
 
 /// **Every** playable word, in the order Diggle prefers them for `goal`.
@@ -1504,45 +1664,71 @@ pub fn ranked(
                         if mods.excluded.contains(word) {
                             continue;
                         }
-                        let Some(typed) = typist.type_word(word) else { continue };
-                        let consumed: Vec<Tile> =
-                            typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
-                        let (score, cast) = scored_cast(
-                            scorer,
-                            mods,
-                            word,
-                            &consumed,
-                            Some(&typed),
-                            typed.corners_used,
-                            corner_count,
-                        );
-                        let reach = mods.reach(word, score);
-                        let tier = tier_of(score, reach);
-                        // Every tier that is ordered by the ranking, in full or on a tie: all but
-                        // the gentlest-first ones.
-                        let ranked = !matches!(tier, Tier::Overshoot | Tier::Flees);
-                        let rank = ranked.then(|| {
-                            crate::pick::rank(
-                                word,
-                                tiles,
-                                geometry,
-                                &typed.tiles,
+                        let mut options: Vec<Candidate> = Vec::new();
+                        for typed in typist.placements(word) {
+                            let consumed: Vec<Tile> =
+                                typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
+                            let (score, cast) = scored_cast(
                                 scorer,
-                                &picking.target,
-                                picking.prefs,
+                                mods,
+                                word,
+                                &consumed,
+                                Some(&typed),
+                                typed.corners_used,
+                                corner_count,
+                            );
+                            let reach = mods.reach(word, score);
+                            let afflictions = mods.afflictions(scorer, word, &consumed);
+                            let tier = tier_of(score, reach);
+                            // Every tier that is ordered by the ranking, in full or on a tie: all but
+                            // the gentlest-first ones.
+                            let ranked = !matches!(tier, Tier::Overshoot | Tier::Flees);
+                            let rank = ranked.then(|| {
+                                crate::pick::rank(
+                                    word,
+                                    tiles,
+                                    geometry,
+                                    &typed.tiles,
+                                    scorer,
+                                    &picking.target,
+                                    picking.prefs,
+                                    reach - mods.status_damage(scorer, word, &consumed),
+                                )
+                            });
+                            options.push(Candidate {
+                                word: word.clone(),
+                                score,
                                 reach,
-                            )
-                        });
-                        local.push(Candidate {
-                            word: word.clone(),
-                            score,
-                            reach,
-                            pierces: mods.pierces(word),
-                            tier,
-                            rank,
-                            typed,
-                            cast,
-                        });
+                                pierces: mods.pierces(word),
+                                tier,
+                                rank,
+                                typed,
+                                cast,
+                                afflictions,
+                            });
+                        }
+                        // One row per word: its best placement. On a tie, the one that spends less
+                        // of what the board keeps — gold, wildcards, gems ([`crate::pick::hoarded`])
+                        // — so a letter is shown on the plain twin when the precious one would do
+                        // no more: the user, 2026-11-07. The ranking already asks this inside a
+                        // band; the tiers without one (overshoot, flees) need it asked here. Then
+                        // the typed one.
+                        let heal_wanted = picking.prefs.room.health > 0;
+                        let kept = |c: &Candidate| {
+                            crate::pick::hoarded(tiles, &c.typed.tiles, scorer, heal_wanted)
+                        };
+                        if let Some(best) = options.into_iter().reduce(|a, b| {
+                            let b_first = order(mods, &b, &a)
+                                .then_with(|| kept(&b).total_cmp(&kept(&a)))
+                                .is_lt();
+                            if b_first {
+                                b
+                            } else {
+                                a
+                            }
+                        }) {
+                            local.push(best);
+                        }
                     }
                 }
                 all.lock().unwrap().extend(local);
@@ -1586,6 +1772,7 @@ fn order(mods: &Modifiers, a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
 /// rank a word only when they need to, which is when two words tie on damage.
 #[derive(Clone, Copy)]
 struct Ranker<'a> {
+    mods: &'a Modifiers,
     tiles: &'a [Tile],
     geometry: &'a Geometry,
     scorer: &'a Scorer,
@@ -1593,7 +1780,12 @@ struct Ranker<'a> {
 }
 
 impl Ranker<'_> {
+    /// Ranked on the blow's own damage, [`Modifiers::toxin`] taken off: what the blow alone pays
+    /// on — the wood-kill gear, the Well-Rested heal — does not come from an enemy the poison
+    /// finishes (`rpgview.enemyDeathChecks` runs with no word, `rpgview.lua:1152-1170`).
     fn rank(&self, word: &str, consumed: &[usize], reach: i64) -> crate::pick::Rank {
+        let tiles: Vec<Tile> =
+            consumed.iter().filter_map(|&i| self.tiles.get(i).cloned()).collect();
         crate::pick::rank(
             word,
             self.tiles,
@@ -1602,7 +1794,7 @@ impl Ranker<'_> {
             self.scorer,
             &self.picking.target,
             self.picking.prefs,
-            reach,
+            reach - self.mods.status_damage(self.scorer, word, &tiles),
         )
     }
 }
@@ -1633,10 +1825,11 @@ impl Hardest {
     #[allow(clippy::too_many_arguments)]
     fn offer(
         slot: &mut Option<Hardest>, mods: &Modifiers, ranker: Ranker, word: &str, score: i64,
-        slice: usize, consumed: &[usize], reach: i64,
+        slice: usize, typed: &crate::typist::Typed, reach: i64,
     ) {
+        let consumed = &typed.tiles;
         let fresh = || Hardest {
-            found: Found { word: word.to_string(), score, slice },
+            found: Found { word: word.to_string(), score, slice, typed: typed.clone() },
             consumed: consumed.to_vec(),
             reach,
             rank: None,
@@ -1715,7 +1908,7 @@ pub fn race_for_band(
     let stop = AtomicBool::new(false);
     let lethal: Mutex<Option<(Found, crate::pick::Rank)>> = Mutex::new(None);
     let best: Mutex<Option<Hardest>> = Mutex::new(None);
-    let ranker = Ranker { tiles, geometry, scorer, picking };
+    let ranker = Ranker { mods, tiles, geometry, scorer, picking };
     let least: Mutex<Option<Found>> = Mutex::new(None);
     let under: Mutex<Option<Hardest>> = Mutex::new(None);
     let nothing: Mutex<Option<(Found, crate::pick::Rank)>> = Mutex::new(None);
@@ -1735,7 +1928,7 @@ pub fn race_for_band(
                 let mut local_under: Option<Hardest> = None;
                 let mut local_nothing: Option<(Found, crate::pick::Rank)> = None;
                 let mut local_longest: Option<Found> = None;
-                for word in part {
+                'words: for word in part {
                     // Checked periodically rather than every word: an atomic load per word would
                     // dominate the loop for no benefit at this granularity. Only ever set by the
                     // unbounded-kill path below; a banded search must see every word to rank them.
@@ -1748,76 +1941,75 @@ pub fn race_for_band(
                     }
                     // Not "are the letters there" but "does typing this work", which also tells us
                     // exactly which tiles it eats -- and so what it is worth.
-                    let Some(typed) = typist.type_word(word) else { continue };
-                    let consumed: Vec<Tile> =
-                        typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
-                    let score = scored(
-                        scorer,
-                        mods,
-                        word,
-                        &consumed,
-                        Some(&typed),
-                        typed.corners_used,
-                        corner_count,
-                    );
-                    // Measured as the goal is: see [`Modifiers::reach`]. The floor below stays on
-                    // the damage itself, because it asks whether the word lands at all.
-                    let reach = mods.reach(word, score);
-                    if reach >= need && below.map(|b| reach < b).unwrap_or(true) {
-                        // Ranked, not raced. Every word in the band ends the exchange the same way,
-                        // so the tiles it spends are the only thing left to choose on.
-                        let rank = crate::pick::rank(
-                            word,
-                            tiles,
-                            geometry,
-                            &typed.tiles,
+                    for typed in typist.placements(word) {
+                        let consumed: Vec<Tile> =
+                            typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
+                        let score = scored(
                             scorer,
-                            &picking.target,
-                            picking.prefs,
-                            reach,
+                            mods,
+                            word,
+                            &consumed,
+                            Some(&typed),
+                            typed.corners_used,
+                            corner_count,
                         );
-                        // **Only a band ranks.** With no ceiling this is `race_for_kill`, whose
-                        // contract is `Goal::FirstKill`'s: every lethal word ends the exchange, so
-                        // the first one wins and the rest stop. Scanning the whole dictionary to
-                        // choose between words that are all simply "a kill" is the cost that goal
-                        // exists to avoid.
-                        if below.is_none() {
-                            let mut l = lethal.lock().unwrap();
-                            if l.is_none() {
-                                *l = Some((Found { word: word.clone(), score, slice }, rank));
+                        // Measured as the goal is: see [`Modifiers::reach`]. The floor below stays on
+                        // the damage itself, because it asks whether the word lands at all.
+                        let reach = mods.reach(word, score);
+                        if reach >= need && below.map(|b| reach < b).unwrap_or(true) {
+                            // Ranked, not raced. Every word in the band ends the exchange the same way,
+                            // so the tiles it spends are the only thing left to choose on.
+                            let rank = crate::pick::rank(
+                                word,
+                                tiles,
+                                geometry,
+                                &typed.tiles,
+                                scorer,
+                                &picking.target,
+                                picking.prefs,
+                                reach - mods.status_damage(scorer, word, &consumed),
+                            );
+                            // **Only a band ranks.** With no ceiling this is `race_for_kill`, whose
+                            // contract is `Goal::FirstKill`'s: every lethal word ends the exchange, so
+                            // the first one wins and the rest stop. Scanning the whole dictionary to
+                            // choose between words that are all simply "a kill" is the cost that goal
+                            // exists to avoid.
+                            if below.is_none() {
+                                let mut l = lethal.lock().unwrap();
+                                if l.is_none() {
+                                    *l = Some((
+                                        Found {
+                                            word: word.clone(),
+                                            score,
+                                            slice,
+                                            typed: typed.clone(),
+                                        },
+                                        rank,
+                                    ));
+                                }
+                                stop.store(true, Ordering::Relaxed);
+                                break 'words;
                             }
-                            stop.store(true, Ordering::Relaxed);
-                            break;
+                            let better = match local_lethal.as_ref() {
+                                Some((_, cur)) => rank.better_than(cur),
+                                None => true,
+                            };
+                            if better {
+                                local_lethal = Some((
+                                    Found {
+                                        word: word.clone(),
+                                        score,
+                                        slice,
+                                        typed: typed.clone(),
+                                    },
+                                    rank,
+                                ));
+                            }
+                            continue;
                         }
-                        let better = match local_lethal.as_ref() {
-                            Some((_, cur)) => rank.better_than(cur),
-                            None => true,
-                        };
-                        if better {
-                            local_lethal = Some((Found { word: word.clone(), score, slice }, rank));
-                        }
-                        continue;
-                    }
-                    let at = &typed.tiles;
-                    Hardest::offer(&mut local_best, mods, ranker, word, score, slice, at, reach);
-                    // The gentlest word that still does something. A zero-scoring word is the
-                    // gentlest of all and is never the answer — see `MIN_MEANINGFUL_DAMAGE` — so
-                    // this is the minimum over words that actually land, not over all of them.
-                    if score >= MIN_MEANINGFUL_DAMAGE
-                        && local_least
-                            .as_ref()
-                            .map(|b| reach < mods.reach(&b.word, b.score))
-                            .unwrap_or(true)
-                    {
-                        local_least = Some(Found { word: word.clone(), score, slice });
-                    }
-                    // The hardest word that still cannot break a ceiling. Every word reaching this
-                    // line missed the band, so `reach < below` here also means `reach < need` — the
-                    // in-between words left above. See [`Outcome::under`].
-                    if score >= MIN_MEANINGFUL_DAMAGE && below.is_some_and(|b| reach < b) {
-                        let at = &typed.tiles;
+                        let at = &typed;
                         Hardest::offer(
-                            &mut local_under,
+                            &mut local_best,
                             mods,
                             ranker,
                             word,
@@ -1826,34 +2018,78 @@ pub fn race_for_band(
                             at,
                             reach,
                         );
-                    }
-                    // The word to waste a free turn on — see [`Outcome::nothing`]. Ranked, because
-                    // they all do the same nothing and differ only in what they leave behind.
-                    if mods.stall
-                        && score < MIN_MEANINGFUL_DAMAGE
-                        && below.is_some_and(|b| reach < b)
-                    {
-                        let rank = crate::pick::rank(
-                            word,
-                            tiles,
-                            geometry,
-                            &typed.tiles,
-                            scorer,
-                            &picking.target,
-                            picking.prefs,
-                            reach,
-                        );
-                        if local_nothing.as_ref().is_none_or(|(_, cur)| rank.better_than(cur)) {
-                            local_nothing =
-                                Some((Found { word: word.clone(), score, slice }, rank));
+                        // The gentlest word that still does something. A zero-scoring word is the
+                        // gentlest of all and is never the answer — see `MIN_MEANINGFUL_DAMAGE` — so
+                        // this is the minimum over words that actually land, not over all of them.
+                        if score >= MIN_MEANINGFUL_DAMAGE
+                            && local_least
+                                .as_ref()
+                                .map(|b| reach < mods.reach(&b.word, b.score))
+                                .unwrap_or(true)
+                        {
+                            local_least = Some(Found {
+                                word: word.clone(),
+                                score,
+                                slice,
+                                typed: typed.clone(),
+                            });
                         }
-                    }
-                    if local_longest
-                        .as_ref()
-                        .map(|b| word.chars().count() > b.word.chars().count())
-                        .unwrap_or(true)
-                    {
-                        local_longest = Some(Found { word: word.clone(), score, slice });
+                        // The hardest word that still cannot break a ceiling. Every word reaching this
+                        // line missed the band, so `reach < below` here also means `reach < need` — the
+                        // in-between words left above. See [`Outcome::under`].
+                        if score >= MIN_MEANINGFUL_DAMAGE && below.is_some_and(|b| reach < b) {
+                            let at = &typed;
+                            Hardest::offer(
+                                &mut local_under,
+                                mods,
+                                ranker,
+                                word,
+                                score,
+                                slice,
+                                at,
+                                reach,
+                            );
+                        }
+                        // The word to waste a free turn on — see [`Outcome::nothing`]. Ranked, because
+                        // they all do the same nothing and differ only in what they leave behind.
+                        if mods.stall
+                            && score < MIN_MEANINGFUL_DAMAGE
+                            && below.is_some_and(|b| reach < b)
+                        {
+                            let rank = crate::pick::rank(
+                                word,
+                                tiles,
+                                geometry,
+                                &typed.tiles,
+                                scorer,
+                                &picking.target,
+                                picking.prefs,
+                                reach - mods.status_damage(scorer, word, &consumed),
+                            );
+                            if local_nothing.as_ref().is_none_or(|(_, cur)| rank.better_than(cur)) {
+                                local_nothing = Some((
+                                    Found {
+                                        word: word.clone(),
+                                        score,
+                                        slice,
+                                        typed: typed.clone(),
+                                    },
+                                    rank,
+                                ));
+                            }
+                        }
+                        if local_longest
+                            .as_ref()
+                            .map(|b| word.chars().count() > b.word.chars().count())
+                            .unwrap_or(true)
+                        {
+                            local_longest = Some(Found {
+                                word: word.clone(),
+                                score,
+                                slice,
+                                typed: typed.clone(),
+                            });
+                        }
                     }
                 }
                 considered.fetch_add(seen, Ordering::Relaxed);
@@ -2102,11 +2338,21 @@ mod tests {
         // because nothing scores zero — which is the whole reason this band cannot be satisfied.
         let out = Outcome {
             lethal: None,
-            best: Some(Found { word: "VENEPUNCTURE".into(), score: 40, slice: 0 }),
-            least: Some(Found { word: "AT".into(), score: 2, slice: 0 }),
+            best: Some(Found {
+                word: "VENEPUNCTURE".into(),
+                score: 40,
+                slice: 0,
+                typed: Default::default(),
+            }),
+            least: Some(Found { word: "AT".into(), score: 2, slice: 0, typed: Default::default() }),
             under: None,
             nothing: None,
-            longest: Some(Found { word: "VENEPUNCTURE".into(), score: 40, slice: 0 }),
+            longest: Some(Found {
+                word: "VENEPUNCTURE".into(),
+                score: 40,
+                slice: 0,
+                typed: Default::default(),
+            }),
             words_considered: 900,
         };
         assert_eq!(
@@ -2128,11 +2374,26 @@ mod tests {
         // under the ceiling, so the hardest one is also the hardest safe one.
         let out = Outcome {
             lethal: None,
-            best: Some(Found { word: "VENEPUNCTURE".into(), score: 29, slice: 0 }),
-            least: Some(Found { word: "SE".into(), score: 1, slice: 0 }),
-            under: Some(Found { word: "VENEPUNCTURE".into(), score: 29, slice: 0 }),
+            best: Some(Found {
+                word: "VENEPUNCTURE".into(),
+                score: 29,
+                slice: 0,
+                typed: Default::default(),
+            }),
+            least: Some(Found { word: "SE".into(), score: 1, slice: 0, typed: Default::default() }),
+            under: Some(Found {
+                word: "VENEPUNCTURE".into(),
+                score: 29,
+                slice: 0,
+                typed: Default::default(),
+            }),
             nothing: None,
-            longest: Some(Found { word: "VENEPUNCTURE".into(), score: 29, slice: 0 }),
+            longest: Some(Found {
+                word: "VENEPUNCTURE".into(),
+                score: 29,
+                slice: 0,
+                typed: Default::default(),
+            }),
             words_considered: 900,
         };
         assert_eq!(
@@ -2153,11 +2414,26 @@ mod tests {
         let out = Outcome {
             lethal: None,
             // Over the ceiling: playing this kills her, and she carries `fear`, so that is murder.
-            best: Some(Found { word: "SISSOO".into(), score: 25, slice: 0 }),
-            least: Some(Found { word: "AA".into(), score: 1, slice: 0 }),
-            under: Some(Found { word: "MIL".into(), score: 3, slice: 0 }),
+            best: Some(Found {
+                word: "SISSOO".into(),
+                score: 25,
+                slice: 0,
+                typed: Default::default(),
+            }),
+            least: Some(Found { word: "AA".into(), score: 1, slice: 0, typed: Default::default() }),
+            under: Some(Found {
+                word: "MIL".into(),
+                score: 3,
+                slice: 0,
+                typed: Default::default(),
+            }),
             nothing: None,
-            longest: Some(Found { word: "SISSOO".into(), score: 25, slice: 0 }),
+            longest: Some(Found {
+                word: "SISSOO".into(),
+                score: 25,
+                slice: 0,
+                typed: Default::default(),
+            }),
             words_considered: 900,
         };
         let goal = Goal::Scare { need: 4, below: 6 };
@@ -2169,7 +2445,8 @@ mod tests {
 
         // A word inside the band still beats every fallback — this is a miss handler, not a policy.
         let mut hit = out.clone();
-        hit.lethal = Some(Found { word: "LOWN".into(), score: 4, slice: 0 });
+        hit.lethal =
+            Some(Found { word: "LOWN".into(), score: 4, slice: 0, typed: Default::default() });
         assert_eq!(hit.choice_for(goal).map(|f| f.word.as_str()), Some("LOWN"));
     }
 
@@ -2178,11 +2455,26 @@ mod tests {
     fn a_free_turn_spends_itself_on_nothing_before_it_kills() {
         let out = Outcome {
             lethal: None,
-            best: Some(Found { word: "SISSOO".into(), score: 25, slice: 0 }),
-            least: Some(Found { word: "AA".into(), score: 1, slice: 0 }),
+            best: Some(Found {
+                word: "SISSOO".into(),
+                score: 25,
+                slice: 0,
+                typed: Default::default(),
+            }),
+            least: Some(Found { word: "AA".into(), score: 1, slice: 0, typed: Default::default() }),
             under: None,
-            nothing: Some(Found { word: "O".into(), score: 0, slice: 0 }),
-            longest: Some(Found { word: "SISSOO".into(), score: 25, slice: 0 }),
+            nothing: Some(Found {
+                word: "O".into(),
+                score: 0,
+                slice: 0,
+                typed: Default::default(),
+            }),
+            longest: Some(Found {
+                word: "SISSOO".into(),
+                score: 25,
+                slice: 0,
+                typed: Default::default(),
+            }),
             words_considered: 900,
         };
         let goal = Goal::Scare { need: 1, below: 1 };
@@ -2192,7 +2484,12 @@ mod tests {
         assert_eq!(no_stall.choice_for(goal).map(|f| f.word.as_str()), Some("AA"));
         // A safe chip still beats doing nothing: it moves the band toward the board.
         let chip = Outcome {
-            under: Some(Found { word: "MIL".into(), score: 3, slice: 0 }),
+            under: Some(Found {
+                word: "MIL".into(),
+                score: 3,
+                slice: 0,
+                typed: Default::default(),
+            }),
             ..out.clone()
         };
         assert_eq!(
@@ -2312,12 +2609,22 @@ mod tests {
     #[test]
     fn refresh_only_when_nothing_good_and_nothing_lethal() {
         let lethal = Outcome {
-            lethal: Some(Found { word: "CAT".into(), score: 9, slice: 0 }),
-            best: Some(Found { word: "CAT".into(), score: 9, slice: 0 }),
+            lethal: Some(Found {
+                word: "CAT".into(),
+                score: 9,
+                slice: 0,
+                typed: Default::default(),
+            }),
+            best: Some(Found { word: "CAT".into(), score: 9, slice: 0, typed: Default::default() }),
             least: None,
             under: None,
             nothing: None,
-            longest: Some(Found { word: "CAT".into(), score: 9, slice: 0 }),
+            longest: Some(Found {
+                word: "CAT".into(),
+                score: 9,
+                slice: 0,
+                typed: Default::default(),
+            }),
             words_considered: 1,
         };
         // A kill ends the exchange, which beats any board-quality judgement.
@@ -2325,11 +2632,16 @@ mod tests {
 
         let weak = Outcome {
             lethal: None,
-            best: Some(Found { word: "CAT".into(), score: 4, slice: 0 }),
+            best: Some(Found { word: "CAT".into(), score: 4, slice: 0, typed: Default::default() }),
             least: None,
             under: None,
             nothing: None,
-            longest: Some(Found { word: "CAT".into(), score: 4, slice: 0 }),
+            longest: Some(Found {
+                word: "CAT".into(),
+                score: 4,
+                slice: 0,
+                typed: Default::default(),
+            }),
             words_considered: 1,
         };
         assert!(weak.should_refresh(8), "3 letters is under the 8 threshold");
@@ -2346,11 +2658,21 @@ mod tests {
         // tracked separately.
         let out = Outcome {
             lethal: None,
-            best: Some(Found { word: "JAY".into(), score: 20, slice: 0 }),
+            best: Some(Found {
+                word: "JAY".into(),
+                score: 20,
+                slice: 0,
+                typed: Default::default(),
+            }),
             least: None,
             under: None,
             nothing: None,
-            longest: Some(Found { word: "OATMEALS".into(), score: 12, slice: 1 }),
+            longest: Some(Found {
+                word: "OATMEALS".into(),
+                score: 12,
+                slice: 1,
+                typed: Default::default(),
+            }),
             words_considered: 10,
         };
         assert!(
@@ -3622,6 +3944,130 @@ mod ranked_tests {
         assert_eq!(with, play(&w));
     }
 
+    /// A Chrysocolla starting the word ticks its ice, a Corundum its burn; nowhere else, never on
+    /// an enemy already carrying it, and not at all under `noCastSpell`.
+    #[test]
+    fn a_gem_that_starts_the_word_adds_its_status_tick() {
+        let mut w = world();
+        // `OYCAACTPORLIGAHJ`.
+        w.board[0].quality.material = Some("gemice".into());
+        w.board[6].quality.material = Some("gemfire".into());
+        let t = |i: &[usize]| i.iter().map(|&i| w.board[i].clone()).collect::<Vec<_>>();
+        let m = Modifiers { burn_tick: 3, ..Modifiers::none() };
+        let a = |m: &Modifiers, word, i: &[usize]| m.afflictions(&w.scorer, word, &t(i));
+        assert_eq!(a(&m, "OC", &[0, 2]), Afflictions { ice: 1, ..Default::default() });
+        assert_eq!(a(&m, "TO", &[6, 0]), Afflictions { burn: 3, ..Default::default() });
+        assert_eq!(a(&m, "CO", &[2, 0]).total(), 0, "a Chrysocolla last freezes nothing");
+        let iced = Modifiers { ice_tick: 0, ..Modifiers::none() };
+        assert_eq!(a(&iced, "OC", &[0, 2]).total(), 0, "already iced");
+        let muted = Modifiers { tile_spells: None, ..Modifiers::none() };
+        assert_eq!(a(&muted, "OC", &[0, 2]).total(), 0, "noCastSpell");
+    }
+
+    /// The tick is read from the enemy: flat, doubled while weak, nothing on top of its own.
+    #[test]
+    fn the_ice_and_burn_ticks_read_the_enemy() {
+        let mods = |enemy: &str| {
+            let save = crate::game::save::parse(&format!(
+                "return {{ rpg = {{ player = {{ gearFlags = {{}} }}, enemy = {{ {enemy} }} }} }}"
+            ))
+            .unwrap();
+            Modifiers::from_save(&game_dir(), &save, 16).unwrap().0
+        };
+        let m = mods("health = 5");
+        assert_eq!((m.ice_tick, m.burn_tick), (1, 1), "unknown maximum health burns for 1");
+        let m = mods("health = 5, maxHealth = 40, statusEffects = { iceWeak = 1, burnWeak = 1 }");
+        assert_eq!((m.ice_tick, m.burn_tick), (2, 5), "weak: doubled, and 40/8");
+        let m = mods("health = 5, statusEffects = { ice = 3, burnImmune = 1 }");
+        assert_eq!((m.ice_tick, m.burn_tick), (0, 0));
+        assert!(m.tile_spells.is_some());
+    }
+
+    /// A word its own tiles make an arcane spell of is boosted, before the weapon and the status;
+    /// `noCastSpell` turns it off.
+    #[test]
+    fn a_chrysocolla_word_is_boosted_by_adept() {
+        let mut w = world();
+        w.board[0].quality.material = Some("gemice".into());
+        let t = |i: &[usize]| i.iter().map(|&i| w.board[i].clone()).collect::<Vec<_>>();
+        let adept = crate::game::save::parse(
+            "return { rpg = { player = { gearFlags = { arcaneSpellEffectBonus5 = 10 } } } }",
+        )
+        .unwrap();
+        let m = Modifiers {
+            tile_spells: Some(crate::spells::Power::from_save(&adept)),
+            ..Modifiers::none()
+        };
+        let base = scored(&w.scorer, &Modifiers::none(), "COOP", &t(&[2, 0, 8, 7]), None, 0, 4);
+        let at = |m: &Modifiers, word, i: &[usize]| scored(&w.scorer, m, word, &t(i), None, 0, 4);
+        // `COOP` ends on P, so the Chrysocolla O is mid-word and does nothing.
+        assert_eq!(at(&m, "COOP", &[2, 0, 8, 7]), base);
+        let plain = at(&Modifiers::none(), "OPT", &[0, 7, 6]) - 1;
+        assert_eq!(
+            at(&m, "OPT", &[0, 7, 6]),
+            crate::spells::Power::from_save(&adept).boost(plain, crate::spells::School::Arcane) + 1,
+            "boosted, plus the ice"
+        );
+        let muted = Modifiers { tile_spells: None, ..Modifiers::none() };
+        assert_eq!(at(&muted, "OPT", &[0, 7, 6]), plain, "noCastSpell: neither");
+    }
+
+    /// The user's rule, 2026-11-07: a kill that does not need the board's gems keeps them, as it
+    /// keeps gold. With a Chrysocolla on one of the two Os, the best kill spells its O on the other
+    /// one; a Diamond is kept the same way at full health, and spent once there is health to heal.
+    #[test]
+    fn a_kill_that_does_not_need_a_gem_keeps_it() {
+        let mut w = world();
+        // `OYCAACTPORLIGAHJ`: Os at 0 and 8.
+        let goal = Goal::RankedKill { need: 3 };
+        let top_spends = |w: &World, tile: usize| {
+            let list = rank_all(w, &Modifiers::none(), goal);
+            let top = list.iter().find(|c| c.tier == Tier::InBand).expect("a kill");
+            (top.word.clone(), top.typed.tiles.contains(&tile))
+        };
+        for gem in ["gemice", "gemfire", "gemheal"] {
+            w.board[0].quality.material = Some(gem.into());
+            let (word, spent) = top_spends(&w, 0);
+            assert!(!spent, "{gem}: {word} should keep it");
+        }
+        // Injured: the Diamond's heal is wanted, so a word that ends on it and heals comes first.
+        w.picking.prefs.room = crate::pick::Room { health: 10, ..Default::default() };
+        let (word, spent) = top_spends(&w, 0);
+        assert!(spent, "an injured player spends the Diamond: {word}");
+    }
+
+    /// The user, 2026-11-07: when another tile carries the same letter, a word is not shown on the
+    /// one worth keeping. The user's chest board has a plain F (13, `silver3`, 3 points) and a
+    /// Chrysocolla F (14, 3 points): mid-word the gem does nothing, so the two placements of a word
+    /// tie on everything — and in a tier the ranking does not order (here every word overshoots a
+    /// `1..=1` scare), only what they spend can tell them apart.
+    #[test]
+    fn a_letter_is_shown_on_the_plain_twin_of_a_kept_tile() {
+        let w = world();
+        let save = crate::game::save::parse(
+            &std::fs::read_to_string("tests/fixtures/combatSaveData-chest-chrysocolla.lua")
+                .unwrap(),
+        )
+        .unwrap();
+        let board = crate::turn::tiles_of(&save);
+        let geom = Geometry::from_save(&save, board.len()).geometry;
+        assert_eq!(board[14].quality.material.as_deref(), Some("gemice"));
+        assert_eq!(w.scorer.tile_score(&board[13]), w.scorer.tile_score(&board[14]), "twins");
+        let goal = Goal::Scare { need: 1, below: 2 };
+        let list =
+            ranked(&w.dict, &w.scorer, &board, &geom, &Modifiers::none(), goal, &w.picking, 8);
+        let mid_f: Vec<&Candidate> = list
+            .iter()
+            .filter(|c| c.word.matches('F').count() == 1)
+            .filter(|c| !c.word.starts_with('F') && !c.word.ends_with('F'))
+            .collect();
+        assert!(mid_f.len() > 5, "the fixture needs words with an F inside");
+        for c in mid_f {
+            assert_eq!(c.tier, Tier::Overshoot, "{}", c.word);
+            assert!(!c.typed.tiles.contains(&14), "{} spells its F on the Chrysocolla", c.word);
+        }
+    }
+
     /// A toxin tile adds 3 per serrated tile, bleed kinds included, but only when it starts the
     /// word; `toxinWeak` doubles it and `toxinImmune` zeroes it.
     #[test]
@@ -3652,6 +4098,9 @@ mod ranked_tests {
     fn toxin_counts_toward_a_hold_ceiling() {
         let mut w = world();
         w.board[0].quality.material = Some("electrumtoxin".into());
+        // The board's other O would let the word start on a plain O and stay under — see
+        // `a_ceiling_starts_the_word_on_the_plain_twin` — so this one has a single O.
+        w.board[8].letter = "X".into();
         let mods = Modifiers { stall: true, ..Modifiers::none() };
         // The same enemy, immune: the direct hit alone.
         let immune = Modifiers { toxin_scale: 0, ..Modifiers { stall: true, ..Modifiers::none() } };
@@ -3672,6 +4121,59 @@ mod ranked_tests {
         };
         assert_eq!(tier(&immune), Tier::Under, "{} stays under on its direct hit", o.word);
         assert_ne!(tier(&mods), Tier::Under, "{} would finish it with toxin", o.word);
+    }
+
+    /// A click can start a word on either of two O tiles, so the hardest hit starts it on the toxin
+    /// one even though typing would take the other: `OYCAACTPORLIGAHJ`, where typing an O takes
+    /// tile 0 and the toxin is on tile 8. The user's report, 2026-11-06: `BREAKABLY` with its
+    /// serrated tile on the second B.
+    #[test]
+    fn the_hardest_hit_starts_on_the_toxin_twin() {
+        let mut w = world();
+        w.board[8].quality.material = Some("electrumtoxin".into());
+        let list = rank_all(&w, &Modifiers::none(), Goal::MaxDamage);
+        let one_o: Vec<&Candidate> = list
+            .iter()
+            .filter(|c| c.word.starts_with('O') && c.word.matches('O').count() == 1)
+            .collect();
+        assert!(!one_o.is_empty(), "the board makes words starting on an O");
+        for c in one_o {
+            assert_eq!(c.typed.tiles.first(), Some(&8), "{} starts on the toxin O", c.word);
+        }
+        // Diggle plays from `search`, and is handed the placement it scored.
+        let out = search(
+            &w.dict,
+            &w.scorer,
+            &w.board,
+            &w.geom,
+            &Modifiers::none(),
+            Goal::MaxDamage,
+            &w.picking,
+            8,
+        );
+        let best = out.best.expect("something is playable");
+        let listed = list.iter().find(|c| c.word == best.word).unwrap();
+        assert_eq!(best.typed, listed.typed, "{}: the tiles the list shows", best.word);
+    }
+
+    /// And the other way: where the toxin would break a hold's ceiling, the same word starts on the
+    /// plain O and stays under, rather than being listed as an overshoot.
+    #[test]
+    fn a_ceiling_starts_the_word_on_the_plain_twin() {
+        let mut w = world();
+        w.board[0].quality.material = Some("electrumtoxin".into());
+        let open = Goal::Hold { below: 1000, lethal: 1000 };
+        let immune = Modifiers { toxin_scale: 0, stall: true, ..Modifiers::none() };
+        let o = rank_all(&w, &immune, open)
+            .into_iter()
+            .find(|c| c.typed.tiles.first() == Some(&0) && c.word.matches('O').count() == 1)
+            .expect("some word starts on the O");
+        let below = o.score + 2;
+        let goal = Goal::Hold { below, lethal: below };
+        let mods = Modifiers { stall: true, ..Modifiers::none() };
+        let c = rank_all(&w, &mods, goal).into_iter().find(|c| c.word == o.word).unwrap();
+        assert_eq!(c.typed.tiles.first(), Some(&8), "{} starts on the plain O", o.word);
+        assert_eq!(c.tier, Tier::Under, "{} stays under", o.word);
     }
 
     /// Every word short of the goal, in the advisor's order: hardest first, and between two that hit
