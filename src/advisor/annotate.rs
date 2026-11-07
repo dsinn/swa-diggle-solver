@@ -28,7 +28,8 @@ pub struct Row {
     pub bonus: Option<Bonus>,
     /// Health and armour this word is expected to give. Zero for most words.
     pub gain: crate::pick::Gains,
-    /// What the word does, and the spell to cast for it when one is assumed: `kills, cast Metal`.
+    /// What the word does: `kills`, `scares - on a free turn`. The spell its damage assumes is
+    /// the Spell column's first entry, not repeated here — see [`spell_column`].
     pub effect: String,
     /// Each letter as typed, with the board index of the tile it goes into.
     pub letters: Vec<Letter>,
@@ -304,17 +305,6 @@ pub fn effect(
     }
 }
 
-/// The effect, with the spell its damage assumes: the user's call, 2026-11-07, *assume that the
-/// player using Advisor will cast a spell when indicated in the effect column*. The damage shown
-/// is the cast's, so the row has to say to cast it.
-pub fn with_cast(effect: &str, cast: Option<&str>) -> String {
-    match (effect, cast) {
-        (_, None) => effect.to_string(),
-        ("", Some(spell)) => format!("cast {spell}"),
-        (e, Some(spell)) => format!("{e}, cast {spell}"),
-    }
-}
-
 /// Each letter as it is typed, against the board index of its tile. A wildcard shows the letter
 /// typed into it, upper-cased like every other tile (the typist reports it in lower case).
 pub fn letters_of(tiles: &[Tile], c: &Candidate) -> Vec<Letter> {
@@ -366,7 +356,12 @@ fn historical_glyph(ligature: &str) -> Option<&'static str> {
 }
 
 /// The Spell column: the spell to cast for the damage shown, first, then any other held spell
-/// the word qualifies for. Each is its emoji alone — the user's call, the emoji say which — and
+/// the word qualifies for.
+///
+/// **The only place the cast is named.** The effect column said `kills, cast Metal` for a day; the
+/// user, 2026-11-07, found it not worth the words: the game puts up its own "Submit as" panel
+/// whenever there is a choice, and the first entry here says which to press. A lone spell the
+/// game casts by itself (`alwaysCastSpell`) needs no instruction at all. Each is its emoji alone — the user's call, the emoji say which — and
 /// only a spell without one (UwU) is written out.
 pub fn spell_column(cast: Option<&'static str>, qualifying: Vec<&'static str>) -> Vec<String> {
     let mark = |heading: &str| spell_emoji(heading).unwrap_or(heading).to_string();
@@ -457,10 +452,8 @@ pub fn rows(
                 ),
                 ..heals.of(&plan.tiles, scorer, c)
             },
-            effect: with_cast(
-                effect(plan.goal, c.tier, c.score, c.reach, heals.need, c.afflictions.total()),
-                c.cast,
-            ),
+            effect: effect(plan.goal, c.tier, c.score, c.reach, heals.need, c.afflictions.total())
+                .to_string(),
             pierces: c.pierces,
             letters: letters_of(&plan.tiles, c),
             spells: spell_column(c.cast, spells.qualifying(&c.word, &tile_letters(c))),
@@ -800,13 +793,6 @@ mod tests {
             effect(Goal::RankedKill { need: 6 }, Tier::InBand, 6, 6, kill, 2),
             "kills - status finishes it"
         );
-    }
-
-    #[test]
-    fn the_effect_names_the_spell_to_cast() {
-        assert_eq!(with_cast("kills", Some("Metal")), "kills, cast Metal");
-        assert_eq!(with_cast("", Some("Fire")), "cast Fire");
-        assert_eq!(with_cast("kills", None), "kills");
     }
 
     /// The row shows each letter against the tile it is typed into — wildcards as their letter.

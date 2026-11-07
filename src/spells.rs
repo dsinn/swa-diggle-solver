@@ -30,7 +30,7 @@
 //! is scored as casting the best spell. **Pressing the cast button is not written yet** — what it
 //! takes is worked out in [`crate::cast`], with [`SpellBook::cast_slot`] naming the slot — and until
 //! it is, Diggle plays the plain attack where a spell scored higher, and lands short of what it aimed
-//! for. And the advisor's user is assumed to cast the spell its effect column names.
+//! for. And the advisor's user is assumed to cast the spell its Spell column names first.
 
 use crate::game::save::Table;
 use crate::lexica::Lexica;

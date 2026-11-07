@@ -28,9 +28,10 @@ behaviour freely.
   or two wildcards to queue one, is ranked as having lost one (`pick::TileLedger`).
 - Advisor's Gain column shows the `!` marks a word clears (`2❗`) and the bassanello's wildcards
   (`+2 ⬜`).
-- Advisor's effect column names the spell its damage assumes (`kills, cast Metal`), and says how
-  sure a kill is: `kills - no margin` at exactly lethal, `kills - status finishes it` when the hit
-  leaves the enemy alive and its status kills it before it acts.
+- Advisor's Spell column leads with the spell its damage assumes, the one to pick when the game
+  asks "Submit as". The effect column says how sure a kill is: `kills - no margin` at exactly
+  lethal, `kills - status finishes it` when the hit leaves the enemy alive and its status kills it
+  before it acts.
 - `score_check <combatSaveData>`: scores every listed word with the game's own Lua (`words.score`,
   the modifier files, the spells) and lists any where the solver promises more damage than the game
   deals.
