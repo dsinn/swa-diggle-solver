@@ -320,17 +320,33 @@ pub fn afflictions_text(a: crate::search::Afflictions) -> String {
 }
 
 /// [`afflictions_text`], item by item.
+///
+/// Bleed is shown as the stacks the word applies, as the game previews it, and explained: a flat
+/// loss each turn, not the stack count ([`crate::search::Afflictions::bleed_stacks`]).
 pub fn affliction_items(a: crate::search::Afflictions) -> Vec<Item> {
-    [(a.toxin, "🧪", "Toxin"), (a.ice, "❄️", "Ice"), (a.burn, "🔥", "Burn")]
-        .iter()
-        .filter(|(n, ..)| *n > 0)
-        .map(|(n, emoji, what)| {
-            Item::new(
-                format!("+{n} {emoji}"),
-                format!("{what}: the enemy loses {n} more health at the start of its turn"),
-            )
-        })
-        .collect()
+    let mut items: Vec<Item> =
+        [(a.toxin, "🧪", "Toxin"), (a.ice, "❄️", "Ice"), (a.burn, "🔥", "Burn")]
+            .iter()
+            .filter(|(n, ..)| *n > 0)
+            .map(|(n, emoji, what)| {
+                Item::new(
+                    format!("+{n} {emoji}"),
+                    format!("{what}: the enemy loses {n} more health at the start of its turn"),
+                )
+            })
+            .collect();
+    if a.bleed_stacks > 0 {
+        let n = a.bleed_stacks;
+        let each = a.bleed.max(1);
+        items.push(Item::new(
+            format!("+{n} 🩸"),
+            format!(
+                "{n} bleed: at the start of each of its turns the enemy loses {each} health and \
+                 the bleed wears down; while it bleeds it cannot heal"
+            ),
+        ));
+    }
+    items
 }
 
 /// The Damage column, item by item: the rapier's mark, the hit, then [`affliction_items`].
@@ -844,9 +860,18 @@ mod tests {
         assert_eq!(afflictions_text(Afflictions::default()), "");
         assert_eq!(afflictions_text(Afflictions { toxin: 3, ..Default::default() }), " +3 🧪");
         assert_eq!(
-            afflictions_text(Afflictions { toxin: 3, ice: 1, burn: 2 }),
-            " +3 🧪 +1 ❄️ +2 🔥"
+            afflictions_text(Afflictions { toxin: 3, ice: 1, burn: 2, bleed: 1, bleed_stacks: 6 }),
+            " +3 🧪 +1 ❄️ +2 🔥 +6 🩸",
+            "bleed shows its stacks, as the game previews them"
         );
+        let bleed =
+            affliction_items(Afflictions { bleed: 1, bleed_stacks: 6, ..Default::default() });
+        assert_eq!(
+            bleed[0].tip,
+            "6 bleed: at the start of each of its turns the enemy loses 1 health and the bleed \
+             wears down; while it bleeds it cannot heal"
+        );
+        assert_eq!(Afflictions { bleed: 1, bleed_stacks: 6, ..Default::default() }.total(), 1);
     }
 
     /// Any bleed is bleeding, as Diggle reads it, even one the save writes as a fraction.

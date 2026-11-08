@@ -214,6 +214,10 @@ pub struct Modifiers {
     /// and 0 while `burnImmune` or already burning. 1 when the enemy's maximum health is not in the
     /// save, the cautious guess [`crate::gear::status_tick`] makes too.
     pub burn_tick: i64,
+    /// The same for bleed: a flat 1, 2 while `bleedWeak` (`baseStatusDamage`, `rpgview.lua:1286-1295`),
+    /// and 0 while `bleedImmune` or already bleeding, whose tick is in
+    /// [`Modifiers::enemy_status_tick`]. See [`Modifiers::bleed`].
+    pub bleed_tick: i64,
     /// The burn stacks already on the enemy (`statusEffects.burn`). See [`Modifiers::halves_attack`].
     pub enemy_burn: i64,
     /// The schools' power, for a word its own tiles make a spell of — see
@@ -241,11 +245,17 @@ pub struct Afflictions {
     pub toxin: i64,
     pub ice: i64,
     pub burn: i64,
+    pub bleed: i64,
+    /// The bleed **stacks** the word applies, as the game previews them (`+6 bleed`) — shown, not
+    /// counted: bleed costs a flat tick however many there are, and that tick is
+    /// [`Afflictions::bleed`]. The user, 2026-11-08: *6 bleed on an attack should display as 6,
+    /// not just one. Players should understand what bleed means.*
+    pub bleed_stacks: i64,
 }
 
 impl Afflictions {
     pub fn total(&self) -> i64 {
-        self.toxin + self.ice + self.burn
+        self.toxin + self.ice + self.burn + self.bleed
     }
 }
 
@@ -314,6 +324,11 @@ impl Modifiers {
             (true, true) => 2,
             (true, false) => 1,
         };
+        let bleed_tick = match (fresh("bleed"), statuses.contains_key("bleedWeak")) {
+            (false, _) => 0,
+            (true, true) => 2,
+            (true, false) => 1,
+        };
         let burn_tick = if fresh("burn") {
             let divisor = if statuses.contains_key("burnWeak") { 8.0 } else { 16.0 };
             save.int_at("rpg.enemy.maxHealth")
@@ -378,6 +393,7 @@ impl Modifiers {
                 toxin_scale,
                 ice_tick,
                 burn_tick,
+                bleed_tick,
                 enemy_burn: statuses.get("burn").map_or(0, |v| *v as i64).max(0),
                 tile_spells,
                 defence: None,
@@ -412,6 +428,7 @@ impl Modifiers {
             toxin_scale: 1,
             ice_tick: 1,
             burn_tick: 1,
+            bleed_tick: 1,
             enemy_burn: 0,
             tile_spells: Some(crate::spells::Power::default()),
             defence: None,
@@ -442,7 +459,44 @@ impl Modifiers {
             toxin: self.toxin(scorer, word, consumed),
             ice: if first == "gemice" { self.ice_tick } else { 0 },
             burn: if first == "gemfire" { self.burn_tick } else { 0 },
+            bleed: self.bleed(scorer, word, consumed),
+            bleed_stacks: self.bleed_stacks(scorer, word, consumed),
         }
+    }
+
+    /// The bleed damage this word adds before the enemy acts: [`Modifiers::bleed_tick`], if it
+    /// applies any bleed at all. Bleed costs a flat amount however many stacks there are, so the
+    /// stacks decide only that there is some. Two sources, as for toxin:
+    ///
+    /// - **A bleed tile that starts the word**: `bronzebleed`, `silverbleed`, `goldbleed` and
+    ///   `electrumbleed` are `active` only as `wordTiles[1]`, and then add 6 bleed per serrated tile
+    ///   in the word (`rpg/effects/material/silverbleed.lua:2-8`);
+    /// - **the weapon**, [`crate::gear::WeaponBonus::bleed`]: the Bastard sword's 3 on a
+    ///   seven-letter word, and `bleedAttack`.
+    ///
+    /// The user's board, 2026-11-08: `FICTIONER` on a silverbleed F, which the game previews as
+    /// 52 plus 6 bleed, showed no bleed at all.
+    pub fn bleed(&self, scorer: &Scorer, word: &str, consumed: &[Tile]) -> i64 {
+        if self.bleed_stacks(scorer, word, consumed) > 0 {
+            self.bleed_tick
+        } else {
+            0
+        }
+    }
+
+    /// The bleed stacks this word applies: see [`Modifiers::bleed`] for the two sources.
+    pub fn bleed_stacks(&self, scorer: &Scorer, word: &str, consumed: &[Tile]) -> i64 {
+        let serrated = |m: &str| m.ends_with("toxin") || m.ends_with("bleed");
+        let tile = match consumed.first().and_then(|t| scorer.material_name(t)) {
+            Some(m) if m.ends_with("bleed") => {
+                6 * consumed
+                    .iter()
+                    .filter(|t| scorer.material_name(t).is_some_and(serrated))
+                    .count() as i64
+            }
+            _ => 0,
+        };
+        tile + self.weapon.bonus_for(word, consumed).bleed
     }
 
     /// The burn stacks this word puts on the enemy, as the game adds them up when it is submitted:
@@ -4101,6 +4155,30 @@ mod ranked_tests {
         let m = mods("health = 5, statusEffects = { ice = 3, burnImmune = 1 }");
         assert_eq!((m.ice_tick, m.burn_tick), (0, 0));
         assert!(m.tile_spells.is_some());
+        let m = mods("health = 5, statusEffects = { bleedWeak = 1 }");
+        assert_eq!(m.bleed_tick, 2, "weak: doubled");
+        let m = mods("health = 5, statusEffects = { bleed = 4 }");
+        assert_eq!(m.bleed_tick, 0, "already bleeding: its tick is already counted");
+    }
+
+    /// A bleed tile that starts the word bleeds the enemy for a flat tick before it acts; one
+    /// further in does nothing. The user's `FICTIONER` on a silverbleed F, 2026-11-08.
+    #[test]
+    fn a_bleed_tile_that_starts_the_word_adds_its_tick() {
+        let mut w = world();
+        // `OYCAACTPORLIGAHJ`.
+        w.board[0].quality.material = Some("silverbleed".into());
+        let t = |i: &[usize]| i.iter().map(|&i| w.board[i].clone()).collect::<Vec<_>>();
+        let a = |m: &Modifiers, word, i: &[usize]| m.afflictions(&w.scorer, word, &t(i));
+        let m = Modifiers::none();
+        assert_eq!(
+            a(&m, "OC", &[0, 2]),
+            Afflictions { bleed: 1, bleed_stacks: 6, ..Default::default() },
+            "6 stacks shown, a tick of 1 counted"
+        );
+        assert_eq!(a(&m, "CO", &[2, 0]).total(), 0, "a bleed tile last does nothing");
+        let weak = Modifiers { bleed_tick: 2, ..Modifiers::none() };
+        assert_eq!(a(&weak, "OC", &[0, 2]).bleed, 2);
     }
 
     /// A word its own tiles make an arcane spell of is boosted, before the weapon and the status;

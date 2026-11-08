@@ -94,6 +94,10 @@ behaviour freely.
   word upper-cased, so `FOOTER` with its second O typed into a wildcard repeats a letter; the
   solver counted the wildcard as its own letter, added the heterogram's +25% and listed
   `FICTIONER` at 63 and a kill where the game shows 52.
+- **Bleed counts as damage, like toxin, ice and burn.** A bleed tile that starts the word (6 bleed
+  per serrated tile) or the weapon's bleed costs the enemy its tick before it acts
+  (`Modifiers::bleed`). The damage column shows the stacks, as the game's preview does,
+  `52 +6 🩸`, and its tooltip says what bleed does.
 - `score_check` runs on boards with the Totem: its stand-in board now counts full columns.
 - **Serrated gold is kept like solid gold.** A bleed or toxin gold tile was spent freely: the ranking
   only counted the material named `gold`, so `SEEDBED`, using a bleed gold S and a toxin gold D,
