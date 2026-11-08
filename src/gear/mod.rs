@@ -306,6 +306,27 @@ mod tests {
         assert_eq!(plain(&gear, "AAPA").mult, 1.0);
     }
 
+    /// A wildcard's letter repeats a tile's like any other: the game hashes the upper-cased word.
+    /// The user's `FOOTER`, its second O typed into a wildcard, scored 37 where the game says 31.
+    #[test]
+    fn a_wildcard_letter_can_spoil_a_heterogram() {
+        let gear = Gear::from_pairs(&[("wordScoreBonusHeterogram", 1.0)]);
+        let typed = crate::typist::Typed {
+            tiles: vec![0, 1, 2, 3, 4, 5],
+            wildcards: vec![None, None, Some('o'), None, None, None],
+            ..Default::default()
+        };
+        let apply = |word| {
+            gear.compile().apply(&Facts::new(word, &[], Some(&typed), &[]), &FightFacts::default())
+        };
+        assert_eq!(apply("FOOTER").mult, 1.0, "the wildcard O repeats the tile O");
+        assert_eq!(
+            apply("FOATER").mult,
+            1.25,
+            "a wildcard letter that repeats nothing still counts"
+        );
+    }
+
     /// Longest match, and never the whole word.
     #[test]
     fn the_longest_registered_suffix_wins() {

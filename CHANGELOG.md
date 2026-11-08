@@ -90,6 +90,11 @@ behaviour freely.
 
 ### Fixed
 
+- **A wildcard's letter now spoils a heterogram, as it does in the game.** The game checks the
+  word upper-cased, so `FOOTER` with its second O typed into a wildcard repeats a letter; the
+  solver counted the wildcard as its own letter, added the heterogram's +25% and listed
+  `FICTIONER` at 63 and a kill where the game shows 52.
+- `score_check` runs on boards with the Totem: its stand-in board now counts full columns.
 - **Serrated gold is kept like solid gold.** A bleed or toxin gold tile was spent freely: the ranking
   only counted the material named `gold`, so `SEEDBED`, using a bleed gold S and a toxin gold D,
   topped a list of kills that spent no gold.

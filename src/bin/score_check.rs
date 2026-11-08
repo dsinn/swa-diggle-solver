@@ -268,7 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             lua.create_sequence_from(names)
         })?,
     )?;
-    stub_game(&lua, &cs, undead.unwrap_or(false), always_cast)?;
+    stub_game(&lua, &cs, &plan.geom, undead.unwrap_or(false), always_cast)?;
     lua.load(PRELUDE).exec()?;
     let score: mlua::Function = lua.load(SCORE).eval()?;
 
@@ -322,7 +322,8 @@ hardest five:"
 
 /// The engine half the scoring path reads, answered from the save.
 fn stub_game(
-    lua: &Lua, cs: &diggle_solver::game::save::Table, undead: bool, always_cast: bool,
+    lua: &Lua, cs: &diggle_solver::game::save::Table, geom: &diggle_solver::geometry::Geometry,
+    undead: bool, always_cast: bool,
 ) -> mlua::Result<()> {
     let flags = lua.create_table()?;
     if let Some(t) = cs.table_at("rpg.player.gearFlags") {
@@ -355,6 +356,14 @@ fn stub_game(
     g.set("__alwaysCast", always_cast)?;
     g.set("__maxHealth", cs.int_at("rpg.player.maxHealth").unwrap_or(1))?;
     g.set("__armour", cs.int_at("rpg.player.armour").unwrap_or(0))?;
+    // The board's columns, as board indices: `tileboardData.tilegrid`, for the Totem's count.
+    let grid = lua.create_table()?;
+    let mut start = 0;
+    for (c, &rows) in geom.rows_per_col.iter().enumerate() {
+        grid.set(c + 1, lua.create_sequence_from(start..start + rows)?)?;
+        start += rows;
+    }
+    g.set("__grid", grid)?;
     lua.load(
         r#"
         rpgview = {
@@ -380,6 +389,21 @@ fn stub_game(
             getSelectedCornerTileCount = function() return 0 end,
             getCornerCount = function() return 4 end,
         }
+        -- `tileboard.lua:892-909`, over `__grid`; a tile is known by its board index `__i`.
+        function tileboard.countTilesInFullySelectedColumn(wordRaw)
+            if not wordRaw then return 0 end
+            local hash = {}
+            for _, tile in ipairs(wordRaw) do hash[tile.__i] = true end
+            local count = 0
+            for _, rows in ipairs(__grid) do
+                local full = rows[1] ~= nil
+                for _, i in ipairs(rows) do
+                    if not hash[i] then full = false break end
+                end
+                if full then count = count + #rows end
+            end
+            return count
+        end
         function getActiveMode() return { type = 'rpg' } end
         "#,
     )
@@ -410,6 +434,7 @@ fn game_score(
             extra.set("carbon", k)?;
         }
         let tile = lua.create_table()?;
+        tile.set("__i", i)?;
         tile.set("letter", t.letter.as_str())?;
         tile.set("extra", extra)?;
         if let Some(ch) = wild {

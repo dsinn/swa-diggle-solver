@@ -161,20 +161,21 @@ impl<'a> Facts<'a> {
 
     /// `mostCommonCount==1 and not letterHash['.']` (`wordScoreBonusHeterogram.lua`).
     ///
-    /// The hash is over the word **as submitted**, and a wildcard contributes its chosen letter in
-    /// lower case — `words.wildcardCount` counts `'.'` or any byte above 90 (`utils/words.lua:151`),
-    /// which is how the game tells them apart. So a wildcard `a` and a tile `A` are distinct keys
-    /// there, and treating both as `A` would wrongly disqualify a heterogram.
+    /// The hash is over the word **upper-cased**: `wordboard.updateEffectValues` hands every
+    /// `wordCache` `LAZYWORD`, `getWord():upper()` (`wordboard.lua:229-238`), and `basicCache` sets
+    /// no hash of its own for this one to find first (`utils/words.lua:313-320`). So a wildcard
+    /// typed as `O` is the same letter as a tile's `O`, and `FOOTER` on a wildcard O is no
+    /// heterogram. Counting the wildcard's letter as distinct — once thought right, from
+    /// `words.wildcardCount`'s lower-case test, which is a different count — scored the user's
+    /// `FICTIONER` at 63 where the game previews 52 (2026-11-08).
     fn heterogram(&self) -> bool {
         if let Some(v) = self.heterogram.get() {
             return v;
         }
-        let wild = self.wildcard_positions();
         let mut seen = [0u8; 128];
         let mut most = 0u8;
-        for (i, b) in self.word.bytes().enumerate() {
-            let key = if wild.contains(&i) { b.to_ascii_lowercase() } else { b };
-            let slot = &mut seen[(key & 0x7f) as usize];
+        for b in self.word.bytes() {
+            let slot = &mut seen[(b.to_ascii_uppercase() & 0x7f) as usize];
             *slot += 1;
             most = most.max(*slot);
         }
