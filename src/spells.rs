@@ -260,6 +260,12 @@ impl SpellBook {
         self.power.boost(value, school)
     }
 
+    /// The schools' power this book casts with: what boosts a spell's effect as well as its damage,
+    /// such as the Fire spell's burn.
+    pub fn power(&self) -> Power {
+        self.power
+    }
+
     /// The best damage `word` can deal, given its plain-attack damage `base`, and the spell to
     /// cast for it — `None` when the plain attack is as good as any spell.
     ///

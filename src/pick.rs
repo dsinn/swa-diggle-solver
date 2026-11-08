@@ -348,6 +348,22 @@ pub struct Rank {
     /// this ordering is weakest on: a single tile with one turn left burns out on its own, and four
     /// armour is the better take. Post-MVP, and see the task.
     pub fire_eaten: usize,
+    /// The word leaves the enemy burning when it attacks, so its direct damage is halved:
+    /// `floor(attackDamage * 0.5)` while `statusEffects.burn` is set (`rpgview.lua:1831`), which the
+    /// estimate reads as more than one stack before the start-of-turn decay (`:1052-1053`). See
+    /// [`crate::search::Modifiers::halves_attack`]. Higher is better.
+    ///
+    /// **Only where the enemy hits back**: the user, 2026-11-07, *on turns where we fail to kill an
+    /// enemy, take into account the damage reduction from setting it on fire*, ranked like the
+    /// burning tiles. So it is set only for a word that neither kills nor scares, on a turn the
+    /// enemy can land on, and [`crate::pick::rank`] leaves it false: its callers in
+    /// [`crate::search`] set it. On those turns the hardest hit comes first, so this, like every
+    /// term here, decides only between words that hit equally hard.
+    ///
+    /// **A yes or no, not health saved.** The save does not carry the enemy's next attack — it keeps
+    /// `attacksCycle` and the stance, and the damage is read from the enemy's definition when the
+    /// cycle turns (`rpgview.lua:1971-1979`) — and two words that both halve it save the same.
+    pub halves_attack: bool,
     /// Hazard tiles (`!` and bombs, see [`is_hazard`]) this word drops all the way to the bottom
     /// row, where a `!` falls off at the start of the next turn (`tileboard.lua:179`). Higher is
     /// better. See [`hazards_cleared`].
@@ -456,6 +472,9 @@ impl Rank {
     pub fn better_than(&self, other: &Rank) -> bool {
         if self.fire_eaten != other.fire_eaten {
             return self.fire_eaten > other.fire_eaten;
+        }
+        if self.halves_attack != other.halves_attack {
+            return self.halves_attack;
         }
         if self.hazards_cleared != other.hazards_cleared {
             return self.hazards_cleared > other.hazards_cleared;
@@ -1101,6 +1120,8 @@ pub fn rank(
     let ledger = TileLedger::of(word, tiles, consumed, scorer, picking);
     Rank {
         fire_eaten: fire_eaten(tiles, consumed),
+        // Set by the caller, which knows whether the enemy will hit back: see the field.
+        halves_attack: false,
         wood_only: prefs.wood_only_pays
             && prefs.kill_at.is_none_or(|at| damage >= at)
             && wood_only(tiles, consumed, scorer),
@@ -1234,6 +1255,7 @@ mod tests {
     fn a_partial_fire_clear_beats_a_smaller_one_and_outranks_the_wood_payout() {
         let r = |fire: usize, wood: bool| Rank {
             fire_eaten: fire,
+            halves_attack: false,
             wood_only: wood,
             heals_fully: false,
             gain: 0,
@@ -1324,6 +1346,7 @@ mod tests {
     fn tile_terms_rank_gold_then_gems_then_wildcards_then_infinitives() {
         let r = |gain: i64, gold: f64, gems: f64, wildcards: f64, infinitives: i64| Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: false,
             heals_fully: false,
             hazards_cleared: 0,
@@ -1393,6 +1416,7 @@ mod tests {
     fn a_smaller_gem_loss_outranks_an_infinitive() {
         let r = |gems_net: f64, infinitives: i64| Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: false,
             heals_fully: false,
             hazards_cleared: 0,
@@ -1484,6 +1508,7 @@ mod tests {
     fn gain_outranks_hygiene_but_not_fire_or_the_payouts() {
         let r = |fire: usize, wood: bool, gain: i64, hoarded: f64, deviation: f64| Rank {
             fire_eaten: fire,
+            halves_attack: false,
             wood_only: wood,
             heals_fully: false,
             gain,
@@ -1520,6 +1545,7 @@ mod tests {
     fn a_wood_kill_outranks_a_heal_it_cannot_also_collect() {
         let tier = |wood: bool, heal: bool, hoarded: f64| Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: wood,
             heals_fully: heal,
             gain: 0,
@@ -1565,6 +1591,7 @@ mod tests {
     fn between_two_kills_the_one_that_spends_less_wins() {
         let plain = Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -1579,6 +1606,7 @@ mod tests {
         };
         let golden = Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -1597,6 +1625,7 @@ mod tests {
         // Below the payout, though. `wood_only` is gear paying out for real, and this is a saving.
         let paid = Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: true,
             heals_fully: false,
             gain: 0,
@@ -1614,6 +1643,7 @@ mod tests {
         // And the wildcard case the dev asked for: same gold either way, so do not also burn one.
         let gold_only = Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -1628,6 +1658,7 @@ mod tests {
         };
         let gold_and_wild = Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -1656,6 +1687,7 @@ mod tests {
     fn an_ash_is_shed_when_it_is_free_and_never_at_the_price_of_gold() {
         let r = |hoarded: f64, shed: usize, deviation: f64| Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -1896,6 +1928,7 @@ mod tests {
     fn clearing_a_hazard_outranks_a_gain() {
         let r = |hazards_cleared: usize, gain: i64| Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: true,
             heals_fully: false,
             hazards_cleared,
@@ -1919,6 +1952,7 @@ mod tests {
     fn clearing_a_hazard_outranks_the_wood_and_heal_payouts() {
         let r = |hazards_cleared: usize, wood_only: bool, heals_fully: bool| Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only,
             heals_fully,
             hazards_cleared,
@@ -1940,6 +1974,7 @@ mod tests {
     fn infinitives_rank_below_gain_and_below_hoarding() {
         let r = |gain: i64, infinitives: i64, hoarded: f64| Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: false,
             heals_fully: false,
             hazards_cleared: 0,
@@ -1961,6 +1996,7 @@ mod tests {
     fn a_payout_outranks_tidier_letters_and_wood_outranks_a_falling_hazard() {
         let wood = Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: true,
             heals_fully: false,
             gain: 0,
@@ -1975,6 +2011,7 @@ mod tests {
         };
         let hazard = Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -1991,6 +2028,7 @@ mod tests {
 
         let falls = Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -2005,6 +2043,7 @@ mod tests {
         };
         let tidy = Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -2021,6 +2060,7 @@ mod tests {
 
         let a = Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -2035,6 +2075,7 @@ mod tests {
         };
         let b = Rank {
             fire_eaten: 0,
+            halves_attack: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,

@@ -30,6 +30,9 @@ behaviour freely.
 - Both are counted **net of what the word spends**, each against its own kind and one tile each: a
   word that uses up two Corundums to queue one, or two wildcards to queue one, is ranked as having
   lost one (`pick::TileLedger`).
+- **Burning the enemy counts when it will hit back.** A burning enemy's direct hit is halved, so
+  between two non-killing words that hit equally hard, the one that leaves it burning (a Corundum
+  first, the Fire spell cast, burn-attack gear) ranks first (`Rank::halves_attack`).
 - Advisor's Gain column shows the `!` marks a word clears (`2❗`) and the bassanello's wildcards
   (`+2 ⬜`).
 - Advisor's Spell column leads with the spell its damage assumes, the one to pick when the game

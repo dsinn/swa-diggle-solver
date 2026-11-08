@@ -214,6 +214,8 @@ pub struct Modifiers {
     /// and 0 while `burnImmune` or already burning. 1 when the enemy's maximum health is not in the
     /// save, the cautious guess [`crate::gear::status_tick`] makes too.
     pub burn_tick: i64,
+    /// The burn stacks already on the enemy (`statusEffects.burn`). See [`Modifiers::halves_attack`].
+    pub enemy_burn: i64,
     /// The schools' power, for a word its own tiles make a spell of — see
     /// [`crate::spells::tile_school`]. `None` while `noCastSpell` is held, which keeps every gem
     /// tile inactive (`wordboard.lua:103-118`): no boost, and no ice or burn either.
@@ -376,6 +378,7 @@ impl Modifiers {
                 toxin_scale,
                 ice_tick,
                 burn_tick,
+                enemy_burn: statuses.get("burn").map_or(0, |v| *v as i64).max(0),
                 tile_spells,
                 defence: None,
             },
@@ -409,6 +412,7 @@ impl Modifiers {
             toxin_scale: 1,
             ice_tick: 1,
             burn_tick: 1,
+            enemy_burn: 0,
             tile_spells: Some(crate::spells::Power::default()),
             defence: None,
         }
@@ -439,6 +443,56 @@ impl Modifiers {
             ice: if first == "gemice" { self.ice_tick } else { 0 },
             burn: if first == "gemfire" { self.burn_tick } else { 0 },
         }
+    }
+
+    /// The burn stacks this word puts on the enemy, as the game adds them up when it is submitted:
+    ///
+    /// - **a Corundum first**: 3 per gem in the word (`rpg/effects/material/gemfire.lua:7-9`), while
+    ///   gem tiles are active ([`Modifiers::tile_spells`]);
+    /// - **the weapon**: `burnAttack`'s one per letter and `bonusBurningTiles`' one per burning tile
+    ///   in the word ([`crate::gear::WeaponBonus::burn`], `rpgview.lua:908-933`);
+    /// - **the Fire spell, when it is the cast**: the word's length, boosted by arcane power
+    ///   (`rpg/effects/spell/Fire.lua:26`).
+    pub fn burn_applied(
+        &self, scorer: &Scorer, word: &str, consumed: &[Tile], cast: Option<&str>,
+    ) -> i64 {
+        let gem = |t: &Tile| scorer.material_name(t).is_some_and(|m| m.starts_with("gem"));
+        let corundum = match (&self.tile_spells, consumed.first()) {
+            (Some(_), Some(t)) if scorer.material_name(t) == Some("gemfire") => {
+                3 * consumed.iter().filter(|t| gem(t)).count() as i64
+            }
+            _ => 0,
+        };
+        let fire = match cast {
+            Some("Fire") => self
+                .spells
+                .as_ref()
+                .map_or_else(crate::spells::Power::default, |book| book.power())
+                .boost(word.len() as i64, crate::spells::School::Arcane),
+            _ => 0,
+        };
+        corundum + self.weapon.bonus_for(word, consumed).burn + fire
+    }
+
+    /// Does this word halve the enemy's next direct hit? A burning enemy deals
+    /// `floor(attackDamage * 0.5)` (`rpgview.lua:1831`), and burn decays by one at the start of its
+    /// turn, before it attacks, so the estimate asks for more than one stack in all
+    /// (`rpgview.lua:1052-1053`). An enemy already on two or more is halved whatever we play.
+    ///
+    /// Only where the enemy hits back: not on a free turn ([`Modifiers::stall`],
+    /// [`Modifiers::player_dodges`]), and not when `reach` kills it ([`Modifiers::defence`]). See
+    /// [`crate::pick::Rank::halves_attack`].
+    pub fn halves_attack(
+        &self, scorer: &Scorer, word: &str, consumed: &[Tile], cast: Option<&str>, reach: i64,
+    ) -> bool {
+        let kills = self.defence.is_some_and(|d| {
+            reach >= if self.pierces(word) { d.health } else { d.health + d.armour }
+        });
+        !self.stall
+            && !self.player_dodges
+            && !kills
+            && self.enemy_burn <= 1
+            && self.enemy_burn + self.burn_applied(scorer, word, consumed, cast) > 1
     }
 
     /// [`Modifiers::afflictions`], added up: the part of a word's damage that lands after the blow.
@@ -1688,7 +1742,7 @@ pub fn ranked(
                             // the gentlest-first ones.
                             let ranked = !matches!(tier, Tier::Overshoot | Tier::Flees);
                             let rank = ranked.then(|| {
-                                crate::pick::rank(
+                                let mut rank = crate::pick::rank(
                                     word,
                                     tiles,
                                     geometry,
@@ -1696,7 +1750,11 @@ pub fn ranked(
                                     scorer,
                                     picking,
                                     reach - mods.status_damage(scorer, word, &consumed),
-                                )
+                                );
+                                // Short of the goal, so the enemy answers: see the field.
+                                rank.halves_attack = matches!(tier, Tier::Under | Tier::Fallback)
+                                    && mods.halves_attack(scorer, word, &consumed, cast, reach);
+                                rank
                             });
                             options.push(Candidate {
                                 word: word.clone(),
@@ -1786,10 +1844,14 @@ impl Ranker<'_> {
     /// Ranked on the blow's own damage, [`Modifiers::toxin`] taken off: what the blow alone pays
     /// on — the wood-kill gear, the Well-Rested heal — does not come from an enemy the poison
     /// finishes (`rpgview.enemyDeathChecks` runs with no word, `rpgview.lua:1152-1170`).
-    fn rank(&self, word: &str, consumed: &[usize], reach: i64) -> crate::pick::Rank {
+    ///
+    /// Only the hardest-hit collectors use this, and a word there is short of the goal, so the
+    /// enemy answers it: [`crate::pick::Rank::halves_attack`] is set here.
+    fn rank(&self, word: &str, typed: &crate::typist::Typed, reach: i64) -> crate::pick::Rank {
+        let consumed = &typed.tiles;
         let tiles: Vec<Tile> =
             consumed.iter().filter_map(|&i| self.tiles.get(i).cloned()).collect();
-        crate::pick::rank(
+        let mut rank = crate::pick::rank(
             word,
             self.tiles,
             self.geometry,
@@ -1797,7 +1859,18 @@ impl Ranker<'_> {
             self.scorer,
             self.picking,
             reach - self.mods.status_damage(self.scorer, word, &tiles),
-        )
+        );
+        let (_, cast) = scored_cast(
+            self.scorer,
+            self.mods,
+            word,
+            &tiles,
+            Some(typed),
+            typed.corners_used,
+            self.geometry.corner_count(),
+        );
+        rank.halves_attack = self.mods.halves_attack(self.scorer, word, &tiles, cast, reach);
+        rank
     }
 }
 
@@ -1817,7 +1890,6 @@ impl Ranker<'_> {
 /// board walk would be wasted on them.
 struct Hardest {
     found: Found,
-    consumed: Vec<usize>,
     reach: i64,
     rank: Option<crate::pick::Rank>,
 }
@@ -1829,10 +1901,8 @@ impl Hardest {
         slot: &mut Option<Hardest>, mods: &Modifiers, ranker: Ranker, word: &str, score: i64,
         slice: usize, typed: &crate::typist::Typed, reach: i64,
     ) {
-        let consumed = &typed.tiles;
         let fresh = || Hardest {
             found: Found { word: word.to_string(), score, slice, typed: typed.clone() },
-            consumed: consumed.to_vec(),
             reach,
             rank: None,
         };
@@ -1844,7 +1914,7 @@ impl Hardest {
             std::cmp::Ordering::Less => {}
             std::cmp::Ordering::Greater => *slot = Some(fresh()),
             std::cmp::Ordering::Equal => {
-                let mine = ranker.rank(word, consumed, reach);
+                let mine = ranker.rank(word, typed, reach);
                 if mine.better_than(&cur.ranked(ranker)) {
                     *slot = Some(Hardest { rank: Some(mine), ..fresh() });
                 }
@@ -1871,8 +1941,8 @@ impl Hardest {
     }
 
     fn ranked(&mut self, ranker: Ranker) -> crate::pick::Rank {
-        let (word, consumed, reach) = (&self.found.word, &self.consumed, self.reach);
-        *self.rank.get_or_insert_with(|| ranker.rank(word, consumed, reach))
+        let (word, typed, reach) = (&self.found.word, &self.found.typed, self.reach);
+        *self.rank.get_or_insert_with(|| ranker.rank(word, typed, reach))
     }
 }
 
@@ -3955,6 +4025,62 @@ mod ranked_tests {
         assert_eq!(a(&iced, "OC", &[0, 2]).total(), 0, "already iced");
         let muted = Modifiers { tile_spells: None, ..Modifiers::none() };
         assert_eq!(a(&muted, "OC", &[0, 2]).total(), 0, "noCastSpell");
+    }
+
+    /// A word halves the enemy's next hit when it leaves more than one burn stack for the decay to
+    /// take: a Corundum first, or the Fire spell cast. Not on an enemy already halved, not on a free
+    /// turn, and not with a word that kills.
+    #[test]
+    fn burn_that_outlasts_the_decay_halves_the_attack() {
+        let mut w = world();
+        // `OYCAACTPORLIGAHJ`.
+        w.board[6].quality.material = Some("gemfire".into());
+        let t = |i: &[usize]| i.iter().map(|&i| w.board[i].clone()).collect::<Vec<_>>();
+        let m = Modifiers::none();
+        let halves = |m: &Modifiers, word, i: &[usize], cast, reach| {
+            m.halves_attack(&w.scorer, word, &t(i), cast, reach)
+        };
+        assert_eq!(m.burn_applied(&w.scorer, "TO", &t(&[6, 0]), None), 3, "3 per gem");
+        assert!(halves(&m, "TO", &[6, 0], None, 5), "a Corundum first");
+        assert!(!halves(&m, "OT", &[0, 6], None, 5), "a Corundum last burns nothing");
+        assert!(!halves(&m, "CO", &[2, 0], None, 5), "a plain word");
+        assert!(!halves(&m, "CO", &[2, 0], Some("Ice"), 5), "another spell");
+        assert!(halves(&m, "CO", &[2, 0], Some("Fire"), 5), "Fire burns for the word's length");
+        let one = Modifiers { enemy_burn: 1, ..Modifiers::none() };
+        assert!(halves(&one, "TO", &[6, 0], None, 5), "one stack decays away, three do not");
+        let two = Modifiers { enemy_burn: 2, ..Modifiers::none() };
+        assert!(!halves(&two, "TO", &[6, 0], None, 5), "halved already");
+        let free = Modifiers { stall: true, ..Modifiers::none() };
+        assert!(!halves(&free, "TO", &[6, 0], None, 5), "it cannot hit back");
+        let dodged = Modifiers { player_dodges: true, ..Modifiers::none() };
+        assert!(!halves(&dodged, "TO", &[6, 0], None, 5), "it cannot land");
+        let near =
+            Modifiers { defence: Some(Defence { health: 5, armour: 0 }), ..Modifiers::none() };
+        assert!(!halves(&near, "TO", &[6, 0], None, 5), "a kill");
+        assert!(halves(&near, "TO", &[6, 0], None, 4), "one short");
+    }
+
+    /// Between two hits of the same damage, the one that halves the enemy's answer ranks first:
+    /// right after the burning tiles eaten, above everything else.
+    #[test]
+    fn halving_the_attack_ranks_after_fire_eaten() {
+        let r = |fire_eaten: usize, halves_attack: bool, gain: i64| crate::pick::Rank {
+            fire_eaten,
+            halves_attack,
+            wood_only: false,
+            heals_fully: false,
+            hazards_cleared: 0,
+            gain,
+            gold_spent: 0.0,
+            gems_net: 0.0,
+            wildcards_net: 0.0,
+            infinitives: 0,
+            shed: 0,
+            hazard_fall: 0,
+            deviation: 0.0,
+        };
+        assert!(r(0, true, 0).better_than(&r(0, false, 4)), "above armour");
+        assert!(r(1, false, 0).better_than(&r(0, true, 0)), "below the fire eaten");
     }
 
     /// The tick is read from the enemy: flat, doubled while weak, nothing on top of its own.
