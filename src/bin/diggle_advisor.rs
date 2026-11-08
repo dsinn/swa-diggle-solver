@@ -77,7 +77,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT_NORMAL, DWRITE_INLINE_OBJECT_METRICS, DWRITE_OVERHANG_METRICS,
     DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_RANGE,
-    DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::DirectWrite::{IDWriteTextLayout, DWRITE_HIT_TEST_METRICS};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -260,9 +260,13 @@ const COLUMNS: [(&str, i32, bool); 8] = [
     ("#", 44, true),
     ("", 30, false),
     ("Word", 470, false),
-    ("Damage", 84, true),
+    // Left, so the hit stays in view and only the afflictions after it are trimmed — the
+    // user's call, 2026-11-08.
+    ("Damage", 84, false),
     ("Bonus", 90, false),
-    ("Gain", 120, true),
+    // Left, like Damage, so a clipped cell keeps its first gains in view — the user's call,
+    // 2026-11-08.
+    ("Gain", 120, false),
     ("Spell", 120, false),
     ("Effect", 190, false),
 ];
@@ -982,20 +986,26 @@ struct ColourText {
     icons: RefCell<Option<Vec<(Vec<u16>, IDWriteInlineObject)>>>,
 }
 
-/// The game's own art for the two infinitive items, drawn in place of their emoji (🧤 ⚖️), which
-/// look nothing like them: `ui/graphics/items/gauntlet-inf-32.png` (`items/infinitives.lua:236`)
-/// and `ui/graphics/items/scales-justice-32.png` (`items/scalesofjustice.lua:64`). Copied into
-/// `assets/advisor/` and built into the exe, so the Advisor needs no game checkout to show them.
-/// Every gauntlet shows the full gauntlet, even a partial one with its own art
-/// (`gauntlet-inf-01111-32.png` and the rest, `items/infinitives.lua:323`).
-const ICONS: [(diggle_solver::pick::InfinitiveSource, &[u8]); 2] = [
+/// The game's own item art, each drawn in place of the emoji that stands for it in the text,
+/// which look nothing like the items: the two infinitive items,
+/// `ui/graphics/items/gauntlet-inf-32.png` (`items/infinitives.lua:236`) and
+/// `ui/graphics/items/scales-justice-32.png` (`items/scalesofjustice.lua:64`), and the rapier,
+/// `ui/graphics/items/weapon-rapier-32.png` (`items/rapier.lua:28`), in place of 🤺 — the user's
+/// call, 2026-11-08. Copied into `assets/advisor/` and built into the exe, so the Advisor needs
+/// no game checkout to show them. Every gauntlet shows the full gauntlet, even a partial one with
+/// its own art (`gauntlet-inf-01111-32.png` and the rest, `items/infinitives.lua:323`).
+const ICONS: [(&str, &[u8]); 3] = [
     (
-        diggle_solver::pick::InfinitiveSource::Gauntlet,
+        diggle_solver::pick::InfinitiveSource::Gauntlet.emoji(),
         include_bytes!("../../assets/advisor/gauntlet-inf-32.png"),
     ),
     (
-        diggle_solver::pick::InfinitiveSource::Justice,
+        diggle_solver::pick::InfinitiveSource::Justice.emoji(),
         include_bytes!("../../assets/advisor/scales-justice-32.png"),
+    ),
+    (
+        diggle_solver::advisor::annotate::RAPIER,
+        include_bytes!("../../assets/advisor/weapon-rapier-32.png"),
     ),
 ];
 
@@ -1249,6 +1259,15 @@ impl ColourText {
                 )?;
                 format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
                 format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+                // A cell too narrow for its text ends in "…" where it is cut, so a clipped cell
+                // can be told from a short one — the user's call, 2026-11-08.
+                let trimming = DWRITE_TRIMMING {
+                    granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                    delimiter: 0,
+                    delimiterCount: 0,
+                };
+                let ellipsis = write.CreateEllipsisTrimmingSign(&format)?;
+                format.SetTrimming(&trimming, &ellipsis)?;
                 Ok(format)
             };
             let (format, right) = (make()?, make()?);
@@ -1272,7 +1291,7 @@ impl ColourText {
         };
         ICONS
             .iter()
-            .filter_map(|(source, bytes)| {
+            .filter_map(|(emoji, bytes)| {
                 let (w, h, pixels) = decode_icon(bytes)?;
                 let bitmap = target
                     .CreateBitmap(
@@ -1284,7 +1303,7 @@ impl ColourText {
                     .ok()?;
                 let icon: IDWriteInlineObject =
                     InlineIcon { target: target.clone(), bitmap }.into();
-                Some((source.emoji().encode_utf16().collect(), icon))
+                Some((emoji.encode_utf16().collect(), icon))
             })
             .collect()
     }
@@ -1340,13 +1359,17 @@ impl ColourText {
                 let m = &metrics[..n.min(4) as usize];
                 let left = m.iter().map(|m| m.left).fold(f32::MAX, f32::min);
                 let right = m.iter().map(|m| m.left + m.width).fold(f32::MIN, f32::max);
-                // `draw` sets the layout 6 px in from the cell's left edge.
-                RECT {
-                    left: rc.left + 6 + left.floor() as i32,
-                    right: rc.left + 6 + right.ceil() as i32,
-                    top: rc.top,
-                    bottom: rc.bottom,
+                // `draw` sets the layout 6 px in from the cell's left edge. An item trimmed off
+                // the end measures where it would have been, so it is cut to the cell; one cut
+                // away entirely has no area.
+                let (left, right) = (
+                    rc.left + 6 + left.floor() as i32,
+                    (rc.left + 6 + right.ceil() as i32).min(rc.right - 6),
+                );
+                if left >= right {
+                    return RECT::default();
                 }
+                RECT { left, right, top: rc.top, bottom: rc.bottom }
             })
             .collect()
     }
@@ -1411,7 +1434,6 @@ fn cell_items(v: &View, item: usize, sub: i32) -> Vec<diggle_solver::advisor::an
         0 => plain((item + 1).to_string()),
         MOUSE_COLUMN => a::mouse_items(&r.row),
         WORD_COLUMN => plain(r.row.word.clone()),
-        // The fencer before the number, so the numbers stay lined up on the right.
         3 => a::damage_items(&r.row),
         4 => r.row.bonus.as_ref().map(a::bonus_items).unwrap_or_default(),
         5 => a::gain_items(r.row.gain),
@@ -1817,7 +1839,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 mod tests {
     use super::*;
 
-    /// Both icons built into the exe decode, at the game's 32 px, with see-through corners: a
+    /// Every icon built into the exe decodes, at the game's 32 px, with see-through corners: a
     /// bad copy would otherwise only show as the emoji coming back.
     #[test]
     fn the_built_in_icons_decode_with_transparency() {

@@ -217,7 +217,9 @@ pub fn plan(
             .and_then(|v| v.as_f64())
             .map(|v| v as i64)
             .unwrap_or(0),
-    );
+    )
+    // Express mail: the tile queue gains rank first — see `pick::Preferences::queue_first`.
+    .with_queue_first(cs.path("rpg.player.gearFlags.submitContinuesTurn").is_some());
     let goal = Goal::for_enemy(&mods, deciding_health, armour, Some(peak), player.as_ref(), prefs);
     // Built per turn rather than per fight, because the board's tile count is what the target is
     // scaled to and a board can lose tiles mid-fight — the run that died at `l50` watched its

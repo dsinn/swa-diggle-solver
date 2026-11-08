@@ -23,6 +23,17 @@ pub struct Bestiary {
 }
 
 impl Bestiary {
+    /// [`Bestiary::load`], read once per game folder and version and kept in memory — see
+    /// [`crate::game::version`].
+    pub fn cached(game_dir: &Path) -> std::sync::Arc<Self> {
+        static LOADED: crate::game::version::ByVersion<Bestiary> =
+            crate::game::version::ByVersion::new();
+        match LOADED.get(game_dir, |d| Ok::<_, std::convert::Infallible>(Self::load(d))) {
+            Ok(b) => b,
+            Err(never) => match never {},
+        }
+    }
+
     pub fn load(game_dir: &Path) -> Self {
         let mut b = Bestiary::default();
         let files = |dir: &str| -> Vec<std::path::PathBuf> {

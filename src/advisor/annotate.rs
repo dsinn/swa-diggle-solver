@@ -68,9 +68,16 @@ pub struct Bonus {
     pub names: Vec<String>,
 }
 
+/// A multiplier to two places without the trailing zeros: `2`, `1.5`, `1.25` — the user's call,
+/// 2026-11-08.
+fn multiplier(m: f64) -> String {
+    let s = format!("{m:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 impl std::fmt::Display for Bonus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "x{:.2}", self.mult)?;
+        write!(f, "x{}", multiplier(self.mult))?;
         // Just the emoji: they say which lexicon, and the user found the names noise. A lexicon
         // with no emoji keeps its name, so nothing drops out of sight.
         if !self.names.is_empty() {
@@ -280,27 +287,42 @@ pub fn gain_items(g: crate::pick::Gains) -> Vec<Item> {
     items
 }
 
-/// The queued infinitives' tooltip: the suffix, what it queues, and the gear. The user,
-/// 2026-11-07: *the tooltip should be more specific about what happens*.
+/// The queued infinitives' tooltip: the suffix, the tiles it queues, and the gear. The user,
+/// 2026-11-07: *the tooltip should be more specific about what happens*, and 2026-11-08: *more
+/// specific about which infinitive tiles it queues up*.
 fn queue_tip(g: crate::pick::Gains) -> String {
     let gear = g.infinitives_from.map(|f| format!(" ({})", f.name())).unwrap_or_default();
     let queued: Vec<String> =
-        g.tiles.iter().flat_map(|e| e.queues.iter().flatten()).map(|s| format!("-{s}")).collect();
+        g.tiles.iter().flat_map(|e| e.queues.iter().flatten()).map(|s| suffix_tiles(s)).collect();
     match (g.tiles.and_then(|e| e.suffix), queued.is_empty()) {
         (Some(suffix), false) => {
-            format!("Ends in -{suffix}: queues the {} tiles{gear}", queued.join(" and "))
+            format!("Ends in -{suffix}: queues {}{gear}", queued.join("; and "))
         }
         _ => format!("Queues infinitive tiles{gear}"),
     }
+}
+
+/// The tiles one suffix link queues: a tile per letter, or one time in five the whole suffix on a
+/// single tile (`generateSuffixGauntletTile`, `ui/objects/tile.lua:377-391`). `ED` reads "E and D
+/// tiles, or one ED tile".
+fn suffix_tiles(suffix: &str) -> String {
+    let letters: Vec<String> = suffix.chars().map(String::from).collect();
+    let each = match letters.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    format!("{each} tiles, or one {suffix} tile")
 }
 
 /// The upgrades' tooltip: the suffix's upgrades, then a seven-letter word's gilding.
 fn upgrade_tip(e: crate::pick::TileEffect) -> String {
     let mut parts = Vec::new();
     if let (Some(suffix), true) = (e.suffix, e.upgrades > 0) {
+        // Without the gilding of a tile already at the top: the game shows that, and the user
+        // called it irrelevant, 2026-11-08.
         parts.push(format!(
-            "Ends in -{suffix}: upgrades {} one material stage, gilding instead where none can go \
-             higher",
+            "Ends in -{suffix}: upgrades {} one material stage",
             count(e.upgrades, "random tile", "random tiles")
         ));
     }
@@ -349,16 +371,20 @@ pub fn affliction_items(a: crate::search::Afflictions) -> Vec<Item> {
     items
 }
 
-/// The Damage column, item by item: the rapier's mark, the hit, then [`affliction_items`].
+/// The rapier's mark on a hit that ignores armour. The Advisor draws the game's rapier art in its
+/// place; the emoji is what a plain-text view shows.
+pub const RAPIER: &str = "🤺";
+
+/// The Damage column, item by item: the hit, the rapier's mark, then [`affliction_items`]. The
+/// hit leads so the numbers line up down the left-aligned column.
 pub fn damage_items(r: &Row) -> Vec<Item> {
-    let mut items = Vec::new();
+    let mut items = vec![Item::new(r.score.to_string(), "")];
     if r.pierces {
         items.push(Item::new(
-            "🤺",
+            RAPIER,
             "Starts and ends with the same letter: the rapier's hit ignores armour",
         ));
     }
-    items.push(Item::new(r.score.to_string(), ""));
     items.extend(affliction_items(r.afflictions));
     items
 }
@@ -374,7 +400,7 @@ pub fn bonus_items(b: &Bonus) -> Vec<Item> {
             last.to_lowercase()
         ),
     };
-    let tip = format!("This enemy takes x{:.2} damage from {lexicons} words", b.mult);
+    let tip = format!("This enemy takes x{} damage from {lexicons} words", multiplier(b.mult));
     vec![Item::new(b.to_string(), tip)]
 }
 
@@ -695,9 +721,12 @@ mod tests {
         mods.bonus_names = vec!["Fire".into(), "Ice".into()];
         let both = Bonus { mult: 2.0, names: vec!["Fire".into(), "Ice".into()] };
         assert_eq!(bonus_of(&mods, "CAT"), Some(both.clone()));
-        assert_eq!(both.to_string(), "x2.00 🔥❄️", "the emoji say which, without words");
+        assert_eq!(both.to_string(), "x2 🔥❄️", "the emoji say which, without words");
+        for (m, shown) in [(2.0, "2"), (1.5, "1.5"), (1.25, "1.25"), (1.4, "1.4"), (10.0, "10")] {
+            assert_eq!(multiplier(m), shown, "no trailing zeros");
+        }
         let unknown = Bonus { mult: 1.5, names: vec!["Mystery".into()] };
-        assert_eq!(unknown.to_string(), "x1.50 Mystery", "a lexicon with no emoji keeps its name");
+        assert_eq!(unknown.to_string(), "x1.5 Mystery", "a lexicon with no emoji keeps its name");
         assert_eq!(bonus_of(&mods, "DOG"), None);
     }
 
@@ -942,7 +971,7 @@ mod tests {
                 ("+4 🛡️", "Gives 4 armour"),
                 ("+1 💎", "Queues 1 gem tile"),
                 ("+2 ⬜", "Queues 2 wildcard tiles"),
-                ("🧤", "Ends in -ING: queues the -ED tiles (Infinitives gauntlet)"),
+                ("🧤", "Ends in -ING: queues E and D tiles, or one ED tile (Infinitives gauntlet)"),
                 ("1❗", "Brings 1 ! tile to the bottom row, where it falls off"),
             ]
         );
@@ -962,14 +991,11 @@ mod tests {
         let tip = |text: &str| tips.iter().find(|(t, _)| t == text).map(|(_, tip)| tip.clone());
         assert_eq!(
             tip("⚖️").as_deref(),
-            Some("Ends in -ER: queues the -EST tiles (Scales of justice)")
+            Some("Ends in -ER: queues E, S and T tiles, or one EST tile (Scales of justice)")
         );
         assert_eq!(
             tip("+1 ⬆️").as_deref(),
-            Some(
-                "Ends in -ER: upgrades 1 random tile one material stage, gilding instead where \
-                 none can go higher"
-            )
+            Some("Ends in -ER: upgrades 1 random tile one material stage")
         );
         let texts: Vec<&str> = tips.iter().map(|(t, _)| t.as_str()).collect();
         let at = |t: &str| texts.iter().position(|x| *x == t).unwrap();
@@ -988,7 +1014,7 @@ mod tests {
         let toxin = affliction_items(crate::search::Afflictions { toxin: 3, ..Default::default() });
         assert_eq!(toxin[0].tip, "Toxin: the enemy loses 3 more health at the start of its turn");
         let b = Bonus { mult: 1.4, names: vec!["Spider".into()] };
-        assert_eq!(bonus_items(&b)[0].tip, "This enemy takes x1.40 damage from spider words");
+        assert_eq!(bonus_items(&b)[0].tip, "This enemy takes x1.4 damage from spider words");
     }
 
     /// The spell to cast leads, with its emoji; other qualifying spells follow; a spell sharing a

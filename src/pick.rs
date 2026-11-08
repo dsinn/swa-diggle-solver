@@ -65,6 +65,11 @@ pub struct Preferences {
     /// value of `onSubmitWoodQueueWoodornateWildcardPerRun`, the Bookkeepers bassanello, zero when
     /// it is not worn. See [`wildcards_queued`].
     pub wildcards_per_run: i64,
+    /// Express mail is worn (`submitContinuesTurn`, `items/turngear.lua:4-27`: *"Submissions don't
+    /// end the turn, but refresh does"*), so the tile queue gains rank above everything else a
+    /// word gives — see [`Rank::queue_first`]. The user's call, 2026-11-08: *when the Express Mail
+    /// gear is active, tile queue gains are ranked higher*, above `hazards_cleared`.
+    pub queue_first: bool,
 }
 
 /// The gear that turns a submitted word into new or better tiles: the suffix links that queue
@@ -144,7 +149,7 @@ pub enum InfinitiveSource {
 }
 
 impl InfinitiveSource {
-    pub fn emoji(self) -> &'static str {
+    pub const fn emoji(self) -> &'static str {
         match self {
             InfinitiveSource::Gauntlet => "🧤",
             InfinitiveSource::Justice => "⚖️",
@@ -355,6 +360,11 @@ impl Preferences {
     pub fn with_wildcards_per_run(self, wildcards_per_run: i64) -> Self {
         Preferences { wildcards_per_run, ..self }
     }
+
+    /// Records whether Express mail is worn — see [`Preferences::queue_first`].
+    pub fn with_queue_first(self, queue_first: bool) -> Self {
+        Preferences { queue_first, ..self }
+    }
 }
 
 /// Everything the ranking needs that does not change between candidates.
@@ -449,6 +459,11 @@ pub struct Rank {
     /// `attacksCycle` and the stance, and the damage is read from the enemy's definition when the
     /// cycle turns (`rpgview.lua:1971-1979`) — and two words that both halve it save the same.
     pub halves_attack: bool,
+    /// Express mail is worn: the tile queue terms — [`Rank::gems_net`], [`Rank::wildcards_net`]
+    /// and [`Rank::infinitives`], in that order — are asked here, above
+    /// [`Rank::hazards_cleared`], rather than in their own places. The same for every candidate
+    /// in a turn: see [`Preferences::queue_first`].
+    pub queue_first: bool,
     /// Hazard tiles (`!` and bombs, see [`is_hazard`]) this word drops all the way to the bottom
     /// row, where a `!` falls off at the start of the next turn (`tileboard.lua:179`). Higher is
     /// better. See [`hazards_cleared`].
@@ -576,6 +591,19 @@ impl Rank {
         }
         if self.halves_attack != other.halves_attack {
             return self.halves_attack;
+        }
+        // Under Express mail, what the word queues comes before anything else it gives.
+        let queue_first = self.queue_first || other.queue_first;
+        if queue_first {
+            if self.gems_net != other.gems_net {
+                return self.gems_net > other.gems_net;
+            }
+            if self.wildcards_net != other.wildcards_net {
+                return self.wildcards_net > other.wildcards_net;
+            }
+            if self.infinitives != other.infinitives {
+                return self.infinitives > other.infinitives;
+            }
         }
         if self.hazards_cleared != other.hazards_cleared {
             return self.hazards_cleared > other.hazards_cleared;
@@ -1239,6 +1267,7 @@ pub fn rank(
         fire_eaten: fire_eaten(tiles, consumed),
         // Set by the caller, which knows whether the enemy will hit back: see the field.
         halves_attack: false,
+        queue_first: prefs.queue_first,
         wood_only: prefs.wood_only_pays
             && prefs.kill_at.is_none_or(|at| damage >= at)
             && wood_only(tiles, consumed, scorer),
@@ -1390,6 +1419,7 @@ mod tests {
         let r = |fire: usize, wood: bool| Rank {
             fire_eaten: fire,
             halves_attack: false,
+            queue_first: false,
             wood_only: wood,
             heals_fully: false,
             gain: 0,
@@ -1482,6 +1512,7 @@ mod tests {
         let r = |gain: i64, gold: f64, gems: f64, wildcards: f64, infinitives: i64| Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             hazards_cleared: 0,
@@ -1553,6 +1584,7 @@ mod tests {
         let r = |gems_net: f64, infinitives: i64| Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             hazards_cleared: 0,
@@ -1646,6 +1678,7 @@ mod tests {
         let r = |fire: usize, wood: bool, gain: i64, hoarded: f64, deviation: f64| Rank {
             fire_eaten: fire,
             halves_attack: false,
+            queue_first: false,
             wood_only: wood,
             heals_fully: false,
             gain,
@@ -1684,6 +1717,7 @@ mod tests {
         let tier = |wood: bool, heal: bool, hoarded: f64| Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: wood,
             heals_fully: heal,
             gain: 0,
@@ -1731,6 +1765,7 @@ mod tests {
         let plain = Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -1747,6 +1782,7 @@ mod tests {
         let golden = Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -1767,6 +1803,7 @@ mod tests {
         let paid = Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: true,
             heals_fully: false,
             gain: 0,
@@ -1786,6 +1823,7 @@ mod tests {
         let gold_only = Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -1802,6 +1840,7 @@ mod tests {
         let gold_and_wild = Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -1832,6 +1871,7 @@ mod tests {
         let r = |hoarded: f64, shed: usize, deviation: f64| Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -2110,6 +2150,7 @@ mod tests {
         let r = |wildcards_net: f64, upgrades: i64, infinitives: i64, shed: usize| Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             hazards_cleared: 0,
@@ -2135,6 +2176,7 @@ mod tests {
         let r = |gems_net: f64, hazard_fall: usize, wildcards_net: f64| Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             hazards_cleared: 0,
@@ -2150,6 +2192,47 @@ mod tests {
         };
         assert!(r(0.0, 1, -1.0).better_than(&r(0.0, 0, 0.0)), "the fall over a wildcard");
         assert!(r(0.0, 0, 0.0).better_than(&r(-1.0, 2, 0.0)), "a gem over the fall");
+    }
+
+    /// Under Express mail, a gem, a wildcard or an infinitive queued outranks a `!` cleared and
+    /// every payout below it; without it, the `!` wins as before. The user's call, 2026-11-08.
+    #[test]
+    fn express_mail_ranks_the_tile_queue_above_a_hazard_cleared() {
+        let r = |queue_first: bool, hazards_cleared: usize, gems: f64, wild: f64, inf: i64| Rank {
+            fire_eaten: 0,
+            halves_attack: false,
+            queue_first,
+            wood_only: hazards_cleared == 0,
+            heals_fully: hazards_cleared == 0,
+            hazards_cleared,
+            gain: if hazards_cleared == 0 { 8 } else { 0 },
+            gold_spent: 0.0,
+            gems_net: gems,
+            hazard_fall: 0,
+            wildcards_net: wild,
+            upgrades: 0,
+            infinitives: inf,
+            shed: 0,
+            deviation: 0.0,
+        };
+        for (gems, wild, inf, what) in
+            [(1.0, 0.0, 0, "a gem"), (0.0, 1.0, 0, "a wildcard"), (0.0, 0.0, 1, "an infinitive")]
+        {
+            let queues = |express| r(express, 0, gems, wild, inf);
+            let clears = |express| r(express, 1, 0.0, 0.0, 0);
+            assert!(
+                queues(true).better_than(&clears(true)),
+                "{what} over the ! under Express mail"
+            );
+            assert!(clears(false).better_than(&queues(false)), "the ! over {what} without it");
+        }
+        // Among the queue terms, the order they always had: gems, then wildcards, then infinitives.
+        assert!(r(true, 0, 1.0, 0.0, 0).better_than(&r(true, 0, 0.0, 1.0, 5)));
+        assert!(r(true, 0, 0.0, 1.0, 0).better_than(&r(true, 0, 0.0, 0.0, 5)));
+        // Burn halving still comes first.
+        let mut halves = r(true, 0, 0.0, 0.0, 0);
+        halves.halves_attack = true;
+        assert!(halves.better_than(&r(true, 0, 3.0, 0.0, 0)));
     }
 
     /// The live board, cut to one column: `A D ! P` bottom to top. Only removing both tiles under
@@ -2173,6 +2256,7 @@ mod tests {
         let r = |hazards_cleared: usize, gain: i64| Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: true,
             heals_fully: false,
             hazards_cleared,
@@ -2198,6 +2282,7 @@ mod tests {
         let r = |hazards_cleared: usize, wood_only: bool, heals_fully: bool| Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only,
             heals_fully,
             hazards_cleared,
@@ -2221,6 +2306,7 @@ mod tests {
         let r = |gain: i64, infinitives: i64, hoarded: f64| Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             hazards_cleared: 0,
@@ -2244,6 +2330,7 @@ mod tests {
         let wood = Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: true,
             heals_fully: false,
             gain: 0,
@@ -2260,6 +2347,7 @@ mod tests {
         let hazard = Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -2278,6 +2366,7 @@ mod tests {
         let falls = Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -2294,6 +2383,7 @@ mod tests {
         let tidy = Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -2312,6 +2402,7 @@ mod tests {
         let a = Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,
@@ -2328,6 +2419,7 @@ mod tests {
         let b = Rank {
             fire_eaten: 0,
             halves_attack: false,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             gain: 0,

@@ -267,7 +267,9 @@ impl Modifiers {
         game_dir: &Path, save: &crate::game::save::Table, tile_count: usize,
     ) -> Result<(Self, Geometry), crate::Error> {
         let statuses = crate::lexica::Lexica::statuses_from_save(save);
-        let lexica = crate::lexica::Lexica::load(game_dir)?;
+        // Kept in memory while the game's version holds — see `crate::game::version`.
+        let lexica = crate::lexica::Lexica::cached(game_dir)?;
+        let bestiary = crate::advisor::bestiary::Bestiary::cached(game_dir);
         let resolved = Geometry::from_save(save, tile_count);
 
         let notes = resolved.notes.clone();
@@ -300,8 +302,7 @@ impl Modifiers {
         // The spells held. Diggle is scored as casting the best of them — the user's call,
         // 2026-11-07, with the button press stubbed (see `crate::spells`) — and as the game casts a
         // lone one for it. The advisor replaces this book with one carrying the user's config.
-        let undead = crate::advisor::bestiary::Bestiary::load(game_dir)
-            .undead(save.str_at("rpg.enemy.name").unwrap_or(""));
+        let undead = bestiary.undead(save.str_at("rpg.enemy.name").unwrap_or(""));
         let spells = crate::spells::SpellBook::from_save(save, &lexica, undead);
         // The status a word *applies* is not in this number — it is per word, and the band the
         // search filters on is per word too. `bonusBastard` trading 6 damage for 3 bleed and 3 toxin
@@ -373,8 +374,7 @@ impl Modifiers {
                     .and_then(|k| crate::flee::Nerve::from_status(k))
                     .filter(|_| {
                         let name = save.str_at("rpg.enemy.name").unwrap_or("");
-                        crate::advisor::bestiary::Bestiary::load(game_dir).undead(name)
-                            != Some(true)
+                        bestiary.undead(name) != Some(true)
                     }),
                 immobile: save.path("rpg.enemy.immobile").is_some(),
                 bonuses: lexica.bonus_sets(&statuses),
@@ -4121,6 +4121,7 @@ mod ranked_tests {
         let r = |fire_eaten: usize, halves_attack: bool, gain: i64| crate::pick::Rank {
             fire_eaten,
             halves_attack,
+            queue_first: false,
             wood_only: false,
             heals_fully: false,
             hazards_cleared: 0,

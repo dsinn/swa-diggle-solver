@@ -46,6 +46,14 @@ pub struct Lexica {
 }
 
 impl Lexica {
+    /// [`Lexica::load`], read once per game folder and version and kept in memory — see
+    /// [`crate::game::version`].
+    pub fn cached(game_dir: &Path) -> Result<std::sync::Arc<Self>, crate::Error> {
+        static LOADED: crate::game::version::ByVersion<Lexica> =
+            crate::game::version::ByVersion::new();
+        LOADED.get(game_dir, Self::load)
+    }
+
     pub fn load(game_dir: &Path) -> Result<Self, crate::Error> {
         let dir = game_dir.join("utils/dictionaries");
         let mut lexicons = Vec::new();

@@ -17,10 +17,12 @@ pub struct Resources {
     pub scorer: crate::score::Scorer,
     pub letters: crate::letters::Weights,
     pub palette: Palette,
-    /// The game's word lists, for the spells a word would cast.
-    pub lexica: crate::lexica::Lexica,
-    /// Enemy names to enemy types, for whether Turn undead applies.
-    pub bestiary: super::bestiary::Bestiary,
+    /// The game's word lists, for the spells a word would cast. The copy shared with
+    /// [`crate::search::Modifiers::from_save`], kept while the game's version holds (see
+    /// [`crate::game::version`]).
+    pub lexica: std::sync::Arc<crate::lexica::Lexica>,
+    /// Enemy names to enemy types, for whether Turn undead applies. Shared the same way.
+    pub bestiary: std::sync::Arc<super::bestiary::Bestiary>,
 }
 
 impl Resources {
@@ -31,8 +33,8 @@ impl Resources {
             scorer: crate::score::Scorer::new(game_dir)?,
             letters: crate::letters::Weights::load(game_dir)?,
             palette: Palette::load(game_dir),
-            lexica: crate::lexica::Lexica::load(game_dir)?,
-            bestiary: super::bestiary::Bestiary::load(game_dir),
+            lexica: crate::lexica::Lexica::cached(game_dir)?,
+            bestiary: super::bestiary::Bestiary::cached(game_dir),
         })
     }
 }
@@ -154,8 +156,11 @@ impl View {
         };
         // The player can cast, so the search scores each word by its best option — see
         // `crate::spells`. Diggle's own plan leaves this `None`.
+        // The same in-memory copies the plan used, re-read only if the game was updated since.
+        let lexica = crate::lexica::Lexica::cached(&res.game_dir)?;
+        let bestiary = super::bestiary::Bestiary::cached(&res.game_dir);
         let mut book =
-            crate::spells::SpellBook::from_save(cs, &res.lexica, res.bestiary.undead(&plan.name));
+            crate::spells::SpellBook::from_save(cs, &lexica, bestiary.undead(&plan.name));
         book.always_cast = always_cast;
         book.choose = true;
         plan.mods.spells = Some(book.clone());
