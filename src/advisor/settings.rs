@@ -1,5 +1,5 @@
-//! The advisor window's own settings: its size, "Stay on top", the log box, and whether to stall on
-//! the halfling's free turns. Kept between
+//! The advisor window's own settings: its size, "Stay on top", the log box, whether to stall on
+//! the halfling's free turns, and whether to underline the tiles to click. Kept between
 //! launches in `%LOCALAPPDATA%\DiggleAdvisor\settings.toml` ([`path`]).
 //!
 //! Nothing here goes near the game's folders: the save folder is watched, and a write there would
@@ -23,6 +23,10 @@ pub struct Settings {
     /// "Stall on halfling's even turns": [`crate::turn::Options::stall_on_free_turns`]. On by
     /// default, so a file written before the box existed loads with it ticked.
     pub stall_on_free_turns: bool,
+    /// "Underline mouse tiles": a green bar under each tile the keyboard would not pick
+    /// ([`crate::advisor::annotate::Letter::click`]). On by default — my call, 2026-11-07, as
+    /// the user asked for the marks; the 🖱️ column shows either way.
+    pub underline_mouse_tiles: bool,
 }
 
 impl Default for Settings {
@@ -34,6 +38,7 @@ impl Default for Settings {
             log_open: false,
             log_height: 96,
             stall_on_free_turns: crate::turn::Options::default().stall_on_free_turns,
+            underline_mouse_tiles: true,
         }
     }
 }
@@ -93,6 +98,7 @@ mod tests {
         assert_eq!(Settings::load(&scratch("missing")), Settings::default());
         assert!(!Settings::default().log_open, "the log starts collapsed");
         assert!(Settings::default().stall_on_free_turns, "stalling starts ticked");
+        assert!(Settings::default().underline_mouse_tiles, "underlining starts ticked");
     }
 
     #[test]
@@ -105,6 +111,7 @@ mod tests {
             log_open: true,
             log_height: 150,
             stall_on_free_turns: false,
+            underline_mouse_tiles: false,
         };
         s.save(&file).unwrap();
         assert_eq!(Settings::load(&file), s, "an unticked stall box must stay unticked");

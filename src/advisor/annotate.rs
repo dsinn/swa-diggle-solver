@@ -33,6 +33,9 @@ pub struct Row {
     pub effect: String,
     /// Each letter as typed, with the board index of the tile it goes into.
     pub letters: Vec<Letter>,
+    /// Some tile of this word must be clicked: the keyboard would pick another
+    /// ([`crate::typist::Typist::clicks`]). The list marks the row 🖱️.
+    pub mouse: bool,
     /// The headings of the held spells this word would cast (`Fire`, `Four heal`).
     pub spells: Vec<String>,
     /// The rapier carries this word's damage past the enemy's armour — see
@@ -307,10 +310,12 @@ pub fn effect(
 
 /// Each letter as it is typed, against the board index of its tile. A wildcard shows the letter
 /// typed into it, upper-cased like every other tile (the typist reports it in lower case).
-pub fn letters_of(tiles: &[Tile], c: &Candidate) -> Vec<Letter> {
+/// `clicks` is [`crate::typist::Typist::clicks`] for the word, one entry per letter.
+pub fn letters_of(tiles: &[Tile], c: &Candidate, clicks: &[bool]) -> Vec<Letter> {
     c.typed
         .steps()
-        .map(|(i, wild)| {
+        .enumerate()
+        .map(|(n, (i, wild))| {
             let letter = match wild {
                 Some(ch) => ch.to_ascii_uppercase().to_string(),
                 None => tiles
@@ -321,7 +326,8 @@ pub fn letters_of(tiles: &[Tile], c: &Candidate) -> Vec<Letter> {
                     })
                     .unwrap_or_default(),
             };
-            Letter { text: letter, tile: i, wildcard: wild.is_some() }
+            let click = clicks.get(n).copied().unwrap_or(false);
+            Letter { text: letter, tile: i, wildcard: wild.is_some(), click }
         })
         .collect()
 }
@@ -334,6 +340,9 @@ pub struct Letter {
     pub tile: usize,
     /// Typed into a wildcard, which the game draws as handwriting.
     pub wildcard: bool,
+    /// The keyboard would pick another tile here, so this one is clicked — see
+    /// [`crate::typist::Typist::clicks`]. Underlined in green when the user asks for it.
+    pub click: bool,
 }
 
 /// The letter the game draws for a ligature tile, when that is a historical glyph.
@@ -434,10 +443,12 @@ pub fn rows(
             })
             .collect()
     };
+    let typist = crate::typist::Typist::new(&plan.tiles, &plan.geom);
     cands
         .iter()
         .take(cap)
-        .map(|c| Row {
+        .map(|c| (c, typist.clicks(&c.typed)))
+        .map(|(c, clicks)| Row {
             word: c.word.clone(),
             score: c.score - c.afflictions.total(),
             afflictions: c.afflictions,
@@ -455,7 +466,8 @@ pub fn rows(
             effect: effect(plan.goal, c.tier, c.score, c.reach, heals.need, c.afflictions.total())
                 .to_string(),
             pierces: c.pierces,
-            letters: letters_of(&plan.tiles, c),
+            letters: letters_of(&plan.tiles, c, &clicks),
+            mouse: clicks.iter().any(|&k| k),
             spells: spell_column(c.cast, spells.qualifying(&c.word, &tile_letters(c))),
         })
         .collect()
@@ -483,7 +495,7 @@ mod tests {
             pierces: false,
             tier,
             rank: None,
-            typed: Typed { tiles, wildcards: vec![None; n], corners_used: 0, adjacent: false },
+            typed: Typed { tiles, wildcards: vec![None; n], ..Typed::default() },
             cast: None,
             afflictions: Default::default(),
         }
@@ -720,7 +732,7 @@ mod tests {
             lig("QU", None),
         ];
         let c = cand("X", 1, Tier::Fallback, (0..tiles.len()).collect());
-        let shown: Vec<String> = letters_of(&tiles, &c).into_iter().map(|l| l.text).collect();
+        let shown: Vec<String> = letters_of(&tiles, &c, &[]).into_iter().map(|l| l.text).collect();
         assert_eq!(shown, ["Þ", "Ð", "Æ", "Œ", "ß", "ꙮ", "ING", "TH", "QU"]);
     }
 
@@ -801,10 +813,11 @@ mod tests {
         let tiles: Vec<Tile> = "C.T".chars().map(|c| Tile::plain(&c.to_string())).collect();
         let mut c = cand("CAT", 1, Tier::Fallback, vec![0, 1, 2]);
         c.typed.wildcards = vec![None, Some('a'), None];
-        let l = |text: &str, tile, wildcard| Letter { text: text.into(), tile, wildcard };
+        let l =
+            |text: &str, tile, wildcard, click| Letter { text: text.into(), tile, wildcard, click };
         assert_eq!(
-            letters_of(&tiles, &c),
-            vec![l("C", 0, false), l("A", 1, true), l("T", 2, false)],
+            letters_of(&tiles, &c, &[false, true, false]),
+            vec![l("C", 0, false, false), l("A", 1, true, true), l("T", 2, false, false)],
             "the wildcard is flagged, so it can be drawn as the game draws it"
         );
     }

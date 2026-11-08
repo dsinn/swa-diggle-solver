@@ -91,14 +91,18 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     ImageList_Create, InitCommonControlsEx, BST_CHECKED, CDDS_ITEMPREPAINT, CDDS_PREPAINT,
     CDDS_SUBITEM, CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYSUBITEMDRAW,
-    CDRF_SKIPDEFAULT, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, ILC_COLOR32,
+    CDRF_SKIPDEFAULT, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, ICC_TAB_CLASSES, ILC_COLOR32,
     INITCOMMONCONTROLSEX, LVCFMT_LEFT, LVCFMT_RIGHT, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW,
     LVIF_TEXT, LVIR_BOUNDS, LVM_GETSUBITEMRECT, LVM_INSERTCOLUMNW, LVM_SETEXTENDEDLISTVIEWSTYLE,
     LVM_SETIMAGELIST, LVM_SETITEMCOUNT, LVN_GETDISPINFOW, LVSIL_SMALL, LVS_EX_DOUBLEBUFFER,
     LVS_EX_FULLROWSELECT, LVS_NOSORTHEADER, LVS_OWNERDATA, LVS_REPORT, NMHDR, NMLVCUSTOMDRAW,
     NMLVDISPINFOW, NM_CUSTOMDRAW, WC_LISTVIEWW,
 };
-use windows::Win32::UI::Controls::{LVM_GETCOLUMNWIDTH, LVM_SETCOLUMNWIDTH};
+use windows::Win32::UI::Controls::{
+    ImageList_Destroy, HIMAGELIST, LVM_GETCOLUMNWIDTH, LVM_SETCOLUMNWIDTH, TOOLTIPS_CLASSW,
+    TTDT_AUTOPOP, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH,
+    TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetCursorPos, GetMessageW,
@@ -108,9 +112,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, HMENU, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST,
     IDC_ARROW, IDC_SIZENS, MINMAXINFO, MSG, SIZE_RESTORED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_COMMAND,
-    WM_CREATE, WM_DESTROY, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NOTIFY,
-    WM_SETCURSOR, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    WM_CREATE, WM_DESTROY, WM_GETFONT, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_NOTIFY, WM_SETCURSOR, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSW, WS_BORDER,
+    WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_TABSTOP,
+    WS_VISIBLE, WS_VSCROLL,
 };
 
 /// Posted to our own window when [`VIEW`] has changed. Never sent anywhere else.
@@ -118,6 +123,7 @@ const WM_VIEW: u32 = WM_APP + 1;
 const ID_TOPMOST: usize = 101;
 const ID_LOG: usize = 102;
 const ID_STALL: usize = 103;
+const ID_UNDERLINE: usize = 104;
 /// The timer that writes the settings once they have stopped changing.
 const ID_SAVE: usize = 1;
 const SAVE_DELAY_MS: u32 = 500;
@@ -160,6 +166,8 @@ struct Ui {
     topmost: HWND,
     log_toggle: HWND,
     stall: HWND,
+    /// "Underline mouse tiles". Its tooltip is owned by the main window and goes with it.
+    underline: HWND,
     list: HWND,
     banner: HWND,
     tile_font: HFONT,
@@ -221,8 +229,12 @@ fn save_now() {
 }
 
 /// Columns: header, width, right-aligned.
-const COLUMNS: [(&str, i32, bool); 7] = [
+///
+/// The second, unnamed, is the 🖱️ mark on a row with a tile to click — the user's design,
+/// 2026-11-07: a column of its own between the rank and the tiles, empty on most rows.
+const COLUMNS: [(&str, i32, bool); 8] = [
     ("#", 44, true),
+    ("", 30, false),
     ("Word", 470, false),
     ("Damage", 84, true),
     ("Bonus", 90, false),
@@ -230,12 +242,42 @@ const COLUMNS: [(&str, i32, bool); 7] = [
     ("Spell", 120, false),
     ("Effect", 190, false),
 ];
-const WORD_COLUMN: i32 = 1;
+const WORD_COLUMN: i32 = 2;
+const MOUSE_COLUMN: i32 = 1;
 /// Lettering on the word column's tiles, in pixels. Bigger than the rest of the list on purpose:
 /// the word is what the player reads.
 const TILE_TEXT: i32 = 26;
 /// Row height, to fit [`TILE_TEXT`] on a tile with a little margin.
 const ROW_HEIGHT: i32 = 36;
+/// "Underline mouse tiles": the green bar's gap under the tile, its height, and the margin below
+/// it. The rows grow by all three while the box is ticked — the user's call, 2026-11-07, for
+/// option A of the mockups with a margin under the bar.
+const UNDERLINE_GAP: i32 = 2;
+const UNDERLINE_BAR: i32 = 3;
+const UNDERLINE_MARGIN: i32 = 3;
+/// The bar's green: bright and a little yellow, clear of every tile face (the nearest, Turquoise
+/// Chrysocolla, is a blue-green). The user's choice of colour, 2026-11-07.
+const UNDERLINE: (u8, u8, u8) = (0, 192, 64);
+const UNDERLINE_TIP: &str = "Draws a green bar under each tile the keyboard would not pick.\nType the word in order and click the underlined tiles instead.";
+
+/// How tall the rows are, with or without the underline's room.
+fn row_height(underline: bool) -> i32 {
+    match underline {
+        true => ROW_HEIGHT + UNDERLINE_GAP + UNDERLINE_BAR + UNDERLINE_MARGIN,
+        false => ROW_HEIGHT,
+    }
+}
+
+/// Sets the list's row height. A ListView's rows are as tall as its small icons, so this swaps in
+/// an empty image list of that height; re-sending the font is what makes the list measure again.
+unsafe fn set_row_height(list: HWND, height: i32, font: WPARAM) {
+    let rows = ImageList_Create(1, height, ILC_COLOR32, 0, 0);
+    let old = SendMessageW(list, LVM_SETIMAGELIST, WPARAM(LVSIL_SMALL as usize), LPARAM(rows.0));
+    if old.0 != 0 {
+        let _ = ImageList_Destroy(HIMAGELIST(old.0));
+    }
+    SendMessageW(list, WM_SETFONT, font, LPARAM(1));
+}
 
 struct Args {
     game_dir: PathBuf,
@@ -416,7 +458,8 @@ fn main() -> windows::core::Result<()> {
     unsafe {
         let icc = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES,
+            // Tab classes register the tooltip, which the underline box carries.
+            dwICC: ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES | ICC_TAB_CLASSES,
         };
         let _ = InitCommonControlsEx(&icc);
         let instance = GetModuleHandleW(None)?;
@@ -509,10 +552,20 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
         ID_STALL,
     )?;
+    let underline = child(
+        hwnd,
+        w!("BUTTON"),
+        w!("Underline mouse tiles"),
+        BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
+        ID_UNDERLINE,
+    )?;
     let saved = settings_now();
-    for (h, on) in
-        [(topmost, saved.topmost), (log_toggle, saved.log_open), (stall, saved.stall_on_free_turns)]
-    {
+    for (h, on) in [
+        (topmost, saved.topmost),
+        (log_toggle, saved.log_open),
+        (stall, saved.stall_on_free_turns),
+        (underline, saved.underline_mouse_tiles),
+    ] {
         let check = if on { BST_CHECKED.0 } else { 0 };
         SendMessageW(h, BM_SETCHECK, WPARAM(check as usize), LPARAM(0));
     }
@@ -524,14 +577,14 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         0,
     )?;
     let banner = child(hwnd, w!("STATIC"), w!("Out of combat"), SS_CENTER | SS_CENTERIMAGE, 0)?;
-    for h in [status, notes, topmost, log_toggle, stall, list] {
+    for h in [status, notes, topmost, log_toggle, stall, underline, list] {
         SendMessageW(h, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
     }
     SendMessageW(banner, WM_SETFONT, WPARAM(banner_font.0 as usize), LPARAM(1));
     // A ListView's rows are as tall as its small icons. An empty one-pixel-wide image list is the
     // way to make rows tall enough for the tiles without enlarging every other column's text.
-    let rows = ImageList_Create(1, ROW_HEIGHT, ILC_COLOR32, 0, 0);
-    SendMessageW(list, LVM_SETIMAGELIST, WPARAM(LVSIL_SMALL as usize), LPARAM(rows.0));
+    set_row_height(list, row_height(saved.underline_mouse_tiles), WPARAM(font.0 as usize));
+    tooltip_for(hwnd, underline, UNDERLINE_TIP)?;
     SendMessageW(
         list,
         LVM_SETEXTENDEDLISTVIEWSTYLE,
@@ -555,6 +608,7 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         topmost,
         log_toggle,
         stall,
+        underline,
         list,
         banner,
         tile_font,
@@ -563,12 +617,68 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
     })
 }
 
+/// One cell's rectangle in the list's client coordinates.
+///
+/// `LVM_GETSUBITEMRECT` with `LVIR_BOUNDS` answers column 0 with the **whole row**, so its right
+/// edge is cut back to the column's own width. Without that, the `#` column's number, flush right,
+/// was drawn at the far right of the row and painted over by the Effect column.
+unsafe fn cell_rect(list: HWND, row: usize, sub: i32) -> RECT {
+    let mut rc = RECT { top: sub, left: LVIR_BOUNDS as i32, ..Default::default() };
+    SendMessageW(list, LVM_GETSUBITEMRECT, WPARAM(row), LPARAM(&mut rc as *mut _ as isize));
+    if sub == 0 {
+        let width = SendMessageW(list, LVM_GETCOLUMNWIDTH, WPARAM(0), LPARAM(0)).0 as i32;
+        rc.right = rc.left + width;
+    }
+    rc
+}
+
+/// A tooltip on `control`, shown while the mouse is over it — a checkbox's label is part of the
+/// checkbox, so this covers both.
+///
+/// The window has no manifest, so it gets comctl32 version 5, whose `TTTOOLINFOW` ends before
+/// `lpReserved`: that version refuses the full-size structure. `cbSize` is the shorter one, which
+/// version 6 accepts too.
+unsafe fn tooltip_for(owner: HWND, control: HWND, text: &str) -> windows::core::Result<HWND> {
+    let tip = CreateWindowExW(
+        WS_EX_TOPMOST,
+        TOOLTIPS_CLASSW,
+        None,
+        WS_POPUP | WINDOW_STYLE(TTS_ALWAYSTIP | TTS_NOPREFIX),
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        owner,
+        None,
+        GetModuleHandleW(None)?,
+        None,
+    )?;
+    // Kept for the tooltip's lifetime: it holds the pointer, not a copy. Leaked once per window.
+    let text: &'static mut [u16] = text.encode_utf16().chain([0]).collect::<Vec<_>>().leak();
+    let info = TTTOOLINFOW {
+        cbSize: (std::mem::size_of::<TTTOOLINFOW>() - std::mem::size_of::<*mut core::ffi::c_void>())
+            as u32,
+        uFlags: TTF_IDISHWND | TTF_SUBCLASS,
+        hwnd: owner,
+        uId: control.0 as usize,
+        lpszText: PWSTR(text.as_mut_ptr()),
+        ..Default::default()
+    };
+    SendMessageW(tip, TTM_ADDTOOLW, WPARAM(0), LPARAM(&info as *const _ as isize));
+    // Wide enough for each line of the text; the line break is the text's own.
+    SendMessageW(tip, TTM_SETMAXTIPWIDTH, WPARAM(0), LPARAM(480));
+    // Long enough to read two lines.
+    SendMessageW(tip, TTM_SETDELAYTIME, WPARAM(TTDT_AUTOPOP as usize), LPARAM(15_000));
+    Ok(tip)
+}
+
 const PAD: i32 = 8;
 /// The header row: the header text, and the three checkboxes on its right.
 const HEADER_HEIGHT: i32 = 40;
 const TOPMOST_WIDTH: i32 = 120;
 const LOG_TOGGLE_WIDTH: i32 = 100;
 const STALL_WIDTH: i32 = 230;
+const UNDERLINE_WIDTH: i32 = 180;
 /// The list keeps at least this much height however tall the log is dragged.
 const MIN_LIST_HEIGHT: i32 = 80;
 
@@ -599,9 +709,11 @@ unsafe fn layout(hwnd: HWND, ui: &Ui) {
     let _ = GetClientRect(hwnd, &mut rc);
     let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
     let s = settings_now();
-    let boxes = STALL_WIDTH + PAD + LOG_TOGGLE_WIDTH + PAD + TOPMOST_WIDTH;
+    let boxes = UNDERLINE_WIDTH + PAD + STALL_WIDTH + PAD + LOG_TOGGLE_WIDTH + PAD + TOPMOST_WIDTH;
     let _ = MoveWindow(ui.status, PAD, PAD, (w - 3 * PAD - boxes).max(0), HEADER_HEIGHT, true);
-    let _ = MoveWindow(ui.stall, w - PAD - boxes, PAD, STALL_WIDTH, 24, true);
+    let _ = MoveWindow(ui.underline, w - PAD - boxes, PAD, UNDERLINE_WIDTH, 24, true);
+    let stall_left = w - PAD - boxes + UNDERLINE_WIDTH + PAD;
+    let _ = MoveWindow(ui.stall, stall_left, PAD, STALL_WIDTH, 24, true);
     let log_left = w - PAD - TOPMOST_WIDTH - PAD - LOG_TOGGLE_WIDTH;
     let _ = MoveWindow(ui.log_toggle, log_left, PAD, LOG_TOGGLE_WIDTH, 24, true);
     let _ = MoveWindow(ui.topmost, w - PAD - TOPMOST_WIDTH, PAD, TOPMOST_WIDTH, 24, true);
@@ -671,9 +783,10 @@ fn faded((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
     (mix(r), mix(g), mix(b))
 }
 
-/// The columns whose text carries emoji, drawn by [`ColourText`]: Damage (the rapier's 🤺), Bonus,
-/// Gain (❤️ and 🛡️) and Spell.
-const EMOJI_COLUMNS: [i32; 4] = [2, 3, 4, 5];
+/// The columns drawn by [`ColourText`]: every one but the word. Most carry emoji — the 🖱️ mark,
+/// Damage (the rapier's 🤺), Bonus, Gain (❤️ and 🛡️) and Spell — and drawing the rest the same
+/// way keeps all the text level with the tiles when the rows grow for the underline.
+const EMOJI_COLUMNS: [i32; 7] = [0, 1, 3, 4, 5, 6, 7];
 
 /// Colour emoji, which GDI cannot draw: GDI renders a colour font's glyphs in one colour, so the
 /// list's own text would show 🔥 as a black outline. Direct2D's text drawing with
@@ -921,16 +1034,17 @@ fn cell_text(v: &View, item: usize, sub: i32) -> String {
     let Some(r) = v.rows.get(item) else { return String::new() };
     match sub {
         0 => (item + 1).to_string(),
-        1 => r.row.word.clone(),
+        MOUSE_COLUMN => if r.row.mouse { "🖱️" } else { "" }.to_string(),
+        WORD_COLUMN => r.row.word.clone(),
         // The fencer before the number, so the numbers stay lined up on the right.
-        2 => {
+        3 => {
             let fencer = if r.row.pierces { "🤺 " } else { "" };
             let after = diggle_solver::advisor::annotate::afflictions_text(r.row.afflictions);
             format!("{fencer}{}{after}", r.row.score)
         }
-        3 => r.row.bonus.as_ref().map(|b| b.to_string()).unwrap_or_default(),
-        4 => diggle_solver::advisor::annotate::gain_text(r.row.gain),
-        5 => r.row.spells.join(" "),
+        4 => r.row.bonus.as_ref().map(|b| b.to_string()).unwrap_or_default(),
+        5 => diggle_solver::advisor::annotate::gain_text(r.row.gain),
+        6 => r.row.spells.join(" "),
         _ => r.row.effect.to_string(),
     }
 }
@@ -991,8 +1105,9 @@ unsafe fn draw_word(ui: &Ui, cd: &NMLVCUSTOMDRAW) {
         (tm.tmInternalLeading + tm.tmAscent) / 2
     };
     let (tile_mid, wildcard_mid) = (caps_mid(ui.tile_font), caps_mid(ui.wildcard_font));
+    let underline = settings_now().underline_mouse_tiles;
     let mut x = rc.left + WORD_MARGIN;
-    for cell in &r.cells {
+    for (n, cell) in r.cells.iter().enumerate() {
         let (font, caps_mid) = match cell.wildcard {
             true => (ui.wildcard_font, wildcard_mid),
             false => (ui.tile_font, tile_mid),
@@ -1000,13 +1115,20 @@ unsafe fn draw_word(ui: &Ui, cd: &NMLVCUSTOMDRAW) {
         SelectObject(hdc, HGDIOBJ(font.0));
         let mut text: Vec<u16> = cell.letter.encode_utf16().collect();
         let width = tile_width(hdc, &text);
-        let mut tile = RECT { left: x, right: x + width, top: rc.top + 1, bottom: rc.bottom - 1 };
+        // The tile fills the row's first `ROW_HEIGHT` pixels; below is the underline's room.
+        let bottom = rc.bottom.min(rc.top + ROW_HEIGHT) - 1;
+        let mut tile = RECT { left: x, right: x + width, top: rc.top + 1, bottom };
         let shade = |c| if v.live { c } else { faded(c) };
         let colour = shade(cell.colour);
         // The game's own lettering colour for this material (see the palette), greyed with the
         // rest of a stale list.
         let ink = shade(cell.ink);
         fill(hdc, &tile, colour);
+        if underline && r.row.letters.get(n).is_some_and(|l| l.click) {
+            let top = tile.bottom + UNDERLINE_GAP;
+            let bar = RECT { top, bottom: top + UNDERLINE_BAR, ..tile };
+            fill(hdc, &bar, shade(UNDERLINE));
+        }
         // Fire is an outer ring of red; the lettering keeps the contrast of its tile.
         if cell.burning {
             frame(hdc, &tile, FIRE_RING, shade(FIRE));
@@ -1120,16 +1242,13 @@ unsafe fn notify(ui: &Ui, lparam: LPARAM) -> Option<LRESULT> {
                         let v = view().lock().unwrap();
                         (cell_text(&v, cd.nmcd.dwItemSpec, cd.iSubItem), v.live)
                     };
-                    let mut rc =
-                        RECT { top: cd.iSubItem, left: LVIR_BOUNDS as i32, ..Default::default() };
-                    SendMessageW(
-                        ui.list,
-                        LVM_GETSUBITEMRECT,
-                        WPARAM(cd.nmcd.dwItemSpec),
-                        LPARAM(&mut rc as *mut _ as isize),
-                    );
+                    let rc = cell_rect(ui.list, cd.nmcd.dwItemSpec, cd.iSubItem);
                     let right = COLUMNS.get(cd.iSubItem as usize).is_some_and(|c| c.2);
-                    colour.draw(cd.nmcd.hdc, &rc, &text, live, right);
+                    // The text sits in the band the tiles fill, not the whole row, so it stays
+                    // level with them when the row grows for the underline.
+                    FillRect(cd.nmcd.hdc, &rc, GetSysColorBrush(COLOR_WINDOW));
+                    let band = RECT { bottom: rc.bottom.min(rc.top + ROW_HEIGHT), ..rc };
+                    colour.draw(cd.nmcd.hdc, &band, &text, live, right);
                     return Some(LRESULT(CDRF_SKIPDEFAULT as isize));
                 }
                 let live = view().lock().unwrap().live;
@@ -1247,6 +1366,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             });
             update(hwnd, |s| s.stall_on_free_turns = on);
             tell_worker(options_of(&settings_now()));
+            LRESULT(0)
+        }
+        WM_COMMAND
+            if (wparam.0 & 0xffff) == ID_UNDERLINE && (wparam.0 >> 16) as u32 == BN_CLICKED =>
+        {
+            UI.with(|u| {
+                if let Some(ui) = u.borrow().as_ref() {
+                    let on = SendMessageW(ui.underline, BM_GETCHECK, WPARAM(0), LPARAM(0)).0
+                        == BST_CHECKED.0 as isize;
+                    update(hwnd, |s| s.underline_mouse_tiles = on);
+                    let font = SendMessageW(ui.list, WM_GETFONT, WPARAM(0), LPARAM(0));
+                    set_row_height(ui.list, row_height(on), WPARAM(font.0 as usize));
+                    let _ = InvalidateRect(ui.list, None, true);
+                }
+            });
             LRESULT(0)
         }
         WM_VIEW => {

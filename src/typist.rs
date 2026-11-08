@@ -112,6 +112,16 @@ struct Walk<'w> {
     seen: &'w mut std::collections::HashSet<Vec<(usize, String)>>,
 }
 
+/// The same entry: the same tile, holding the same letter.
+fn same_slot(a: Slot, b: Slot) -> bool {
+    match (a, b) {
+        (Slot::Real(x), Slot::Real(y)) => x == y,
+        (Slot::Wild(x, c), Slot::Wild(y, d)) => x == y && c == d,
+        (Slot::Ephemeral(c), Slot::Ephemeral(d)) => c == d,
+        _ => false,
+    }
+}
+
 /// One entry of the word being built. Mirrors `wordTiles`.
 #[derive(Clone, Copy)]
 enum Slot {
@@ -212,6 +222,72 @@ impl<'a> Typist<'a> {
             return None;
         }
         Some(Typed { tiles, wildcards, corners_used, adjacent })
+    }
+
+    /// Which of a placement's tiles must be **clicked**: `true` where typing the slot's letters, at
+    /// that point in the word, would not select that tile or one interchangeable with it.
+    ///
+    /// The user's request, 2026-11-07: mark the tiles the keyboard would not pick, so a word can be
+    /// typed with the odd tile clicked. Played in order, as the user would: each slot is first
+    /// tried on the keyboard with the game's own rules ([`Typist::step`], so corners first, then
+    /// column-major; ligature swaps; wildcards only after exact letters; the chaining curse's box),
+    /// and kept if the selection grew by exactly one tile that will do. Otherwise the attempt is
+    /// undone and the tile is clicked — which changes what the next keystroke picks, so the marks
+    /// depend on order and are worked out in it.
+    ///
+    /// "Will do" is [`Typist::placements`]'s notion of interchangeable: the same letter and
+    /// quality and the same corner standing, and under the curse only the tile itself, where
+    /// position is everything. A slot typed into a wildcard must also take the same letter.
+    pub fn clicks(&self, placement: &Typed) -> Vec<bool> {
+        let mut selected = vec![false; self.tiles.len()];
+        let mut built: Vec<Slot> = Vec::with_capacity(placement.tiles.len());
+        let mut last: Option<usize> = None;
+        let interchangeable = |a: usize, b: usize| {
+            a == b
+                || (!self.geometry.adjacency_required
+                    && self.tiles[a] == self.tiles[b]
+                    && self.geometry.is_corner(a) == self.geometry.is_corner(b))
+        };
+        let mut out = Vec::with_capacity(placement.tiles.len());
+        for (want, wild) in placement.steps() {
+            if want >= self.tiles.len() {
+                out.push(true);
+                continue;
+            }
+            let keys: Vec<u8> = match wild {
+                Some(c) => vec![c.to_ascii_uppercase() as u8],
+                None => self.letters[want].bytes().collect(),
+            };
+            let (mut s, mut b) = (selected.clone(), built.clone());
+            let typed = keys.iter().all(|&k| self.step(k, &mut s, &mut b, last).is_some())
+                && b.len() == built.len() + 1
+                && b[..built.len()].iter().zip(&built).all(|(x, y)| same_slot(*x, *y))
+                && match b[built.len()] {
+                    Slot::Real(i) => wild.is_none() && interchangeable(i, want),
+                    Slot::Wild(i, c) => {
+                        wild.is_some_and(|w| w.eq_ignore_ascii_case(&(c as char)))
+                            && interchangeable(i, want)
+                    }
+                    Slot::Ephemeral(_) => false,
+                };
+            if typed {
+                (selected, built) = (s, b);
+            } else {
+                self.select(
+                    want,
+                    wild.map(|c| c.to_ascii_uppercase() as u8),
+                    &mut selected,
+                    &mut built,
+                );
+            }
+            out.push(!typed);
+            if let Some(Slot::Real(i) | Slot::Wild(i, _)) = built.last() {
+                if self.geometry.adjacency_required {
+                    last = Some(*i);
+                }
+            }
+        }
+        out
     }
 
     /// Every way of **clicking** `word` with the segmentation typing found: [`Typist::type_word`]'s
@@ -1109,6 +1185,61 @@ mod tests {
         let both: Vec<Vec<usize>> =
             Typist::new(&t, &g).placements("BOB").into_iter().map(|p| p.tiles).collect();
         assert_eq!(both, [vec![0, 1, 2], vec![2, 1, 0]]);
+    }
+
+    /// What typing would pick needs no click; the other twin does, and once it is clicked the
+    /// keyboard picks up the rest — the B it skipped included.
+    #[test]
+    fn clicks_mark_only_the_tiles_the_keyboard_would_not_pick() {
+        let mut t = plain("BOB");
+        t[2].quality.material = Some("silvertoxin".into());
+        let g = strip(3);
+        let ty = Typist::new(&t, &g);
+        let all = ty.placements("BOB");
+        assert_eq!(ty.clicks(&all[0]), [false, false, false], "typed as it is");
+        assert_eq!(all[1].tiles, [2, 1, 0]);
+        assert_eq!(ty.clicks(&all[1]), [true, false, false], "click the toxin B, type the rest");
+    }
+
+    /// An identical twin is as good as the one asked for: typing takes it and needs no click.
+    #[test]
+    fn an_identical_twin_needs_no_click() {
+        let t = plain("BAA");
+        let g = strip(3);
+        let ty = Typist::new(&t, &g);
+        let other = Typed { tiles: vec![2], wildcards: vec![None], ..Typed::default() };
+        assert_eq!(ty.clicks(&other), [false], "tile 1 is the same plain A, neither a corner");
+        // Under the curse every tile is its own: the other A must be clicked.
+        let cursed = Geometry { adjacency_required: true, ..strip(3) };
+        assert_eq!(Typist::new(&t, &cursed).clicks(&other), [true]);
+    }
+
+    /// Typing H after T takes the TH tile instead; keeping the two tiles takes a click on the H.
+    #[test]
+    fn a_ligature_swap_is_a_click() {
+        let t = tiles_of(&["T", "H", "TH"]);
+        let g = strip(3);
+        let ty = Typist::new(&t, &g);
+        let apart = Typed { tiles: vec![0, 1], wildcards: vec![None, None], ..Typed::default() };
+        assert_eq!(ty.clicks(&apart), [false, true]);
+        let joined = ty.type_word("TH").unwrap();
+        assert_eq!(joined.tiles, [2]);
+        assert_eq!(ty.clicks(&joined), [false], "typed, the swap is what the keyboard does");
+    }
+
+    /// A wildcard the placement types into, where the keyboard would take a real letter, is a
+    /// click; with no real letter left, the keyboard takes the wildcard itself.
+    #[test]
+    fn a_wildcard_instead_of_a_letter_is_a_click() {
+        let mut t = tiles_of(&["A", "."]);
+        t[1].quality.material = Some("gemfire".into());
+        let g = strip(2);
+        let ty = Typist::new(&t, &g);
+        let wild = Typed { tiles: vec![1], wildcards: vec![Some('a')], ..Typed::default() };
+        assert_eq!(ty.clicks(&wild), [true]);
+        let only = tiles_of(&["B", "."]);
+        let ty = Typist::new(&only, &g);
+        assert_eq!(ty.clicks(&ty.type_word("A").unwrap()), [false]);
     }
 
     /// Twins — same letter, same quality, same corner standing — score alike wherever they go, so

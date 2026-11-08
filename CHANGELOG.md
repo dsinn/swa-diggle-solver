@@ -9,6 +9,10 @@ behaviour freely.
 
 ### Added
 
+- **Advisor marks the words that need the mouse.** A 🖱️ column flags any word with a tile the
+  keyboard would not pick, worked out with the game's own keyboard rules, in order
+  (`Typist::clicks`). With "Underline mouse tiles" ticked (the default; hover it for a tooltip),
+  each tile to click gets a green bar beneath it: type the word and click those.
 - **The word's tiles are chosen, not only its letters.** Where two tiles carry the same letter, the
   ranking tries each and keeps the better: a serrated, toxin, gem or braced tile where its position
   pays, the plain twin where it would do nothing (`typist::placements`). Diggle plays the tiles
