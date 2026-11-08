@@ -36,8 +36,9 @@ pub struct Row {
     /// Some tile of this word must be clicked: the keyboard would pick another
     /// ([`crate::typist::Typist::clicks`]). The list marks the row 🖱️.
     pub mouse: bool,
-    /// The headings of the held spells this word would cast (`Fire`, `Four heal`).
-    pub spells: Vec<String>,
+    /// The held spells this word would cast, each as the Spell column shows it, the cast first:
+    /// see [`spell_column`].
+    pub spells: Vec<Item>,
     /// The rapier carries this word's damage past the enemy's armour — see
     /// [`crate::search::Modifiers::pierces`].
     pub pierces: bool,
@@ -207,37 +208,140 @@ impl Heals {
 /// The infinitive is the emoji alone, no count: the user, 2026-11-04, *it's a binary question*.
 /// Each item has exactly one link from any suffix, so a word queues one infinitive or none.
 pub fn gain_text(g: crate::pick::Gains) -> String {
-    let mut parts = Vec::new();
+    join(&gain_items(g))
+}
+
+/// One thing a cell shows, and its tooltip: the user, 2026-11-07, *one tooltip per item gained, so
+/// a "+2 ⬜" would have a tooltip like "Queues 2 wildcard tiles"*. An empty `tip` has none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Item {
+    pub text: String,
+    pub tip: String,
+}
+
+impl Item {
+    fn new(text: impl Into<String>, tip: impl Into<String>) -> Self {
+        Item { text: text.into(), tip: tip.into() }
+    }
+}
+
+/// A cell's text: its items, a space apart.
+pub fn join(items: &[Item]) -> String {
+    items.iter().map(|i| i.text.as_str()).collect::<Vec<_>>().join(" ")
+}
+
+/// `n` and the noun, plural when `n` is not 1: `2 wildcard tiles`.
+fn count(n: i64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// The Gain column, item by item: [`gain_text`].
+pub fn gain_items(g: crate::pick::Gains) -> Vec<Item> {
+    let mut items = Vec::new();
     if g.health > 0 {
-        parts.push(format!("+{} ❤️", g.health));
+        items.push(Item::new(format!("+{} ❤️", g.health), format!("Restores {} health", g.health)));
     }
     if g.armour > 0 {
-        parts.push(format!("+{} 🛡️", g.armour));
+        items.push(Item::new(format!("+{} 🛡️", g.armour), format!("Gives {} armour", g.armour)));
     }
     if g.gems > 0 {
-        parts.push(format!("+{} 💎", g.gems));
+        items.push(Item::new(
+            format!("+{} 💎", g.gems),
+            format!("Queues {}", count(g.gems, "gem tile", "gem tiles")),
+        ));
     }
     if let (true, Some(from)) = (g.infinitives > 0, g.infinitives_from) {
-        parts.push(from.emoji().to_string());
+        let gear = match from {
+            crate::pick::InfinitiveSource::Gauntlet => "Infinitives gauntlet",
+            crate::pick::InfinitiveSource::Justice => "Scales of justice",
+        };
+        items.push(Item::new(from.emoji(), format!("Queues infinitive tiles ({gear})")));
     }
     if g.wildcards > 0 {
-        parts.push(format!("+{} ⬜", g.wildcards));
+        items.push(Item::new(
+            format!("+{} ⬜", g.wildcards),
+            format!("Queues {}", count(g.wildcards, "wildcard tile", "wildcard tiles")),
+        ));
     }
     // A count, not a sign: these leave the board, and `+2` beside a heal would read as more of them.
     if g.exclamations > 0 {
-        parts.push(format!("{}❗", g.exclamations));
+        let n = g.exclamations as i64;
+        items.push(Item::new(
+            format!("{n}❗"),
+            format!(
+                "Brings {} to the bottom row, where {} off",
+                count(n, "! tile", "! tiles"),
+                if n == 1 { "it falls" } else { "they fall" }
+            ),
+        ));
     }
-    parts.join(" ")
+    items
 }
 
 /// What follows the hit in the damage column: ` +3 🧪 +1 ❄️ +2 🔥`, each only when there is some,
 /// and empty when there is none.
 pub fn afflictions_text(a: crate::search::Afflictions) -> String {
-    [(a.toxin, "🧪"), (a.ice, "❄️"), (a.burn, "🔥")]
+    affliction_items(a).iter().map(|i| format!(" {}", i.text)).collect()
+}
+
+/// [`afflictions_text`], item by item.
+pub fn affliction_items(a: crate::search::Afflictions) -> Vec<Item> {
+    [(a.toxin, "🧪", "Toxin"), (a.ice, "❄️", "Ice"), (a.burn, "🔥", "Burn")]
         .iter()
-        .filter(|(n, _)| *n > 0)
-        .map(|(n, emoji)| format!(" +{n} {emoji}"))
+        .filter(|(n, ..)| *n > 0)
+        .map(|(n, emoji, what)| {
+            Item::new(
+                format!("+{n} {emoji}"),
+                format!("{what}: the enemy loses {n} more health at the start of its turn"),
+            )
+        })
         .collect()
+}
+
+/// The Damage column, item by item: the rapier's mark, the hit, then [`affliction_items`].
+pub fn damage_items(r: &Row) -> Vec<Item> {
+    let mut items = Vec::new();
+    if r.pierces {
+        items.push(Item::new(
+            "🤺",
+            "Starts and ends with the same letter: the rapier's hit ignores armour",
+        ));
+    }
+    items.push(Item::new(r.score.to_string(), ""));
+    items.extend(affliction_items(r.afflictions));
+    items
+}
+
+/// The Bonus column: the multiplier and its lexicons, one item.
+pub fn bonus_items(b: &Bonus) -> Vec<Item> {
+    let lexicons = match b.names.as_slice() {
+        [] => "these".to_string(),
+        [one] => one.to_lowercase(),
+        [rest @ .., last] => format!(
+            "{} and {}",
+            rest.iter().map(|n| n.to_lowercase()).collect::<Vec<_>>().join(", "),
+            last.to_lowercase()
+        ),
+    };
+    let tip = format!("This enemy takes x{:.2} damage from {lexicons} words", b.mult);
+    vec![Item::new(b.to_string(), tip)]
+}
+
+/// The 🖱️ column: the mark, and how many tiles to click.
+pub fn mouse_items(r: &Row) -> Vec<Item> {
+    if !r.mouse {
+        return Vec::new();
+    }
+    let n = r.letters.iter().filter(|l| l.click).count() as i64;
+    let tiles = if n == 1 {
+        "the underlined tile".to_string()
+    } else {
+        format!("the {n} underlined tiles")
+    };
+    let tip = format!(
+        "Needs the mouse: click {tiles}; the keyboard would pick another with the same letter"
+    );
+    vec![Item::new("🖱️", tip)]
 }
 
 /// The player's bleed, as a whole number of stacks, and never zero while any is present.
@@ -372,10 +476,19 @@ fn historical_glyph(ligature: &str) -> Option<&'static str> {
 /// whenever there is a choice, and the first entry here says which to press. A lone spell the
 /// game casts by itself (`alwaysCastSpell`) needs no instruction at all. Each is its emoji alone — the user's call, the emoji say which — and
 /// only a spell without one (UwU) is written out.
-pub fn spell_column(cast: Option<&'static str>, qualifying: Vec<&'static str>) -> Vec<String> {
+pub fn spell_column(cast: Option<&'static str>, qualifying: Vec<&'static str>) -> Vec<Item> {
     let mark = |heading: &str| spell_emoji(heading).unwrap_or(heading).to_string();
-    let mut out: Vec<String> = cast.map(mark).into_iter().collect();
-    out.extend(qualifying.into_iter().filter(|q| Some(*q) != cast).map(mark));
+    let also = if cast.is_some() { "Also qualifies for" } else { "Qualifies for" };
+    let mut out: Vec<Item> = cast
+        .map(|c| Item::new(mark(c), format!("Cast {c}: the damage shown assumes it")))
+        .into_iter()
+        .collect();
+    out.extend(
+        qualifying
+            .into_iter()
+            .filter(|q| Some(*q) != cast)
+            .map(|q| Item::new(mark(q), format!("{also} {q}"))),
+    );
     out
 }
 
@@ -736,15 +849,56 @@ mod tests {
         assert_eq!(shown, ["Þ", "Ð", "Æ", "Œ", "ß", "ꙮ", "ING", "TH", "QU"]);
     }
 
+    /// Every item in a cell has its own tooltip: the user, 2026-11-07, *one tooltip per item
+    /// gained*.
+    #[test]
+    fn each_gain_has_its_own_tooltip() {
+        let g = crate::pick::Gains {
+            health: 3,
+            armour: 4,
+            gems: 1,
+            wildcards: 2,
+            exclamations: 1,
+            infinitives: 1,
+            infinitives_from: Some(crate::pick::InfinitiveSource::Gauntlet),
+        };
+        let items = gain_items(g);
+        let pairs: Vec<(&str, &str)> =
+            items.iter().map(|i| (i.text.as_str(), i.tip.as_str())).collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("+3 ❤️", "Restores 3 health"),
+                ("+4 🛡️", "Gives 4 armour"),
+                ("+1 💎", "Queues 1 gem tile"),
+                ("🧤", "Queues infinitive tiles (Infinitives gauntlet)"),
+                ("+2 ⬜", "Queues 2 wildcard tiles"),
+                ("1❗", "Brings 1 ! tile to the bottom row, where it falls off"),
+            ]
+        );
+        assert_eq!(join(&items), gain_text(g), "the text is the items, a space apart");
+        let toxin = affliction_items(crate::search::Afflictions { toxin: 3, ..Default::default() });
+        assert_eq!(toxin[0].tip, "Toxin: the enemy loses 3 more health at the start of its turn");
+        let b = Bonus { mult: 1.4, names: vec!["Spider".into()] };
+        assert_eq!(bonus_items(&b)[0].tip, "This enemy takes x1.40 damage from spider words");
+    }
+
     /// The spell to cast leads, with its emoji; other qualifying spells follow; a spell sharing a
     /// dictionary shows that dictionary's emoji.
     #[test]
     fn the_spell_column_leads_with_the_cast_and_its_emoji() {
-        assert_eq!(spell_column(Some("Turn"), vec!["Turn", "Four heal"]), vec!["💀", "💚"]);
-        assert_eq!(spell_column(None, vec!["Fire"]), vec!["🔥"]);
+        let texts = |items: Vec<Item>| items.into_iter().map(|i| i.text).collect::<Vec<_>>();
+        assert_eq!(texts(spell_column(Some("Turn"), vec!["Turn", "Four heal"])), vec!["💀", "💚"]);
+        assert_eq!(texts(spell_column(None, vec!["Fire"])), vec!["🔥"]);
         assert!(spell_column(None, vec![]).is_empty());
-        assert_eq!(spell_column(None, vec!["UwU"]), vec!["UwU"], "UwU is its own label");
-        assert_eq!(spell_column(Some("Metal"), vec!["Metal"]), vec!["🤘"]);
+        assert_eq!(texts(spell_column(None, vec!["UwU"])), vec!["UwU"], "UwU is its own label");
+        assert_eq!(texts(spell_column(Some("Metal"), vec!["Metal"])), vec!["🤘"]);
+        let tips = |items: Vec<Item>| items.into_iter().map(|i| i.tip).collect::<Vec<_>>();
+        assert_eq!(
+            tips(spell_column(Some("Turn"), vec!["Turn", "Four heal"])),
+            vec!["Cast Turn: the damage shown assumes it", "Also qualifies for Four heal"]
+        );
+        assert_eq!(tips(spell_column(None, vec!["Fire"])), vec!["Qualifies for Fire"]);
         assert_eq!(lexicon_emoji("Slime"), Some("🍮"));
         assert_eq!(lexicon_emoji("Swears"), Some("❗"), "the profane book's own mark");
     }

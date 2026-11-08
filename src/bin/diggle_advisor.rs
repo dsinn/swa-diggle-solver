@@ -79,6 +79,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_RANGE,
     DWRITE_WORD_WRAPPING_NO_WRAP,
 };
+use windows::Win32::Graphics::DirectWrite::{IDWriteTextLayout, DWRITE_HIT_TEST_METRICS};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
     CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, FillRect, GetSysColorBrush,
@@ -103,7 +104,16 @@ use windows::Win32::UI::Controls::{
     TTDT_AUTOPOP, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH,
     TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Controls::{
+    LVHITTESTINFO, LVM_SUBITEMHITTEST, TOOLTIP_FLAGS, TTM_NEWTOOLRECTW, TTM_POP, TTM_RELAYEVENT,
+    TTM_UPDATETIPTEXTW, WM_MOUSELEAVE,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CallWindowProcW, SetWindowLongPtrW, GWLP_WNDPROC, WM_MOUSEFIRST, WM_MOUSELAST, WNDPROC,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetCursorPos, GetMessageW,
     GetWindowRect, KillTimer, LoadCursorW, MoveWindow, PostMessageW, PostQuitMessage,
@@ -169,6 +179,9 @@ struct Ui {
     /// "Underline mouse tiles". Its tooltip is owned by the main window and goes with it.
     underline: HWND,
     list: HWND,
+    /// The tooltip over the list's items: one tool, moved onto whichever item is under the mouse.
+    /// See [`hover`].
+    list_tip: HWND,
     banner: HWND,
     tile_font: HFONT,
     wildcard_font: HFONT,
@@ -585,6 +598,7 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
     // way to make rows tall enough for the tiles without enlarging every other column's text.
     set_row_height(list, row_height(saved.underline_mouse_tiles), WPARAM(font.0 as usize));
     tooltip_for(hwnd, underline, UNDERLINE_TIP)?;
+    let list_tip = item_tooltip(hwnd, list)?;
     SendMessageW(
         list,
         LVM_SETEXTENDEDLISTVIEWSTYLE,
@@ -610,11 +624,158 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         stall,
         underline,
         list,
+        list_tip,
         banner,
         tile_font,
         wildcard_font,
         colour_text: ColourText::new().ok(),
     })
+}
+
+/// The list's item tooltip: one tool on the list, with no area until [`hover`] gives it the
+/// item under the mouse, and the list subclassed so that [`hover`] sees the mouse first.
+///
+/// Relayed rather than `TTF_SUBCLASS`, so the tool is moved before the tooltip sees the move that
+/// moved it: it then hides as the mouse leaves one item, and shows after its usual delay on the
+/// next, as if each item were a control of its own.
+unsafe fn item_tooltip(owner: HWND, list: HWND) -> windows::core::Result<HWND> {
+    let tip = CreateWindowExW(
+        WS_EX_TOPMOST,
+        TOOLTIPS_CLASSW,
+        None,
+        WS_POPUP | WINDOW_STYLE(TTS_ALWAYSTIP | TTS_NOPREFIX),
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        owner,
+        None,
+        GetModuleHandleW(None)?,
+        None,
+    )?;
+    let mut empty = [0u16];
+    let info = tool_info(list, RECT::default(), PWSTR(empty.as_mut_ptr()));
+    SendMessageW(tip, TTM_ADDTOOLW, WPARAM(0), LPARAM(&info as *const _ as isize));
+    SendMessageW(tip, TTM_SETMAXTIPWIDTH, WPARAM(0), LPARAM(480));
+    let old = SetWindowLongPtrW(list, GWLP_WNDPROC, list_proc as *const () as isize);
+    LIST_PROC.store(old, std::sync::atomic::Ordering::Relaxed);
+    Ok(tip)
+}
+
+/// The one tool [`item_tooltip`] keeps on the list, at `rect` in the list's client coordinates.
+/// `cbSize` is version 5's, as in [`tooltip_for`].
+fn tool_info(list: HWND, rect: RECT, text: PWSTR) -> TTTOOLINFOW {
+    TTTOOLINFOW {
+        cbSize: (std::mem::size_of::<TTTOOLINFOW>() - std::mem::size_of::<*mut core::ffi::c_void>())
+            as u32,
+        uFlags: TOOLTIP_FLAGS(0),
+        hwnd: list,
+        uId: 1,
+        rect,
+        lpszText: text,
+        ..Default::default()
+    }
+}
+
+/// The list's own window procedure, which [`list_proc`] passes everything on to.
+static LIST_PROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+thread_local! {
+    /// The item the tooltip is on: row, column and item index. `None` when it is on nothing.
+    static HOVERED: std::cell::Cell<Option<(usize, i32, usize)>> = const { std::cell::Cell::new(None) };
+}
+
+unsafe extern "system" fn list_proc(
+    hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
+) -> LRESULT {
+    if (WM_MOUSEFIRST..=WM_MOUSELAST).contains(&msg) || msg == WM_MOUSELEAVE {
+        // `try_borrow`: the list is sent messages while the window procedure holds the UI.
+        UI.with(|u| {
+            if let Ok(ui) = u.try_borrow() {
+                if let Some(ui) = ui.as_ref() {
+                    hover(ui, msg, wparam, lparam);
+                }
+            }
+        });
+    }
+    let old: WNDPROC = std::mem::transmute(LIST_PROC.load(std::sync::atomic::Ordering::Relaxed));
+    CallWindowProcW(old, hwnd, msg, wparam, lparam)
+}
+
+/// Moves the item tooltip onto the item under the mouse, then hands the tooltip the mouse message.
+unsafe fn hover(ui: &Ui, msg: u32, wparam: WPARAM, lparam: LPARAM) {
+    let found = if msg == WM_MOUSELEAVE {
+        None
+    } else {
+        if msg == WM_MOUSEMOVE {
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: ui.list,
+                dwHoverTime: 0,
+            };
+            let _ = TrackMouseEvent(&mut track);
+        }
+        let x = (lparam.0 & 0xffff) as i16 as i32;
+        let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+        item_at(ui, x, y)
+    };
+    let key = found.as_ref().map(|f| f.0);
+    if key != HOVERED.with(|h| h.get()) {
+        HOVERED.with(|h| h.set(key));
+        let (rect, tip) = found.map(|f| (f.1, f.2)).unwrap_or_default();
+        let mut text: Vec<u16> = tip.encode_utf16().chain([0]).collect();
+        let info = tool_info(ui.list, rect, PWSTR(text.as_mut_ptr()));
+        SendMessageW(ui.list_tip, TTM_POP, WPARAM(0), LPARAM(0));
+        SendMessageW(ui.list_tip, TTM_NEWTOOLRECTW, WPARAM(0), LPARAM(&info as *const _ as isize));
+        SendMessageW(
+            ui.list_tip,
+            TTM_UPDATETIPTEXTW,
+            WPARAM(0),
+            LPARAM(&info as *const _ as isize),
+        );
+    }
+    if msg != WM_MOUSELEAVE {
+        let relay = MSG {
+            hwnd: ui.list,
+            message: msg,
+            wParam: wparam,
+            lParam: lparam,
+            ..Default::default()
+        };
+        SendMessageW(ui.list_tip, TTM_RELAYEVENT, WPARAM(0), LPARAM(&relay as *const _ as isize));
+    }
+}
+
+/// The item with a tooltip at `(x, y)` in the list: which it is, where it is drawn, and its tip.
+unsafe fn item_at(ui: &Ui, x: i32, y: i32) -> Option<((usize, i32, usize), RECT, String)> {
+    let colour = ui.colour_text.as_ref()?;
+    let mut hit =
+        LVHITTESTINFO { pt: windows::Win32::Foundation::POINT { x, y }, ..Default::default() };
+    let row =
+        SendMessageW(ui.list, LVM_SUBITEMHITTEST, WPARAM(0), LPARAM(&mut hit as *mut _ as isize)).0;
+    let sub = hit.iSubItem;
+    if row < 0 || !EMOJI_COLUMNS.contains(&sub) {
+        return None;
+    }
+    let items = cell_items(&view().lock().unwrap(), row as usize, sub);
+    let band = text_band(ui, row as usize, sub);
+    let right = COLUMNS.get(sub as usize).is_some_and(|c| c.2);
+    colour
+        .item_rects(&band, &items, right)
+        .into_iter()
+        .zip(items)
+        .enumerate()
+        .find(|(_, (rc, item))| {
+            !item.tip.is_empty() && x >= rc.left && x < rc.right && y >= rc.top && y < rc.bottom
+        })
+        .map(|(i, (rc, item))| ((row as usize, sub, i), rc, item.tip))
+}
+
+/// Where a ColourText cell's text is drawn: the band the tiles fill, at the top of the row.
+unsafe fn text_band(ui: &Ui, row: usize, sub: i32) -> RECT {
+    let rc = cell_rect(ui.list, row, sub);
+    RECT { bottom: rc.bottom.min(rc.top + ROW_HEIGHT), ..rc }
 }
 
 /// One cell's rectangle in the list's client coordinates.
@@ -976,6 +1137,68 @@ impl ColourText {
             .collect()
     }
 
+    /// The layout `draw` draws for `units` in a `w` by `h` cell, the item icons set in place of
+    /// their emoji once they have been made. Also what [`ColourText::item_rects`] measures, so a
+    /// tooltip's area is where the item is drawn.
+    unsafe fn layout(
+        &self, units: &[u16], w: f32, h: f32, right: bool,
+    ) -> Option<IDWriteTextLayout> {
+        let format = if right { &self.right } else { &self.format };
+        let layout = self.write.CreateTextLayout(units, format, (w - 12.0).max(0.0), h).ok()?;
+        if let Some(icons) = self.icons.borrow().as_ref() {
+            for (emoji, icon) in icons {
+                let mut at = 0;
+                while let Some(i) =
+                    units[at..].windows(emoji.len()).position(|run| run == &emoji[..])
+                {
+                    let range = DWRITE_TEXT_RANGE {
+                        startPosition: (at + i) as u32,
+                        length: emoji.len() as u32,
+                    };
+                    let _ = layout.SetInlineObject(icon, range);
+                    at += i + emoji.len();
+                }
+            }
+        }
+        Some(layout)
+    }
+
+    /// Where each of `items` is drawn when the cell is drawn into `rc`, in `rc`'s coordinates.
+    unsafe fn item_rects(
+        &self, rc: &RECT, items: &[diggle_solver::advisor::annotate::Item], right: bool,
+    ) -> Vec<RECT> {
+        let text = diggle_solver::advisor::annotate::join(items);
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let (w, h) = ((rc.right - rc.left) as f32, (rc.bottom - rc.top) as f32);
+        let Some(layout) = self.layout(&units, w, h, right) else { return Vec::new() };
+        let mut at = 0u32;
+        items
+            .iter()
+            .map(|item| {
+                let len = item.text.encode_utf16().count() as u32;
+                let mut metrics = [DWRITE_HIT_TEST_METRICS::default(); 4];
+                let mut n = 0u32;
+                let found =
+                    layout.HitTestTextRange(at, len, 0.0, 0.0, Some(&mut metrics), &mut n).is_ok()
+                        && n > 0;
+                at += len + 1;
+                if !found {
+                    return RECT::default();
+                }
+                let m = &metrics[..n.min(4) as usize];
+                let left = m.iter().map(|m| m.left).fold(f32::MAX, f32::min);
+                let right = m.iter().map(|m| m.left + m.width).fold(f32::MIN, f32::max);
+                // `draw` sets the layout 6 px in from the cell's left edge.
+                RECT {
+                    left: rc.left + 6 + left.floor() as i32,
+                    right: rc.left + 6 + right.ceil() as i32,
+                    top: rc.top,
+                    bottom: rc.bottom,
+                }
+            })
+            .collect()
+    }
+
     /// Draws `text` into `rc` of `hdc`, black, or greyed for a stale list; flush right when
     /// `right` is set.
     unsafe fn draw(
@@ -991,24 +1214,14 @@ impl ColourText {
         self.target.BeginDraw();
         self.target.Clear(Some(&colour(1.0, 1.0, 1.0, 1.0)));
         let units: Vec<u16> = text.encode_utf16().collect();
-        let format = if right { &self.right } else { &self.format };
         let ink = self.target.CreateSolidColorBrush(&colour(0.0, 0.0, 0.0, 1.0), None);
-        let layout = self.write.CreateTextLayout(&units, format, (w - 12.0).max(0.0), h);
-        if let (Ok(ink), Ok(layout)) = (ink, layout) {
+        {
+            // Made here, where the target is bound; [`ColourText::layout`] only uses them.
             let mut icons = self.icons.borrow_mut();
-            for (emoji, icon) in icons.get_or_insert_with(|| self.make_icons()).iter() {
-                let mut at = 0;
-                while let Some(i) =
-                    units[at..].windows(emoji.len()).position(|run| run == &emoji[..])
-                {
-                    let range = DWRITE_TEXT_RANGE {
-                        startPosition: (at + i) as u32,
-                        length: emoji.len() as u32,
-                    };
-                    let _ = layout.SetInlineObject(icon, range);
-                    at += i + emoji.len();
-                }
-            }
+            icons.get_or_insert_with(|| self.make_icons());
+        }
+        let layout = self.layout(&units, w, h, right);
+        if let (Ok(ink), Some(layout)) = (ink, layout) {
             self.target.DrawTextLayout(
                 D2D_POINT_2F { x: 6.0, y: 0.0 },
                 &layout,
@@ -1029,23 +1242,29 @@ impl ColourText {
     }
 }
 
-/// The text of one cell of the virtual list.
+/// The text of one cell of the virtual list: its items, a space apart.
 fn cell_text(v: &View, item: usize, sub: i32) -> String {
-    let Some(r) = v.rows.get(item) else { return String::new() };
     match sub {
-        0 => (item + 1).to_string(),
-        MOUSE_COLUMN => if r.row.mouse { "🖱️" } else { "" }.to_string(),
-        WORD_COLUMN => r.row.word.clone(),
+        WORD_COLUMN => v.rows.get(item).map(|r| r.row.word.clone()).unwrap_or_default(),
+        _ => diggle_solver::advisor::annotate::join(&cell_items(v, item, sub)),
+    }
+}
+
+/// One cell's items, each with its tooltip: see [`diggle_solver::advisor::annotate::Item`].
+fn cell_items(v: &View, item: usize, sub: i32) -> Vec<diggle_solver::advisor::annotate::Item> {
+    use diggle_solver::advisor::annotate as a;
+    let Some(r) = v.rows.get(item) else { return Vec::new() };
+    let plain = |text: String| vec![a::Item { text, tip: String::new() }];
+    match sub {
+        0 => plain((item + 1).to_string()),
+        MOUSE_COLUMN => a::mouse_items(&r.row),
+        WORD_COLUMN => plain(r.row.word.clone()),
         // The fencer before the number, so the numbers stay lined up on the right.
-        3 => {
-            let fencer = if r.row.pierces { "🤺 " } else { "" };
-            let after = diggle_solver::advisor::annotate::afflictions_text(r.row.afflictions);
-            format!("{fencer}{}{after}", r.row.score)
-        }
-        4 => r.row.bonus.as_ref().map(|b| b.to_string()).unwrap_or_default(),
-        5 => diggle_solver::advisor::annotate::gain_text(r.row.gain),
-        6 => r.row.spells.join(" "),
-        _ => r.row.effect.to_string(),
+        3 => a::damage_items(&r.row),
+        4 => r.row.bonus.as_ref().map(a::bonus_items).unwrap_or_default(),
+        5 => a::gain_items(r.row.gain),
+        6 => r.row.spells.clone(),
+        _ => plain(r.row.effect.to_string()),
     }
 }
 

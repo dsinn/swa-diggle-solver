@@ -461,7 +461,7 @@ mod tests {
         let mut cast = 0;
         for r in &v.rows {
             assert_eq!(
-                r.row.spells.iter().any(|s| s == "🔥"),
+                r.row.spells.iter().any(|s| s.text == "🔥"),
                 fire.contains(&r.row.word),
                 "{}",
                 r.row.word
@@ -518,7 +518,7 @@ mod tests {
         let (plain, cast) = (row(&plain).expect("spellable"), row(&cast).expect("spellable"));
         assert!(plain.row.score > 0);
         assert_eq!(cast.row.score, plain.row.score * 2);
-        assert_eq!(cast.row.spells.first().map(String::as_str), Some("💀"));
+        assert_eq!(cast.row.spells.first().map(|s| s.text.as_str()), Some("💀"));
         assert!(plain.row.spells.is_empty());
     }
 

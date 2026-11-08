@@ -13,6 +13,10 @@ behaviour freely.
   keyboard would not pick, worked out with the game's own keyboard rules, in order
   (`Typist::clicks`). With "Underline mouse tiles" ticked (the default; hover it for a tooltip),
   each tile to click gets a green bar beneath it: type the word and click those.
+- **Advisor explains each item in the table on hover.** Every emoji-bearing item has its own
+  tooltip: `+2 ⬜` says "Queues 2 wildcard tiles", `+3 🧪` the toxin the enemy loses before it
+  acts, `🤺` why the hit ignores armour, the Bonus column which lexicons the enemy is weak to, and
+  the Spell column which spell the damage assumes (`annotate::Item`).
 - **The word's tiles are chosen, not only its letters.** Where two tiles carry the same letter, the
   ranking tries each and keeps the better: a serrated, toxin, gem or braced tile where its position
   pays, the plain twin where it would do nothing (`typist::placements`). Diggle plays the tiles
