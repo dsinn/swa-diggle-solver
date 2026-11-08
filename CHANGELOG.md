@@ -47,6 +47,9 @@ behaviour freely.
 
 ### Changed
 
+- **A kill that brings a `!` to the bottom now outranks the wood-only and full-heal payouts**, as it
+  already outranked armour and health. A board where every plain word earned the Woodsman tunic's
+  4 armour listed the words that took the D out from under the `!` at #130; they are now first.
 - **Kept tiles rank gold first, then gems, then wildcards, all above infinitives.** Of two kills,
   the one that spends less gold wins; then the one that loses fewer gems, each gem counting one
   whatever its letter; then fewer wildcards. So `DENS` beats `AXES`, which spends the gold X for 🧤,

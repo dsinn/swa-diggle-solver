@@ -348,6 +348,21 @@ pub struct Rank {
     /// this ordering is weakest on: a single tile with one turn left burns out on its own, and four
     /// armour is the better take. Post-MVP, and see the task.
     pub fire_eaten: usize,
+    /// Hazard tiles (`!` and bombs, see [`is_hazard`]) this word drops all the way to the bottom
+    /// row, where a `!` falls off at the start of the next turn (`tileboard.lua:179`). Higher is
+    /// better. See [`hazards_cleared`].
+    ///
+    /// **Above [`Rank::gain`]**, the user's call, 2026-11-04, on a board where every top kill ended
+    /// on a braced E for 4 armour and the kills that brought the `!` down gave none. A `!` takes one
+    /// of the board's tiles out of play for as long as it stands, so getting rid of it is worth more
+    /// than one word's armour. Only reaching the bottom counts here; a partial fall is still the
+    /// board-hygiene term [`Rank::hazard_fall`], below everything that pays.
+    ///
+    /// **Above [`Rank::wood_only`] and [`Rank::heals_fully`] too**, the user's call, 2026-11-07, on
+    /// a board where every word under a gold-bordered D was wood only, so all of them earned the
+    /// Woodsman tunic's 4 armour and every word that took the D out from under the `!` ranked below
+    /// them: *the exclamation mark removal should be prioritized over armour gain*.
+    pub hazards_cleared: usize,
     /// Every tile used was wood, and the gear pays for that. Higher is better.
     pub wood_only: bool,
     /// This blow overkills deeply enough for the Well-Rested heal to close the whole deficit.
@@ -371,16 +386,6 @@ pub struct Rank {
     /// floor drops to plain lethal whenever the wood payout is live, and this field carries the heal
     /// into the comparison instead — see [`crate::search::Goal::killing_blow`].
     pub heals_fully: bool,
-    /// Hazard tiles (`!` and bombs, see [`is_hazard`]) this word drops all the way to the bottom
-    /// row, where a `!` falls off at the start of the next turn (`tileboard.lua:179`). Higher is
-    /// better. See [`hazards_cleared`].
-    ///
-    /// **Above [`Rank::gain`]**, the user's call, 2026-11-04, on a board where every top kill ended
-    /// on a braced E for 4 armour and the kills that brought the `!` down gave none. A `!` takes one
-    /// of the board's tiles out of play for as long as it stands, so getting rid of it is worth more
-    /// than one word's armour. Only reaching the bottom counts here; a partial fall is still the
-    /// board-hygiene term [`Rank::hazard_fall`], below everything that pays.
-    pub hazards_cleared: usize,
     /// Health and armour this word gives the player, as far as they would land: see [`gain`].
     /// Higher is better.
     ///
@@ -452,14 +457,14 @@ impl Rank {
         if self.fire_eaten != other.fire_eaten {
             return self.fire_eaten > other.fire_eaten;
         }
+        if self.hazards_cleared != other.hazards_cleared {
+            return self.hazards_cleared > other.hazards_cleared;
+        }
         if self.wood_only != other.wood_only {
             return self.wood_only;
         }
         if self.heals_fully != other.heals_fully {
             return self.heals_fully;
-        }
-        if self.hazards_cleared != other.hazards_cleared {
-            return self.hazards_cleared > other.hazards_cleared;
         }
         if self.gain != other.gain {
             return self.gain > other.gain;
@@ -1905,6 +1910,29 @@ mod tests {
         };
         assert!(r(1, 0).better_than(&r(0, 4)));
         assert!(r(1, 4).better_than(&r(1, 0)), "and the gain still breaks the tie");
+    }
+
+    /// The user's board, 2026-11-07: `FIR` is wood only and earns the Woodsman tunic's armour,
+    /// `DRIP` spends the gold-bordered D under the `!` and brings it down. The `!` wins, over the
+    /// wood payout and the full heal both.
+    #[test]
+    fn clearing_a_hazard_outranks_the_wood_and_heal_payouts() {
+        let r = |hazards_cleared: usize, wood_only: bool, heals_fully: bool| Rank {
+            fire_eaten: 0,
+            wood_only,
+            heals_fully,
+            hazards_cleared,
+            gain: 0,
+            infinitives: 0,
+            gems_net: 0.0,
+            gold_spent: 0.0,
+            wildcards_net: 0.0,
+            shed: 0,
+            hazard_fall: 0,
+            deviation: 0.0,
+        };
+        assert!(r(1, false, false).better_than(&r(0, true, true)));
+        assert!(r(1, true, false).better_than(&r(1, false, true)), "then wood, then the heal");
     }
 
     /// Below health and armour, and below hoarding: the user's `AXES` and `DENS`, 2026-11-07.
