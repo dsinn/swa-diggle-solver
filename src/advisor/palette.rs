@@ -72,9 +72,15 @@ fn brighten((r, g, b): (u8, u8, u8), by: f64) -> (u8, u8, u8) {
     (scale(r), scale(g), scale(b))
 }
 
-/// How far inlaid wood's gold lettering is lightened, once its sampled colour is spent on the
-/// ring. The user's call, 2026-11-02: ring in the gold, letters lighter than it.
+/// How far inlaid wood's gold lettering is lightened. The user's call, 2026-11-02, when its sampled
+/// gold also ringed the tile: ring in the gold, letters lighter than it. The ring is gone (see
+/// [`Palette::face`]); the lighter letters stay.
 const INLAID_INK_LIGHTEN: f64 = 0.5;
+
+/// A gold border's ring: pure gold, `#FFD700`. **The user's pick**, 2026-11-07, over the gold tile's
+/// sampled face, (222, 194, 113), a pale gold that was hard to tell from inlaid wood's own gold on
+/// its dark face. Fixed rather than sampled, as [`CHRYSOCOLLA`] is.
+pub const GOLD_BORDER: (u8, u8, u8) = (255, 215, 0);
 
 fn swatches_face(swatches: &HashMap<String, Swatch>, m: &str) -> Option<(u8, u8, u8)> {
     swatches.get(m).map(|s| s.face)
@@ -118,6 +124,7 @@ impl Palette {
                 let colour = swatches_face(&swatches, metal).or_else(|| {
                     opaque_median(&tiles.join(format!("overlays/border_rounded_{n}.png")))
                 })?;
+                let colour = if n == "gold" { GOLD_BORDER } else { colour };
                 Some((n, colour))
             })
             .collect();
@@ -138,8 +145,13 @@ impl Palette {
     ///
     /// Special means a variant, ringed in the list so it stands apart. Variants are named
     /// by suffix on their family (`categories.material` in `rpg/effects/material/*.lua`): `braced`
-    /// and `ornate` wood, `bleed` and `toxin` metals. Each keeps its own colours — braced and
-    /// inlaid wood look nothing like plain wood in the game, so they must not here either.
+    /// wood, `bleed` and `toxin` metals. Each keeps its own colours — braced and inlaid wood look
+    /// nothing like plain wood in the game, so they must not here either.
+    ///
+    /// **Inlaid (`ornate`) wood is not ringed**, the user's call, 2026-11-07: its ring, in its own
+    /// gold lettering colour, could not be told from a gold border's, and a bronze border's was all
+    /// but the same colour. Its dark face and light gold letters already set it apart, so a ring on
+    /// wood now means a metal border, or near-black for braced wood.
     pub fn face(&self, material: Option<&str>) -> Face {
         let swatch = material.and_then(|m| self.swatches.get(m)).copied();
         // **Gems are not ringed**, the user's call, 2026-11-07. The black ring once marked every
@@ -147,7 +159,7 @@ impl Palette {
         // all that told them apart; each gem now has a face no other tile has, so on them it said
         // nothing. A bleed or toxin metal still needs it: its face is all but its family's.
         let special = material.is_some_and(|m| {
-            ["braced", "ornate", "bleed", "toxin"]
+            ["braced", "bleed", "toxin"]
                 .iter()
                 .any(|suffix| m.strip_suffix(suffix).is_some_and(|f| !f.is_empty()))
         });
@@ -167,11 +179,11 @@ impl Palette {
                 Face { colour: face, ink: readable(face, s.ink), ring }
             }
             Some("gemice") => Face { colour: CHRYSOCOLLA, ink: readable(CHRYSOCOLLA, s.ink), ring },
-            // Inlaid wood's own gold goes to the ring, and its letters are lifted above it.
+            // Inlaid wood's gold letters, lifted. No ring: see above.
             Some("woodornate") => Face {
                 colour: s.face,
                 ink: readable(s.face, lighten(s.ink, INLAID_INK_LIGHTEN)),
-                ring: Some(s.ink),
+                ring,
             },
             _ => Face { colour: s.face, ink: readable(s.face, s.ink), ring },
         }
@@ -387,22 +399,22 @@ mod tests {
         assert_eq!(p.face(Some("silvertoxin")).ring, Some(SPECIAL), "a toxin metal still is");
     }
 
-    /// Inlaid wood is ringed in its own gold lettering colour, and its letters are lighter still.
+    /// Inlaid wood is not ringed, so a ring means a border; its letters are lighter than its gold.
     #[test]
-    fn inlaid_wood_is_ringed_in_its_ink_and_lettered_lighter() {
+    fn inlaid_wood_is_unringed_and_lettered_lighter() {
         let p = Palette::load(&game_dir());
         let f = p.face(Some("woodornate"));
         let sampled = p.swatches["woodornate"].ink;
-        assert_eq!(f.ring, Some(sampled));
-        assert!(luma(f.ink) > luma(sampled) + 20.0, "ink {:?} vs ring {sampled:?}", f.ink);
+        assert_eq!(f.ring, None);
+        assert!(luma(f.ink) > luma(sampled) + 20.0, "ink {:?} vs sampled {sampled:?}", f.ink);
     }
 
-    /// A metal border is ringed in its own colour, sampled from its overlay.
+    /// A metal border is ringed in its own colour; gold in pure gold, the user's pick.
     #[test]
     fn a_gold_border_is_ringed_gold() {
         let p = Palette::load(&game_dir());
-        let (r, g, b) = p.border(Some("gold")).expect("gold border sampled");
-        assert!(r > 180 && r > g && g > b, "gold should be bright warm yellow: {:?}", (r, g, b));
+        assert_eq!(p.border(Some("gold")), Some(GOLD_BORDER));
+        assert_ne!(p.border(Some("bronze")), None, "the others are still sampled");
         assert_ne!(p.border(Some("silver")), p.border(Some("gold")));
         assert_eq!(p.border(None), None);
     }
@@ -411,10 +423,11 @@ mod tests {
     #[test]
     fn variants_are_marked_special() {
         let p = Palette::load(&game_dir());
-        for m in ["woodbraced", "woodornate", "bronzebleed", "silvertoxin"] {
+        for m in ["woodbraced", "bronzebleed", "silvertoxin"] {
             assert!(p.face(Some(m)).ring.is_some(), "{m}");
         }
-        for m in ["wood", "bronze", "silver3", "gold", "gemfire", "gemice", "gemheal"] {
+        for m in ["wood", "woodornate", "bronze", "silver3", "gold", "gemfire", "gemice", "gemheal"]
+        {
             assert!(p.face(Some(m)).ring.is_none(), "{m}");
         }
     }

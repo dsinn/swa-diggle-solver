@@ -1133,9 +1133,8 @@ unsafe fn draw_word(ui: &Ui, cd: &NMLVCUSTOMDRAW) {
         if cell.burning {
             frame(hdc, &tile, FIRE_RING, shade(FIRE));
         }
-        // A special tile — braced, inlaid, serrated, gem, bordered — is ringed in its own colour
-        // (a metal border's, inlaid wood's gold, else near-black), at the tile's edge or just
-        // inside the fire ring.
+        // A bordered tile is ringed in its metal's colour, and braced wood or a bleed or toxin
+        // metal in near-black (see the palette), at the tile's edge or just inside the fire ring.
         if let Some(ring) = cell.ring {
             let inner = if cell.burning { inset(&tile, FIRE_RING) } else { tile };
             frame(hdc, &inner, SPECIAL_RING, shade(ring));

@@ -56,7 +56,8 @@ behaviour freely.
   written yet, so until it is Diggle can land short where a spell scored higher.
 - Advisor draws Corundum a clear red, Chrysocolla Turquoise and Diamond a very light blue, all
   with dark lettering and without the black ring, which now marks only braced wood and the bleed
-  and toxin metals.
+  and toxin metals. Inlaid wood is no longer ringed, so a ring on wood always means a metal
+  border, and a gold border is drawn in pure gold: the two were hard to tell apart.
 - **Advisor shows the game's own gauntlet and scales.** The Gain column draws the Infinitives
   gauntlet's and the Scales of justice's item art in place of 🧤 and ⚖️, sized like the emoji
   beside them. The two icons are built into the Advisor, so it needs no game checkout to show
