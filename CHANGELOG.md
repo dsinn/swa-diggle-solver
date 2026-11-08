@@ -16,7 +16,9 @@ behaviour freely.
 - **Advisor explains each item in the table on hover.** Every emoji-bearing item has its own
   tooltip: `+2 ⬜` says "Queues 2 wildcard tiles", `+3 🧪` the toxin the enemy loses before it
   acts, `🤺` why the hit ignores armour, the Bonus column which lexicons the enemy is weak to, and
-  the Spell column which spell the damage assumes (`annotate::Item`).
+  the Spell column which spell the damage assumes (`annotate::Item`). A suffix word's 🧤 or ⚖️
+  says what the suffix queues, "Ends in -ING: queues the -ED tiles (Infinitives gauntlet)"
+  (`Infinitives::effect`).
 - **The word's tiles are chosen, not only its letters.** Where two tiles carry the same letter, the
   ranking tries each and keeps the better: a serrated, toxin, gem or braced tile where its position
   pays, the plain twin where it would do nothing (`typist::placements`). Diggle plays the tiles
@@ -57,6 +59,12 @@ behaviour freely.
 
 ### Changed
 
+- **Tile upgrades and queued infinitives are the last two gains ranked**, above only the
+  board-tidiness tiebreakers: tiles kept, then upgrades, then infinitives. Upgrades count from any
+  gear that upgrades or gilds tiles on submit: the Scales of justice and the ER/EST scales on
+  suffix words, the Gilding bastard sword on seven-letter words. The Gain column shows them as
+  `+1 ⬆️`, with a tooltip saying which. Queued infinitives count from every suffix link, so the
+  Ostrich feather, Heart of gold and the lesser scales now count too (🔁).
 - **A kill that brings a `!` to the bottom now outranks the wood-only and full-heal payouts**, as it
   already outranked armour and health. A board where every plain word earned the Woodsman tunic's
   4 armour listed the words that took the D out from under the `!` at #130; they are now first.

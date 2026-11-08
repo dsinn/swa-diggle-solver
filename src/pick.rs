@@ -67,7 +67,10 @@ pub struct Preferences {
     pub wildcards_per_run: i64,
 }
 
-/// The gear that turns a suffixed word into new tiles, and which of its links are live.
+/// The gear that turns a submitted word into new or better tiles: the suffix links that queue
+/// infinitives, and the flags that upgrade tiles.
+///
+/// ## Queuing
 ///
 /// Each link is an `onSubmitSuffix<FROM>to<TO>` flag. Submitting a word whose suffix is `FROM`
 /// queues `TO` onto the board (`utils/effects.lua:126-140`): one in five times as a single tile,
@@ -75,31 +78,69 @@ pub struct Preferences {
 /// the word need not kill. The suffix is `cacheSuffix`'s, the longest registered one strictly
 /// shorter than the word (`utils/effects.lua:106-118`), which is [`crate::gear::table::SUFFIXES_LONGEST_FIRST`].
 ///
-/// Two items, the user's pick, 2026-11-04, each with its own emoji:
+/// The game has eight links ([`LINKS`], `rpg/effects/modifiers/onSubmitSuffix*.lua`), and every one
+/// is read from `gearFlags`, whichever item grants it — the user, 2026-11-07, *any queuing links*:
 ///
 /// ```text
 ///   Infinitives gauntlet  suffixGauntlet*  🧤  ING>ED ED>ES ES>LY LY>ING
 ///   Scales of justice     scalesOfJustice  ⚖️  ED>ES ES>LY LY>ING ING>ER ER>EST EST>ED
+///   the ER/EST gear       (below)          🔁  ER>EST and EST>ER, by item
 /// ```
 ///
-/// (`items/infinitives.lua:214-260,271-348`, `items/scalesofjustice.lua:25-114`.) The gauntlet's
-/// partial forms (`suffixGauntlet01111` and the rest) carry only some links, and a link can be
-/// switched off by an `…Inactive` status until a shrine wakes it — but the game leaves inactive
-/// flags out of `gearFlags` (`rpgview.lua:2458`), so reading the flags is enough for both.
+/// (`items/infinitives.lua:214-260,271-348`, `items/scalesofjustice.lua:25-114`,
+/// `items/erestgear.lua`: Ostrich feather, Heart of gold, and the Unbalanced, Imbalanced and
+/// truth scales.) The item decides only the mark and the name the Advisor shows. A link can be
+/// switched off by an `…Inactive` status until a shrine wakes it, but the game leaves inactive flags
+/// out of `gearFlags` (`rpgview.lua:2458`), so reading the flags is enough.
 ///
-/// The other ER/EST gear (Ostrich feather, Heart of gold, the lesser scales,
-/// `items/erestgear.lua`) has links of the same kind and is not counted: not asked for.
+/// ## Upgrading
+///
+/// On submit, a word ending in a flag's suffix upgrades that many random tiles one material stage,
+/// and gilds as many more as could not be upgraded (`wordboard.lua:664-684`): `submitSuffixUpgrade`
+/// on -ED -ES -LY -ING, `submitERESTupgrade` on -ER and -EST, `submitERupgrade` and
+/// `submitESTupgrade` on one each. A seven-letter word gilds `submit7gild` tiles, the Gilding
+/// bastard sword's (`wordboard.lua:655-663`, `items/lengthgear.lua`). See [`Infinitives::with_upgrades`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Infinitives {
-    /// Live links, as bits over the source's [`InfinitiveSource::links`].
+    /// Live links, as bits over [`LINKS`].
     live: u8,
+    /// The item the links come from, for the Advisor's mark: see [`InfinitiveSource`].
     pub source: Option<InfinitiveSource>,
+    /// Tiles upgraded by a word ending -ED, -ES, -LY or -ING, by one ending -ER, and by one ending
+    /// -EST.
+    upgrades: [i64; 3],
+    /// Tiles a seven-letter word gilds (`submit7gild`).
+    gild7: i64,
 }
+
+/// Every suffix link the game has, `(FROM, TO)`: one modifier file each.
+pub const LINKS: [(&str, &str); 8] = [
+    ("ING", "ED"),
+    ("ED", "ES"),
+    ("ES", "LY"),
+    ("LY", "ING"),
+    ("ING", "ER"),
+    ("ER", "EST"),
+    ("EST", "ED"),
+    ("EST", "ER"),
+];
+
+/// The ER/EST gear's keys (`items/erestgear.lua`).
+const ER_EST_GEAR: [&str; 6] = [
+    "ostrichFeather",
+    "heartOfGold",
+    "balancingScales",
+    "imbalancedScalesER",
+    "imbalancedScalesEST",
+    "scalesOfBalance",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfinitiveSource {
     Gauntlet,
     Justice,
+    /// The ER/EST gear: Ostrich feather, Heart of gold, the lesser scales.
+    Comparative,
 }
 
 impl InfinitiveSource {
@@ -107,23 +148,16 @@ impl InfinitiveSource {
         match self {
             InfinitiveSource::Gauntlet => "🧤",
             InfinitiveSource::Justice => "⚖️",
+            InfinitiveSource::Comparative => "🔁",
         }
     }
 
-    /// The item's links, `(FROM, TO)`.
-    pub fn links(self) -> &'static [(&'static str, &'static str)] {
+    /// What the Advisor calls it.
+    pub fn name(self) -> &'static str {
         match self {
-            InfinitiveSource::Gauntlet => {
-                &[("ING", "ED"), ("ED", "ES"), ("ES", "LY"), ("LY", "ING")]
-            }
-            InfinitiveSource::Justice => &[
-                ("ED", "ES"),
-                ("ES", "LY"),
-                ("LY", "ING"),
-                ("ING", "ER"),
-                ("ER", "EST"),
-                ("EST", "ED"),
-            ],
+            InfinitiveSource::Gauntlet => "Infinitives gauntlet",
+            InfinitiveSource::Justice => "Scales of justice",
+            InfinitiveSource::Comparative => "ER/EST gear",
         }
     }
 }
@@ -136,38 +170,89 @@ impl Infinitives {
     ) -> Self {
         let gear: Vec<&str> = gear.into_iter().collect();
         let source = if gear.contains(&"scalesOfJustice") {
-            InfinitiveSource::Justice
+            Some(InfinitiveSource::Justice)
         } else if gear.iter().any(|g| g.starts_with("suffixGauntlet")) {
-            InfinitiveSource::Gauntlet
+            Some(InfinitiveSource::Gauntlet)
+        } else if gear.iter().any(|g| ER_EST_GEAR.contains(g)) {
+            Some(InfinitiveSource::Comparative)
         } else {
-            return Infinitives::default();
+            None
         };
-        let live = source
-            .links()
+        let live = LINKS
             .iter()
             .enumerate()
             .filter(|(_, (from, to))| has_flag(&format!("onSubmitSuffix{from}to{to}")))
             .fold(0u8, |bits, (i, _)| bits | 1 << i);
-        Infinitives { live, source: Some(source) }
+        Infinitives { live, source, ..Infinitives::default() }
+    }
+
+    /// The tile upgrades a word earns, from each flag's value (`flag`, 0 when not held): see
+    /// **Upgrading** above.
+    pub fn with_upgrades(self, flag: impl Fn(&str) -> i64) -> Self {
+        let both = flag("submitERESTupgrade");
+        Infinitives {
+            upgrades: [
+                flag("submitSuffixUpgrade"),
+                both + flag("submitERupgrade"),
+                both + flag("submitESTupgrade"),
+            ],
+            gild7: flag("submit7gild"),
+            ..self
+        }
     }
 
     /// How many infinitives submitting `word` queues: one per live link from its suffix.
     pub fn created(&self, word: &str) -> i64 {
-        let Some(source) = self.source else { return 0 };
+        self.effect(word).map_or(0, |e| e.queues.iter().flatten().count() as i64)
+    }
+
+    /// How many tiles submitting `word` upgrades or gilds.
+    pub fn upgraded(&self, word: &str) -> i64 {
+        self.effect(word).map_or(0, |e| e.upgrades + e.gilds)
+    }
+
+    /// What submitting `word` does with this gear: the suffixes it queues, and the tiles it
+    /// upgrades and gilds. `None` when it does none of them.
+    pub fn effect(&self, word: &str) -> Option<TileEffect> {
         let word = word.to_ascii_uppercase();
-        let Some(suffix) = crate::gear::table::SUFFIXES_LONGEST_FIRST
+        let suffix = crate::gear::table::SUFFIXES_LONGEST_FIRST
             .iter()
             .find(|s| word.len() > s.len() && word.ends_with(*s))
-        else {
-            return 0;
-        };
-        source
-            .links()
+            .copied();
+        let mut queues = [None; 2];
+        let targets = LINKS
             .iter()
             .enumerate()
-            .filter(|(i, (from, _))| self.live & (1 << i) != 0 && from == suffix)
-            .count() as i64
+            .filter(|(i, (from, _))| self.live & (1 << i) != 0 && Some(*from) == suffix)
+            .map(|(_, (_, to))| *to);
+        for (slot, to) in queues.iter_mut().zip(targets) {
+            *slot = Some(to);
+        }
+        let upgrades = match suffix {
+            Some("ER") => self.upgrades[1],
+            Some("EST") => self.upgrades[2],
+            Some(_) => self.upgrades[0],
+            None => 0,
+        };
+        // `word:len() == 7` (`wordboard.lua:655`): the word's letters, which a ligature tile
+        // carries several of.
+        let gilds = if word.len() == 7 { self.gild7 } else { 0 };
+        let effect = TileEffect { suffix, queues, upgrades, gilds };
+        (queues[0].is_some() || upgrades > 0 || gilds > 0).then_some(effect)
     }
+}
+
+/// What submitting a word does with the tile gear — see [`Infinitives::effect`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TileEffect {
+    /// The word's suffix, `ING`, if it has one.
+    pub suffix: Option<&'static str>,
+    /// The suffixes whose tiles it queues, `ED`: one per live link from [`TileEffect::suffix`].
+    pub queues: [Option<&'static str>; 2],
+    /// Random tiles its suffix upgrades one material stage, or gilds where none can go higher.
+    pub upgrades: i64,
+    /// Random tiles it gilds for being seven letters long.
+    pub gilds: i64,
 }
 
 /// How much a word's armour and healing can actually give, this turn.
@@ -441,11 +526,20 @@ pub struct Rank {
     /// A wildcard's material is `wood0` (`rpg/effects/material/default.lua:4`), which `wood_only`
     /// accepts, so a wood-only kill can still be spending one.
     pub wildcards_net: f64,
-    /// Infinitive tile sets this word queues from the Infinitives gauntlet or the Scales of
-    /// justice: see [`Infinitives`]. Higher is better.
+    /// Tiles this word upgrades a material stage or gilds, from any gear that does it on submit:
+    /// see [`Infinitives::upgraded`]. Higher is better.
     ///
-    /// Below health and armour, the user's call, 2026-11-04; below every tile kept or queued,
-    /// 2026-11-07.
+    /// **Second-lowest of what a word gives**, the user's call, 2026-11-07: *tile upgrades (not
+    /// just -er and -est; any gear that upgrade tiles) should be the second-lowest priority*. Above
+    /// the board-tidiness terms, which the user chose over putting it truly last, where deviation,
+    /// which almost never ties, would leave it nothing to decide.
+    pub upgrades: i64,
+    /// Infinitive tile sets this word queues, from any suffix link: see [`Infinitives`]. Higher is
+    /// better.
+    ///
+    /// Below health and armour, the user's call, 2026-11-04; below every tile kept or queued and
+    /// below the upgrades, 2026-11-07: *any queuing links get added as the least priority
+    /// tiebreaker*. The lowest of what a word gives, above the board-tidiness terms only.
     pub infinitives: i64,
     /// Ligature tiles this word gets **rid** of. Higher is better. See [`shed`].
     ///
@@ -496,6 +590,9 @@ impl Rank {
         }
         if self.wildcards_net != other.wildcards_net {
             return self.wildcards_net > other.wildcards_net;
+        }
+        if self.upgrades != other.upgrades {
+            return self.upgrades > other.upgrades;
         }
         if self.infinitives != other.infinitives {
             return self.infinitives > other.infinitives;
@@ -549,6 +646,9 @@ pub struct Gains {
     /// advisor, which has the word; [`gains`] leaves it empty.
     pub infinitives: i64,
     pub infinitives_from: Option<InfinitiveSource>,
+    /// What the word does with the tile gear — queues, upgrades, gilds — for the Advisor: see
+    /// [`Infinitives::effect`]. Filled by the advisor; [`gains`] leaves it empty.
+    pub tiles: Option<TileEffect>,
     /// Wildcards queued: see [`wildcards_queued`]. Filled by the advisor, which has the word;
     /// [`gains`] leaves it at zero.
     pub wildcards: i64,
@@ -1141,6 +1241,7 @@ pub fn rank(
         gold_spent: ledger.gold_spent,
         gems_net: ledger.gems_net(),
         wildcards_net: ledger.wildcards_net(),
+        upgrades: prefs.infinitives.upgraded(word),
         infinitives: prefs.infinitives.created(word),
         shed: shed(tiles, consumed),
         hazard_fall: hazard_fall(tiles, geometry, consumed, scorer),
@@ -1288,6 +1389,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: 0.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
@@ -1380,6 +1482,7 @@ mod tests {
             gold_spent: gold,
             gems_net: gems,
             wildcards_net: wildcards,
+            upgrades: 0,
             infinitives,
             shed: 0,
             hazard_fall: 0,
@@ -1451,6 +1554,7 @@ mod tests {
             infinitives,
             gold_spent: 0.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 0,
             deviation: 0.0,
@@ -1541,6 +1645,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: hoarded,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
@@ -1578,6 +1683,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: hoarded,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
@@ -1624,6 +1730,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: 0.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
@@ -1639,6 +1746,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: 40.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
@@ -1658,6 +1766,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: 40.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
@@ -1676,6 +1785,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: 10.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
@@ -1691,6 +1801,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: 11.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
@@ -1720,6 +1831,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: hoarded,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed,
             hazard_fall: 0,
             hazards_cleared: 0,
@@ -1922,16 +2034,91 @@ mod tests {
         assert_eq!(g.created("BIGGEST"), 0, "EST is the suffix, and the gauntlet has no EST link");
         assert_eq!(g.created("CAT"), 0);
 
-        // The scales take over from the gauntlet, and carry the ER/EST links.
-        let all = |f: &str| f.starts_with("onSubmitSuffix");
-        let j = Infinitives::from_gear(["scalesOfJustice"], all);
+        // The scales' own six links: ING goes to ER, not the gauntlet's ED.
+        let six = [
+            "onSubmitSuffixEDtoES",
+            "onSubmitSuffixEStoLY",
+            "onSubmitSuffixLYtoING",
+            "onSubmitSuffixINGtoER",
+            "onSubmitSuffixERtoEST",
+            "onSubmitSuffixESTtoED",
+        ];
+        let j = Infinitives::from_gear(["scalesOfJustice"], |f| six.contains(&f));
         assert_eq!(j.source, Some(InfinitiveSource::Justice));
         assert_eq!(j.created("BIGGEST"), 1);
         assert_eq!(j.created("ROASTED"), 1);
-        assert_eq!(j.created("SINGING"), 1, "ING>ER, not the gauntlet's ING>ED");
+        assert_eq!(j.effect("SINGING").unwrap().queues, [Some("ER"), None]);
 
-        // Flags without the item are some other gear's, and are not counted.
-        assert_eq!(Infinitives::from_gear(["scalesOfBalance"], all).created("BIGGEST"), 0);
+        // Any queuing link counts, whichever item grants it — the user, 2026-11-07. The Scales of
+        // truth carry ER>EST and EST>ER.
+        let truth = ["onSubmitSuffixERtoEST", "onSubmitSuffixESTtoER"];
+        let t = Infinitives::from_gear(["scalesOfBalance"], |f| truth.contains(&f));
+        assert_eq!(t.source, Some(InfinitiveSource::Comparative));
+        assert_eq!(t.created("BIGGEST"), 1);
+        assert_eq!(t.effect("BIGGER").unwrap().queues, [Some("EST"), None]);
+        assert_eq!(t.created("ROASTED"), 0);
+    }
+
+    /// What a word does with the tile gear: the Scales queue the next suffix and upgrade a tile on
+    /// each suffix word, -ER and -EST through their own flag; the lesser ER/EST scales only
+    /// upgrade; the Gilding bastard sword gilds on seven letters.
+    #[test]
+    fn a_word_queues_upgrades_and_gilds() {
+        let six = |f: &str| {
+            ["EDtoES", "EStoLY", "LYtoING", "INGtoER", "ERtoEST", "ESTtoED"]
+                .iter()
+                .any(|l| f == format!("onSubmitSuffix{l}"))
+        };
+        let flags = |f: &str| match f {
+            "submitSuffixUpgrade" | "submitERESTupgrade" => 1,
+            _ => 0,
+        };
+        let j = Infinitives::from_gear(["scalesOfJustice"], six).with_upgrades(flags);
+        let e = |w: &str| j.effect(w).unwrap();
+        assert_eq!((e("RUNNING").suffix, e("RUNNING").queues), (Some("ING"), [Some("ER"), None]));
+        assert_eq!((e("BIGGER").queues, e("BIGGER").upgrades), ([Some("EST"), None], 1));
+        assert_eq!((e("BIGGEST").queues, e("BIGGEST").upgrades), ([Some("ED"), None], 1));
+        assert_eq!(j.upgraded("JUMPED"), 1);
+        assert_eq!(j.effect("CAT"), None, "no suffix");
+        let lesser = Infinitives::default().with_upgrades(|f| (f == "submitERESTupgrade") as i64);
+        assert_eq!(
+            lesser.effect("BIGGER").map(|e| (e.queues, e.upgrades)),
+            Some(([None, None], 1))
+        );
+        assert_eq!(lesser.effect("JUMPED"), None, "-ED is not theirs");
+        assert_eq!(lesser.created("BIGGER"), 0, "upgrading is not queuing");
+        let sword = Infinitives::default().with_upgrades(|f| 2 * (f == "submit7gild") as i64);
+        assert_eq!(sword.upgraded("PLAYING"), 2, "seven letters");
+        assert_eq!(sword.upgraded("PLAYS"), 0);
+        assert_eq!(
+            sword.effect("PLAYING").map(|e| (e.suffix, e.upgrades, e.gilds)),
+            Some((Some("ING"), 0, 2))
+        );
+    }
+
+    /// Upgrades rank just above the queued infinitives, both above the board-tidiness terms and
+    /// below every tile kept: the user's order, 2026-11-07.
+    #[test]
+    fn upgrades_then_queues_are_the_last_gains() {
+        let r = |wildcards_net: f64, upgrades: i64, infinitives: i64, shed: usize| Rank {
+            fire_eaten: 0,
+            halves_attack: false,
+            wood_only: false,
+            heals_fully: false,
+            hazards_cleared: 0,
+            gain: 0,
+            gold_spent: 0.0,
+            gems_net: 0.0,
+            wildcards_net,
+            upgrades,
+            infinitives,
+            shed,
+            hazard_fall: 0,
+            deviation: 0.0,
+        };
+        assert!(r(0.0, 0, 0, 0).better_than(&r(-1.0, 1, 1, 0)), "a wildcard kept first");
+        assert!(r(0.0, 1, 0, 0).better_than(&r(0.0, 0, 1, 0)), "an upgrade over a queue");
+        assert!(r(0.0, 0, 1, 0).better_than(&r(0.0, 0, 0, 1)), "a queue over tidiness");
     }
 
     /// The live board, cut to one column: `A D ! P` bottom to top. Only removing both tiles under
@@ -1963,6 +2150,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: 0.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 0,
             deviation: 0.0,
@@ -1987,6 +2175,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: 0.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 0,
             deviation: 0.0,
@@ -2009,6 +2198,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: hoarded,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 0,
             deviation: 0.0,
@@ -2029,6 +2219,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: 0.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
@@ -2044,6 +2235,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: 0.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 5,
             hazards_cleared: 0,
@@ -2061,6 +2253,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: 0.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 2,
             hazards_cleared: 0,
@@ -2076,6 +2269,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: 0.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 1,
             hazards_cleared: 0,
@@ -2093,6 +2287,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: 0.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 1,
             hazards_cleared: 0,
@@ -2108,6 +2303,7 @@ mod tests {
             gems_net: 0.0,
             gold_spent: 0.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             shed: 0,
             hazard_fall: 1,
             hazards_cleared: 0,

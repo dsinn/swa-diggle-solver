@@ -4074,6 +4074,7 @@ mod ranked_tests {
             gold_spent: 0.0,
             gems_net: 0.0,
             wildcards_net: 0.0,
+            upgrades: 0,
             infinitives: 0,
             shed: 0,
             hazard_fall: 0,

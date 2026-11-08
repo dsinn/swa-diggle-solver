@@ -180,6 +180,7 @@ impl Heals {
             armour: armour.min(self.armour_room.max(0)),
             infinitives: self.infinitives.created(&c.word),
             infinitives_from: self.infinitives.source,
+            tiles: self.infinitives.effect(&c.word),
             wildcards: crate::pick::wildcards_queued(
                 &c.word,
                 tiles,
@@ -250,18 +251,19 @@ pub fn gain_items(g: crate::pick::Gains) -> Vec<Item> {
             format!("Queues {}", count(g.gems, "gem tile", "gem tiles")),
         ));
     }
-    if let (true, Some(from)) = (g.infinitives > 0, g.infinitives_from) {
-        let gear = match from {
-            crate::pick::InfinitiveSource::Gauntlet => "Infinitives gauntlet",
-            crate::pick::InfinitiveSource::Justice => "Scales of justice",
-        };
-        items.push(Item::new(from.emoji(), format!("Queues infinitive tiles ({gear})")));
-    }
     if g.wildcards > 0 {
         items.push(Item::new(
             format!("+{} ⬜", g.wildcards),
             format!("Queues {}", count(g.wildcards, "wildcard tile", "wildcard tiles")),
         ));
+    }
+    // Upgrades, then the queued infinitives: the order they rank in.
+    if let Some(e) = g.tiles.filter(|e| e.upgrades + e.gilds > 0) {
+        items.push(Item::new(format!("+{} ⬆️", e.upgrades + e.gilds), upgrade_tip(e)));
+    }
+    if g.infinitives > 0 {
+        let emoji = g.infinitives_from.map_or("🔁", |f| f.emoji());
+        items.push(Item::new(emoji, queue_tip(g)));
     }
     // A count, not a sign: these leave the board, and `+2` beside a heal would read as more of them.
     if g.exclamations > 0 {
@@ -276,6 +278,39 @@ pub fn gain_items(g: crate::pick::Gains) -> Vec<Item> {
         ));
     }
     items
+}
+
+/// The queued infinitives' tooltip: the suffix, what it queues, and the gear. The user,
+/// 2026-11-07: *the tooltip should be more specific about what happens*.
+fn queue_tip(g: crate::pick::Gains) -> String {
+    let gear = g.infinitives_from.map(|f| format!(" ({})", f.name())).unwrap_or_default();
+    let queued: Vec<String> =
+        g.tiles.iter().flat_map(|e| e.queues.iter().flatten()).map(|s| format!("-{s}")).collect();
+    match (g.tiles.and_then(|e| e.suffix), queued.is_empty()) {
+        (Some(suffix), false) => {
+            format!("Ends in -{suffix}: queues the {} tiles{gear}", queued.join(" and "))
+        }
+        _ => format!("Queues infinitive tiles{gear}"),
+    }
+}
+
+/// The upgrades' tooltip: the suffix's upgrades, then a seven-letter word's gilding.
+fn upgrade_tip(e: crate::pick::TileEffect) -> String {
+    let mut parts = Vec::new();
+    if let (Some(suffix), true) = (e.suffix, e.upgrades > 0) {
+        parts.push(format!(
+            "Ends in -{suffix}: upgrades {} one material stage, gilding instead where none can go \
+             higher",
+            count(e.upgrades, "random tile", "random tiles")
+        ));
+    }
+    if e.gilds > 0 {
+        parts.push(format!(
+            "Seven letters: gilds {}",
+            count(e.gilds, "random tile", "random tiles")
+        ));
+    }
+    parts.join("\n")
 }
 
 /// What follows the hit in the damage column: ` +3 🧪 +1 ❄️ +2 🔥`, each only when there is some,
@@ -793,9 +828,13 @@ mod tests {
         assert_eq!(gain_text(bang(2)), "+4 🛡️ 2❗");
         assert_eq!(gain_text(bang(0)), "+4 🛡️", "none cleared, none shown");
         let wild = |n| crate::pick::Gains { wildcards: n, ..inf(1, Gauntlet) };
-        assert_eq!(gain_text(wild(2)), "+3 ❤️ 🧤 +2 ⬜", "after the infinitive, as ranked");
+        assert_eq!(gain_text(wild(2)), "+3 ❤️ +2 ⬜ 🧤", "before the infinitive, as ranked");
         let gem = |n| crate::pick::Gains { gems: n, ..wild(2) };
-        assert_eq!(gain_text(gem(1)), "+3 ❤️ +1 💎 🧤 +2 ⬜", "before the infinitive, as ranked");
+        assert_eq!(
+            gain_text(gem(1)),
+            "+3 ❤️ +1 💎 +2 ⬜ 🧤",
+            "gems, wildcards, then it, as ranked"
+        );
         assert_eq!(gain_text(wild(0)), "+3 ❤️ 🧤", "none queued, none shown");
     }
 
@@ -861,6 +900,12 @@ mod tests {
             exclamations: 1,
             infinitives: 1,
             infinitives_from: Some(crate::pick::InfinitiveSource::Gauntlet),
+            tiles: Some(crate::pick::TileEffect {
+                suffix: Some("ING"),
+                queues: [Some("ED"), None],
+                upgrades: 0,
+                gilds: 0,
+            }),
         };
         let items = gain_items(g);
         let pairs: Vec<(&str, &str)> =
@@ -871,12 +916,50 @@ mod tests {
                 ("+3 ❤️", "Restores 3 health"),
                 ("+4 🛡️", "Gives 4 armour"),
                 ("+1 💎", "Queues 1 gem tile"),
-                ("🧤", "Queues infinitive tiles (Infinitives gauntlet)"),
                 ("+2 ⬜", "Queues 2 wildcard tiles"),
+                ("🧤", "Ends in -ING: queues the -ED tiles (Infinitives gauntlet)"),
                 ("1❗", "Brings 1 ! tile to the bottom row, where it falls off"),
             ]
         );
         assert_eq!(join(&items), gain_text(g), "the text is the items, a space apart");
+        let scales = crate::pick::Gains {
+            infinitives_from: Some(crate::pick::InfinitiveSource::Justice),
+            tiles: Some(crate::pick::TileEffect {
+                suffix: Some("ER"),
+                queues: [Some("EST"), None],
+                upgrades: 1,
+                gilds: 0,
+            }),
+            ..g
+        };
+        let tips: Vec<(String, String)> =
+            gain_items(scales).into_iter().map(|i| (i.text, i.tip)).collect();
+        let tip = |text: &str| tips.iter().find(|(t, _)| t == text).map(|(_, tip)| tip.clone());
+        assert_eq!(
+            tip("⚖️").as_deref(),
+            Some("Ends in -ER: queues the -EST tiles (Scales of justice)")
+        );
+        assert_eq!(
+            tip("+1 ⬆️").as_deref(),
+            Some(
+                "Ends in -ER: upgrades 1 random tile one material stage, gilding instead where \
+                 none can go higher"
+            )
+        );
+        let texts: Vec<&str> = tips.iter().map(|(t, _)| t.as_str()).collect();
+        let at = |t: &str| texts.iter().position(|x| *x == t).unwrap();
+        assert!(at("+2 ⬜") < at("+1 ⬆️") && at("+1 ⬆️") < at("⚖️"), "in ranking order: {texts:?}");
+        let sword = crate::pick::Gains {
+            infinitives: 0,
+            tiles: Some(crate::pick::TileEffect { gilds: 2, ..Default::default() }),
+            ..crate::pick::Gains::default()
+        };
+        let items = gain_items(sword);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            (items[0].text.as_str(), items[0].tip.as_str()),
+            ("+2 ⬆️", "Seven letters: gilds 2 random tiles")
+        );
         let toxin = affliction_items(crate::search::Afflictions { toxin: 3, ..Default::default() });
         assert_eq!(toxin[0].tip, "Toxin: the enemy loses 3 more health at the start of its turn");
         let b = Bonus { mult: 1.4, names: vec!["Spider".into()] };

@@ -197,14 +197,20 @@ pub fn plan(
             .unwrap_or(0),
     })
     // The gauntlet's and the scales' infinitive tiles — see `pick::Infinitives`.
-    .with_infinitives(crate::pick::Infinitives::from_gear(
-        cs.get("gear")
-            .and_then(|v| v.as_table())
-            .into_iter()
-            .flat_map(|t| t.arr.iter())
-            .filter_map(|v| v.as_str()),
-        |f| cs.path(&format!("rpg.player.gearFlags.{f}")).is_some(),
-    ))
+    .with_infinitives(
+        crate::pick::Infinitives::from_gear(
+            cs.get("gear")
+                .and_then(|v| v.as_table())
+                .into_iter()
+                .flat_map(|t| t.arr.iter())
+                .filter_map(|v| v.as_str()),
+            |f| cs.path(&format!("rpg.player.gearFlags.{f}")).is_some(),
+        )
+        .with_upgrades(|f| {
+            cs.path(&format!("rpg.player.gearFlags.{f}")).and_then(|v| v.as_f64()).unwrap_or(0.0)
+                as i64
+        }),
+    )
     // The bassanello's wildcards per run of repeated letters — see `pick::wildcards_queued`.
     .with_wildcards_per_run(
         cs.path("rpg.player.gearFlags.onSubmitWoodQueueWoodornateWildcardPerRun")
