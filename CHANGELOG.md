@@ -26,11 +26,10 @@ behaviour freely.
   walrus (an ice word, a Chrysocolla) and the unicorn (a letter four times, a Diamond), staves and
   trinkets alike, rank a word that queues a gem above the infinitives. The Gain column shows it,
   `+1 💎` (`pick::GemQueue`).
-- The Bookkeepers bassanello's wildcards count in the ranking, as the lowest of the tile gains,
-  below the infinitives.
-- Both are counted **net of what the word spends**, each against its own kind: a word that uses up
-  two Corundums to queue one, or two wildcards to queue one, is ranked as having lost one
-  (`pick::TileLedger`).
+- The Bookkeepers bassanello's wildcards count in the ranking.
+- Both are counted **net of what the word spends**, each against its own kind and one tile each: a
+  word that uses up two Corundums to queue one, or two wildcards to queue one, is ranked as having
+  lost one (`pick::TileLedger`).
 - Advisor's Gain column shows the `!` marks a word clears (`2❗`) and the bassanello's wildcards
   (`+2 ⬜`).
 - Advisor's Spell column leads with the spell its damage assumes, the one to pick when the game
@@ -48,10 +47,12 @@ behaviour freely.
 
 ### Changed
 
-- **Gems are kept.** A Corundum or Chrysocolla, and a Diamond while at full health, is spent only
-  when a plainer word would not do the job; between equal placements the plain twin is shown. Of
-  two kills, the one that loses fewer gems ranks first, above an infinitive (gold still ranks
-  below one).
+- **Kept tiles rank gold first, then gems, then wildcards, all above infinitives.** Of two kills,
+  the one that spends less gold wins; then the one that loses fewer gems, each gem counting one
+  whatever its letter; then fewer wildcards. So `DENS` beats `AXES`, which spends the gold X for 🧤,
+  and `TOWKAY` (a Diamond Y) beats `NOXA` (a Corundum N and the gold X). A Corundum or Chrysocolla,
+  and a Diamond while at full health, is spent only when a plainer word would not do the job;
+  between equal placements the plain twin is shown.
 - Diggle is scored as casting the best spell, as the Advisor's user is. Pressing the button is not
   written yet, so until it is Diggle can land short where a spell scored higher.
 - Advisor draws Corundum a clear red, Chrysocolla Turquoise and Diamond a very light blue, all

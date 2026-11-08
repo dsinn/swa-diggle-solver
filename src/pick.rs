@@ -390,40 +390,46 @@ pub struct Rank {
     /// burns (see [`Rank::fire_eaten`]), and below the wood-only and full-heal payouts, which the
     /// dev ordered and which already stand for gain of their own.
     pub gain: i64,
-    /// The worth of the gems this word queues ([`GemQueue`]) less the worth of the gems it spends
-    /// ([`gems_spent`]). **Signed**; higher is better. See [`TileLedger`].
+    /// The gold this word spends, each tile at its own worth ([`Scorer::tile_score`]): **lower** is
+    /// better. See [`hoarded`] for why at worth: a `Q` is a bigger reserve than a `Z`.
+    ///
+    /// **The first of the tile terms**, the user's call, 2026-11-07: *default to gold being the
+    /// highest priority*. Below health and armour, which the player is given outright.
+    pub gold_spent: f64,
+    /// The gems this word queues ([`GemQueue`]) less the gems it spends ([`gems_spent`]), one each.
+    /// **Signed**; higher is better. See [`TileLedger`].
     ///
     /// **Above the infinitives**, the user's call, 2026-11-07, and net because *if the inputs
     /// require more tiles that we want to save than it outputs, that's bad*. A word that spends two
     /// Corundums to queue one scores one gem's loss here, and with no gem gear worn every gem spent
     /// is a loss here too, so two kills differing in gems are told apart before the infinitives.
     pub gems_net: f64,
+    /// The wildcards this word queues from the Bookkeepers bassanello ([`wildcards_queued`]) less
+    /// the wildcards it spends, one each. **Signed**; higher is better. See [`TileLedger`].
+    ///
+    /// **One signed figure, like the gems**, the user's call, 2026-11-07: *the bassanello's
+    /// wildcard queued should be factored into the wildcard spent step, similar to the net gem
+    /// gain*. That replaced two terms: wildcards spent (hoarding) and wildcards queued, the lowest
+    /// tile gain, below the infinitives.
+    ///
+    /// **Above the infinitives**: the user's call the same day, on a board where `AXES` spent the
+    /// gold X for an infinitive and outranked `DENS`, which spent nothing — *infinitives should no
+    /// longer rank above hoarding*.
+    ///
+    /// Note this and `wood_only` do **not** subsume each other, though it looks as if they might.
+    /// A wildcard's material is `wood0` (`rpg/effects/material/default.lua:4`), which `wood_only`
+    /// accepts, so a wood-only kill can still be spending one.
+    pub wildcards_net: f64,
     /// Infinitive tile sets this word queues from the Infinitives gauntlet or the Scales of
     /// justice: see [`Infinitives`]. Higher is better.
     ///
-    /// Below health and armour, the user's call, 2026-11-04, and below the gems, 2026-11-07.
+    /// Below health and armour, the user's call, 2026-11-04; below every tile kept or queued,
+    /// 2026-11-07.
     pub infinitives: i64,
-    /// Wildcards this word queues from the Bookkeepers bassanello ([`wildcards_queued`]), net of
-    /// the gold and wildcards it spends, floored at zero. Higher is better. See [`TileLedger`].
-    ///
-    /// **The lowest of the tile gains**, the user's call, 2026-11-07, which moved it below the
-    /// infinitives where it had sat above them since 2026-11-06. Net for the same reason as the
-    /// gems: a wood-only word spends wildcards too (their material is `wood0`), and one that spends
-    /// two to queue one has lost a wildcard, not gained one.
-    pub wildcards: f64,
-    /// What this word spends from the board's stock of tiles worth keeping. **Lower** is better.
-    ///
-    /// See [`hoarded`]. Ranked below `wood_only`, which is a payout the gear actually pays, and above
-    /// both hygiene terms: a kill is a kill, so of two words that both end the fight, the one that
-    /// does not burn the board's biggest hitter is the better trade.
-    ///
-    /// Note the two do **not** subsume each other, though it looks as if they might. A wildcard's
-    /// material is `wood0` (`rpg/effects/material/default.lua:4`), which `wood_only` accepts, so a
-    /// wood-only kill can still be spending one.
-    pub hoarded: f64,
     /// Ligature tiles this word gets **rid** of. Higher is better. See [`shed`].
     ///
-    /// The mirror image of [`Rank::hoarded`], and ranked directly below it on the dev's call,
+    /// The mirror image of the kept tiles ([`Rank::gold_spent`] and on), and ranked below them on
+    /// the dev's call,
     /// 2026-08-17: *ranking the ash usage underneath hoarding works.* Gold is damage held in
     /// reserve and an ash is a tile that clogs the board, so the two want opposite treatment — but
     /// the reserve is worth more than the tidying, and a word must never burn a `Q` to take out the
@@ -458,17 +464,17 @@ impl Rank {
         if self.gain != other.gain {
             return self.gain > other.gain;
         }
+        if self.gold_spent != other.gold_spent {
+            return self.gold_spent < other.gold_spent;
+        }
         if self.gems_net != other.gems_net {
             return self.gems_net > other.gems_net;
         }
+        if self.wildcards_net != other.wildcards_net {
+            return self.wildcards_net > other.wildcards_net;
+        }
         if self.infinitives != other.infinitives {
             return self.infinitives > other.infinitives;
-        }
-        if self.wildcards != other.wildcards {
-            return self.wildcards > other.wildcards;
-        }
-        if self.hoarded != other.hoarded {
-            return self.hoarded < other.hoarded;
         }
         if self.shed != other.shed {
             return self.shed > other.shed;
@@ -737,10 +743,11 @@ pub fn wildcards_queued(
     per_run * crate::gear::facts::count_runs(&word.to_ascii_uppercase()) as i64
 }
 
-/// What a gem queued by gear is worth, priced as [`hoarded`] prices one spent: a gem's own `score = 3`
-/// (`rpg/effects/material/gem{fire,ice,heal}.lua`). The queued tile's letter is random, so only the
-/// material is known, and the material is what makes it worth keeping.
-pub const GEM_WORTH: f64 = 3.0;
+/// What a gem is worth to the ranking, spent or queued: **1, flat**. The user, 2026-11-07: *every
+/// gem tile should be worth 1 flat*. Each gem was first priced at its tile's score — 3, but 4 for a
+/// Y, whose cooper ligature adds a point (`rpg/effects/ligature/cooperY.lua`) — and that point
+/// ranked `NOXA`, spending a Corundum N and the gold X, above `TOWKAY`, spending a Diamond Y alone.
+pub const GEM_WORTH: f64 = 1.0;
 
 /// The gear that queues a gem when a word is submitted — tiles [`hoarded`] would rather keep.
 ///
@@ -837,36 +844,35 @@ impl GemQueue {
     }
 }
 
-/// The kept tiles a word spends against the ones its gear queues, priced as [`hoarded`] prices
-/// them: a gem at its own worth ([`GEM_WORTH`] for a queued one), a wildcard at [`WILDCARD_WORTH`].
+/// The kept tiles a word spends against the ones its gear queues, kind by kind: gold at its worth,
+/// gems and wildcards one each.
 ///
-/// The user, 2026-11-07, for both the gem staves and the bassanello: count a queued tile only net
-/// of what the word spends, and rank the gems above the infinitives and the wildcards below them.
-/// Each kind is netted against its own:
+/// The user, 2026-11-07: count a queued tile only net of what the word spends; rank gold first,
+/// then the gems, and the wildcards below; every gem worth 1 flat. Each kind is netted against
+/// its own:
 ///
 /// ```text
-///   gems_net      = gems queued - gems spent                     Rank::gems_net (signed)
-///   wildcards_net = max(0, wildcards queued - the rest spent)    Rank::wildcards
-///   net_spent     = the rest spent - wildcards queued            Rank::hoarded (lower is better)
+///   gold_spent    = the worth of the gold spent           Rank::gold_spent (lower is better)
+///   gems_net      = gems queued - gems spent              Rank::gems_net (signed)
+///   wildcards_net = wildcards queued - wildcards spent    Rank::wildcards_net (signed)
 /// ```
 ///
-/// where *the rest* is the gold and wildcards [`hoarded`] charges for.
+/// All three rank above the infinitives.
 ///
 /// **The gem net is signed**, the user's correction the same day: on a board where `PUDDLY` spent
 /// three gems for an infinitive and `UNCLAYED` one gem for nothing, `PUDDLY` ranked first, because
-/// a loss was floored at zero and judged only at [`Rank::hoarded`], below the infinitives. *The
-/// net loss of gems is only one* — so a gem lost counts against the word above the infinitives,
-/// whether or not any gem gear is worn. Gold keeps its place below the infinitives (the user's
-/// call, 2026-11-04).
+/// a loss was floored at zero and judged below the infinitives. *The net loss of gems is only one*.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct TileLedger {
-    /// [`gems_spent`]: the worth of the gems the word uses up.
+    /// The worth of the gold the word uses up.
+    pub gold_spent: f64,
+    /// The gems it uses up: a Corundum, a Chrysocolla, and a Diamond unless healing is wanted.
     pub gems_spent: f64,
-    /// The rest of [`hoarded`]: the gold and wildcards it uses up.
-    pub rest_spent: f64,
-    /// The worth of the gems queued.
+    /// The plain wildcards it uses up.
+    pub wildcards_spent: f64,
+    /// The gems queued.
     pub gems: f64,
-    /// The worth of the wildcards queued.
+    /// The wildcards queued.
     pub wildcards: f64,
 }
 
@@ -876,14 +882,21 @@ impl TileLedger {
     ) -> Self {
         let prefs = picking.prefs;
         let heal_wanted = prefs.room.health > 0;
-        let gems_spent = gems_spent(tiles, consumed, scorer, heal_wanted);
-        TileLedger {
-            gems_spent,
-            rest_spent: hoarded(tiles, consumed, scorer, heal_wanted) - gems_spent,
+        let mut ledger = TileLedger {
             gems: GEM_WORTH * picking.gems.queued(word) as f64,
             wildcards: WILDCARD_WORTH
                 * wildcards_queued(word, tiles, consumed, scorer, prefs.wildcards_per_run) as f64,
+            ..TileLedger::default()
+        };
+        for t in consumed.iter().filter_map(|&i| tiles.get(i)) {
+            match kept_kind(t, scorer, heal_wanted) {
+                Kept::Gold(worth) => ledger.gold_spent += worth,
+                Kept::Gem => ledger.gems_spent += GEM_WORTH,
+                Kept::Wildcard => ledger.wildcards_spent += WILDCARD_WORTH,
+                Kept::Not => {}
+            }
         }
+        ledger
     }
 
     pub fn gems_net(&self) -> f64 {
@@ -891,11 +904,7 @@ impl TileLedger {
     }
 
     pub fn wildcards_net(&self) -> f64 {
-        (self.wildcards - self.rest_spent).max(0.0)
-    }
-
-    pub fn net_spent(&self) -> f64 {
-        self.rest_spent - self.wildcards
+        self.wildcards - self.wildcards_spent
     }
 }
 
@@ -929,6 +938,7 @@ const WILDCARD_WORTH: f64 = 1.0;
 
 /// The material a word should not be spending unless the kill needs it.
 const GOLD: &str = "gold";
+
 
 /// What this word spends from the board's stock of tiles worth keeping. Lower is better.
 ///
@@ -964,36 +974,53 @@ const GOLD: &str = "gold";
 /// also have made should not spend one. A **Diamond** (`gemheal`) is a heal in reserve, and is
 /// free to spend only while `heal_wanted`: health is missing ([`Room::health`]).
 ///
-/// Priced like gold, at the tile's own worth: `score = 3` for each gem
-/// (`rpg/effects/material/gem*.lua`). So a gem costs more than a plain wildcard and less than the
-/// cheapest gold, and two words that spend the same gold fall to the one that keeps its gems.
+/// Each gem counts [`GEM_WORTH`], 1 flat — the user, 2026-11-07, after a Y's cooper point made
+/// one gem cost more than another. The ranking weighs gold, gems and wildcards as separate terms
+/// ([`TileLedger`]); this sum, gold at its worth and the rest one each, is the single figure the
+/// search uses to break ties between placements of a word.
 pub fn hoarded(tiles: &[Tile], consumed: &[usize], scorer: &Scorer, heal_wanted: bool) -> f64 {
-    consumed.iter().filter_map(|&i| tiles.get(i)).map(|t| kept_worth(t, scorer, heal_wanted)).sum()
+    consumed
+        .iter()
+        .filter_map(|&i| tiles.get(i))
+        .map(|t| match kept_kind(t, scorer, heal_wanted) {
+            Kept::Gold(worth) => worth,
+            Kept::Gem => GEM_WORTH,
+            Kept::Wildcard => WILDCARD_WORTH,
+            Kept::Not => 0.0,
+        })
+        .sum()
 }
 
-/// The part of [`hoarded`] spent on gems: a Corundum, a Chrysocolla, and a Diamond unless healing
-/// is wanted. The rest of [`hoarded`] is gold and wildcards.
+/// The gems among `consumed`, one each: a Corundum, a Chrysocolla, and a Diamond unless healing is
+/// wanted.
 pub fn gems_spent(tiles: &[Tile], consumed: &[usize], scorer: &Scorer, heal_wanted: bool) -> f64 {
     consumed
         .iter()
         .filter_map(|&i| tiles.get(i))
-        .filter(|t| scorer.material_name(t).is_some_and(|m| m.starts_with("gem")))
-        .map(|t| kept_worth(t, scorer, heal_wanted))
-        .sum()
+        .filter(|t| kept_kind(t, scorer, heal_wanted) == Kept::Gem)
+        .count() as f64
+        * GEM_WORTH
 }
 
-/// One tile's charge in [`hoarded`].
-fn kept_worth(t: &Tile, scorer: &Scorer, heal_wanted: bool) -> f64 {
-    let kept = match scorer.material_name(t) {
-        Some(GOLD | "gemfire" | "gemice") => scorer.tile_score(t),
-        Some("gemheal") if !heal_wanted => scorer.tile_score(t),
-        _ => 0.0,
-    };
-    let wild = match t.letter == WILDCARD {
-        true => WILDCARD_WORTH,
-        false => 0.0,
-    };
-    kept.max(wild)
+/// Why a tile is worth keeping, if it is. A tile has one reason: a wildcard that gear has made
+/// gold is gold, and a gem wildcard a gem.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Kept {
+    /// Solid gold, at the tile's own worth.
+    Gold(f64),
+    Gem,
+    Wildcard,
+    Not,
+}
+
+fn kept_kind(t: &Tile, scorer: &Scorer, heal_wanted: bool) -> Kept {
+    match scorer.material_name(t) {
+        Some(GOLD) => Kept::Gold(scorer.tile_score(t).max(WILDCARD_WORTH)),
+        Some("gemfire" | "gemice") => Kept::Gem,
+        Some("gemheal") if !heal_wanted => Kept::Gem,
+        _ if t.letter == WILDCARD => Kept::Wildcard,
+        _ => Kept::Not,
+    }
 }
 
 /// Ligatures the board is better off without, by **the game's own name** for them.
@@ -1075,10 +1102,10 @@ pub fn rank(
         heals_fully: prefs.heal_at.is_some_and(|at| damage >= at),
         hazards_cleared: hazards_cleared(tiles, geometry, consumed, scorer),
         gain: gain(tiles, consumed, scorer, prefs.room),
+        gold_spent: ledger.gold_spent,
         gems_net: ledger.gems_net(),
+        wildcards_net: ledger.wildcards_net(),
         infinitives: prefs.infinitives.created(word),
-        wildcards: ledger.wildcards_net(),
-        hoarded: ledger.net_spent(),
         shed: shed(tiles, consumed),
         hazard_fall: hazard_fall(tiles, geometry, consumed, scorer),
         deviation: target.deviation(&remaining_counts(tiles, consumed)),
@@ -1159,7 +1186,7 @@ mod tests {
     }
 
     /// The user's rule, 2026-11-07: Corundum and Chrysocolla are kept like gold, a Diamond only while
-    /// nothing needs healing, each at its own worth — above a wildcard, below the cheapest gold.
+    /// nothing needs healing — and every gem counts 1, flat, below the cheapest gold.
     #[test]
     fn attack_gems_are_kept_and_a_diamond_until_healing_is_wanted() {
         let Some(sc) = scorer() else { return };
@@ -1173,16 +1200,16 @@ mod tests {
         ];
         for i in [0, 1, 2] {
             let gem = hoarded(&tiles, &[i], &sc, false);
-            assert_eq!(gem, sc.tile_score(&tiles[i]), "tile {i} costs its worth");
-            assert!(gem > WILDCARD_WORTH && gem < hoarded(&tiles, &[4], &sc, false), "tile {i}");
+            assert_eq!(gem, GEM_WORTH, "tile {i} counts one, whatever its score");
+            assert!(gem < hoarded(&tiles, &[4], &sc, false), "tile {i}");
         }
         assert_eq!(hoarded(&tiles, &[2], &sc, true), 0.0, "a Diamond is free when injured");
-        assert_eq!(hoarded(&tiles, &[0, 1], &sc, true), 6.0, "the attack gems never are");
+        assert_eq!(hoarded(&tiles, &[0, 1], &sc, true), 2.0, "the attack gems never are");
         assert_eq!(hoarded(&tiles, &[3], &sc, false), 0.0, "plain wood stays free");
-        // A gem wildcard is priced as the gem: one preciousness, the larger.
+        // A gem wildcard is a gem: one reason to keep a tile, not two.
         let mut wild_gem = Tile::plain(".");
         wild_gem.quality.material = Some("gemice".into());
-        assert_eq!(hoarded(&[wild_gem], &[0], &sc, false), 3.0);
+        assert_eq!(gems_spent(&[wild_gem], &[0], &sc, false), GEM_WORTH);
     }
 
     /// Fire is cleared by the count, and a partial clear is real progress.
@@ -1206,12 +1233,12 @@ mod tests {
             heals_fully: false,
             gain: 0,
             gems_net: 0.0,
-            hoarded: 0.0,
+            gold_spent: 0.0,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0.0,
             deviation: 0.0,
         };
         // Neither of these clears the board, so a threshold rule calls them equal. They are not.
@@ -1287,49 +1314,72 @@ mod tests {
         assert_eq!(wildcards_queued("AAA", &wood("AAA"), &[0, 1, 2], &sc, 1), 1, "a run is a set");
     }
 
-    /// Below health and armour, above the infinitives and everything after them.
+    /// Below health and armour: gold, then gems, then wildcards, then the infinitives.
     #[test]
-    fn tile_gains_rank_gems_then_infinitives_then_wildcards() {
-        let r = |gain: i64, gems: f64, infinitives: i64, wildcards: f64, hoarded: f64| Rank {
+    fn tile_terms_rank_gold_then_gems_then_wildcards_then_infinitives() {
+        let r = |gain: i64, gold: f64, gems: f64, wildcards: f64, infinitives: i64| Rank {
             fire_eaten: 0,
             wood_only: false,
             heals_fully: false,
             hazards_cleared: 0,
             gain,
+            gold_spent: gold,
             gems_net: gems,
+            wildcards_net: wildcards,
             infinitives,
-            wildcards,
-            hoarded,
             shed: 0,
             hazard_fall: 0,
             deviation: 0.0,
         };
-        assert!(r(4, 0.0, 0, 0.0, 0.0).better_than(&r(0, 3.0, 0, 0.0, 0.0)), "armour first");
-        assert!(r(0, 3.0, 0, 0.0, 0.0).better_than(&r(0, 0.0, 1, 0.0, 0.0)), "then gems");
-        assert!(r(0, 0.0, 1, 0.0, 0.0).better_than(&r(0, 0.0, 0, 3.0, 0.0)), "then infinitives");
-        assert!(r(0, 0.0, 0, 1.0, 9.0).better_than(&r(0, 0.0, 0, 0.0, 0.0)), "then wildcards");
+        assert!(r(4, 9.0, 0.0, 0.0, 0).better_than(&r(0, 0.0, 0.0, 0.0, 0)), "armour first");
+        assert!(r(0, 0.0, -1.0, 0.0, 0).better_than(&r(0, 11.0, 0.0, 0.0, 0)), "then gold");
+        assert!(r(0, 0.0, 0.0, -2.0, 0).better_than(&r(0, 0.0, -1.0, 0.0, 1)), "then gems");
+        assert!(r(0, 0.0, 0.0, 0.0, 0).better_than(&r(0, 0.0, 0.0, -1.0, 1)), "then wildcards");
+        assert!(r(0, 0.0, 0.0, 1.0, 0).better_than(&r(0, 0.0, 0.0, 0.0, 1)), "a wildcard gained");
+        assert!(r(0, 0.0, 0.0, 0.0, 1).better_than(&r(0, 0.0, 0.0, 0.0, 0)), "then infinitives");
     }
 
-    /// Spending is paid back by the gems first, then by the wildcards; what is left is hoarding.
+    /// Each kind nets against its own: gold at its worth, gems and wildcards one each.
     #[test]
-    fn the_ledger_nets_spending_against_what_is_queued() {
-        let l = |gems_spent: f64, rest_spent: f64, gems: f64, wildcards: f64| {
-            let l = TileLedger { gems_spent, rest_spent, gems, wildcards };
-            (l.gems_net(), l.wildcards_net(), l.net_spent())
+    fn the_ledger_nets_each_kind_against_its_own() {
+        let l = |gold_spent, gems_spent, wildcards_spent, gems, wildcards| {
+            let l = TileLedger { gold_spent, gems_spent, wildcards_spent, gems, wildcards };
+            (l.gold_spent, l.gems_net(), l.wildcards_net())
         };
-        assert_eq!(l(0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0), "nothing either way");
-        assert_eq!(l(0.0, 5.0, 0.0, 0.0), (0.0, 0.0, 5.0), "gold: hoarding as before");
-        assert_eq!(l(3.0, 0.0, 0.0, 0.0), (-3.0, 0.0, 0.0), "a gem spent is a gem lost");
-        assert_eq!(l(0.0, 0.0, 3.0, 0.0), (3.0, 0.0, 0.0), "a Corundum for free");
-        assert_eq!(l(3.0, 0.0, 3.0, 0.0), (0.0, 0.0, 0.0), "one Corundum spent to queue one");
+        assert_eq!(l(0.0, 0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0), "nothing either way");
+        assert_eq!(l(11.0, 0.0, 0.0, 0.0, 0.0), (11.0, 0.0, 0.0), "the gold X");
+        assert_eq!(l(0.0, 1.0, 0.0, 0.0, 0.0), (0.0, -1.0, 0.0), "a gem spent is a gem lost");
+        assert_eq!(l(0.0, 1.0, 0.0, 1.0, 0.0), (0.0, 0.0, 0.0), "one Corundum spent to queue one");
+        assert_eq!(l(0.0, 2.0, 0.0, 1.0, 0.0), (0.0, -1.0, 0.0), "two spent to queue one");
         assert_eq!(
-            l(6.0, 0.0, 3.0, 0.0),
-            (-3.0, 0.0, 0.0),
-            "two spent to queue one: a loss of one"
+            l(0.0, 0.0, 2.0, 0.0, 1.0),
+            (0.0, 0.0, -1.0),
+            "two wildcards spent to queue one"
         );
-        assert_eq!(l(0.0, 2.0, 0.0, 1.0), (0.0, 0.0, 1.0), "two wildcards spent to queue one");
-        assert_eq!(l(0.0, 1.0, 0.0, 2.0), (0.0, 1.0, -1.0), "one wildcard spent to queue two");
-        assert_eq!(l(0.0, 5.0, 3.0, 0.0), (3.0, 0.0, 5.0), "a gem queued does not pay for gold");
+        assert_eq!(l(0.0, 0.0, 1.0, 0.0, 2.0), (0.0, 0.0, 1.0), "one wildcard spent to queue two");
+        assert_eq!(
+            l(11.0, 0.0, 0.0, 1.0, 0.0),
+            (11.0, 1.0, 0.0),
+            "a gem queued does not pay for gold"
+        );
+    }
+
+    /// The user's board, 2026-11-07: `NOXA` spends a Corundum N and the gold X, `TOWKAY` a Diamond
+    /// Y, whose cooper ligature adds a point. One gem each, so the gold decides.
+    #[test]
+    fn every_gem_counts_one_and_gold_decides() {
+        let Some(sc) = scorer() else { return };
+        let mut t = board(&["N", "O", "X", "A", "Y"]);
+        t[0].quality.material = Some("gemfire".into());
+        t[2].quality.material = Some("gold".into());
+        t[4].quality.material = Some("gemheal".into());
+        t[4].quality.ligature = Some("cooperY".into());
+        assert!(sc.tile_score(&t[4]) > sc.tile_score(&t[0]), "the Y scores a point more");
+        let ctx = Context::default();
+        let noxa = TileLedger::of("NOXA", &t, &[0, 1, 2, 3], &sc, &ctx);
+        let oya = TileLedger::of("OYA", &t, &[1, 4, 3], &sc, &ctx);
+        assert_eq!((noxa.gems_net(), oya.gems_net()), (-1.0, -1.0), "one gem each");
+        assert!(noxa.gold_spent > 0.0 && oya.gold_spent == 0.0);
     }
 
     /// The user's board, 2026-11-07: `PUDDLY` spends three gems and queues an infinitive,
@@ -1344,8 +1394,8 @@ mod tests {
             gain: 0,
             gems_net,
             infinitives,
-            wildcards: 0.0,
-            hoarded: 0.0,
+            gold_spent: 0.0,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 0,
             deviation: 0.0,
@@ -1433,12 +1483,12 @@ mod tests {
             heals_fully: false,
             gain,
             gems_net: 0.0,
-            hoarded,
+            gold_spent: hoarded,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0.0,
             deviation,
         };
         assert!(r(0, true, 4, 0.0, 11.6).better_than(&r(0, true, 0, 0.0, 11.0)), "FUD over DAU");
@@ -1469,12 +1519,12 @@ mod tests {
             heals_fully: heal,
             gain: 0,
             gems_net: 0.0,
-            hoarded,
+            gold_spent: hoarded,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0.0,
             deviation: 0.0,
         };
         let both = tier(true, true, 99.0);
@@ -1514,12 +1564,12 @@ mod tests {
             heals_fully: false,
             gain: 0,
             gems_net: 0.0,
-            hoarded: 0.0,
+            gold_spent: 0.0,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0.0,
             deviation: 9.0,
         };
         let golden = Rank {
@@ -1528,12 +1578,12 @@ mod tests {
             heals_fully: false,
             gain: 0,
             gems_net: 0.0,
-            hoarded: 40.0,
+            gold_spent: 40.0,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0.0,
             deviation: 0.0,
         };
         assert!(plain.better_than(&golden), "a tidier board is not worth a Q");
@@ -1546,12 +1596,12 @@ mod tests {
             heals_fully: false,
             gain: 0,
             gems_net: 0.0,
-            hoarded: 40.0,
+            gold_spent: 40.0,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0.0,
             deviation: 9.0,
         };
         assert!(paid.better_than(&plain), "a payout in hand outranks a tile kept back");
@@ -1563,12 +1613,12 @@ mod tests {
             heals_fully: false,
             gain: 0,
             gems_net: 0.0,
-            hoarded: 10.0,
+            gold_spent: 10.0,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0.0,
             deviation: 0.0,
         };
         let gold_and_wild = Rank {
@@ -1577,12 +1627,12 @@ mod tests {
             heals_fully: false,
             gain: 0,
             gems_net: 0.0,
-            hoarded: 11.0,
+            gold_spent: 11.0,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0.0,
             deviation: 0.0,
         };
         assert!(gold_only.better_than(&gold_and_wild), "no reason to spend a wildcard as well");
@@ -1605,12 +1655,12 @@ mod tests {
             heals_fully: false,
             gain: 0,
             gems_net: 0.0,
-            hoarded,
+            gold_spent: hoarded,
+            wildcards_net: 0.0,
             shed,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0.0,
             deviation,
         };
         // Nothing else to separate them, so getting rid of the ash decides it.
@@ -1846,9 +1896,9 @@ mod tests {
             hazards_cleared,
             gain,
             infinitives: 0,
-            wildcards: 0.0,
             gems_net: 0.0,
-            hoarded: 0.0,
+            gold_spent: 0.0,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 0,
             deviation: 0.0,
@@ -1857,9 +1907,9 @@ mod tests {
         assert!(r(1, 4).better_than(&r(1, 0)), "and the gain still breaks the tie");
     }
 
-    /// The lowest of the gains: below health and armour, above the board-hygiene terms.
+    /// Below health and armour, and below hoarding: the user's `AXES` and `DENS`, 2026-11-07.
     #[test]
-    fn infinitives_rank_below_gain_and_above_hoarding() {
+    fn infinitives_rank_below_gain_and_below_hoarding() {
         let r = |gain: i64, infinitives: i64, hoarded: f64| Rank {
             fire_eaten: 0,
             wood_only: false,
@@ -1867,15 +1917,16 @@ mod tests {
             hazards_cleared: 0,
             gain,
             infinitives,
-            wildcards: 0.0,
             gems_net: 0.0,
-            hoarded,
+            gold_spent: hoarded,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 0,
             deviation: 0.0,
         };
         assert!(r(1, 0, 0.0).better_than(&r(0, 2, 0.0)), "a point of health or armour first");
-        assert!(r(0, 1, 50.0).better_than(&r(0, 0, 0.0)), "then infinitives, gold or not");
+        assert!(r(0, 0, 0.0).better_than(&r(0, 1, 11.0)), "DENS over AXES: keep the gold X");
+        assert!(r(0, 1, 11.0).better_than(&r(0, 0, 11.0)), "the same gold: the infinitive decides");
     }
 
     #[test]
@@ -1886,12 +1937,12 @@ mod tests {
             heals_fully: false,
             gain: 0,
             gems_net: 0.0,
-            hoarded: 0.0,
+            gold_spent: 0.0,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 0,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0.0,
             deviation: 99.0,
         };
         let hazard = Rank {
@@ -1900,12 +1951,12 @@ mod tests {
             heals_fully: false,
             gain: 0,
             gems_net: 0.0,
-            hoarded: 0.0,
+            gold_spent: 0.0,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 5,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0.0,
             deviation: 1.0,
         };
         assert!(wood.better_than(&hazard), "a wood-only kill outranks any number of falls");
@@ -1916,12 +1967,12 @@ mod tests {
             heals_fully: false,
             gain: 0,
             gems_net: 0.0,
-            hoarded: 0.0,
+            gold_spent: 0.0,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 2,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0.0,
             deviation: 50.0,
         };
         let tidy = Rank {
@@ -1930,12 +1981,12 @@ mod tests {
             heals_fully: false,
             gain: 0,
             gems_net: 0.0,
-            hoarded: 0.0,
+            gold_spent: 0.0,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 1,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0.0,
             deviation: 0.0,
         };
         assert!(falls.better_than(&tidy), "a falling hazard outranks a tidier board");
@@ -1946,12 +1997,12 @@ mod tests {
             heals_fully: false,
             gain: 0,
             gems_net: 0.0,
-            hoarded: 0.0,
+            gold_spent: 0.0,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 1,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0.0,
             deviation: 3.0,
         };
         let b = Rank {
@@ -1960,12 +2011,12 @@ mod tests {
             heals_fully: false,
             gain: 0,
             gems_net: 0.0,
-            hoarded: 0.0,
+            gold_spent: 0.0,
+            wildcards_net: 0.0,
             shed: 0,
             hazard_fall: 1,
             hazards_cleared: 0,
             infinitives: 0,
-            wildcards: 0.0,
             deviation: 4.0,
         };
         assert!(a.better_than(&b), "with the payouts equal, lower deviation wins");
