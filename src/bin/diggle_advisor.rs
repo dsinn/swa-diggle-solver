@@ -34,6 +34,12 @@
 //! book, as the game's own censor does, but only the vowels, so the word can still be played: see
 //! [`diggle_solver::advisor::censor`].
 //!
+//! **Collapse candidates out of combat** (unticked by default) rolls the window up to its header
+//! and checkboxes while no fight is on, with an elastic ease, and drops it back to the height it
+//! had when a fight starts: see [`diggle_solver::advisor::shade`] for every transition. A
+//! maximised or minimised window is left alone until it is restored. While rolled up, dragging an
+//! edge changes only the width; the height saved is the open one.
+//!
 //! Its size, the checkboxes, and whether the log box is shown and
 //! how tall it is are remembered between launches ([`diggle_solver::advisor::settings`]). The log
 //! box starts collapsed; drag the gap under it to resize it. Settings are written half a second after the last change
@@ -55,6 +61,7 @@
 
 use diggle_solver::advisor::mode::Mode;
 use diggle_solver::advisor::settings::{self, Settings};
+use diggle_solver::advisor::shade::Shade;
 use diggle_solver::advisor::telemetry;
 use diggle_solver::advisor::view::{Resources, View};
 use diggle_solver::advisor::watch::{self, Event};
@@ -129,6 +136,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetCursorPos, GetMessageW,
     GetWindowRect, KillTimer, LoadCursorW, MoveWindow, PostMessageW, PostQuitMessage,
     RegisterClassW, SendMessageW, SetCursor, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
+    IsIconic, IsZoomed, SWP_NOZORDER, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_SIZING,
     TranslateMessage, BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, CW_USEDEFAULT,
     ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, HMENU, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST,
     IDC_ARROW, IDC_SIZENS, MINMAXINFO, MSG, SIZE_RESTORED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
@@ -146,9 +154,14 @@ const ID_LOG: usize = 102;
 const ID_STALL: usize = 103;
 const ID_UNDERLINE: usize = 104;
 const ID_CENSOR: usize = 105;
+const ID_COLLAPSE: usize = 106;
 /// The timer that writes the settings once they have stopped changing.
 const ID_SAVE: usize = 1;
 const SAVE_DELAY_MS: u32 = 500;
+/// The timer that steps the roll-up ([`Shade::tick`]), and how often: about 60 frames a second,
+/// though Windows rounds a timer up to its tick of about 15.6 ms.
+const ID_SHADE: usize = 2;
+const SHADE_FRAME_MS: u32 = 15;
 /// Static-control styles (`winuser.h`), which the `windows` crate does not expose as constants.
 const SS_CENTER: u32 = 0x1;
 const SS_CENTERIMAGE: u32 = 0x200;
@@ -192,6 +205,8 @@ struct Ui {
     underline: HWND,
     /// "Censor profanity". Its tooltip is owned by the main window, like the underline box's.
     censor: HWND,
+    /// "Collapse candidates out of combat".
+    collapse: HWND,
     list: HWND,
     /// The tooltip over the list's items: one tool, moved onto whichever item is under the mouse.
     /// See [`hover`].
@@ -219,6 +234,11 @@ struct State {
     /// While the gap under the log is being dragged: how far below the log's bottom edge the
     /// cursor was when the drag began, so the edge does not jump to the cursor.
     drag: Option<i32>,
+    /// The roll-up out of combat.
+    shade: Shade,
+    /// Whether the last view shown was a fight; `None` until the worker's first view, so the
+    /// window does not roll up on the placeholder it opens with and drop again a moment later.
+    combat: Option<bool>,
 }
 
 thread_local! {
@@ -489,7 +509,14 @@ fn main() -> windows::core::Result<()> {
     let file = local.map(|d| settings::path(std::path::Path::new(&d)));
     let saved = file.as_deref().map(Settings::load).unwrap_or_default();
     STATE.with(|s| {
-        *s.borrow_mut() = Some(State { settings: saved.clone(), file, dirty: false, drag: None })
+        *s.borrow_mut() = Some(State {
+            settings: saved.clone(),
+            file,
+            dirty: false,
+            drag: None,
+            shade: Shade::default(),
+            combat: None,
+        })
     });
     // SAFETY: standard Win32 window set-up and message loop, all on this thread.
     unsafe {
@@ -603,6 +630,13 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
         ID_CENSOR,
     )?;
+    let collapse = child(
+        hwnd,
+        w!("BUTTON"),
+        w!("Collapse candidates out of combat"),
+        BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
+        ID_COLLAPSE,
+    )?;
     let saved = settings_now();
     for (h, on) in [
         (topmost, saved.topmost),
@@ -610,6 +644,7 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         (stall, saved.stall_on_free_turns),
         (underline, saved.underline_mouse_tiles),
         (censor, saved.censor_profanity),
+        (collapse, saved.collapse_out_of_combat),
     ] {
         let check = if on { BST_CHECKED.0 } else { 0 };
         SendMessageW(h, BM_SETCHECK, WPARAM(check as usize), LPARAM(0));
@@ -622,7 +657,7 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         0,
     )?;
     let banner = child(hwnd, w!("STATIC"), w!("Out of combat"), SS_CENTER | SS_CENTERIMAGE, 0)?;
-    for h in [status, notes, topmost, log_toggle, stall, underline, censor, list] {
+    for h in [status, notes, topmost, log_toggle, stall, underline, censor, collapse, list] {
         SendMessageW(h, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
     }
     SendMessageW(banner, WM_SETFONT, WPARAM(banner_font.0 as usize), LPARAM(1));
@@ -657,6 +692,7 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         stall,
         underline,
         censor,
+        collapse,
         list,
         list_tip,
         banner,
@@ -878,10 +914,11 @@ const PAD: i32 = 8;
 const HEADER_HEIGHT: i32 = 40;
 const BOX_HEIGHT: i32 = 24;
 /// Each checkbox's width, in the order they sit left to right: see [`Ui::boxes`].
-const BOX_WIDTHS: [i32; 5] = [
+const BOX_WIDTHS: [i32; 6] = [
     180, // Underline mouse tiles
     140, // Censor profanity
     230, // Stall on halfling's even turns
+    250, // Collapse candidates out of combat
     100, // Show log
     120, // Stay on top
 ];
@@ -890,14 +927,14 @@ const MIN_LIST_HEIGHT: i32 = 80;
 
 impl Ui {
     /// The checkboxes, left to right, matching [`BOX_WIDTHS`].
-    fn boxes(&self) -> [HWND; 5] {
-        [self.underline, self.censor, self.stall, self.log_toggle, self.topmost]
+    fn boxes(&self) -> [HWND; 6] {
+        [self.underline, self.censor, self.stall, self.collapse, self.log_toggle, self.topmost]
     }
 }
 
 /// Where each checkbox goes in a client area `w` wide, and the bottom of the last row. They run
 /// left to right under the header and wrap onto another row when the window is too narrow.
-fn box_layout(w: i32) -> ([RECT; 5], i32) {
+fn box_layout(w: i32) -> ([RECT; 6], i32) {
     let (mut x, mut y) = (PAD, PAD + HEADER_HEIGHT);
     let rects = BOX_WIDTHS.map(|bw| {
         if x > PAD && x + bw > w - PAD {
@@ -969,6 +1006,97 @@ unsafe fn relayout(hwnd: HWND) {
             layout(hwnd, ui);
         }
     });
+}
+
+/// The window's outer height now, and its height rolled up — the header and checkbox rows, with
+/// the frame and title bar around them — at outer width `outer_w`, or at its width now.
+unsafe fn shade_heights(hwnd: HWND, outer_w: Option<i32>) -> (i32, i32) {
+    let mut wr = RECT::default();
+    let _ = GetWindowRect(hwnd, &mut wr);
+    let (cw, ch) = client_size(hwnd);
+    let (ow, oh) = (wr.right - wr.left, wr.bottom - wr.top);
+    let client_w = outer_w.map_or(cw, |w| w - (ow - cw));
+    (oh, box_layout(client_w).1 + PAD + (oh - ch))
+}
+
+/// Sets the window's outer height, keeping its top edge and width.
+unsafe fn set_height(hwnd: HWND, height: i32) {
+    let mut wr = RECT::default();
+    let _ = GetWindowRect(hwnd, &mut wr);
+    let flags = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE;
+    let _ = SetWindowPos(hwnd, HWND::default(), 0, 0, wr.right - wr.left, height, flags);
+}
+
+/// What [`sync_shade`] does to the window once the state is updated.
+enum ShadeMove {
+    Animate,
+    To(i32),
+}
+
+/// Rolls the window up or drops it to match the box and the mode: up while the box is ticked and
+/// the last view was out of combat, down otherwise. Called whenever either changes and on every
+/// restored resize, which also keeps a rolled-up window fitted to its checkbox rows as the width
+/// changes. `snap` lands at once instead of animating: for the first view after launch, so the
+/// window opens as it was left rather than bouncing.
+///
+/// A maximised or minimised window is left alone; restoring it brings it back here.
+unsafe fn sync_shade(hwnd: HWND, snap: bool) {
+    if IsIconic(hwnd).as_bool() || IsZoomed(hwnd).as_bool() {
+        return;
+    }
+    let (height, closed) = shade_heights(hwnd, None);
+    let now = std::time::Instant::now();
+    let collapse = settings_now().collapse_out_of_combat;
+    let action = STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        let st = st.as_mut()?;
+        let combat = st.combat?;
+        if st.shade.want(collapse && !combat, height, closed, now) {
+            return match snap {
+                true => st.shade.finish(now).map(ShadeMove::To),
+                false => Some(ShadeMove::Animate),
+            };
+        }
+        (st.shade.is_closed() && height != closed).then_some(ShadeMove::To(closed))
+    });
+    // Outside the borrow: moving the window sends WM_SIZE, which comes back here.
+    match action {
+        Some(ShadeMove::Animate) => {
+            SetTimer(hwnd, ID_SHADE, SHADE_FRAME_MS, None);
+        }
+        Some(ShadeMove::To(h)) => set_height(hwnd, h),
+        None => {}
+    }
+}
+
+/// One frame of the roll-up. A window maximised or minimised mid-move lands where it was going
+/// without being moved, and is fitted when it is restored.
+unsafe fn step_shade(hwnd: HWND) {
+    let now = std::time::Instant::now();
+    let parked = IsIconic(hwnd).as_bool() || IsZoomed(hwnd).as_bool();
+    let step = STATE.with(|st| {
+        let mut st = st.borrow_mut();
+        let st = st.as_mut()?;
+        match parked {
+            true => st.shade.finish(now).map(|_| None),
+            false => st.shade.tick(now).map(Some),
+        }
+    });
+    match step {
+        Some(Some((h, done))) => {
+            set_height(hwnd, h);
+            if done {
+                let _ = KillTimer(hwnd, ID_SHADE);
+            }
+        }
+        Some(None) | None => {
+            let _ = KillTimer(hwnd, ID_SHADE);
+        }
+    }
+}
+
+fn shade_now() -> Shade {
+    STATE.with(|s| s.borrow().as_ref().map(|s| s.shade).unwrap_or_default())
 }
 
 /// The client y out of a mouse message's `lparam`, signed: it goes negative above the window
@@ -1810,22 +1938,43 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_SIZE => {
             relayout(hwnd);
             // Only a restored window's size is kept: reopening at a maximised or minimised size
-            // would be wrong once it is restored.
+            // would be wrong once it is restored. Nor is the height while rolled up or moving:
+            // the open height is the one to come back to.
             if wparam.0 == SIZE_RESTORED as usize {
                 let mut rc = RECT::default();
                 if GetWindowRect(hwnd, &mut rc).is_ok() {
+                    let open = shade_now().is_open();
                     update(hwnd, |s| {
                         s.width = rc.right - rc.left;
-                        s.height = rc.bottom - rc.top;
+                        if open {
+                            s.height = rc.bottom - rc.top;
+                        }
                     });
                 }
+                sync_shade(hwnd, false);
             }
             LRESULT(0)
         }
         WM_GETMINMAXINFO => {
             let info = &mut *(lparam.0 as *mut MINMAXINFO);
             info.ptMinTrackSize.x = settings::MIN_WIDTH;
-            info.ptMinTrackSize.y = settings::MIN_HEIGHT;
+            // Rolled up or on the way, the window is shorter than an open one may be, and the
+            // ease overshoots shorter still.
+            info.ptMinTrackSize.y = if shade_now().is_open() { settings::MIN_HEIGHT } else { 0 };
+            LRESULT(0)
+        }
+        // Rolled up, an edge drag changes only the width: the height follows the checkbox rows.
+        WM_SIZING if shade_now().is_closed() => {
+            let rc = &mut *(lparam.0 as *mut RECT);
+            let (_, closed) = shade_heights(hwnd, Some(rc.right - rc.left));
+            match wparam.0 as u32 {
+                WMSZ_TOP | WMSZ_TOPLEFT | WMSZ_TOPRIGHT => rc.top = rc.bottom - closed,
+                _ => rc.bottom = rc.top + closed,
+            }
+            LRESULT(1)
+        }
+        WM_TIMER if wparam.0 == ID_SHADE => {
+            step_shade(hwnd);
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == ID_SAVE => {
@@ -1931,6 +2080,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             });
             LRESULT(0)
         }
+        WM_COMMAND
+            if (wparam.0 & 0xffff) == ID_COLLAPSE && (wparam.0 >> 16) as u32 == BN_CLICKED =>
+        {
+            let on = UI.with(|u| {
+                u.borrow().as_ref().is_some_and(|ui| {
+                    SendMessageW(ui.collapse, BM_GETCHECK, WPARAM(0), LPARAM(0)).0
+                        == BST_CHECKED.0 as isize
+                })
+            });
+            update(hwnd, |s| s.collapse_out_of_combat = on);
+            sync_shade(hwnd, false);
+            LRESULT(0)
+        }
         WM_VIEW => {
             let waited = PUBLISHED.lock().unwrap().map(|t| t.elapsed());
             let drawing = std::time::Instant::now();
@@ -1939,6 +2101,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     refresh(hwnd, ui);
                 }
             });
+            let combat = !matches!(view().lock().unwrap().mode, Mode::OutOfCombat);
+            let first = STATE.with(|st| {
+                st.borrow_mut().as_mut().is_some_and(|st| st.combat.replace(combat).is_none())
+            });
+            sync_shade(hwnd, first);
             telemetry::note(
                 "window",
                 format_args!(
@@ -1977,6 +2144,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_DESTROY => {
             let _ = KillTimer(hwnd, ID_SAVE);
+            let _ = KillTimer(hwnd, ID_SHADE);
             save_now();
             // Dropped here, while the window is still being destroyed, not with the thread's
             // locals after `main` returns. Its Direct2D and DirectWrite objects — the item icons

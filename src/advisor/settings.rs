@@ -1,6 +1,6 @@
 //! The advisor window's own settings: its size, "Stay on top", the log box, whether to stall on
-//! the halfling's free turns, whether to underline the tiles to click, and whether to censor
-//! profanity. Kept between
+//! the halfling's free turns, whether to underline the tiles to click, whether to censor
+//! profanity, and whether to roll the window up out of combat. Kept between
 //! launches in `%LOCALAPPDATA%\DiggleAdvisor\settings.toml` ([`path`]).
 //!
 //! Nothing here goes near the game's folders: the save folder is watched, and a write there would
@@ -31,6 +31,10 @@ pub struct Settings {
     /// "Censor profanity": a word in the profane book shows some letters as the game's mosaic
     /// ([`crate::advisor::censor`]). Off by default, the user's call, 2026-11-08.
     pub censor_profanity: bool,
+    /// "Collapse candidates out of combat": the window rolls up to its header and checkboxes
+    /// while no fight is on ([`crate::advisor::shade`]). Off by default, the user's call,
+    /// 2026-11-08. [`Self::height`] stays the open height while it is rolled up.
+    pub collapse_out_of_combat: bool,
 }
 
 impl Default for Settings {
@@ -44,6 +48,7 @@ impl Default for Settings {
             stall_on_free_turns: crate::turn::Options::default().stall_on_free_turns,
             underline_mouse_tiles: true,
             censor_profanity: false,
+            collapse_out_of_combat: false,
         }
     }
 }
@@ -105,6 +110,7 @@ mod tests {
         assert!(Settings::default().stall_on_free_turns, "stalling starts ticked");
         assert!(Settings::default().underline_mouse_tiles, "underlining starts ticked");
         assert!(!Settings::default().censor_profanity, "censoring starts unticked");
+        assert!(!Settings::default().collapse_out_of_combat, "collapsing starts unticked");
     }
 
     #[test]
@@ -119,6 +125,7 @@ mod tests {
             stall_on_free_turns: false,
             underline_mouse_tiles: false,
             censor_profanity: true,
+            collapse_out_of_combat: true,
         };
         s.save(&file).unwrap();
         assert_eq!(Settings::load(&file), s, "an unticked stall box must stay unticked");

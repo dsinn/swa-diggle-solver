@@ -8,6 +8,7 @@ pub mod censor;
 pub mod mode;
 pub mod palette;
 pub mod settings;
+pub mod shade;
 pub mod telemetry;
 pub mod view;
 pub mod watch;

@@ -9,6 +9,13 @@ behaviour freely.
 
 ### Advisor
 
+- **"Collapse candidates out of combat"** (unticked by default) rolls the window up to its header
+  and checkboxes while no fight is on, with an elastic ease, and drops it back to its earlier
+  height when a fight starts. A fight that starts or ends partway through turns the window round
+  from wherever it is. Unticking it while rolled up drops the window at once; ticking or unticking
+  it during a fight does nothing until the fight ends. A maximised or minimised window catches up
+  when you restore it. While rolled up, dragging an edge changes only the width, and the height
+  remembered between launches is the open one (`advisor::shade`).
 - The Advisor has its own window icon, one for in combat and one for out of combat.
 - **"Censor profanity"** (unticked by default) pixelates words from the profane book the way the
   game's own censor does, a 4×4 mosaic over each tile with every block the average of what it
