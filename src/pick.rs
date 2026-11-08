@@ -457,7 +457,7 @@ pub struct Rank {
     /// on a braced E for 4 armour and the kills that brought the `!` down gave none. A `!` takes one
     /// of the board's tiles out of play for as long as it stands, so getting rid of it is worth more
     /// than one word's armour. Only reaching the bottom counts here; a partial fall is still the
-    /// board-hygiene term [`Rank::hazard_fall`], below everything that pays.
+    /// term [`Rank::hazard_fall`], below the gold and gems kept.
     ///
     /// **Above [`Rank::wood_only`] and [`Rank::heals_fully`] too**, the user's call, 2026-11-07, on
     /// a board where every word under a gold-bordered D was wood only, so all of them earned the
@@ -510,6 +510,13 @@ pub struct Rank {
     /// Corundums to queue one scores one gem's loss here, and with no gem gear worn every gem spent
     /// is a loss here too, so two kills differing in gems are told apart before the infinitives.
     pub gems_net: f64,
+    /// Total slots every hazard tile on the board would fall by: see [`hazard_fall`]. Higher is
+    /// better.
+    ///
+    /// **Above [`Rank::wildcards_net`]**, the user's call, 2026-11-07: a `!` brought partway down is
+    /// closer to falling off, and that was judged worth more than a wildcard. Bringing one all the
+    /// way to the bottom is still [`Rank::hazards_cleared`], far above.
+    pub hazard_fall: usize,
     /// The wildcards this word queues from the Bookkeepers bassanello ([`wildcards_queued`]) less
     /// the wildcards it spends, one each. **Signed**; higher is better. See [`TileLedger`].
     ///
@@ -526,21 +533,6 @@ pub struct Rank {
     /// A wildcard's material is `wood0` (`rpg/effects/material/default.lua:4`), which `wood_only`
     /// accepts, so a wood-only kill can still be spending one.
     pub wildcards_net: f64,
-    /// Tiles this word upgrades a material stage or gilds, from any gear that does it on submit:
-    /// see [`Infinitives::upgraded`]. Higher is better.
-    ///
-    /// **Second-lowest of what a word gives**, the user's call, 2026-11-07: *tile upgrades (not
-    /// just -er and -est; any gear that upgrade tiles) should be the second-lowest priority*. Above
-    /// the board-tidiness terms, which the user chose over putting it truly last, where deviation,
-    /// which almost never ties, would leave it nothing to decide.
-    pub upgrades: i64,
-    /// Infinitive tile sets this word queues, from any suffix link: see [`Infinitives`]. Higher is
-    /// better.
-    ///
-    /// Below health and armour, the user's call, 2026-11-04; below every tile kept or queued and
-    /// below the upgrades, 2026-11-07: *any queuing links get added as the least priority
-    /// tiebreaker*. The lowest of what a word gives, above the board-tidiness terms only.
-    pub infinitives: i64,
     /// Ligature tiles this word gets **rid** of. Higher is better. See [`shed`].
     ///
     /// The mirror image of the kept tiles ([`Rank::gold_spent`] and on), and ranked below them on
@@ -549,9 +541,24 @@ pub struct Rank {
     /// reserve and an ash is a tile that clogs the board, so the two want opposite treatment — but
     /// the reserve is worth more than the tidying, and a word must never burn a `Q` to take out the
     /// rubbish.
+    ///
+    /// **Above [`Rank::upgrades`]**, the user's call, 2026-11-07.
     pub shed: usize,
-    /// Total slots every hazard tile on the board would fall by. Higher is better.
-    pub hazard_fall: usize,
+    /// Tiles this word upgrades a material stage or gilds, from any gear that does it on submit:
+    /// see [`Infinitives::upgraded`]. Higher is better.
+    ///
+    /// **Second-lowest of what a word gives**, the user's call, 2026-11-07: *tile upgrades (not
+    /// just -er and -est; any gear that upgrade tiles) should be the second-lowest priority*. Above
+    /// deviation, which the user chose over putting it truly last, where deviation, which almost
+    /// never ties, would leave it nothing to decide; below [`Rank::shed`], the user's later call.
+    pub upgrades: i64,
+    /// Infinitive tile sets this word queues, from any suffix link: see [`Infinitives`]. Higher is
+    /// better.
+    ///
+    /// Below health and armour, the user's call, 2026-11-04; below every tile kept or queued and
+    /// below the upgrades, 2026-11-07: *any queuing links get added as the least priority
+    /// tiebreaker*. The lowest of what a word gives, above only [`Rank::deviation`].
+    pub infinitives: i64,
     /// Distance of the resulting board from its target letter distribution. **Lower** is better.
     pub deviation: f64,
 }
@@ -588,20 +595,20 @@ impl Rank {
         if self.gems_net != other.gems_net {
             return self.gems_net > other.gems_net;
         }
+        if self.hazard_fall != other.hazard_fall {
+            return self.hazard_fall > other.hazard_fall;
+        }
         if self.wildcards_net != other.wildcards_net {
             return self.wildcards_net > other.wildcards_net;
+        }
+        if self.shed != other.shed {
+            return self.shed > other.shed;
         }
         if self.upgrades != other.upgrades {
             return self.upgrades > other.upgrades;
         }
         if self.infinitives != other.infinitives {
             return self.infinitives > other.infinitives;
-        }
-        if self.shed != other.shed {
-            return self.shed > other.shed;
-        }
-        if self.hazard_fall != other.hazard_fall {
-            return self.hazard_fall > other.hazard_fall;
         }
         self.deviation < other.deviation
     }
@@ -2096,8 +2103,8 @@ mod tests {
         );
     }
 
-    /// Upgrades rank just above the queued infinitives, both above the board-tidiness terms and
-    /// below every tile kept: the user's order, 2026-11-07.
+    /// Upgrades rank just above the queued infinitives, both below every tile kept and the ash
+    /// shed: the user's order, 2026-11-07.
     #[test]
     fn upgrades_then_queues_are_the_last_gains() {
         let r = |wildcards_net: f64, upgrades: i64, infinitives: i64, shed: usize| Rank {
@@ -2118,7 +2125,31 @@ mod tests {
         };
         assert!(r(0.0, 0, 0, 0).better_than(&r(-1.0, 1, 1, 0)), "a wildcard kept first");
         assert!(r(0.0, 1, 0, 0).better_than(&r(0.0, 0, 1, 0)), "an upgrade over a queue");
-        assert!(r(0.0, 0, 1, 0).better_than(&r(0.0, 0, 0, 1)), "a queue over tidiness");
+        assert!(r(0.0, 0, 0, 1).better_than(&r(0.0, 1, 1, 0)), "an ash shed over an upgrade");
+    }
+
+    /// A `!` brought partway down outranks a wildcard kept, and a gem kept outranks it: the user's
+    /// call, 2026-11-07.
+    #[test]
+    fn hazard_fall_ranks_between_gems_and_wildcards() {
+        let r = |gems_net: f64, hazard_fall: usize, wildcards_net: f64| Rank {
+            fire_eaten: 0,
+            halves_attack: false,
+            wood_only: false,
+            heals_fully: false,
+            hazards_cleared: 0,
+            gain: 0,
+            gold_spent: 0.0,
+            gems_net,
+            hazard_fall,
+            wildcards_net,
+            upgrades: 0,
+            infinitives: 0,
+            shed: 0,
+            deviation: 0.0,
+        };
+        assert!(r(0.0, 1, -1.0).better_than(&r(0.0, 0, 0.0)), "the fall over a wildcard");
+        assert!(r(0.0, 0, 0.0).better_than(&r(-1.0, 2, 0.0)), "a gem over the fall");
     }
 
     /// The live board, cut to one column: `A D ! P` bottom to top. Only removing both tiles under

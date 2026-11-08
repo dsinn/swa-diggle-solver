@@ -59,12 +59,14 @@ behaviour freely.
 
 ### Changed
 
-- **Tile upgrades and queued infinitives are the last two gains ranked**, above only the
-  board-tidiness tiebreakers: tiles kept, then upgrades, then infinitives. Upgrades count from any
-  gear that upgrades or gilds tiles on submit: the Scales of justice and the ER/EST scales on
-  suffix words, the Gilding bastard sword on seven-letter words. The Gain column shows them as
-  `+1 ⬆️`, with a tooltip saying which. Queued infinitives count from every suffix link, so the
-  Ostrich feather, Heart of gold and the lesser scales now count too (🔁).
+- **A `!` brought partway down now ranks above the wildcards a word keeps**, below gold and gems.
+  It used to be a board-tidiness tiebreaker, near the very end.
+- **Tile upgrades and queued infinitives are the last two gains ranked**: tiles kept, then an ash
+  shed, then upgrades, then infinitives, with only the board's letter balance below. Upgrades
+  count from any gear that upgrades or gilds tiles on submit: the Scales of justice and the ER/EST
+  scales on suffix words, the Gilding bastard sword on seven-letter words. The Gain column shows
+  them as `+1 ⬆️`, with a tooltip saying which. Queued infinitives count from every suffix link,
+  so the Ostrich feather, Heart of gold and the lesser scales now count too (🔁).
 - **A kill that brings a `!` to the bottom now outranks the wood-only and full-heal payouts**, as it
   already outranked armour and health. A board where every plain word earned the Woodsman tunic's
   4 armour listed the words that took the D out from under the `!` at #130; they are now first.
