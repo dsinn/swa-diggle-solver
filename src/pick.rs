@@ -1529,7 +1529,8 @@ mod tests {
     }
 
     /// The user's board, 2026-11-07: `NOXA` spends a Corundum N and the gold X, `TOWKAY` a Diamond
-    /// Y, whose cooper ligature adds a point. One gem each, so the gold decides.
+    /// Y with a cooper ligature. One gem each, so the gold decides. (The cooper point that once
+    /// made the Y dearer is one the game never adds: see `Scorer::tile_score`.)
     #[test]
     fn every_gem_counts_one_and_gold_decides() {
         let Some(sc) = scorer() else { return };
@@ -1538,7 +1539,6 @@ mod tests {
         t[2].quality.material = Some("gold".into());
         t[4].quality.material = Some("gemheal".into());
         t[4].quality.ligature = Some("cooperY".into());
-        assert!(sc.tile_score(&t[4]) > sc.tile_score(&t[0]), "the Y scores a point more");
         let ctx = Context::default();
         let noxa = TileLedger::of("NOXA", &t, &[0, 1, 2, 3], &sc, &ctx);
         let oya = TileLedger::of("OYA", &t, &[1, 4, 3], &sc, &ctx);

@@ -90,6 +90,10 @@ behaviour freely.
 
 ### Fixed
 
+- **A cooper X, Y or Z no longer scores a point the game never gives.** The ligature's +1
+  (`scoreAdd`) is dead in the game itself: `tiles.score` shadows the ligature table with the
+  tile's ligature name, so it is never added. `YOWIE` on a cooper Y was listed at 16 and a kill;
+  the game previews 14.
 - **A wildcard's letter now spoils a heterogram, as it does in the game.** The game checks the
   word upper-cased, so `FOOTER` with its second O typed into a wildcard repeats a letter; the
   solver counted the wildcard as its own letter, added the heterogram's +25% and listed

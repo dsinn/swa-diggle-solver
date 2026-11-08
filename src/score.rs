@@ -93,8 +93,6 @@ pub struct Scorer {
     materials: HashMap<String, Material>,
     /// Border name → `score`. `iron` has none, and a border without a score contributes nothing.
     borders: HashMap<String, Option<f64>>,
-    /// Ligature effect name → `scoreAdd`.
-    ligature_bonus: HashMap<String, f64>,
     /// Mutex rather than RefCell: the search shares `&Scorer` across threads, and RefCell is not
     /// Sync. Contention is irrelevant because this only ever records a drift warning.
     unknown: std::sync::Mutex<Vec<String>>,
@@ -106,7 +104,6 @@ impl Scorer {
         let (letter_material, default_score) = load_default_material(game_dir)?;
         let materials = load_materials(game_dir)?;
         let borders = load_scored_dir(game_dir.join("rpg/effects/border"))?;
-        let ligature_bonus = load_ligature_bonuses(game_dir)?;
 
         if letter_material.is_empty() || default_score.is_empty() {
             return Err(crate::Error::Config(
@@ -118,7 +115,6 @@ impl Scorer {
             default_score,
             materials,
             borders,
-            ligature_bonus,
             unknown: std::sync::Mutex::new(Vec::new()),
         })
     }
@@ -227,14 +223,17 @@ impl Scorer {
             }
         });
 
-        let mut score = match (material_score, border_score) {
+        // **No ligature `scoreAdd`, because the game never adds one.** `tiles.score` means to
+        // (`if tile.extra.ligature and ligature[tile.extra.ligature].scoreAdd`, `:90-92`), but its
+        // `local letter, ligature = tile.letter, tile.extra.ligature` (`:67`) shadows the ligature
+        // table with the tile's ligature *name*. Indexing that string yields nil, and `conf.lua`'s
+        // nil metatable makes nil's `.scoreAdd` nil rather than an error, so the cooper ligatures'
+        // `scoreAdd = 1` (`rpg/effects/ligature/cooper*.lua`) is dead. The user's `YOWIE`,
+        // 2026-11-08, on a cooper Y: listed at 16 and a kill, previewed by the game at 14.
+        let score = match (material_score, border_score) {
             (Some(m), Some(b)) => m * MAT_BORDER_RATIO + b * (1.0 - MAT_BORDER_RATIO),
             (m, b) => m.unwrap_or(1.0) + b.unwrap_or(0.0),
         };
-        if let Some(add) = tile.quality.ligature.as_deref().and_then(|l| self.ligature_bonus.get(l))
-        {
-            score += add;
-        }
         score * score_mult
     }
 
@@ -359,13 +358,6 @@ fn load_scored_dir(dir: std::path::PathBuf) -> Result<HashMap<String, Option<f64
         .collect())
 }
 
-fn load_ligature_bonuses(game_dir: &Path) -> Result<HashMap<String, f64>, crate::Error> {
-    Ok(read_lua_dir(game_dir.join("rpg/effects/ligature"))?
-        .into_iter()
-        .filter_map(|(name, t)| Some((name, t.path("scoreAdd")?.as_f64()?)))
-        .collect())
-}
-
 /// Loads every `.lua` in a directory as data, keyed by `data.key` or the file stem — the same rule
 /// `enumerate.hashRequire` uses (`utils/enumerate.lua:60-74`).
 fn read_lua_dir(dir: std::path::PathBuf) -> Result<Vec<(String, Table)>, crate::Error> {
@@ -442,6 +434,25 @@ mod tests {
         assert_eq!(s.letter_score("J"), 30.0);
         assert_eq!(s.letter_score("Q"), 40.0);
         assert!(s.letter_score("J") > s.letter_score("Z"), "J beats a plain gold letter");
+    }
+
+    /// The cooper ligatures' `scoreAdd` is dead in the game (`utils/tiles.lua:67` shadows the
+    /// ligature table): the user's `YOWIE`, 2026-11-08, on a cooper Y of gold-bordered inlaid wood,
+    /// which the game scores (1 x 0.75 + 10 x 0.25) x 10/9 = 3.61, no point added.
+    #[test]
+    fn a_cooper_ligature_adds_nothing() {
+        let Some(s) = scorer() else { return };
+        let y = |ligature: Option<&str>| Tile {
+            letter: "Y".into(),
+            quality: crate::observe::board::Quality {
+                material: Some("woodornate".into()),
+                border: Some("gold".into()),
+                ligature: ligature.map(str::to_string),
+                ..Default::default()
+            },
+        };
+        assert!((s.tile_score(&y(Some("cooperY"))) - 3.25 * 10.0 / 9.0).abs() < 1e-9);
+        assert_eq!(s.tile_score(&y(Some("cooperY"))), s.tile_score(&y(None)));
     }
 
     #[test]
