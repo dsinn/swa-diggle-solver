@@ -27,7 +27,11 @@ windows = { version = "0.58", features = [
     "Win32_UI_Controls",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+    # The Advisor implements IDWriteInlineObject to draw item icons in its list.
+    "implement",
 ] }
+# The `implement` macro expands to `::windows_core` paths, so it has to be a direct dependency.
+windows-core = "0.58"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 thiserror = "2"

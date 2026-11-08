@@ -51,6 +51,11 @@ behaviour freely.
 - Diggle is scored as casting the best spell, as the Advisor's user is. Pressing the button is not
   written yet, so until it is Diggle can land short where a spell scored higher.
 - Advisor draws Corundum a clear red.
+- **Advisor shows the game's own gauntlet and scales.** The Gain column draws the Infinitives
+  gauntlet's and the Scales of justice's item art in place of 🧤 and ⚖️, sized like the emoji
+  beside them. The two icons are built into the Advisor, so it needs no game checkout to show
+  them. Every gauntlet shows the full gauntlet, a partial one included (`InlineIcon`,
+  `assets/advisor/`).
 
 ### Fixed
 

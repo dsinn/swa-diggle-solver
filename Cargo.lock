@@ -71,6 +71,7 @@ dependencies = [
  "thiserror",
  "toml",
  "windows",
+ "windows-core",
 ]
 
 [[package]]

@@ -58,22 +58,26 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{mpsc, Mutex, OnceLock};
-use windows::core::{w, HSTRING, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
+use windows::core::{w, Interface, HSTRING, PCWSTR, PWSTR};
+use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
+    D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D_POINT_2F, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory, ID2D1RenderTarget,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_CLIP,
     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
     D2D1_RENDER_TARGET_USAGE_NONE,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWriteCreateFactory, IDWriteFactory, IDWriteInlineObject, IDWriteInlineObject_Impl,
+    IDWriteTextFormat, IDWriteTextRenderer, DWRITE_BREAK_CONDITION, DWRITE_BREAK_CONDITION_NEUTRAL,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_INLINE_OBJECT_METRICS, DWRITE_OVERHANG_METRICS,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_RANGE,
+    DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
@@ -677,9 +681,115 @@ const EMOJI_COLUMNS: [i32; 4] = [2, 3, 4, 5];
 /// context through a DC render target.
 struct ColourText {
     target: ID2D1DCRenderTarget,
+    write: IDWriteFactory,
     format: IDWriteTextFormat,
     /// The same, set flush right, for the right-aligned columns.
     right: IDWriteTextFormat,
+    /// The item icons that stand in for their emoji, each with the emoji it replaces. Made on the
+    /// first draw, once the target is bound; empty if they could not be made, and then the emoji
+    /// show as they always did.
+    icons: RefCell<Option<Vec<(Vec<u16>, IDWriteInlineObject)>>>,
+}
+
+/// The game's own art for the two infinitive items, drawn in place of their emoji (🧤 ⚖️), which
+/// look nothing like them: `ui/graphics/items/gauntlet-inf-32.png` (`items/infinitives.lua:236`)
+/// and `ui/graphics/items/scales-justice-32.png` (`items/scalesofjustice.lua:64`). Copied into
+/// `assets/advisor/` and built into the exe, so the Advisor needs no game checkout to show them.
+/// Every gauntlet shows the full gauntlet, even a partial one with its own art
+/// (`gauntlet-inf-01111-32.png` and the rest, `items/infinitives.lua:323`).
+const ICONS: [(diggle_solver::pick::InfinitiveSource, &[u8]); 2] = [
+    (
+        diggle_solver::pick::InfinitiveSource::Gauntlet,
+        include_bytes!("../../assets/advisor/gauntlet-inf-32.png"),
+    ),
+    (
+        diggle_solver::pick::InfinitiveSource::Justice,
+        include_bytes!("../../assets/advisor/scales-justice-32.png"),
+    ),
+];
+
+/// How big an item icon is drawn, in pixels: the size of the emoji around it, the user's call,
+/// 2026-11-07. Measured on screen, the list's emoji draw up to 15 px (💀 15×15, 🔥 12×15), and
+/// the scales fill their whole 32 px square, so 16 is within a pixel. It is also exactly half the
+/// art, so the linear filter averages each 2×2 block evenly; 15 would scale by 2.13 and blur more.
+/// 32 was tried: faithful to the last pixel, but twice the height of the emoji.
+const ICON_PX: f32 = 16.0;
+
+/// A PNG as premultiplied BGRA, the layout a Direct2D bitmap takes: (width, height, pixels).
+fn decode_icon(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    // Both icons are paletted with a transparent entry: EXPAND turns that into RGBA.
+    decoder.set_transformations(
+        png::Transformations::EXPAND | png::Transformations::STRIP_16 | png::Transformations::ALPHA,
+    );
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    buf.truncate(info.buffer_size());
+    for px in buf.chunks_exact_mut(4) {
+        let a = px[3] as u16;
+        let pre = |c: u8| ((c as u16 * a + 127) / 255) as u8;
+        let (r, g, b) = (pre(px[0]), pre(px[1]), pre(px[2]));
+        px.copy_from_slice(&[b, g, r, px[3]]);
+    }
+    Some((info.width, info.height, buf))
+}
+
+/// An item icon set into a line of text in place of a character run: DirectWrite lays it out as
+/// one glyph [`ICON_PX`] square and calls [`Self::Draw`] where it lands.
+#[windows_core::implement(IDWriteInlineObject)]
+struct InlineIcon {
+    target: ID2D1RenderTarget,
+    bitmap: ID2D1Bitmap,
+}
+
+impl IDWriteInlineObject_Impl for InlineIcon_Impl {
+    fn Draw(
+        &self, _context: *const std::ffi::c_void, _renderer: Option<&IDWriteTextRenderer>, x: f32,
+        y: f32, _sideways: BOOL, _rtl: BOOL, _effect: Option<&windows_core::IUnknown>,
+    ) -> windows::core::Result<()> {
+        // Direct2D's own renderer hands over the icon's top-left corner on the target.
+        let to = D2D_RECT_F { left: x, top: y, right: x + ICON_PX, bottom: y + ICON_PX };
+        // SAFETY: called by DirectWrite inside the BeginDraw/EndDraw of `ColourText::draw`.
+        unsafe {
+            self.target.DrawBitmap(
+                &self.bitmap,
+                Some(&to),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
+        }
+        Ok(())
+    }
+
+    fn GetMetrics(&self) -> windows::core::Result<DWRITE_INLINE_OBJECT_METRICS> {
+        Ok(DWRITE_INLINE_OBJECT_METRICS {
+            width: ICON_PX,
+            height: ICON_PX,
+            // Sits on the baseline with a little below it, as the emoji beside it do.
+            baseline: ICON_PX * 0.85,
+            supportsSideways: BOOL(0),
+        })
+    }
+
+    fn GetOverhangMetrics(&self) -> windows::core::Result<DWRITE_OVERHANG_METRICS> {
+        Ok(DWRITE_OVERHANG_METRICS::default())
+    }
+
+    fn GetBreakConditions(
+        &self, before: *mut DWRITE_BREAK_CONDITION, after: *mut DWRITE_BREAK_CONDITION,
+    ) -> windows::core::Result<()> {
+        // SAFETY: DirectWrite passes two writable out-pointers.
+        unsafe {
+            *before = DWRITE_BREAK_CONDITION_NEUTRAL;
+            *after = DWRITE_BREAK_CONDITION_NEUTRAL;
+        }
+        Ok(())
+    }
 }
 
 impl ColourText {
@@ -717,8 +827,40 @@ impl ColourText {
             };
             let (format, right) = (make()?, make()?);
             right.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)?;
-            Ok(ColourText { target, format, right })
+            Ok(ColourText { target, write, format, right, icons: RefCell::new(None) })
         }
+    }
+
+    /// The item icons as inline objects, each with the emoji it stands in for. Bitmaps belong to
+    /// a render target, so this runs once the target is bound. An icon that fails is left out,
+    /// and its emoji shows instead.
+    unsafe fn make_icons(&self) -> Vec<(Vec<u16>, IDWriteInlineObject)> {
+        let Ok(target) = self.target.cast::<ID2D1RenderTarget>() else { return Vec::new() };
+        let props = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        ICONS
+            .iter()
+            .filter_map(|(source, bytes)| {
+                let (w, h, pixels) = decode_icon(bytes)?;
+                let bitmap = target
+                    .CreateBitmap(
+                        D2D_SIZE_U { width: w, height: h },
+                        Some(pixels.as_ptr() as *const _),
+                        w * 4,
+                        &props,
+                    )
+                    .ok()?;
+                let icon: IDWriteInlineObject =
+                    InlineIcon { target: target.clone(), bitmap }.into();
+                Some((source.emoji().encode_utf16().collect(), icon))
+            })
+            .collect()
     }
 
     /// Draws `text` into `rc` of `hdc`, black, or greyed for a stale list; flush right when
@@ -735,15 +877,30 @@ impl ColourText {
         let colour = |r: f32, g: f32, b: f32, a: f32| D2D1_COLOR_F { r, g, b, a };
         self.target.BeginDraw();
         self.target.Clear(Some(&colour(1.0, 1.0, 1.0, 1.0)));
-        if let Ok(ink) = self.target.CreateSolidColorBrush(&colour(0.0, 0.0, 0.0, 1.0), None) {
-            let units: Vec<u16> = text.encode_utf16().collect();
-            self.target.DrawText(
-                &units,
-                if right { &self.right } else { &self.format },
-                &D2D_RECT_F { left: 6.0, top: 0.0, right: w - 6.0, bottom: h },
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let format = if right { &self.right } else { &self.format };
+        let ink = self.target.CreateSolidColorBrush(&colour(0.0, 0.0, 0.0, 1.0), None);
+        let layout = self.write.CreateTextLayout(&units, format, (w - 12.0).max(0.0), h);
+        if let (Ok(ink), Ok(layout)) = (ink, layout) {
+            let mut icons = self.icons.borrow_mut();
+            for (emoji, icon) in icons.get_or_insert_with(|| self.make_icons()).iter() {
+                let mut at = 0;
+                while let Some(i) =
+                    units[at..].windows(emoji.len()).position(|run| run == &emoji[..])
+                {
+                    let range = DWRITE_TEXT_RANGE {
+                        startPosition: (at + i) as u32,
+                        length: emoji.len() as u32,
+                    };
+                    let _ = layout.SetInlineObject(icon, range);
+                    at += i + emoji.len();
+                }
+            }
+            self.target.DrawTextLayout(
+                D2D_POINT_2F { x: 6.0, y: 0.0 },
+                &layout,
                 &ink,
                 D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT | D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                DWRITE_MEASURING_MODE_NATURAL,
             );
         }
         // A stale list is greyed by washing it with translucent white, which greys the coloured
@@ -1143,5 +1300,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both icons built into the exe decode, at the game's 32 px, with see-through corners: a
+    /// bad copy would otherwise only show as the emoji coming back.
+    #[test]
+    fn the_built_in_icons_decode_with_transparency() {
+        for (source, bytes) in ICONS {
+            let (w, h, px) = decode_icon(bytes).unwrap_or_else(|| panic!("{source:?} decodes"));
+            assert_eq!((w, h), (32, 32), "{source:?}");
+            assert_eq!(px.len(), 32 * 32 * 4, "{source:?}");
+            assert_eq!(&px[..4], &[0, 0, 0, 0], "{source:?}: the top-left corner is clear");
+            assert!(px.chunks_exact(4).any(|p| p[3] == 255), "{source:?} has opaque pixels");
+        }
     }
 }
