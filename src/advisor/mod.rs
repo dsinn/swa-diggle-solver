@@ -4,6 +4,7 @@
 
 pub mod annotate;
 pub mod bestiary;
+pub mod censor;
 pub mod mode;
 pub mod palette;
 pub mod settings;

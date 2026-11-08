@@ -55,6 +55,9 @@ pub struct Cell {
     /// Burning tiles score nothing (`utils/tiles.lua:56-57`); drawn with a red border, never red
     /// lettering, which is hard to read on the darker tiles.
     pub burning: bool,
+    /// Drawn as the game's mosaic while "Censor profanity" is ticked: the word is in the profane
+    /// book and this tile carries a letter [`super::censor::tiles_hidden`] hides.
+    pub censor: bool,
 }
 
 /// The cell for `letter` typed into `tile`.
@@ -67,6 +70,7 @@ pub fn cell_for(res: &Resources, tile: &crate::observe::board::Tile, letter: &st
         wildcard: false,
         ring: res.palette.border(tile.quality.border.as_deref()).or(face.ring),
         burning: tile.burn().is_some(),
+        censor: false,
     }
 }
 
@@ -74,6 +78,10 @@ pub fn cell_for(res: &Resources, tile: &crate::observe::board::Tile, letter: &st
 pub struct ListRow {
     pub row: Row,
     pub cells: Vec<Cell>,
+    /// The word is in the profane book (`utils/lexica/curses.lua`), whether or not the player
+    /// holds it: the advisor shows the word either way. The game censors only while the book is
+    /// held (`wordboard.lua:180-191,254`).
+    pub profane: bool,
 }
 
 /// The window's whole state.
@@ -190,13 +198,28 @@ impl View {
         if list.is_empty() {
             notes.push("nothing playable on this board".into());
         }
+        let swears = lexica.words_for("swears");
         let rows = rows(&plan, cs, &res.scorer, &book, &list, ROW_CAP)
             .into_iter()
             .map(|row| {
+                let profane = swears.is_some_and(|w| w.contains(&row.word.to_ascii_uppercase()));
+                let spans: Vec<usize> = row
+                    .letters
+                    .iter()
+                    .map(|l| match l.wildcard {
+                        true => 1,
+                        false => plan.tiles.get(l.tile).map_or(1, |t| t.letter.chars().count()),
+                    })
+                    .collect();
+                let censored = match profane {
+                    true => super::censor::tiles_hidden(&row.word, &spans),
+                    false => vec![false; spans.len()],
+                };
                 let cells = row
                     .letters
                     .iter()
-                    .map(|l| {
+                    .zip(censored)
+                    .map(|(l, censor)| {
                         let cell = match plan.tiles.get(l.tile) {
                             Some(tile) => cell_for(res, tile, &l.text),
                             None => Cell {
@@ -206,12 +229,13 @@ impl View {
                                 wildcard: false,
                                 ring: None,
                                 burning: false,
+                                censor: false,
                             },
                         };
-                        Cell { wildcard: l.wildcard, ..cell }
+                        Cell { wildcard: l.wildcard, censor, ..cell }
                     })
                     .collect();
-                ListRow { row, cells }
+                ListRow { row, cells, profane }
             })
             .collect();
         super::telemetry::note(
@@ -845,5 +869,44 @@ mod tests {
         assert_eq!(top.effect, "kills", "{} first, unticked", top.word);
         assert!(off.rows.iter().all(|r| r.row.tier != Tier::Stall));
         assert!(off.header.contains("kill"), "{}", off.header);
+    }
+
+    /// A word in the profane book has the tiles of its hidden letters marked for the mosaic, and
+    /// no other word has any. At least one row on these boards must be profane, or this proves
+    /// nothing. Words are never printed, only their masked form.
+    #[test]
+    fn profane_words_mark_the_tiles_their_hidden_letters_sit_on() {
+        let res = res();
+        let swears = res.lexica.words_for("swears").expect("the profane book's list");
+        let mut seen = 0;
+        for fixture in ["crypt-l0", "chest-chrysocolla", "l1-depleted"] {
+            let save =
+                std::fs::read_to_string(format!("tests/fixtures/combatSaveData-{fixture}.lua"))
+                    .unwrap();
+            let v = View::next(
+                &View::default(),
+                &snap(Some(&save)),
+                &res,
+                &mut Default::default(),
+                Default::default(),
+            );
+            for r in &v.rows {
+                let marked: Vec<bool> = r.cells.iter().map(|c| c.censor).collect();
+                let masked = super::super::censor::masked(&r.row.word);
+                assert_eq!(r.profane, swears.contains(&r.row.word), "{masked}");
+                if !r.profane {
+                    assert!(!marked.contains(&true), "{masked}: a clean word marked");
+                    continue;
+                }
+                seen += 1;
+                assert!(marked.contains(&true), "{masked}: nothing marked");
+                // With one letter per tile, a marked tile is a `*` in the mask.
+                if r.cells.len() == r.row.word.len() {
+                    let stars: Vec<bool> = masked.chars().map(|c| c == '*').collect();
+                    assert_eq!(marked, stars, "{masked}");
+                }
+            }
+        }
+        assert!(seen > 0, "no profane word on any board: the test checked nothing");
     }
 }

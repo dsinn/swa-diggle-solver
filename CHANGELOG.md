@@ -10,6 +10,15 @@ behaviour freely.
 ### Advisor
 
 - The Advisor has its own window icon, one for in combat and one for out of combat.
+- **"Censor profanity"** (unticked by default) pixelates words from the profane book the way the
+  game's own censor does, a 4×4 mosaic over each tile with every block the average of what it
+  covers, so the tile's ring and the letter's strokes show through as the game's frame and
+  lettering do. Only the vowels are censored, so the word can
+  still be played. `y` counts as a vowel when neither neighbour is one (`gym`, not `yes`); a word
+  with no vowel hides every other letter from the second (`advisor::censor`). It applies whether
+  or not you hold the profane book.
+- **The checkboxes have a row of their own** under the header line, wrapping onto a second row in
+  a narrow window, so the header has the full width.
 - **Words that need the mouse are marked.** A 🖱️ column flags any word with a tile the keyboard
   would not pick, worked out with the game's own keyboard rules, in order (`Typist::clicks`). With
   "Underline mouse tiles" ticked (the default; hover it for a tooltip), each tile to click gets a

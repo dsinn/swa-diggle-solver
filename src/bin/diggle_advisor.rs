@@ -30,7 +30,11 @@
 //!
 //! ## The window
 //!
-//! Its size, "Stay on top", "Stall on halfling's even turns", and whether the log box is shown and
+//! **Censor profanity** (unticked by default) pixelates some letters of each word in the profane
+//! book, as the game's own censor does, but only the vowels, so the word can still be played: see
+//! [`diggle_solver::advisor::censor`].
+//!
+//! Its size, the checkboxes, and whether the log box is shown and
 //! how tall it is are remembered between launches ([`diggle_solver::advisor::settings`]). The log
 //! box starts collapsed; drag the gap under it to resize it. Settings are written half a second after the last change
 //! ([`SAVE_DELAY_MS`]), so a drag is one write rather than hundreds.
@@ -87,7 +91,8 @@ use windows::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, COLOR_WINDOW, DT_CENTER, DT_SINGLELINE, DT_TOP, HFONT, HGDIOBJ, TEXTMETRICW,
     TRANSPARENT,
 };
-use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC, ScreenToClient};
+use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC, ScreenToClient, HDC};
+use windows::Win32::Graphics::Gdi::{BitBlt, CreateCompatibleDC, DeleteDC, GdiFlush, SRCCOPY};
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, CreateDIBSection, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
 };
@@ -140,6 +145,7 @@ const ID_TOPMOST: usize = 101;
 const ID_LOG: usize = 102;
 const ID_STALL: usize = 103;
 const ID_UNDERLINE: usize = 104;
+const ID_CENSOR: usize = 105;
 /// The timer that writes the settings once they have stopped changing.
 const ID_SAVE: usize = 1;
 const SAVE_DELAY_MS: u32 = 500;
@@ -184,6 +190,8 @@ struct Ui {
     stall: HWND,
     /// "Underline mouse tiles". Its tooltip is owned by the main window and goes with it.
     underline: HWND,
+    /// "Censor profanity". Its tooltip is owned by the main window, like the underline box's.
+    censor: HWND,
     list: HWND,
     /// The tooltip over the list's items: one tool, moved onto whichever item is under the mouse.
     /// See [`hover`].
@@ -287,6 +295,7 @@ const UNDERLINE_MARGIN: i32 = 3;
 /// Chrysocolla, is a blue-green). The user's choice of colour, 2026-11-07.
 const UNDERLINE: (u8, u8, u8) = (0, 192, 64);
 const UNDERLINE_TIP: &str = "Draws a green bar under each tile the keyboard would not pick.\nType the word in order and click the underlined tiles instead.";
+const CENSOR_TIP: &str = "Pixelates the vowels of words from the profane book, the way the game censors them.\nThe other letters stay readable, so the word can still be played.";
 
 /// How tall the rows are, with or without the underline's room.
 fn row_height(underline: bool) -> i32 {
@@ -587,12 +596,20 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
         ID_UNDERLINE,
     )?;
+    let censor = child(
+        hwnd,
+        w!("BUTTON"),
+        w!("Censor profanity"),
+        BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
+        ID_CENSOR,
+    )?;
     let saved = settings_now();
     for (h, on) in [
         (topmost, saved.topmost),
         (log_toggle, saved.log_open),
         (stall, saved.stall_on_free_turns),
         (underline, saved.underline_mouse_tiles),
+        (censor, saved.censor_profanity),
     ] {
         let check = if on { BST_CHECKED.0 } else { 0 };
         SendMessageW(h, BM_SETCHECK, WPARAM(check as usize), LPARAM(0));
@@ -605,7 +622,7 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         0,
     )?;
     let banner = child(hwnd, w!("STATIC"), w!("Out of combat"), SS_CENTER | SS_CENTERIMAGE, 0)?;
-    for h in [status, notes, topmost, log_toggle, stall, underline, list] {
+    for h in [status, notes, topmost, log_toggle, stall, underline, censor, list] {
         SendMessageW(h, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
     }
     SendMessageW(banner, WM_SETFONT, WPARAM(banner_font.0 as usize), LPARAM(1));
@@ -613,6 +630,7 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
     // way to make rows tall enough for the tiles without enlarging every other column's text.
     set_row_height(list, row_height(saved.underline_mouse_tiles), WPARAM(font.0 as usize));
     tooltip_for(hwnd, underline, UNDERLINE_TIP)?;
+    tooltip_for(hwnd, censor, CENSOR_TIP)?;
     let list_tip = item_tooltip(hwnd, list)?;
     SendMessageW(
         list,
@@ -638,6 +656,7 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         log_toggle,
         stall,
         underline,
+        censor,
         list,
         list_tip,
         banner,
@@ -854,51 +873,75 @@ unsafe fn tooltip_for(owner: HWND, control: HWND, text: &str) -> windows::core::
 }
 
 const PAD: i32 = 8;
-/// The header row: the header text, and the three checkboxes on its right.
+/// The header text, across the whole window; the checkboxes have a row of their own under it —
+/// the user's call, 2026-11-08, as there are too many to share its line.
 const HEADER_HEIGHT: i32 = 40;
-const TOPMOST_WIDTH: i32 = 120;
-const LOG_TOGGLE_WIDTH: i32 = 100;
-const STALL_WIDTH: i32 = 230;
-const UNDERLINE_WIDTH: i32 = 180;
+const BOX_HEIGHT: i32 = 24;
+/// Each checkbox's width, in the order they sit left to right: see [`Ui::boxes`].
+const BOX_WIDTHS: [i32; 5] = [
+    180, // Underline mouse tiles
+    140, // Censor profanity
+    230, // Stall on halfling's even turns
+    100, // Show log
+    120, // Stay on top
+];
 /// The list keeps at least this much height however tall the log is dragged.
 const MIN_LIST_HEIGHT: i32 = 80;
 
-/// The log box's top and height in a client area `h` tall, when it is shown: its saved height,
-/// squeezed if the window is too short for it and a usable list.
-fn log_band(h: i32, saved: i32) -> (i32, i32) {
-    let top = PAD + HEADER_HEIGHT + 4;
+impl Ui {
+    /// The checkboxes, left to right, matching [`BOX_WIDTHS`].
+    fn boxes(&self) -> [HWND; 5] {
+        [self.underline, self.censor, self.stall, self.log_toggle, self.topmost]
+    }
+}
+
+/// Where each checkbox goes in a client area `w` wide, and the bottom of the last row. They run
+/// left to right under the header and wrap onto another row when the window is too narrow.
+fn box_layout(w: i32) -> ([RECT; 5], i32) {
+    let (mut x, mut y) = (PAD, PAD + HEADER_HEIGHT);
+    let rects = BOX_WIDTHS.map(|bw| {
+        if x > PAD && x + bw > w - PAD {
+            (x, y) = (PAD, y + BOX_HEIGHT);
+        }
+        let rc = RECT { left: x, top: y, right: x + bw, bottom: y + BOX_HEIGHT };
+        x += bw + PAD;
+        rc
+    });
+    (rects, y + BOX_HEIGHT)
+}
+
+/// The log box's top and height in a client area `w` by `h`, when it is shown: its saved
+/// height, squeezed if the window is too short for it and a usable list.
+fn log_band(w: i32, h: i32, saved: i32) -> (i32, i32) {
+    let top = box_layout(w).1 + 4;
     let most = (h - top - PAD - PAD - MIN_LIST_HEIGHT).max(settings::MIN_LOG_HEIGHT);
     (top, saved.clamp(settings::MIN_LOG_HEIGHT, most))
 }
 
-fn client_height(hwnd: HWND) -> i32 {
+fn client_size(hwnd: HWND) -> (i32, i32) {
     let mut rc = RECT::default();
     // SAFETY: reads our own window's client rectangle.
     let _ = unsafe { GetClientRect(hwnd, &mut rc) };
-    rc.bottom - rc.top
+    (rc.right - rc.left, rc.bottom - rc.top)
 }
 
 /// Whether client point `y` is on the gap under the shown log: the splitter.
 fn on_splitter(hwnd: HWND, y: i32) -> bool {
     let s = settings_now();
-    let (top, height) = log_band(client_height(hwnd), s.log_height);
+    let (w, h) = client_size(hwnd);
+    let (top, height) = log_band(w, h, s.log_height);
     s.log_open && y >= top + height && y < top + height + PAD
 }
 
 unsafe fn layout(hwnd: HWND, ui: &Ui) {
-    let mut rc = RECT::default();
-    let _ = GetClientRect(hwnd, &mut rc);
-    let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
+    let (w, h) = client_size(hwnd);
     let s = settings_now();
-    let boxes = UNDERLINE_WIDTH + PAD + STALL_WIDTH + PAD + LOG_TOGGLE_WIDTH + PAD + TOPMOST_WIDTH;
-    let _ = MoveWindow(ui.status, PAD, PAD, (w - 3 * PAD - boxes).max(0), HEADER_HEIGHT, true);
-    let _ = MoveWindow(ui.underline, w - PAD - boxes, PAD, UNDERLINE_WIDTH, 24, true);
-    let stall_left = w - PAD - boxes + UNDERLINE_WIDTH + PAD;
-    let _ = MoveWindow(ui.stall, stall_left, PAD, STALL_WIDTH, 24, true);
-    let log_left = w - PAD - TOPMOST_WIDTH - PAD - LOG_TOGGLE_WIDTH;
-    let _ = MoveWindow(ui.log_toggle, log_left, PAD, LOG_TOGGLE_WIDTH, 24, true);
-    let _ = MoveWindow(ui.topmost, w - PAD - TOPMOST_WIDTH, PAD, TOPMOST_WIDTH, 24, true);
-    let (log_top, log_height) = log_band(h, s.log_height);
+    let _ = MoveWindow(ui.status, PAD, PAD, (w - 2 * PAD).max(0), HEADER_HEIGHT, true);
+    let (rects, _) = box_layout(w);
+    for (b, rc) in ui.boxes().into_iter().zip(rects) {
+        let _ = MoveWindow(b, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, true);
+    }
+    let (log_top, log_height) = log_band(w, h, s.log_height);
     let top = if s.log_open {
         let _ = MoveWindow(ui.notes, PAD, log_top, (w - 2 * PAD).max(0), log_height, true);
         log_top + log_height + PAD
@@ -1420,8 +1463,17 @@ impl ColourText {
 /// The text of one cell of the virtual list: its items, a space apart.
 fn cell_text(v: &View, item: usize, sub: i32) -> String {
     match sub {
-        WORD_COLUMN => v.rows.get(item).map(|r| r.row.word.clone()).unwrap_or_default(),
+        WORD_COLUMN => v.rows.get(item).map(word_text).unwrap_or_default(),
         _ => diggle_solver::advisor::annotate::join(&cell_items(v, item, sub)),
+    }
+}
+
+/// A row's word as text, its hidden letters starred while "Censor profanity" is ticked. The
+/// tiles are drawn over it; this is what the list holds underneath, for anything that reads it.
+fn word_text(r: &diggle_solver::advisor::view::ListRow) -> String {
+    match r.profane && settings_now().censor_profanity {
+        true => diggle_solver::advisor::censor::masked(&r.row.word),
+        false => r.row.word.clone(),
     }
 }
 
@@ -1433,7 +1485,7 @@ fn cell_items(v: &View, item: usize, sub: i32) -> Vec<diggle_solver::advisor::an
     match sub {
         0 => plain((item + 1).to_string()),
         MOUSE_COLUMN => a::mouse_items(&r.row),
-        WORD_COLUMN => plain(r.row.word.clone()),
+        WORD_COLUMN => plain(word_text(r)),
         3 => a::damage_items(&r.row),
         4 => r.row.bonus.as_ref().map(a::bonus_items).unwrap_or_default(),
         5 => a::gain_items(r.row.gain),
@@ -1498,7 +1550,8 @@ unsafe fn draw_word(ui: &Ui, cd: &NMLVCUSTOMDRAW) {
         (tm.tmInternalLeading + tm.tmAscent) / 2
     };
     let (tile_mid, wildcard_mid) = (caps_mid(ui.tile_font), caps_mid(ui.wildcard_font));
-    let underline = settings_now().underline_mouse_tiles;
+    let s = settings_now();
+    let (underline, censor) = (s.underline_mouse_tiles, s.censor_profanity);
     let mut x = rc.left + WORD_MARGIN;
     for (n, cell) in r.cells.iter().enumerate() {
         let (font, caps_mid) = match cell.wildcard {
@@ -1535,9 +1588,99 @@ unsafe fn draw_word(ui: &Ui, cd: &NMLVCUSTOMDRAW) {
         SetTextColor(hdc, colorref(ink));
         tile.top = (tile.top + tile.bottom) / 2 - caps_mid;
         DrawTextW(hdc, &mut text, &mut tile, DT_CENTER | DT_TOP | DT_SINGLELINE);
+        // The whole tile, rings and all, as the game pixelates its word strip. The underline is
+        // below the tile and stays readable.
+        if censor && cell.censor {
+            mosaic(hdc, &RECT { left: x, right: x + width, top: rc.top + 1, bottom });
+        }
         x += width + TILE_GAP;
     }
     SelectObject(hdc, old);
+}
+
+/// Blocks across and down a censored tile. The game's censor shader samples a 64×4 grid over a
+/// word canvas 16 tiles wide (`shaders/censor.vs`, `wordboard.lua:13`): 4×4 blocks a tile.
+const MOSAIC: i32 = 4;
+
+/// The [`MOSAIC`]×[`MOSAIC`] blocks of a `w`×`h` picture, each with the average colour of the
+/// pixels it covers. `pixels` are top-down rows of `0x00RRGGBB`, as a 32-bit DIB holds them.
+///
+/// **Averaged, where the game samples one texel per block.** The game's tile art is 118 px, and
+/// its frame and letter are tens of pixels thick, so a single sample per block still lands on
+/// them: the strip comes out as frame-coloured blocks round a darker, mottled middle. The
+/// advisor's tiles are a quarter that size with a 3 px ring and thin strokes, and one sample a
+/// block nearly always hit plain face, which left a flat tile with a speck on it (the user's
+/// screenshots, 2026-11-08). Averaging restores what the game's blocks show.
+fn mosaic_blocks(pixels: &[u32], w: i32, h: i32) -> Vec<(RECT, (u8, u8, u8))> {
+    let edge = |len: i32, k: i32| len * k / MOSAIC;
+    let mut out = Vec::with_capacity((MOSAIC * MOSAIC) as usize);
+    for by in 0..MOSAIC {
+        for bx in 0..MOSAIC {
+            let rc = RECT {
+                left: edge(w, bx),
+                right: edge(w, bx + 1),
+                top: edge(h, by),
+                bottom: edge(h, by + 1),
+            };
+            let mut sum = [0u64; 3];
+            let mut n = 0u64;
+            for y in rc.top..rc.bottom {
+                for x in rc.left..rc.right {
+                    let p = pixels[(y * w + x) as usize];
+                    sum[0] += u64::from((p >> 16) & 0xff);
+                    sum[1] += u64::from((p >> 8) & 0xff);
+                    sum[2] += u64::from(p & 0xff);
+                    n += 1;
+                }
+            }
+            let avg = |s: u64| (s / n.max(1)) as u8;
+            out.push((rc, (avg(sum[0]), avg(sum[1]), avg(sum[2]))));
+        }
+    }
+    out
+}
+
+/// Redraws what is drawn in `tile` as the game's censor mosaic, [`MOSAIC`] blocks each way: see
+/// [`mosaic_blocks`]. The tile is copied out to read it, so filling a block cannot change what the
+/// next one reads.
+unsafe fn mosaic(hdc: HDC, tile: &RECT) {
+    let (w, h) = (tile.right - tile.left, tile.bottom - tile.top);
+    if w < MOSAIC || h < MOSAIC {
+        return;
+    }
+    let mem = CreateCompatibleDC(hdc);
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+    if let Ok(dib) = CreateDIBSection(mem, &info, DIB_RGB_COLORS, &mut bits, None, 0) {
+        let old = SelectObject(mem, HGDIOBJ(dib.0));
+        if !bits.is_null() && BitBlt(mem, 0, 0, w, h, hdc, tile.left, tile.top, SRCCOPY).is_ok() {
+            let _ = GdiFlush();
+            let pixels = std::slice::from_raw_parts(bits as *const u32, (w * h) as usize);
+            for (rc, colour) in mosaic_blocks(pixels, w, h) {
+                let block = RECT {
+                    left: tile.left + rc.left,
+                    right: tile.left + rc.right,
+                    top: tile.top + rc.top,
+                    bottom: tile.top + rc.bottom,
+                };
+                fill(hdc, &block, colour);
+            }
+        }
+        SelectObject(mem, old);
+        let _ = DeleteObject(dib);
+    }
+    let _ = DeleteDC(mem);
 }
 
 /// Space between tiles, and the margin before the first.
@@ -1704,7 +1847,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_LBUTTONDOWN if on_splitter(hwnd, mouse_y(lparam)) => {
             let s = settings_now();
-            let (top, height) = log_band(client_height(hwnd), s.log_height);
+            let (w, h) = client_size(hwnd);
+            let (top, height) = log_band(w, h, s.log_height);
             let grab = mouse_y(lparam) - (top + height);
             STATE.with(|st| {
                 if let Some(st) = st.borrow_mut().as_mut() {
@@ -1717,10 +1861,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_MOUSEMOVE => {
             let drag = STATE.with(|st| st.borrow().as_ref().and_then(|st| st.drag));
             if let Some(grab) = drag {
-                let h = client_height(hwnd);
-                let (top, _) = log_band(h, 0);
+                let (w, h) = client_size(hwnd);
+                let (top, _) = log_band(w, h, 0);
                 // Clamped here, so the height saved is the height on screen.
-                let (_, height) = log_band(h, mouse_y(lparam) - grab - top);
+                let (_, height) = log_band(w, h, mouse_y(lparam) - grab - top);
                 update(hwnd, |s| s.log_height = height);
                 relayout(hwnd);
             }
@@ -1770,6 +1914,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     update(hwnd, |s| s.underline_mouse_tiles = on);
                     let font = SendMessageW(ui.list, WM_GETFONT, WPARAM(0), LPARAM(0));
                     set_row_height(ui.list, row_height(on), WPARAM(font.0 as usize));
+                    let _ = InvalidateRect(ui.list, None, true);
+                }
+            });
+            LRESULT(0)
+        }
+        WM_COMMAND if (wparam.0 & 0xffff) == ID_CENSOR && (wparam.0 >> 16) as u32 == BN_CLICKED => {
+            UI.with(|u| {
+                if let Some(ui) = u.borrow().as_ref() {
+                    let on = SendMessageW(ui.censor, BM_GETCHECK, WPARAM(0), LPARAM(0)).0
+                        == BST_CHECKED.0 as isize;
+                    update(hwnd, |s| s.censor_profanity = on);
+                    // Only the drawing changes: the view already marks which tiles to censor.
                     let _ = InvalidateRect(ui.list, None, true);
                 }
             });
@@ -1838,6 +1994,48 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wide enough, the checkboxes share one row under the header; at the narrowest window they
+    /// wrap, and none runs past the right edge or overlaps another.
+    #[test]
+    fn the_checkboxes_fill_a_row_and_wrap_when_narrow() {
+        let wide = 2 * PAD + BOX_WIDTHS.iter().map(|w| w + PAD).sum::<i32>();
+        let (rects, bottom) = box_layout(wide);
+        assert!(rects.iter().all(|r| r.top == PAD + HEADER_HEIGHT), "one row");
+        assert_eq!(bottom, PAD + HEADER_HEIGHT + BOX_HEIGHT);
+
+        let narrow = settings::MIN_WIDTH - 16;
+        let (rects, bottom) = box_layout(narrow);
+        assert!(bottom > PAD + HEADER_HEIGHT + BOX_HEIGHT, "wrapped");
+        for (i, a) in rects.iter().enumerate() {
+            assert!(a.right <= narrow - PAD, "box {i} runs off the edge");
+            for b in &rects[i + 1..] {
+                let apart = a.right <= b.left || b.right <= a.left || a.bottom <= b.top;
+                assert!(apart, "boxes overlap");
+            }
+        }
+        assert_eq!(log_band(narrow, 600, 96).0, bottom + 4, "the log starts under the boxes");
+    }
+
+    /// A block's colour is the average of what it covers: a thin light stroke on a dark face makes
+    /// a mid-tone block, not one that is all face or all stroke. The blocks tile the picture
+    /// exactly, sizes that do not divide by four included.
+    #[test]
+    fn mosaic_blocks_average_what_they_cover() {
+        let (w, h) = (10, 9);
+        // A dark face with a one-pixel light column at x = 1, inside the first block column.
+        let pixels: Vec<u32> =
+            (0..w * h).map(|i| if i % w == 1 { 0x00ff_ffff } else { 0x0010_2030 }).collect();
+        let blocks = mosaic_blocks(&pixels, w, h);
+        assert_eq!(blocks.len(), 16);
+        let area: i32 = blocks.iter().map(|(r, _)| (r.right - r.left) * (r.bottom - r.top)).sum();
+        assert_eq!(area, w * h, "the blocks cover the tile once");
+        // The first column is two pixels wide (10 * 1 / 4 = 2): half stroke, half face.
+        let (_, first) = blocks[0];
+        assert_eq!(first, (0x87, 0x8f, 0x97), "(0xff + 0x10) / 2 and so on");
+        let (_, second) = blocks[1];
+        assert_eq!(second, (0x10, 0x20, 0x30), "no stroke, plain face");
+    }
 
     /// Every icon built into the exe decodes, at the game's 32 px, with see-through corners: a
     /// bad copy would otherwise only show as the emoji coming back.

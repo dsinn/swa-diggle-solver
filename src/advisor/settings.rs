@@ -1,5 +1,6 @@
 //! The advisor window's own settings: its size, "Stay on top", the log box, whether to stall on
-//! the halfling's free turns, and whether to underline the tiles to click. Kept between
+//! the halfling's free turns, whether to underline the tiles to click, and whether to censor
+//! profanity. Kept between
 //! launches in `%LOCALAPPDATA%\DiggleAdvisor\settings.toml` ([`path`]).
 //!
 //! Nothing here goes near the game's folders: the save folder is watched, and a write there would
@@ -27,6 +28,9 @@ pub struct Settings {
     /// ([`crate::advisor::annotate::Letter::click`]). On by default — my call, 2026-11-07, as
     /// the user asked for the marks; the 🖱️ column shows either way.
     pub underline_mouse_tiles: bool,
+    /// "Censor profanity": a word in the profane book shows some letters as the game's mosaic
+    /// ([`crate::advisor::censor`]). Off by default, the user's call, 2026-11-08.
+    pub censor_profanity: bool,
 }
 
 impl Default for Settings {
@@ -39,6 +43,7 @@ impl Default for Settings {
             log_height: 96,
             stall_on_free_turns: crate::turn::Options::default().stall_on_free_turns,
             underline_mouse_tiles: true,
+            censor_profanity: false,
         }
     }
 }
@@ -99,6 +104,7 @@ mod tests {
         assert!(!Settings::default().log_open, "the log starts collapsed");
         assert!(Settings::default().stall_on_free_turns, "stalling starts ticked");
         assert!(Settings::default().underline_mouse_tiles, "underlining starts ticked");
+        assert!(!Settings::default().censor_profanity, "censoring starts unticked");
     }
 
     #[test]
@@ -112,6 +118,7 @@ mod tests {
             log_height: 150,
             stall_on_free_turns: false,
             underline_mouse_tiles: false,
+            censor_profanity: true,
         };
         s.save(&file).unwrap();
         assert_eq!(Settings::load(&file), s, "an unticked stall box must stay unticked");
