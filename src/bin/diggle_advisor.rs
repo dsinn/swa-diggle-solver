@@ -1648,6 +1648,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_DESTROY => {
             let _ = KillTimer(hwnd, ID_SAVE);
             save_now();
+            // Dropped here, while the window is still being destroyed, not with the thread's
+            // locals after `main` returns. Its Direct2D and DirectWrite objects — the item icons
+            // above all — released that late, in process shutdown, fail fast: every close ended in
+            // 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN), the user's report, 2026-11-08. Nothing reads
+            // the UI after this; the list's own handler finds it gone and passes its messages on.
+            UI.with(|u| u.borrow_mut().take());
             PostQuitMessage(0);
             LRESULT(0)
         }
