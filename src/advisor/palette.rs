@@ -55,6 +55,17 @@ const PLAIN_WOOD_LIGHTEN: f64 = 0.4;
 /// (`ui/graphics/tiles/gemfire_glow.png`) the list cannot draw; scaled, it is a clear red.
 const CORUNDUM_BRIGHTEN: f64 = 2.2;
 
+/// Diamond's face, brightened the same way. **The user's call**, 2026-11-07: *diamond should be a
+/// very light blue*. The sheet's median, about (145, 165, 176), is the stone's shadowed body; what
+/// the eye takes from the game is its pale highlights — measured on the user's screenshot, the
+/// brightest tenth is near (180, 194, 202). Scaled, it is (189, 215, 229).
+const DIAMOND_BRIGHTEN: f64 = 1.3;
+
+/// Chrysocolla's face: Turquoise, `#40E0D0`. **The user's pick**, 2026-11-07, over the sampled
+/// teal brightened ×1.4, so black lettering reads clearly (contrast 12.8). Fixed rather than
+/// sampled: no scaling of the sheet's dark teal, about (61, 106, 102), reaches its hue.
+pub const CHRYSOCOLLA: (u8, u8, u8) = (64, 224, 208);
+
 /// Scales every channel of `c` by `by`, capped at 255.
 fn brighten((r, g, b): (u8, u8, u8), by: f64) -> (u8, u8, u8) {
     let scale = |c: u8| (c as f64 * by).round().min(255.0) as u8;
@@ -125,17 +136,20 @@ impl Palette {
 
     /// How a tile of `material` is drawn: its own face, ink and ring.
     ///
-    /// Special means a variant or a gem, ringed in the list so it stands apart. Variants are named
+    /// Special means a variant, ringed in the list so it stands apart. Variants are named
     /// by suffix on their family (`categories.material` in `rpg/effects/material/*.lua`): `braced`
     /// and `ornate` wood, `bleed` and `toxin` metals. Each keeps its own colours — braced and
     /// inlaid wood look nothing like plain wood in the game, so they must not here either.
     pub fn face(&self, material: Option<&str>) -> Face {
         let swatch = material.and_then(|m| self.swatches.get(m)).copied();
+        // **Gems are not ringed**, the user's call, 2026-11-07. The black ring once marked every
+        // special tile, from when variants were drawn in their family's colour and the ring was
+        // all that told them apart; each gem now has a face no other tile has, so on them it said
+        // nothing. A bleed or toxin metal still needs it: its face is all but its family's.
         let special = material.is_some_and(|m| {
-            m.starts_with("gem")
-                || ["braced", "ornate", "bleed", "toxin"]
-                    .iter()
-                    .any(|suffix| m.strip_suffix(suffix).is_some_and(|f| !f.is_empty()))
+            ["braced", "ornate", "bleed", "toxin"]
+                .iter()
+                .any(|suffix| m.strip_suffix(suffix).is_some_and(|f| !f.is_empty()))
         });
         let ring = special.then_some(SPECIAL);
         let Some(s) = swatch else { return Face { colour: GREY, ink: (0, 0, 0), ring } };
@@ -148,6 +162,11 @@ impl Palette {
                 let face = brighten(s.face, CORUNDUM_BRIGHTEN);
                 Face { colour: face, ink: readable(face, s.ink), ring }
             }
+            Some("gemheal") => {
+                let face = brighten(s.face, DIAMOND_BRIGHTEN);
+                Face { colour: face, ink: readable(face, s.ink), ring }
+            }
+            Some("gemice") => Face { colour: CHRYSOCOLLA, ink: readable(CHRYSOCOLLA, s.ink), ring },
             // Inlaid wood's own gold goes to the ring, and its letters are lifted above it.
             Some("woodornate") => Face {
                 colour: s.face,
@@ -165,7 +184,7 @@ pub struct Face {
     pub colour: (u8, u8, u8),
     /// The lettering colour the game prints on this material.
     pub ink: (u8, u8, u8),
-    /// A variant or gem is ringed so it stands apart from a plain tile, in this colour.
+    /// A variant is ringed so it stands apart from a plain tile, in this colour.
     pub ring: Option<(u8, u8, u8)>,
 }
 
@@ -347,6 +366,27 @@ mod tests {
         assert_eq!(brighten((200, 0, 0), 2.0), (255, 0, 0), "capped");
     }
 
+    /// Diamond is a very light blue, Chrysocolla Turquoise; both take dark lettering, and no gem
+    /// is ringed. The user's calls, 2026-11-07.
+    #[test]
+    fn the_gems_are_light_and_unringed() {
+        let p = Palette::load(&game_dir());
+        let (heal, ice) = (p.face(Some("gemheal")), p.face(Some("gemice")));
+        let (r, g, b) = heal.colour;
+        assert!(
+            luma(heal.colour) > 190.0 && b > g && g > r,
+            "a very light blue: {:?}",
+            heal.colour
+        );
+        assert_eq!(ice.colour, CHRYSOCOLLA);
+        for (m, f) in [("gemheal", heal), ("gemice", ice), ("gemfire", p.face(Some("gemfire")))] {
+            assert!(luma(f.ink) < 60.0, "{m}: dark lettering, {:?}", f.ink);
+            assert!(contrast(f.colour, f.ink) >= MIN_CONTRAST, "{m}");
+            assert_eq!(f.ring, None, "{m} is not ringed");
+        }
+        assert_eq!(p.face(Some("silvertoxin")).ring, Some(SPECIAL), "a toxin metal still is");
+    }
+
     /// Inlaid wood is ringed in its own gold lettering colour, and its letters are lighter still.
     #[test]
     fn inlaid_wood_is_ringed_in_its_ink_and_lettered_lighter() {
@@ -367,14 +407,14 @@ mod tests {
         assert_eq!(p.border(None), None);
     }
 
-    /// Variants and gems are ringed; plain tiles are not.
+    /// Variants are ringed; plain tiles and gems are not.
     #[test]
-    fn variants_and_gems_are_marked_special() {
+    fn variants_are_marked_special() {
         let p = Palette::load(&game_dir());
-        for m in ["woodbraced", "woodornate", "bronzebleed", "silvertoxin", "gemheal"] {
+        for m in ["woodbraced", "woodornate", "bronzebleed", "silvertoxin"] {
             assert!(p.face(Some(m)).ring.is_some(), "{m}");
         }
-        for m in ["wood", "bronze", "silver3", "gold"] {
+        for m in ["wood", "bronze", "silver3", "gold", "gemfire", "gemice", "gemheal"] {
             assert!(p.face(Some(m)).ring.is_none(), "{m}");
         }
     }
