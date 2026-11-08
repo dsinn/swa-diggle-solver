@@ -963,6 +963,16 @@ const WILDCARD_WORTH: f64 = 1.0;
 /// The material a word should not be spending unless the kill needs it.
 const GOLD: &str = "gold";
 
+/// Is `material` gold: solid gold, or one of its serrated variants, `goldbleed` and `goldtoxin`?
+/// Each says `material = 'gold'` among its categories and scores 10 like solid gold
+/// (`rpg/effects/material/goldbleed.lua`, `goldtoxin.lua`), so each is held in reserve the same.
+///
+/// The user's board, 2026-11-07: `SEEDBED` spent a bleed gold S and a toxin gold D and ranked
+/// first, as if it spent nothing, because only the material named `gold` was counted.
+fn is_gold(material: &str) -> bool {
+    let family = ["bleed", "toxin"].iter().find_map(|v| material.strip_suffix(v));
+    family.unwrap_or(material) == GOLD
+}
 
 /// What this word spends from the board's stock of tiles worth keeping. Lower is better.
 ///
@@ -1039,7 +1049,7 @@ enum Kept {
 
 fn kept_kind(t: &Tile, scorer: &Scorer, heal_wanted: bool) -> Kept {
     match scorer.material_name(t) {
-        Some(GOLD) => Kept::Gold(scorer.tile_score(t).max(WILDCARD_WORTH)),
+        Some(m) if is_gold(m) => Kept::Gold(scorer.tile_score(t).max(WILDCARD_WORTH)),
         Some("gemfire" | "gemice") => Kept::Gem,
         Some("gemheal") if !heal_wanted => Kept::Gem,
         _ if t.letter == WILDCARD => Kept::Wildcard,
@@ -1157,6 +1167,22 @@ mod tests {
     ///
     /// The dev's rule is about *solid gold*, so the fixture has to prove the scorer agrees which
     /// letters those are before the costs mean anything.
+    #[test]
+    fn serrated_gold_is_gold() {
+        let Some(sc) = scorer() else { return };
+        let mut t = board(&["D", "S", "E"]);
+        t[0].quality.material = Some("goldtoxin".into());
+        t[1].quality.material = Some("goldbleed".into());
+        t[2].quality.material = Some("bronzetoxin".into());
+        let ctx = Context::default();
+        let spent = |i: &[usize]| TileLedger::of("DSE", &t, i, &sc, &ctx).gold_spent;
+        assert_eq!(spent(&[0]), sc.tile_score(&t[0]), "toxin gold at its worth");
+        assert_eq!(spent(&[1]), sc.tile_score(&t[1]), "bleed gold at its worth");
+        assert!(spent(&[0]) >= 10.0, "worth what solid gold is");
+        assert_eq!(spent(&[2]), 0.0, "serrated bronze is not gold");
+        assert!(!is_gold("golden") && !is_gold("bleed") && is_gold("gold"));
+    }
+
     #[test]
     fn gold_letters_cost_what_they_are_worth_and_plain_ones_cost_nothing() {
         let Some(sc) = scorer() else { return };

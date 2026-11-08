@@ -76,6 +76,9 @@ behaviour freely.
 
 ### Fixed
 
+- **Serrated gold is kept like solid gold.** A bleed or toxin gold tile was spent freely: the ranking
+  only counted the material named `gold`, so `SEEDBED`, using a bleed gold S and a toxin gold D,
+  topped a list of kills that spent no gold.
 - Without Well-Rested, a hurt player was ranked as unhurt: a Diamond played last was not credited
   with its heal, and Diamonds were kept as if at full health. Missing health is now read from the
   save itself.
