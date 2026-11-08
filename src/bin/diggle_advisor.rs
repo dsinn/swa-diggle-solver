@@ -88,6 +88,12 @@ use windows::Win32::Graphics::Gdi::{
     TRANSPARENT,
 };
 use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC, ScreenToClient};
+use windows::Win32::Graphics::Gdi::{
+    CreateBitmap, CreateDIBSection, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateIconIndirect, DestroyIcon, HICON, ICONINFO, ICON_BIG, ICON_SMALL, WM_SETICON,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     ImageList_Create, InitCommonControlsEx, BST_CHECKED, CDDS_ITEMPREPAINT, CDDS_PREPAINT,
@@ -188,6 +194,11 @@ struct Ui {
     /// Direct2D text for the cells that carry emoji. `None` if it would not start, and those
     /// cells fall back to the list's own GDI text, emoji in monochrome.
     colour_text: Option<ColourText>,
+    /// The window's icon out of combat and in a fight; see [`WINDOW_ICON`]. `None` if one could
+    /// not be made, and the window keeps the icon it has.
+    window_icons: [Option<WindowIcon>; 2],
+    /// Which of [`Self::window_icons`] is on the window: `Some(true)` the fight's.
+    icon_shown: std::cell::Cell<Option<bool>>,
 }
 
 /// The window's remembered settings and the state of a splitter drag. Window thread only.
@@ -616,7 +627,7 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         };
         SendMessageW(list, LVM_INSERTCOLUMNW, WPARAM(i), LPARAM(&col as *const _ as isize));
     }
-    Ok(Ui {
+    let ui = Ui {
         status,
         notes,
         topmost,
@@ -629,7 +640,12 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         tile_font,
         wildcard_font,
         colour_text: ColourText::new().ok(),
-    })
+        window_icons: [WindowIcon::new(WINDOW_ICON), WindowIcon::new(WINDOW_ICON_COMBAT)],
+        icon_shown: std::cell::Cell::new(None),
+    };
+    // The window opens out of combat, on the banner, until the first save says otherwise.
+    show_icon(hwnd, &ui, false);
+    Ok(ui)
 }
 
 /// The list's item tooltip: one tool on the list, with no area until [`hover`] gives it the
@@ -927,6 +943,7 @@ unsafe fn refresh(hwnd: HWND, ui: &Ui) {
     let _ = SetWindowTextW(ui.status, &HSTRING::from(v.header.as_str()));
     let _ = SetWindowTextW(ui.notes, &HSTRING::from(v.notes.as_str()));
     let show_list = !matches!(v.mode, Mode::OutOfCombat);
+    show_icon(hwnd, ui, show_list);
     let _ = ShowWindow(ui.list, if show_list { SW_SHOW } else { SW_HIDE });
     let _ = ShowWindow(ui.banner, if show_list { SW_HIDE } else { SW_SHOW });
     SendMessageW(ui.list, LVM_SETITEMCOUNT, WPARAM(v.rows.len()), LPARAM(0));
@@ -989,10 +1006,10 @@ const ICONS: [(diggle_solver::pick::InfinitiveSource, &[u8]); 2] = [
 /// 32 was tried: faithful to the last pixel, but twice the height of the emoji.
 const ICON_PX: f32 = 16.0;
 
-/// A PNG as premultiplied BGRA, the layout a Direct2D bitmap takes: (width, height, pixels).
-fn decode_icon(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+/// A PNG as straight (not premultiplied) RGBA: (width, height, pixels).
+fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    // Both icons are paletted with a transparent entry: EXPAND turns that into RGBA.
+    // The item icons are paletted with a transparent entry: EXPAND turns that into RGBA.
     decoder.set_transformations(
         png::Transformations::EXPAND | png::Transformations::STRIP_16 | png::Transformations::ALPHA,
     );
@@ -1003,13 +1020,148 @@ fn decode_icon(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         return None;
     }
     buf.truncate(info.buffer_size());
+    Some((info.width, info.height, buf))
+}
+
+/// A PNG as premultiplied BGRA, the layout a Direct2D bitmap takes: (width, height, pixels).
+fn decode_icon(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let (width, height, mut buf) = decode_png(bytes)?;
     for px in buf.chunks_exact_mut(4) {
         let a = px[3] as u16;
         let pre = |c: u8| ((c as u16 * a + 127) / 255) as u8;
         let (r, g, b) = (pre(px[0]), pre(px[1]), pre(px[2]));
         px.copy_from_slice(&[b, g, r, px[3]]);
     }
-    Some((info.width, info.height, buf))
+    Some((width, height, buf))
+}
+
+/// The window's icon: a robot inside the game's crystal ball, the item that shows the best-scoring
+/// word (`items/activatedgear.lua:5-13`). Drawn for the Advisor on the ball's own art,
+/// `ui/graphics/items/crystal-ball-32.png` (`items/activatedgear.lua:22`): the robot after the
+/// Apple and Samsung 🤖 designs, in colours that stand out against the glass, with the ball's gold
+/// stand redrawn in front of it so it sits inside. Out of combat it is [`WINDOW_ICON`], the robot
+/// at 65% over the glass with the ball's reflections across it; in a fight it is
+/// [`WINDOW_ICON_COMBAT`], solid and glowing. The user's design, 2026-11-08.
+const WINDOW_ICON: &[u8] = include_bytes!("../../assets/advisor/crystal-ball-robot-32.png");
+const WINDOW_ICON_COMBAT: &[u8] =
+    include_bytes!("../../assets/advisor/crystal-ball-robot-glowing-32.png");
+
+/// One design at the two sizes Windows asks a window for: 32 px for the taskbar and Alt+Tab, 16 px
+/// for the title bar. The window has no DPI manifest, so Windows asks for these two at any display
+/// scale and stretches the whole window itself.
+struct WindowIcon {
+    big: HICON,
+    small: HICON,
+}
+
+impl WindowIcon {
+    /// `None` if the PNG does not decode or Windows will not make the icon. The window then keeps
+    /// the default icon.
+    unsafe fn new(png: &[u8]) -> Option<Self> {
+        let (w, h, rgba) = decode_png(png)?;
+        let big = make_icon(w, h, &rgba)?;
+        let (sw, sh, small) = halve(w, h, &rgba);
+        match make_icon(sw, sh, &small) {
+            Some(small) => Some(WindowIcon { big, small }),
+            None => {
+                let _ = DestroyIcon(big);
+                None
+            }
+        }
+    }
+}
+
+impl Drop for WindowIcon {
+    fn drop(&mut self) {
+        // SAFETY: both icons were made by `make_icon` and are destroyed once, here.
+        unsafe {
+            let _ = DestroyIcon(self.big);
+            let _ = DestroyIcon(self.small);
+        }
+    }
+}
+
+/// Straight RGBA at half the size, each pixel the average of a 2×2 block. Colours are averaged by
+/// alpha, so a clear pixel's colour does not bleed into the edge. The 16 px title-bar icon is
+/// made this way rather than left to Windows, whose stretch drops three pixels in four.
+fn halve(w: u32, h: u32, rgba: &[u8]) -> (u32, u32, Vec<u8>) {
+    let (hw, hh) = (w / 2, h / 2);
+    let mut out = Vec::with_capacity((hw * hh * 4) as usize);
+    for y in 0..hh {
+        for x in 0..hw {
+            let mut sum = [0u32; 4];
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let i = (((2 * y + dy) * w + 2 * x + dx) * 4) as usize;
+                let a = rgba[i + 3] as u32;
+                for c in 0..3 {
+                    sum[c] += rgba[i + c] as u32 * a;
+                }
+                sum[3] += a;
+            }
+            let a = sum[3];
+            if a == 0 {
+                out.extend([0; 4]);
+            } else {
+                let c = |s: u32| ((s + a / 2) / a) as u8;
+                out.extend([c(sum[0]), c(sum[1]), c(sum[2]), ((a + 2) / 4) as u8]);
+            }
+        }
+    }
+    (hw, hh, out)
+}
+
+/// An icon from straight RGBA: a 32-bit top-down DIB with its alpha. Icons take straight alpha,
+/// not the premultiplied a Direct2D bitmap does.
+unsafe fn make_icon(w: u32, h: u32, rgba: &[u8]) -> Option<HICON> {
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w as i32,
+            biHeight: -(h as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+    let colour = CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
+    if bits.is_null() {
+        let _ = DeleteObject(colour);
+        return None;
+    }
+    let dst = std::slice::from_raw_parts_mut(bits as *mut u8, (w * h * 4) as usize);
+    for (d, s) in dst.chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
+        d.copy_from_slice(&[s[2], s[1], s[0], s[3]]);
+    }
+    // Where the colour bitmap has alpha the mask is ignored, but `CreateIconIndirect` wants one.
+    // Monochrome rows are padded to whole 16-bit words.
+    let zeros = vec![0u8; ((w + 15) / 16 * 2 * h) as usize];
+    let mask = CreateBitmap(w as i32, h as i32, 1, 1, Some(zeros.as_ptr() as *const _));
+    let icon = CreateIconIndirect(&ICONINFO {
+        fIcon: true.into(),
+        xHotspot: 0,
+        yHotspot: 0,
+        hbmMask: mask,
+        hbmColor: colour,
+    });
+    // The icon keeps its own copies of both bitmaps.
+    let _ = DeleteObject(colour);
+    let _ = DeleteObject(mask);
+    icon.ok()
+}
+
+/// Shows the icon for the mode: the glowing robot in a fight, the plain one out of it. Sets it
+/// only when it changes, so the taskbar is not redrawn on every save.
+unsafe fn show_icon(hwnd: HWND, ui: &Ui, combat: bool) {
+    if ui.icon_shown.get() == Some(combat) {
+        return;
+    }
+    let Some(icon) = ui.window_icons[combat as usize].as_ref() else { return };
+    SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_BIG as usize), LPARAM(icon.big.0 as isize));
+    SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_SMALL as usize), LPARAM(icon.small.0 as isize));
+    ui.icon_shown.set(Some(combat));
 }
 
 /// An item icon set into a line of text in place of a character run: DirectWrite lays it out as
@@ -1676,5 +1828,27 @@ mod tests {
             assert_eq!(&px[..4], &[0, 0, 0, 0], "{source:?}: the top-left corner is clear");
             assert!(px.chunks_exact(4).any(|p| p[3] == 255), "{source:?} has opaque pixels");
         }
+    }
+
+    /// Both window icons decode at 32 px with clear corners, and Windows makes both sizes of each.
+    #[test]
+    fn the_window_icons_decode_and_become_icons() {
+        for (name, bytes) in [("plain", WINDOW_ICON), ("combat", WINDOW_ICON_COMBAT)] {
+            let (w, h, px) = decode_png(bytes).unwrap_or_else(|| panic!("{name} decodes"));
+            assert_eq!((w, h), (32, 32), "{name}");
+            assert_eq!(px[3], 0, "{name}: the top-left corner is clear");
+            // SAFETY: icons made and dropped on this thread.
+            assert!(unsafe { WindowIcon::new(bytes) }.is_some(), "{name} becomes an icon");
+        }
+        assert_ne!(WINDOW_ICON, WINDOW_ICON_COMBAT, "the fight's icon is its own art");
+    }
+
+    /// Halving averages colour by alpha: a clear pixel's colour does not darken the edge.
+    #[test]
+    fn halving_weights_colour_by_alpha() {
+        // One opaque red pixel beside three clear black ones.
+        let px = [255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(halve(2, 2, &px), (1, 1, vec![255, 0, 0, 64]));
+        assert_eq!(halve(2, 2, &[0; 16]), (1, 1, vec![0; 4]), "all clear stays clear");
     }
 }

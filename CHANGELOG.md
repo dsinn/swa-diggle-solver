@@ -9,6 +9,7 @@ behaviour freely.
 
 ### Added
 
+- The Advisor has its own window icon, one for in combat and one for out of combat.
 - **Advisor marks the words that need the mouse.** A 🖱️ column flags any word with a tile the
   keyboard would not pick, worked out with the game's own keyboard rules, in order
   (`Typist::clicks`). With "Underline mouse tiles" ticked (the default; hover it for a tooltip),
