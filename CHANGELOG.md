@@ -66,6 +66,9 @@ behaviour freely.
 
 ### Fixed
 
+- Without Well-Rested, a hurt player was ranked as unhurt: a Diamond played last was not credited
+  with its heal, and Diamonds were kept as if at full health. Missing health is now read from the
+  save itself.
 - **Words the Advisor called kills fell short.** With `alwaysCastSpell` (the game's default), a word
   with exactly one spell is cast as that spell: a metal word under Book of metal hits only for what
   your missing armour does not absorb, and a lone Four heal or Vowels hits for nothing. Both are now

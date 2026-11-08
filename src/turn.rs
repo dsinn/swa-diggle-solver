@@ -179,7 +179,10 @@ pub fn plan(
     // as the advisor shows it: any bleed at all stops regen.
     .with_room(crate::pick::Room {
         armour: armour_headroom,
-        health: player.as_ref().map(|p| p.vitals.missing()).unwrap_or(0),
+        // Read from the save itself, not from `player`: that exists only with the Well-Rested heal,
+        // and without it every hurt player read as unhurt — no Diamond heal counted, and Diamonds
+        // kept as if at full health. The user's save, 2026-11-07: 48 of 56 read as 0 missing.
+        health: missing_health(cs),
         bleed: cs
             .path("rpg.player.statusEffects.bleed")
             .and_then(|v| v.as_f64())
@@ -325,6 +328,15 @@ pub fn tiles_of(save: &Table) -> Vec<crate::observe::board::Tile> {
     tiles
 }
 
+/// Health the player is missing: `rpg.player.maxHealth` less `rpg.player.health`, never below
+/// zero, and zero when the save does not say.
+pub fn missing_health(cs: &Table) -> i64 {
+    match (cs.int_at("rpg.player.health"), cs.int_at("rpg.player.maxHealth")) {
+        (Some(current), Some(max)) => (max - current).max(0),
+        _ => 0,
+    }
+}
+
 /// The player's side of the killing-blow decision, from `combatSaveData`.
 ///
 /// Returns `None` when nothing about overkill matters, so the search keeps its ordinary goal.
@@ -418,6 +430,26 @@ pub(crate) mod tests {
     fn a_skeleton_terrified_by_turn_undead_is_still_killed() {
         let goal = terrified("Bones McCoy");
         assert!(!matches!(goal, Goal::Scare { .. }), "{goal:?}");
+    }
+
+    /// Missing health is read from the save, Well-Rested or not. The user's save, 2026-11-07: a
+    /// priest at 48 of 56 with no Well-Rested read as unhurt.
+    #[test]
+    fn missing_health_counts_without_well_rested() {
+        let src = std::fs::read_to_string("tests/fixtures/combatSaveData-chest-chrysocolla.lua")
+            .unwrap()
+            .replacen("            health = 12,", "            health = 7,", 1);
+        assert!(!src.contains("wellRested"), "the fixture has no Well-Rested");
+        let cs = crate::game::save::parse(&src).unwrap();
+        let letters = crate::letters::Weights::load(&game_dir()).unwrap();
+        let plan = plan(&cs, &game_dir(), &letters, &mut HashMap::new(), Options::default())
+            .unwrap()
+            .unwrap();
+        assert!(plan.player.is_none(), "no Well-Rested, so no player state");
+        assert_eq!(plan.picking.prefs.room.health, 5, "12 - 7");
+        assert_eq!(missing_health(&cs), 5);
+        let bare = crate::game::save::parse("return {}").unwrap();
+        assert_eq!(missing_health(&bare), 0, "a save that does not say");
     }
 
     /// A board-less save is not a turn to plan.
