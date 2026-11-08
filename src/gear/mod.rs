@@ -175,7 +175,8 @@ impl Plan {
             .filter(|a| {
                 // `Adjacent` is not here: every search scores a typed word, and the typist knows
                 // whether its tiles chain. It stays `Unknown` only for a word scored untyped.
-                matches!(a.spec.fact, Fact::EachHasWood | Fact::FullColumn)
+                // Nor `FullColumn`: the typist counts the full columns as it places the tiles.
+                matches!(a.spec.fact, Fact::EachHasWood)
             })
             .map(|a| a.spec.flag)
             .collect()
@@ -366,6 +367,7 @@ mod tests {
             wildcards: vec![None; 3],
             corners_used: 0,
             adjacent,
+            full_column_tiles: 0,
         };
         let fight = FightFacts::default();
         let (chain, apart) = (typed(true), typed(false));
@@ -373,6 +375,23 @@ mod tests {
         assert_eq!((a.mult, a.unknown.len()), (1.25, 0));
         let a = gear.compile().apply(&Facts::new("CAT", &[], Some(&apart), &[]), &fight);
         assert_eq!((a.mult, a.unknown.len()), (1.0, 0));
+    }
+
+    /// The Totem (`wordScoreBonusFullColumn`): half a point of pre-add per tile in a column the word
+    /// uses all of, per stack; unknown without a typed word.
+    #[test]
+    fn the_totem_pays_per_tile_in_a_full_column() {
+        let gear = Gear::from_pairs(&[("wordScoreBonusFullColumn", 2.0)]);
+        let typed = crate::typist::Typed { full_column_tiles: 10, ..Default::default() };
+        let fight = FightFacts::default();
+        let a = gear.compile().apply(&Facts::new("ANHYDRASES", &[], Some(&typed), &[]), &fight);
+        assert_eq!((a.pre_add, a.unknown.len()), (10.0, 0));
+        let none = crate::typist::Typed::default();
+        let a = gear.compile().apply(&Facts::new("CAT", &[], Some(&none), &[]), &fight);
+        assert_eq!(a.pre_add, 0.0);
+        let a = gear.compile().apply(&Facts::new("CAT", &[], None, &[]), &fight);
+        assert_eq!(a.unknown, vec!["wordScoreBonusFullColumn"]);
+        assert!(gear.compile().unevaluable().is_empty(), "no longer reported as unmodelled");
     }
 
     #[test]

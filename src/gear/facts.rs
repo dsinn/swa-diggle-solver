@@ -268,19 +268,23 @@ impl<'a> Facts<'a> {
                 Some(t) => Eval::when(t.adjacent),
                 None => Eval::Unknown,
             },
-            // TODO(board facts): the last two, stubbed deliberately.
+            // `tileboard.countTilesInFullySelectedColumn(wordTiles)`, the count multiplying the
+            // instances: the typist counts it against the board's own columns.
+            Fact::FullColumn => match self.typed {
+                Some(t) => Eval::counted(t.full_column_tiles as f64),
+                None => Eval::Unknown,
+            },
+            // TODO(board facts): the last one, stubbed deliberately.
             //
             // Each needs an input this type is not handed yet, and each is small on its own:
             //
             // - `EachHasWood` — `tiles.eachHasCat(wordTiles, 'wood')`. Needs the material→category
             //   table from `utils/tiles.lua`; `Tile::quality.material` already carries the material
             //   name, so it is a lookup away.
-            // - `FullColumn` — `tileboard.countTilesInFullySelectedColumn(wordTiles)`. Needs
-            //   `Typed::tiles` mapped through `Geometry::position`, and `Geometry::rows_per_col`.
             //
             // Until then they report rather than contribute, which keeps the score an honest lower
             // bound instead of a confident wrong one.
-            Fact::EachHasWood | Fact::FullColumn => {
+            Fact::EachHasWood => {
                 let _ = self.tiles;
                 Eval::Unknown
             }

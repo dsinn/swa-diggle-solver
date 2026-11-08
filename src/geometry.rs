@@ -98,6 +98,24 @@ impl Geometry {
         self.corners.len()
     }
 
+    /// How many tiles sit in the columns `tiles` uses every tile of:
+    /// `tileboard.countTilesInFullySelectedColumn` (`tileboard.lua:892-909`), which the Totem
+    /// (`wordScoreBonusFullColumn`) pays half a point of pre-add on, per tile.
+    ///
+    /// Per column as the board holds it, so a short column on a hexagonal or ragged board is full
+    /// at its own height, and an empty column is never full (`rowsData[1]` is nil).
+    pub fn full_column_tiles(&self, tiles: &[usize]) -> usize {
+        let mut start = 0;
+        let mut count = 0;
+        for &rows in &self.rows_per_col {
+            if rows > 0 && (start..start + rows).all(|i| tiles.contains(&i)) {
+                count += rows;
+            }
+            start += rows;
+        }
+        count
+    }
+
     /// `(col, row)` of dump entry `flat`, both 1-based. `None` past the end of the board.
     pub fn position(&self, flat: usize) -> Option<(usize, usize)> {
         let mut seen = 0;
@@ -332,6 +350,19 @@ fn shape_to_geometry(shape: &crate::tables::Shape) -> Geometry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Totem's count on the user's `hex4` board, 2026-11-07, columns of 3, 4, 3 and 2:
+    /// `ANHYDRASES` took tiles 0-9, every tile of the first three columns, 10 in all, and the game
+    /// dealt 39 where a score without them said 28.
+    #[test]
+    fn full_columns_count_at_their_own_height() {
+        let g = Geometry::for_passive("hex4", 12).geometry;
+        assert_eq!(g.rows_per_col, vec![3, 4, 3, 2]);
+        assert_eq!(g.full_column_tiles(&[7, 4, 0, 1, 2, 3, 8, 5, 6, 9]), 10);
+        assert_eq!(g.full_column_tiles(&[10, 11]), 2, "the short column");
+        assert_eq!(g.full_column_tiles(&[3, 4, 5]), 0, "three of four");
+        assert_eq!(g.full_column_tiles(&[]), 0);
+    }
     use std::path::PathBuf;
 
     fn game_dir() -> PathBuf {

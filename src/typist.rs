@@ -75,6 +75,9 @@ pub struct Typed {
     /// Every tile is next to the one before it (`tileboard.tilesAreAllAdjacent`) — what
     /// `wordScoreBonusAdjacent` pays on, and what the chaining curse requires.
     pub adjacent: bool,
+    /// The tiles in the columns this word uses all of ([`Geometry::full_column_tiles`]) — what the
+    /// Totem, `wordScoreBonusFullColumn`, pays on.
+    pub full_column_tiles: usize,
 }
 
 impl Typed {
@@ -221,7 +224,8 @@ impl<'a> Typist<'a> {
             // Typed, but refused on submit: "not contiguous".
             return None;
         }
-        Some(Typed { tiles, wildcards, corners_used, adjacent })
+        let full_column_tiles = self.geometry.full_column_tiles(&tiles);
+        Some(Typed { tiles, wildcards, corners_used, adjacent, full_column_tiles })
     }
 
     /// Which of a placement's tiles must be **clicked**: `true` where typing the slot's letters, at
@@ -472,7 +476,8 @@ impl<'a> Typist<'a> {
             if self.geometry.adjacency_required && !adjacent {
                 return;
             }
-            out.push(Typed { tiles, wildcards, corners_used, adjacent });
+            let full_column_tiles = self.geometry.full_column_tiles(&tiles);
+            out.push(Typed { tiles, wildcards, corners_used, adjacent, full_column_tiles });
             return;
         }
         for &c in &options[j] {
