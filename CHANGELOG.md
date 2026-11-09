@@ -7,6 +7,10 @@ behaviour freely.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-09
+
+Tested against game version v53.2.
+
 ### Advisor
 
 - **Words that need the mouse are marked.** A 🖱️ column flags any word with a tile the keyboard
@@ -155,6 +159,7 @@ you play the game yourself. It sends no input and reads only the Steam save fold
 First public release. A run from an empty save cleared the level 8 anomaly unattended, on game
 version v52.4. See the README for the video and the limits of that claim.
 
-[Unreleased]: https://github.com/dsinn/swa-diggle-solver/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/dsinn/swa-diggle-solver/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/dsinn/swa-diggle-solver/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dsinn/swa-diggle-solver/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dsinn/swa-diggle-solver/releases/tag/v0.1.0
