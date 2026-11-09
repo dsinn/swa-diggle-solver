@@ -10,8 +10,9 @@
 //! ```
 //!
 //! `val = 0` means **immune**: `nerf * 0` makes the word score zero. So playing a bone word against a
-//! bone-immune enemy does no damage at all and wastes the turn. Ignoring lexica is therefore safe in
-//! one direction only — never claiming a bonus we do not have — and unsafe in the other.
+//! bone-immune enemy does no damage at all. Both halves are modelled ([`Lexica::bonus_sets`]), so a
+//! resisted word is scored down — to zero when immune — rather than dropped: it can still be worth
+//! playing for what it gains, and the advisor lists it with its multiplier.
 //!
 //! ## The chain, and why it needs a `require` shim
 //!
@@ -132,12 +133,20 @@ impl Lexica {
         self.lexicons.iter().any(|l| l.words.contains(&up))
     }
 
-    /// Lexicons this enemy takes EXTRA damage from, with their multipliers.
+    /// Lexicons this enemy takes more or less damage from, with their status values: above 1 a
+    /// bonus, below 1 a resist, 0 immune. A value of exactly 1 changes nothing and is left out.
     ///
-    /// `utils/words.lua:219-242` accumulates `mult = mult + val - 1` for every status naming a
+    /// `utils/words.lua:219-242` accumulates `mult = mult + val - 1` for every bonus naming a
     /// lexicon the word belongs to, so several bonuses stack additively on one word — a slime with
     /// `lexiconBonusFire = 1.2` and `lexiconBonusIce = 1.5` (`rpg/enemies/slimes.lua:294-295`) pays
-    /// 1.7x on a word that is both.
+    /// 1.7x on a word that is both. A resist instead multiplies `nerf`, beside the corner nerf:
+    /// the common human takes 0.7x from swears (`rpg/enemies/humans.lua:56`), a fire elemental
+    /// nothing from fire words (`rpg/enemies/elementals.lua:113`). See
+    /// [`crate::search::Modifiers::modifier_for_base`].
+    ///
+    /// Resisted words used to be excluded from the search outright, which was safe while the only
+    /// question was "does this kill", but hid words whose gains could make them the right play —
+    /// the user's call, 2026-11-08, to score them instead.
     ///
     /// These used to be ignored on the argument that under-scoring is safe. That was true while
     /// every goal was "at least N" and being wrong only cost turns. It stopped being true with
@@ -147,7 +156,7 @@ impl Lexica {
         let mut out = Vec::new();
         for lex in &self.lexicons {
             if let Some(&v) = statuses.get(&lex.status_key) {
-                if v > 1.0 {
+                if v != 1.0 {
                     out.push((lex.words.clone(), v));
                 }
             }
@@ -160,28 +169,9 @@ impl Lexica {
     pub fn bonus_names(&self, statuses: &HashMap<String, f64>) -> Vec<String> {
         self.lexicons
             .iter()
-            .filter(|lex| statuses.get(&lex.status_key).is_some_and(|&v| v > 1.0))
+            .filter(|lex| statuses.get(&lex.status_key).is_some_and(|&v| v != 1.0))
             .map(|lex| lex.status_key.trim_start_matches("lexiconBonus").to_string())
             .collect()
-    }
-
-    /// Words to exclude from the search, given the enemy's status effects.
-    ///
-    /// Excludes any word belonging to a lexicon whose status value is `<= 1` — resist or immune.
-    /// Exclusion rather than score-scaling because the MVP question is only "does this kill", and a
-    /// resisted word's reduced score is not worth modelling when skipping it is both simpler and safe.
-    /// Values `> 1` are bonuses and are left alone: we never *rely* on them, so the word stays
-    /// eligible on its unbonused score.
-    pub fn excluded_words(&self, statuses: &HashMap<String, f64>) -> HashSet<String> {
-        let mut out = HashSet::new();
-        for lex in &self.lexicons {
-            if let Some(v) = statuses.get(&lex.status_key) {
-                if *v <= 1.0 {
-                    out.extend(lex.words.iter().cloned());
-                }
-            }
-        }
-        out
     }
 
     /// Reads `rpg.enemy.statusEffects` into a flat map.
@@ -257,41 +247,34 @@ mod tests {
     }
 
     #[test]
-    fn an_immune_enemy_excludes_that_lexicons_words() {
+    fn resists_and_immunities_are_kept_beside_bonuses() {
         if !present() {
             eprintln!("SKIP: game source not present");
             return;
         }
         let lx = Lexica::load(&game_dir()).unwrap();
-        // val = 0 is immunity: `nerf * 0` zeroes the score, so these words do NOTHING.
-        let statuses = HashMap::from([("lexiconBonusBone".to_string(), 0.0)]);
-        let excluded = lx.excluded_words(&statuses);
-        assert!(!excluded.is_empty(), "bone words must be excluded when immune");
-        // A word from the bone lexicon, verified present in `utils/lexica/bones.lua`.
-        assert!(excluded.contains("AITCHBONE"), "a known bone word must be excluded");
+        // val = 0 is immunity and 0.7 a resist: both scale the word rather than drop it.
+        for v in [0.0, 0.7, 2.0] {
+            let statuses = HashMap::from([("lexiconBonusBone".to_string(), v)]);
+            let sets = lx.bonus_sets(&statuses);
+            assert_eq!(sets.len(), 1, "lexiconBonusBone = {v} is kept");
+            // A word from the bone lexicon, verified present in `utils/lexica/bones.lua`.
+            assert!(sets[0].0.contains("AITCHBONE") && sets[0].1 == v);
+            assert_eq!(lx.bonus_names(&statuses), vec!["Bone".to_string()]);
+        }
     }
 
     #[test]
-    fn a_bonus_lexicon_is_not_excluded() {
+    fn a_value_of_one_changes_nothing_and_is_left_out() {
         if !present() {
             eprintln!("SKIP: game source not present");
             return;
         }
         let lx = Lexica::load(&game_dir()).unwrap();
-        // val > 1 is a BONUS. We never rely on it, so the word stays eligible on its plain score --
-        // excluding it would throw away perfectly good words.
-        let statuses = HashMap::from([("lexiconBonusBone".to_string(), 2.0)]);
-        assert!(lx.excluded_words(&statuses).is_empty());
-    }
-
-    #[test]
-    fn no_statuses_excludes_nothing() {
-        if !present() {
-            eprintln!("SKIP: game source not present");
-            return;
-        }
-        let lx = Lexica::load(&game_dir()).unwrap();
-        assert!(lx.excluded_words(&HashMap::new()).is_empty());
+        let statuses = HashMap::from([("lexiconBonusBone".to_string(), 1.0)]);
+        assert!(lx.bonus_sets(&statuses).is_empty());
+        assert!(lx.bonus_names(&statuses).is_empty());
+        assert!(lx.bonus_sets(&HashMap::new()).is_empty());
     }
 
     #[test]
@@ -306,7 +289,7 @@ mod tests {
             .expect("fixture loads");
         let statuses = Lexica::statuses_from_save(&save);
         let lx = Lexica::load(&game_dir()).unwrap();
-        assert!(lx.excluded_words(&statuses).is_empty(), "statuses: {statuses:?}");
+        assert!(lx.bonus_sets(&statuses).iter().all(|(_, v)| *v > 1.0), "statuses: {statuses:?}");
         assert!(lx.unmodelled(&statuses).is_empty(), "unmodelled: {:?}", lx.unmodelled(&statuses));
     }
 
@@ -352,7 +335,6 @@ mod live_lexica_tests {
         let sets = lx.bonus_sets(&statuses);
         assert_eq!(sets.len(), 2, "both bonuses recognised");
         assert!(sets.iter().all(|(w, _)| !w.is_empty()), "both lexicons carry words");
-        // Nothing is excluded: these are bonuses, not resistances.
-        assert!(lx.excluded_words(&statuses).is_empty());
+        assert!(sets.iter().all(|(_, v)| *v > 1.0), "bonuses, not resistances");
     }
 }

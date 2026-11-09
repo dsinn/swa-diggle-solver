@@ -102,12 +102,8 @@ impl Dictionary {
 
 /// Everything about the enemy that changes what a word is worth.
 ///
-/// Assembled from `combatSaveData` once per turn. The two members are opposite in character:
-/// `excluded` throws words away, `resist_cornerless` changes what the survivors score.
+/// Assembled from `combatSaveData` once per turn.
 pub struct Modifiers {
-    /// Words from a lexicon this enemy resists or is immune to. `nerf * 0` is a zero-damage turn, so
-    /// these are dropped outright rather than scored down (see [`crate::lexica`]).
-    pub excluded: HashSet<String>,
     /// `resistCornerless` (`utils/words.lua:238-240`): the score is scaled by
     /// `cornersUsed / cornerCount`. Zero corners means zero damage.
     pub resist_cornerless: bool,
@@ -131,8 +127,9 @@ pub struct Modifiers {
     pub nerve: Option<crate::flee::Nerve>,
     /// `immobile` — it cannot run, so no threshold will make it leave (`rpgview.lua:1646`).
     pub immobile: bool,
-    /// Lexicons this enemy takes extra damage from, and by how much. Applied per word, because
-    /// membership is a property of the word rather than of the board.
+    /// Lexicons this enemy takes more or less damage from, and the status value: above 1 a bonus,
+    /// below 1 a resist, 0 immune ([`crate::lexica::Lexica::bonus_sets`]). Applied per word,
+    /// because membership is a property of the word rather than of the board.
     pub bonuses: Vec<(HashSet<String>, f64)>,
     /// What each of [`Modifiers::bonuses`] is called, in the same order: the lexicon's name as its
     /// status key spells it, `lexiconBonusBone` → `Bone`. For showing a bonus, not for scoring.
@@ -355,7 +352,6 @@ impl Modifiers {
         Ok((
             Modifiers {
                 gems: crate::pick::GemQueue::from_save(save, &lexica),
-                excluded: lexica.excluded_words(&statuses),
                 resist_cornerless: statuses.contains_key("resistCornerless"),
                 overkill_gold,
                 problems,
@@ -405,7 +401,6 @@ impl Modifiers {
     /// A modifier set for an ordinary enemy on an ordinary board.
     pub fn none() -> Self {
         Modifiers {
-            excluded: HashSet::new(),
             resist_cornerless: false,
             overkill_gold: false,
             problems: Vec::new(),
@@ -665,10 +660,12 @@ impl Modifiers {
         corners_used as f64 / corner_count as f64
     }
 
-    /// The full multiplier for one word: the corner nerf, times this enemy's lexicon bonuses.
+    /// The full multiplier for one word: the corner nerf and this enemy's resists, times its
+    /// lexicon bonuses.
     ///
     /// `utils/words.lua:219-242` builds the bonus additively — `mult = mult + val - 1` per matching
-    /// lexicon — so two 1.5x lexicons make 2.0x, not 2.25x.
+    /// lexicon — so two 1.5x lexicons make 2.0x, not 2.25x. A resist (`val <= 1`) multiplies
+    /// `nerf` instead, as the corner nerf does, so it scales the gear's share too.
     pub fn modifier_for(&self, word: &str, corners_used: usize, corner_count: usize) -> f64 {
         self.modifier_for_base(word, corners_used, corner_count, 1.0)
     }
@@ -684,13 +681,16 @@ impl Modifiers {
     pub fn modifier_for_base(
         &self, word: &str, corners_used: usize, corner_count: usize, base: f64,
     ) -> f64 {
-        let mut mult = base;
+        let (mut mult, mut nerf) = (base, self.modifier(corners_used, corner_count));
         for (words, val) in &self.bonuses {
             if words.contains(word) {
-                mult += val - 1.0;
+                match *val > 1.0 {
+                    true => mult += val - 1.0,
+                    false => nerf *= val,
+                }
             }
         }
-        self.modifier(corners_used, corner_count) * mult
+        mult * nerf
     }
 }
 
@@ -1435,9 +1435,6 @@ pub fn ranked_kill(
                     }
                     for word in &words[start..(start + CLAIM).min(words.len())] {
                         seen += 1;
-                        if mods.excluded.contains(word) {
-                            continue;
-                        }
                         for typed in typist.placements(word) {
                             let consumed: Vec<Tile> =
                                 typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
@@ -1575,9 +1572,6 @@ pub fn max_damage(
                     }
                     for word in &words[start..(start + CLAIM).min(words.len())] {
                         seen += 1;
-                        if mods.excluded.contains(word) {
-                            continue;
-                        }
                         for typed in typist.placements(word) {
                             let consumed: Vec<Tile> =
                                 typed.tiles.iter().map(|&i| tiles[i].clone()).collect();
@@ -1773,9 +1767,6 @@ pub fn ranked(
                         break;
                     }
                     for word in &words[start..(start + CLAIM).min(words.len())] {
-                        if mods.excluded.contains(word) {
-                            continue;
-                        }
                         let mut options: Vec<Candidate> = Vec::new();
                         for typed in typist.placements(word) {
                             let consumed: Vec<Tile> =
@@ -2062,9 +2053,6 @@ pub fn race_for_band(
                         break;
                     }
                     seen += 1;
-                    if mods.excluded.contains(word) {
-                        continue;
-                    }
                     // Not "are the letters there" but "does typing this work", which also tells us
                     // exactly which tiles it eats -- and so what it is worth.
                     for typed in typist.placements(word) {
@@ -2962,24 +2950,24 @@ mod tests {
         let (mods, geometry) = Modifiers::from_save(&game_dir(), &save, 16).unwrap();
         assert!(mods.problems.is_empty(), "problems: {:?}", mods.problems);
         assert!(!mods.resist_cornerless, "Amorphous does not resist corners");
-        assert!(mods.excluded.is_empty(), "no lexicon immunity");
+        assert!(mods.bonuses.iter().all(|(_, v)| *v > 1.0), "no lexicon resist or immunity");
         assert_eq!(geometry, Geometry::default());
     }
 
     #[test]
-    fn an_immune_lexicon_removes_its_words_from_the_race() {
+    fn an_immune_lexicon_scores_its_words_at_zero() {
         if !present() {
             eprintln!("SKIP: game source not present");
             return;
         }
-        // `nerf * 0` is a zero-damage turn, so an immune enemy's lexicon must not be searched at all.
-        // This wires `crate::lexica` into the race, which previously computed exclusions nobody read.
+        // `nerf * 0` is a zero-damage turn: an immune enemy's lexicon is scored at nothing, so its
+        // words can never be the kill.
         let save = crate::game::save::parse(
             r#"return { passives = {}, rpg = { enemy = { statusEffects = { lexiconBonusBone = 0 } } } }"#,
         )
         .unwrap();
         let (mods, _) = Modifiers::from_save(&game_dir(), &save, 16).unwrap();
-        assert!(mods.excluded.contains("AITCHBONE"), "a bone word must be excluded");
+        assert_eq!(mods.modifier_for("AITCHBONE", 0, 0), 0.0, "a bone word scores nothing");
 
         let dict = Dictionary::load(&game_dir()).unwrap();
         let scorer = Scorer::new(&game_dir()).unwrap();
@@ -3166,9 +3154,6 @@ mod tests {
         let winner = rank_of(&won.word).expect("the winning word must itself be lethal");
         let mut rivals = 0usize;
         for word in dict.words() {
-            if mods.excluded.contains(word) {
-                continue;
-            }
             let Some(other) = rank_of(word) else { continue };
             rivals += 1;
             assert!(
@@ -3681,6 +3666,23 @@ mod lexicon_bonus_tests {
         let m = Modifiers { resist_cornerless: true, ..with_bonus(&[("OOZE", 2.0)]) };
         assert_eq!(m.modifier_for("OOZE", 2, 4), 1.0, "half the corners, doubled");
         assert_eq!(m.modifier_for("OOZE", 0, 4), 0.0, "no corners is still no damage");
+    }
+
+    #[test]
+    fn a_resist_multiplies_the_whole_score_and_immunity_zeroes_it() {
+        // `nerf = nerf * val` for val <= 1 (utils/words.lua:232-234), applied to the gear's share
+        // as well: the common human takes 0.7x from swears (rpg/enemies/humans.lua:56).
+        let m = with_bonus(&[("DAMN", 0.7)]);
+        assert!((m.modifier_for("DAMN", 0, 0) - 0.7).abs() < 1e-9);
+        assert!((m.modifier_for_base("DAMN", 0, 0, 1.5) - 1.05).abs() < 1e-9, "gear 1.5 x 0.7");
+        // A bonus on the same word adds first; the resist then scales the sum.
+        let m = with_bonus(&[("EMBER", 0.5), ("EMBER", 1.5)]);
+        assert!((m.modifier_for("EMBER", 0, 0) - 0.75).abs() < 1e-9);
+        // Immune, as a fire elemental is to fire words (rpg/enemies/elementals.lua:113).
+        assert_eq!(with_bonus(&[("EMBER", 0.0)]).modifier_for("EMBER", 0, 0), 0.0);
+        // Resists and the corner nerf multiply together.
+        let m = Modifiers { resist_cornerless: true, ..with_bonus(&[("DAMN", 0.5)]) };
+        assert_eq!(m.modifier_for("DAMN", 2, 4), 0.25);
     }
 
     #[test]

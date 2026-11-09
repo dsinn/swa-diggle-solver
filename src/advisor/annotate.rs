@@ -24,7 +24,7 @@ pub struct Row {
     /// shows them beside the hit, `33 +3 🧪 +1 ❄️` ([`afflictions_text`]).
     pub afflictions: crate::search::Afflictions,
     pub tier: Tier,
-    /// The enemy's lexicon multiplier for this word, when it is not 1.
+    /// The enemy's lexicon multiplier for this word, when it is not 1: a bonus, or a resist.
     pub bonus: Option<Bonus>,
     /// Health and armour this word is expected to give. Zero for most words.
     pub gain: crate::pick::Gains,
@@ -44,24 +44,28 @@ pub struct Row {
     pub pierces: bool,
 }
 
-/// The enemy's lexicon bonus for `word`, when it is not 1, and which lexicons it comes from.
+/// The enemy's lexicon multiplier for `word`, when it is not 1, and which lexicons it comes from.
 ///
-/// The same accumulator as [`Modifiers::modifier_for_base`] — lexicons add, `mult + val - 1` per
-/// match (`utils/words.lua:219-242`) — started from 1 and without the corner nerf, which is a
-/// property of the board rather than of the word.
+/// The same accumulator as [`Modifiers::modifier_for_base`] — bonuses add, `mult + val - 1` per
+/// match, and resists multiply (`utils/words.lua:219-242`) — started from 1 and without the corner
+/// nerf, which is a property of the board rather than of the word.
 pub fn bonus_of(mods: &Modifiers, word: &str) -> Option<Bonus> {
-    let mut mult = 1.0;
+    let (mut mult, mut nerf) = (1.0, 1.0);
     let mut names = Vec::new();
     for (i, (words, v)) in mods.bonuses.iter().enumerate() {
         if words.contains(word) {
-            mult += v - 1.0;
+            match *v > 1.0 {
+                true => mult += v - 1.0,
+                false => nerf *= v,
+            }
             names.extend(mods.bonus_names.get(i).cloned());
         }
     }
+    let mult = mult * nerf;
     ((mult - 1.0f64).abs() > 1e-9).then_some(Bonus { mult, names })
 }
 
-/// A word's lexicon bonus: the multiplier, and the lexicons it came from (`Bone`, `Slime`).
+/// A word's lexicon multiplier, above 1 or below, and the lexicons it came from (`Bone`, `Slime`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bonus {
     pub mult: f64,
@@ -400,7 +404,10 @@ pub fn bonus_items(b: &Bonus) -> Vec<Item> {
             last.to_lowercase()
         ),
     };
-    let tip = format!("This enemy takes x{} damage from {lexicons} words", multiplier(b.mult));
+    let tip = match b.mult == 0.0 {
+        true => format!("This enemy takes no damage from {lexicons} words"),
+        false => format!("This enemy takes x{} damage from {lexicons} words", multiplier(b.mult)),
+    };
     vec![Item::new(b.to_string(), tip)]
 }
 
@@ -713,6 +720,20 @@ mod tests {
     }
 
     /// Lexicons add on one accumulator (`utils/words.lua:219-242`): two 1.5x make 2.0x.
+    /// A resist shows below 1, and scales a bonus on the same word rather than adding to it.
+    #[test]
+    fn a_resist_shows_its_multiplier() {
+        let set: std::collections::HashSet<String> = ["DAMN".to_string()].into();
+        let mut mods = Modifiers::none();
+        mods.bonuses = vec![(set.clone(), 0.7)];
+        mods.bonus_names = vec!["Swears".into()];
+        let b = bonus_of(&mods, "DAMN").expect("0.7 is not 1");
+        assert!((b.mult - 0.7).abs() < 1e-9 && b.names == ["Swears"]);
+        mods.bonuses.push((set, 1.5));
+        mods.bonus_names.push("Fire".into());
+        assert!((bonus_of(&mods, "DAMN").unwrap().mult - 1.05).abs() < 1e-9, "1.5, then x 0.7");
+    }
+
     #[test]
     fn bonus_adds_lexicons() {
         let mut mods = Modifiers::none();
@@ -1015,6 +1036,8 @@ mod tests {
         assert_eq!(toxin[0].tip, "Toxin: the enemy loses 3 more health at the start of its turn");
         let b = Bonus { mult: 1.4, names: vec!["Spider".into()] };
         assert_eq!(bonus_items(&b)[0].tip, "This enemy takes x1.4 damage from spider words");
+        let b = Bonus { mult: 0.0, names: vec!["Fire".into()] };
+        assert_eq!(bonus_items(&b)[0].tip, "This enemy takes no damage from fire words");
     }
 
     /// The spell to cast leads, with its emoji; other qualifying spells follow; a spell sharing a

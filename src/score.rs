@@ -39,8 +39,8 @@
 //!   word history, and holding one is **reported** through `Adjust::unknown` rather than silently
 //!   dropped. Anything calling [`Scorer::score_typed`] directly gets no gear terms at all, which is
 //!   why the search goes through [`crate::search::scored`].
-//! - **Enemy lexicon bonuses are ignored** (see [`crate::lexica`], which handles the resist half,
-//!   the half that can reach zero).
+//! - **Enemy lexicon bonuses and resists are not applied here**: [`crate::search::scored`] applies
+//!   them, through [`crate::search::Modifiers::modifier_for_base`] (see [`crate::lexica`]).
 //! - **`bonusBurnTileMult` gear is not read**, so a burning tile is scored at zero rather than half.
 //!
 //! Every one of those pushes the same way: this can under-rate a word, not over-rate one.

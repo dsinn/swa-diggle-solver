@@ -9,6 +9,8 @@ behaviour freely.
 
 ### Advisor
 
+- **The Bonus column shows resists too** (`x0.7 🤬`), and an immune lexicon's tooltip says the
+  enemy takes no damage from those words.
 - **"Collapse candidates out of combat"** (unticked by default) rolls the window up to its header
   and checkboxes while no fight is on, with an elastic ease, and drops it back to its earlier
   height when a fight starts. A fight that starts or ends partway through turns the window round
@@ -69,6 +71,12 @@ Diggle and the Advisor share these: how much damage a word is scored at, and how
 
 #### Damage
 
+- **Words an enemy resists are scored down, not dropped.** A resist used to remove that lexicon's
+  words from the search, so against the common human, who takes 0.7x from swears, no swear word
+  was ever considered, however much it would heal or armour you. They are now scored the way the
+  game scores them: the resist multiplies the word's whole multiplier, gear's share included,
+  beside the corner nerf, and an immune lexicon scores zero (`utils/words.lua:219-245`,
+  `Modifiers::modifier_for_base`). A zero-damage word can still rank on what it gains.
 - **The word's tiles are chosen, not only its letters.** Where two tiles carry the same letter, the
   ranking tries each and keeps the better: a serrated, toxin, gem or braced tile where its position
   pays, the plain twin where it would do nothing (`typist::placements`). Diggle plays the tiles

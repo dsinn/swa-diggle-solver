@@ -369,6 +369,38 @@ mod tests {
         assert!(v.header.contains("first sighting"), "{}", v.header);
     }
 
+    /// **A resisted lexicon is listed, scored down.** The crypt slime takes 1.5x from slime words;
+    /// made to resist them at 0.5x instead, the same words stay on the list — they used to be
+    /// dropped — at a third of the damage, with the multiplier in the Bonus column.
+    #[test]
+    fn resisted_words_are_listed_with_their_multiplier() {
+        let res = res();
+        let rows = |val: &str| {
+            let save =
+                turn().replace("lexiconBonusSlime = 1.5,", &format!("lexiconBonusSlime = {val},"));
+            let v = View::next(
+                &View::default(),
+                &snap(Some(&save)),
+                &res,
+                &mut Default::default(),
+                Default::default(),
+            );
+            v.rows
+                .into_iter()
+                .filter_map(|r| r.row.bonus.clone().map(|b| (r.row.word.clone(), (r.row.score, b))))
+                .collect::<HashMap<_, _>>()
+        };
+        let bonused = rows("1.5");
+        let resisted = rows("0.5");
+        assert!(!resisted.is_empty(), "slime words are listed against a slime-resisting enemy");
+        for (word, (score, b)) in &resisted {
+            assert!((b.mult - 0.5).abs() < 1e-9 && b.names == ["Slime"], "{word}: {b:?}");
+            if let Some((full, _)) = bonused.get(word) {
+                assert!(score < full, "{word}: {score} at 0.5x, {full} at 1.5x");
+            }
+        }
+    }
+
     /// Between turns the last list stays up, greyed, rather than vanishing.
     #[test]
     fn waiting_keeps_the_last_list_but_greys_it() {
