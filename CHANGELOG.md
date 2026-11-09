@@ -9,7 +9,8 @@ behaviour freely.
 
 ### Advisor
 
-- **The Bonus column shows resists too** (`x0.7 🤬`), and an immune lexicon's tooltip says the
+- **The Bonus column is now "Mult."**, 76 pixels wide rather than 90, with a "Multiplier" tooltip
+  on its header. It shows resists too now (`x0.7 🤬`), and an immune lexicon's tooltip says the
   enemy takes no damage from those words.
 - **"Collapse candidates out of combat"** (unticked by default) rolls the window up to its header
   and checkboxes while no fight is on, with an elastic ease, and drops it back to its earlier
@@ -34,7 +35,7 @@ behaviour freely.
   green bar beneath it: type the word and click those.
 - **Each item in the table explains itself on hover.** Every emoji-bearing item has its own
   tooltip: `+2 ⬜` says "Queues 2 wildcard tiles", `+3 🧪` the toxin the enemy loses before it
-  acts, `🤺` why the hit ignores armour, the Bonus column which lexicons the enemy is weak to, and
+  acts, `🤺` why the hit ignores armour, the Mult. column which lexicons the enemy is weak to, and
   the Spell column which spell the damage assumes (`annotate::Item`). A suffix word's 🧤 or ⚖️
   says which tiles the suffix queues, "Ends in -ING: queues E and D tiles, or one ED tile
   (Infinitives gauntlet)" (`Infinitives::effect`).

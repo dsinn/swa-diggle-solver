@@ -393,7 +393,7 @@ pub fn damage_items(r: &Row) -> Vec<Item> {
     items
 }
 
-/// The Bonus column: the multiplier and its lexicons, one item.
+/// The Mult. column: the multiplier and its lexicons, one item.
 pub fn bonus_items(b: &Bonus) -> Vec<Item> {
     let lexicons = match b.names.as_slice() {
         [] => "these".to_string(),

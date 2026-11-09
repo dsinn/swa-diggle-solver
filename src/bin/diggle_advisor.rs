@@ -15,7 +15,7 @@
 //! - **Your turn**: every playable word, in the order Diggle prefers them
 //!   ([`diggle_solver::search::ranked`]). The top row is the word Diggle would type. Each letter
 //!   sits on the colour of the tile it would be typed into; the columns give the expected damage,
-//!   the enemy's lexicon bonus when it is not 1, the health and armour it should give, and what it does.
+//!   the enemy's lexicon multiplier when it is not 1 (Mult.), the health and armour it should give, and what it does.
 //!
 //! **Stalling** on the halfling's free turns is the checkbox "Stall on halfling's even turns": even
 //! as the game's Turn box counts them, the turns its `immuneTurnMod2` passive means the enemy cannot
@@ -92,6 +92,10 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::DirectWrite::{IDWriteTextLayout, DWRITE_HIT_TEST_METRICS};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Gdi::{BitBlt, CreateCompatibleDC, DeleteDC, GdiFlush, SRCCOPY};
+use windows::Win32::Graphics::Gdi::{
+    CreateBitmap, CreateDIBSection, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+};
 use windows::Win32::Graphics::Gdi::{
     CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, FillRect, GetSysColorBrush,
     GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, SelectObject, SetBkMode, SetTextColor,
@@ -99,13 +103,6 @@ use windows::Win32::Graphics::Gdi::{
     TRANSPARENT,
 };
 use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC, ScreenToClient, HDC};
-use windows::Win32::Graphics::Gdi::{BitBlt, CreateCompatibleDC, DeleteDC, GdiFlush, SRCCOPY};
-use windows::Win32::Graphics::Gdi::{
-    CreateBitmap, CreateDIBSection, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateIconIndirect, DestroyIcon, HICON, ICONINFO, ICON_BIG, ICON_SMALL, WM_SETICON,
-};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     ImageList_Create, InitCommonControlsEx, BST_CHECKED, CDDS_ITEMPREPAINT, CDDS_PREPAINT,
@@ -118,9 +115,10 @@ use windows::Win32::UI::Controls::{
     NMLVDISPINFOW, NM_CUSTOMDRAW, WC_LISTVIEWW,
 };
 use windows::Win32::UI::Controls::{
-    ImageList_Destroy, HIMAGELIST, LVM_GETCOLUMNWIDTH, LVM_SETCOLUMNWIDTH, TOOLTIPS_CLASSW,
-    TTDT_AUTOPOP, TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH,
-    TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
+    ImageList_Destroy, HDM_GETITEMRECT, HDN_ITEMCHANGEDA, HDN_ITEMCHANGEDW, HIMAGELIST,
+    LVM_GETCOLUMNWIDTH, LVM_GETHEADER, LVM_SETCOLUMNWIDTH, TOOLTIPS_CLASSW, TTDT_AUTOPOP,
+    TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH, TTS_ALWAYSTIP,
+    TTS_NOPREFIX, TTTOOLINFOW,
 };
 use windows::Win32::UI::Controls::{
     LVHITTESTINFO, LVM_SUBITEMHITTEST, TOOLTIP_FLAGS, TTM_NEWTOOLRECTW, TTM_POP, TTM_RELAYEVENT,
@@ -133,17 +131,20 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, SetWindowLongPtrW, GWLP_WNDPROC, WM_MOUSEFIRST, WM_MOUSELAST, WNDPROC,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
+    CreateIconIndirect, DestroyIcon, HICON, ICONINFO, ICON_BIG, ICON_SMALL, WM_SETICON,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetCursorPos, GetMessageW,
-    GetWindowRect, KillTimer, LoadCursorW, MoveWindow, PostMessageW, PostQuitMessage,
-    RegisterClassW, SendMessageW, SetCursor, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
-    IsIconic, IsZoomed, SWP_NOZORDER, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_SIZING,
-    TranslateMessage, BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, CW_USEDEFAULT,
-    ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, HMENU, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST,
-    IDC_ARROW, IDC_SIZENS, MINMAXINFO, MSG, SIZE_RESTORED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_COMMAND,
+    GetWindowRect, IsIconic, IsZoomed, KillTimer, LoadCursorW, MoveWindow, PostMessageW,
+    PostQuitMessage, RegisterClassW, SendMessageW, SetCursor, SetTimer, SetWindowPos,
+    SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK, BM_SETCHECK, BN_CLICKED,
+    BS_AUTOCHECKBOX, CW_USEDEFAULT, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, HMENU, HTCLIENT,
+    HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, IDC_SIZENS, MINMAXINFO, MSG, SIZE_RESTORED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_APP, WM_CAPTURECHANGED, WM_COMMAND,
     WM_CREATE, WM_DESTROY, WM_GETFONT, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_NOTIFY, WM_SETCURSOR, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSW, WS_BORDER,
-    WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_TABSTOP,
+    WM_MOUSEMOVE, WM_NOTIFY, WM_SETCURSOR, WM_SETFONT, WM_SIZE, WM_SIZING, WM_TIMER, WNDCLASSW,
+    WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_TABSTOP,
     WS_VISIBLE, WS_VSCROLL,
 };
 
@@ -291,7 +292,10 @@ const COLUMNS: [(&str, i32, bool); 8] = [
     // Left, so the hit stays in view and only the afflictions after it are trimmed — the
     // user's call, 2026-11-08.
     ("Damage", 84, false),
-    ("Bonus", 90, false),
+    // "Mult.", with a tooltip saying "Multiplier": the cells are short, so the header should not
+    // set the width — the user's call, 2026-11-08, as horizontal space is short. 76 fits a
+    // two-lexicon cell such as `x1.7 🔥❄️`.
+    ("Mult.", 76, false),
     // Left, like Damage, so a clipped cell keeps its first gains in view — the user's call,
     // 2026-11-08.
     ("Gain", 120, false),
@@ -300,6 +304,9 @@ const COLUMNS: [(&str, i32, bool); 8] = [
 ];
 const WORD_COLUMN: i32 = 2;
 const MOUSE_COLUMN: i32 = 1;
+/// The multiplier column, and the tooltip on its header ([`header_tooltip`]).
+const MULT_COLUMN: i32 = 4;
+const MULT_TIP: &str = "Multiplier";
 /// Lettering on the word column's tiles, in pixels. Bigger than the rest of the list on purpose:
 /// the word is what the player reads.
 const TILE_TEXT: i32 = 26;
@@ -684,6 +691,8 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         };
         SendMessageW(list, LVM_INSERTCOLUMNW, WPARAM(i), LPARAM(&col as *const _ as isize));
     }
+    // After the columns, so its tool lands on the Mult. header from the start.
+    header_tooltip(hwnd, list)?;
     let ui = Ui {
         status,
         notes,
@@ -752,6 +761,57 @@ fn tool_info(list: HWND, rect: RECT, text: PWSTR) -> TTTOOLINFOW {
     }
 }
 
+/// The tooltip on the [`MULT_COLUMN`] header: one tool on the list's header control, over that
+/// column's header item, moved by [`place_header_tip`] whenever a column changes width.
+static HEADER_TIP: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// The header's tooltip. The header is a control of its own inside the list, so it gets its own
+/// tooltip: [`item_tooltip`] covers only the rows.
+unsafe fn header_tooltip(owner: HWND, list: HWND) -> windows::core::Result<()> {
+    let header = HWND(SendMessageW(list, LVM_GETHEADER, WPARAM(0), LPARAM(0)).0 as _);
+    let tip = CreateWindowExW(
+        WS_EX_TOPMOST,
+        TOOLTIPS_CLASSW,
+        None,
+        WS_POPUP | WINDOW_STYLE(TTS_ALWAYSTIP | TTS_NOPREFIX),
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        owner,
+        None,
+        GetModuleHandleW(None)?,
+        None,
+    )?;
+    // Kept for the tooltip's lifetime: it holds the pointer, not a copy. Leaked once per window.
+    let text: &'static mut [u16] = MULT_TIP.encode_utf16().chain([0]).collect::<Vec<_>>().leak();
+    let info = TTTOOLINFOW {
+        uFlags: TTF_SUBCLASS,
+        ..tool_info(header, RECT::default(), PWSTR(text.as_mut_ptr()))
+    };
+    SendMessageW(tip, TTM_ADDTOOLW, WPARAM(0), LPARAM(&info as *const _ as isize));
+    HEADER_TIP.store(tip.0 as isize, std::sync::atomic::Ordering::Relaxed);
+    place_header_tip(header);
+    Ok(())
+}
+
+/// Moves the header's tool onto the [`MULT_COLUMN`] header item, wherever it now is.
+unsafe fn place_header_tip(header: HWND) {
+    let tip = HWND(HEADER_TIP.load(std::sync::atomic::Ordering::Relaxed) as _);
+    if tip.0.is_null() {
+        return;
+    }
+    let mut rect = RECT::default();
+    SendMessageW(
+        header,
+        HDM_GETITEMRECT,
+        WPARAM(MULT_COLUMN as usize),
+        LPARAM(&mut rect as *mut _ as isize),
+    );
+    let info = tool_info(header, rect, PWSTR::null());
+    SendMessageW(tip, TTM_NEWTOOLRECTW, WPARAM(0), LPARAM(&info as *const _ as isize));
+}
+
 /// The list's own window procedure, which [`list_proc`] passes everything on to.
 static LIST_PROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
@@ -774,7 +834,16 @@ unsafe extern "system" fn list_proc(
         });
     }
     let old: WNDPROC = std::mem::transmute(LIST_PROC.load(std::sync::atomic::Ordering::Relaxed));
-    CallWindowProcW(old, hwnd, msg, wparam, lparam)
+    let result = CallWindowProcW(old, hwnd, msg, wparam, lparam);
+    // The header tells the list, its parent, when a column changes width: dragged, or set by
+    // `fit_word_column`. Every column right of the Word column moves with it.
+    if msg == WM_NOTIFY {
+        let hdr = &*(lparam.0 as *const NMHDR);
+        if hdr.code == HDN_ITEMCHANGEDW || hdr.code == HDN_ITEMCHANGEDA {
+            place_header_tip(hdr.hwndFrom);
+        }
+    }
+    result
 }
 
 /// Moves the item tooltip onto the item under the mouse, then hands the tooltip the mouse message.
@@ -1137,7 +1206,7 @@ fn faded((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
 }
 
 /// The columns drawn by [`ColourText`]: every one but the word. Most carry emoji — the 🖱️ mark,
-/// Damage (the rapier's 🤺), Bonus, Gain (❤️ and 🛡️) and Spell — and drawing the rest the same
+/// Damage (the rapier's 🤺), Mult., Gain (❤️ and 🛡️) and Spell — and drawing the rest the same
 /// way keeps all the text level with the tiles when the rows grow for the underline.
 const EMOJI_COLUMNS: [i32; 7] = [0, 1, 3, 4, 5, 6, 7];
 

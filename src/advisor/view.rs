@@ -371,7 +371,7 @@ mod tests {
 
     /// **A resisted lexicon is listed, scored down.** The crypt slime takes 1.5x from slime words;
     /// made to resist them at 0.5x instead, the same words stay on the list — they used to be
-    /// dropped — at a third of the damage, with the multiplier in the Bonus column.
+    /// dropped — at a third of the damage, with the multiplier in the Mult. column.
     #[test]
     fn resisted_words_are_listed_with_their_multiplier() {
         let res = res();
