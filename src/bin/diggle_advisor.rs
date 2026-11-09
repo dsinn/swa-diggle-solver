@@ -34,7 +34,7 @@
 //! book, as the game's own censor does, but only the vowels, so the word can still be played: see
 //! [`diggle_solver::advisor::censor`].
 //!
-//! **Collapse candidates out of combat** (unticked by default) rolls the window up to its header
+//! **Collapse table out of combat** (unticked by default) rolls the window up to its header
 //! and checkboxes while no fight is on, with an elastic ease, and drops it back to the height it
 //! had when a fight starts: see [`diggle_solver::advisor::shade`] for every transition. A
 //! maximised or minimised window is left alone until it is restored. While rolled up, dragging an
@@ -206,7 +206,7 @@ struct Ui {
     underline: HWND,
     /// "Censor profanity". Its tooltip is owned by the main window, like the underline box's.
     censor: HWND,
-    /// "Collapse candidates out of combat".
+    /// "Collapse table out of combat".
     collapse: HWND,
     list: HWND,
     /// The tooltip over the list's items: one tool, moved onto whichever item is under the mouse.
@@ -607,21 +607,13 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
         (ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32 | WS_VSCROLL.0 | WS_BORDER.0,
         0,
     )?;
+    // Created in the order they sit, left to right, so Tab moves through them that way.
     let topmost = child(
         hwnd,
         w!("BUTTON"),
-        w!("Stay on top"),
+        w!("Always on top"),
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
         ID_TOPMOST,
-    )?;
-    let log_toggle =
-        child(hwnd, w!("BUTTON"), w!("Show log"), BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0, ID_LOG)?;
-    let stall = child(
-        hwnd,
-        w!("BUTTON"),
-        w!("Stall on halfling's even turns"),
-        BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
-        ID_STALL,
     )?;
     let underline = child(
         hwnd,
@@ -640,9 +632,18 @@ unsafe fn create(hwnd: HWND) -> windows::core::Result<Ui> {
     let collapse = child(
         hwnd,
         w!("BUTTON"),
-        w!("Collapse candidates out of combat"),
+        w!("Collapse table out of combat"),
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
         ID_COLLAPSE,
+    )?;
+    let log_toggle =
+        child(hwnd, w!("BUTTON"), w!("Show log"), BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0, ID_LOG)?;
+    let stall = child(
+        hwnd,
+        w!("BUTTON"),
+        w!("Stall on halfling's even turns"),
+        BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
+        ID_STALL,
     )?;
     let saved = settings_now();
     for (h, on) in [
@@ -983,13 +984,14 @@ const PAD: i32 = 8;
 const HEADER_HEIGHT: i32 = 40;
 const BOX_HEIGHT: i32 = 24;
 /// Each checkbox's width, in the order they sit left to right: see [`Ui::boxes`].
+/// The order is the user's, 2026-11-08.
 const BOX_WIDTHS: [i32; 6] = [
+    130, // Always on top
     180, // Underline mouse tiles
     140, // Censor profanity
-    230, // Stall on halfling's even turns
-    250, // Collapse candidates out of combat
+    230, // Collapse table out of combat
     100, // Show log
-    120, // Stay on top
+    230, // Stall on halfling's even turns
 ];
 /// The list keeps at least this much height however tall the log is dragged.
 const MIN_LIST_HEIGHT: i32 = 80;
@@ -997,7 +999,7 @@ const MIN_LIST_HEIGHT: i32 = 80;
 impl Ui {
     /// The checkboxes, left to right, matching [`BOX_WIDTHS`].
     fn boxes(&self) -> [HWND; 6] {
-        [self.underline, self.censor, self.stall, self.collapse, self.log_toggle, self.topmost]
+        [self.topmost, self.underline, self.censor, self.collapse, self.log_toggle, self.stall]
     }
 }
 

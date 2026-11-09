@@ -1,4 +1,4 @@
-//! The advisor window's own settings: its size, "Stay on top", the log box, whether to stall on
+//! The advisor window's own settings: its size, "Always on top", the log box, whether to stall on
 //! the halfling's free turns, whether to underline the tiles to click, whether to censor
 //! profanity, and whether to roll the window up out of combat. Kept between
 //! launches in `%LOCALAPPDATA%\DiggleAdvisor\settings.toml` ([`path`]).
@@ -31,7 +31,7 @@ pub struct Settings {
     /// "Censor profanity": a word in the profane book shows some letters as the game's mosaic
     /// ([`crate::advisor::censor`]). Off by default, the user's call, 2026-11-08.
     pub censor_profanity: bool,
-    /// "Collapse candidates out of combat": the window rolls up to its header and checkboxes
+    /// "Collapse table out of combat": the window rolls up to its header and checkboxes
     /// while no fight is on ([`crate::advisor::shade`]). Off by default, the user's call,
     /// 2026-11-08. [`Self::height`] stays the open height while it is rolled up.
     pub collapse_out_of_combat: bool,

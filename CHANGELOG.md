@@ -9,10 +9,13 @@ behaviour freely.
 
 ### Advisor
 
+- **"Stay on top" is now "Always on top"**, and the checkboxes run in a new order: Always on top,
+  Underline mouse tiles, Censor profanity, Collapse table out of combat, Show log, Stall on
+  halfling's even turns. Tab moves through them in that order.
 - **The Bonus column is now "Mult."**, 76 pixels wide rather than 90, with a "Multiplier" tooltip
   on its header. It shows resists too now (`x0.7 🤬`), and an immune lexicon's tooltip says the
   enemy takes no damage from those words.
-- **"Collapse candidates out of combat"** (unticked by default) rolls the window up to its header
+- **"Collapse table out of combat"** (unticked by default) rolls the window up to its header
   and checkboxes while no fight is on, with an elastic ease, and drops it back to its earlier
   height when a fight starts. A fight that starts or ends partway through turns the window round
   from wherever it is. Unticking it while rolled up drops the window at once; ticking or unticking

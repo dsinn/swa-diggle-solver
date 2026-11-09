@@ -1,4 +1,4 @@
-//! "Collapse candidates out of combat": the window rolls up to its header and checkboxes while
+//! "Collapse table out of combat": the window rolls up to its header and checkboxes while
 //! no fight is on, and drops back to the height it had when a fight starts. Pure, so every
 //! transition can be tested; the window feeds it heights and times and moves itself to what it
 //! says ([`Shade::want`], [`Shade::tick`]).

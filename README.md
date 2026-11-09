@@ -222,7 +222,7 @@ Diggle drives. The game data (dictionary, scores, tile textures) comes from
 - **Out of combat** shows only once the save being followed is gone, which is when the reward is taken,
   not when `Finish` is clicked. Nothing on disk marks `Finish`; this is temporary until something
   does.
-- **Stay on top** is off by default.
+- **Always on top** is off by default.
 
 Casting is your choice in the game, so only the advisor scores spells; Diggle never casts and
 scores every word as a plain attack. Turn undead counts only when the enemy's name is on the
