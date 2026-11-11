@@ -217,7 +217,7 @@ impl WorldMap {
     /// That is why [`WorldMap::cross_toward`] asks this **once** per crossing and then holds the
     /// answer in [`WorldMap::crossing_to`]. Exits print only while visible
     /// (`overworldview.lua:1044`), so re-asking every step let fog reverse a crossing and reverse it
-    /// back. See `docs/superpowers/notes/navigation-loops.md`.
+    /// back. See `docs/navigation.md`.
     ///
     /// Connecting the two components is the real fix and is not attempted here — it changes what
     /// every distance in this file means, including `next_target`'s. Until then, read the ranking as

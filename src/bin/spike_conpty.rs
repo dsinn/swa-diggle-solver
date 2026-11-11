@@ -246,8 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bytes_captured,
     );
 
-    std::fs::create_dir_all("docs/superpowers/spikes")?;
-    std::fs::File::create("docs/superpowers/spikes/01b-conpty.md")?.write_all(report.as_bytes())?;
+    std::fs::File::create("spike-01b-conpty.md")?.write_all(report.as_bytes())?;
     print!("{report}");
     if !pass {
         std::process::exit(1);

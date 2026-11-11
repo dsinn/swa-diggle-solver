@@ -59,7 +59,7 @@ pub(super) const LOOP_GIVE_UP: usize = 4;
 /// degree the cache carries wrongly, an interior that regenerates under us — which is exactly the
 /// open-ended set a memory should cover and a rule should not try to enumerate.
 ///
-/// The answer is the one `docs/superpowers/notes/navigation-loops.md` gives for every loop here:
+/// The answer is the one `docs/navigation.md` gives for every loop here:
 /// memory, not a ranking. `WorldMap::abandon` is that memory, it already exists, and every chooser
 /// that matters honours it — the crossing's `usable` filter, the frontier search, target selection,
 /// and `committed_exit`. What was missing was anything that ever *wrote* to it for this reason.

@@ -103,8 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if ok_unbuffered { "ok" } else { "FAILED" },
     );
 
-    std::fs::create_dir_all("docs/superpowers/spikes")?;
-    let mut f = std::fs::File::create("docs/superpowers/spikes/01-stdout-buffering.md")?;
+    let mut f = std::fs::File::create("spike-01-stdout-buffering.md")?;
     f.write_all(report.as_bytes())?;
     print!("{report}");
 

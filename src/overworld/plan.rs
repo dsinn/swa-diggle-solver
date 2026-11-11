@@ -449,7 +449,7 @@ impl WorldMap {
     /// ## Why this terminates, which is the part that matters
     ///
     /// It is the one question this file has been burned by before — a bed that stays wanted is a
-    /// loop, and `docs/superpowers/notes/navigation-loops.md` catalogues six of them. **Every rest
+    /// loop, and six of them have been found. **Every rest
     /// moves both terms in the same direction**: one stack banked, ten gold gone. So the condition
     /// is strictly monotone under its own errand and ends either when the bank reaches
     /// [`crate::rest::STACKS_TARGET`] or when the purse drops below [`crate::rest::INN_COST`] —
@@ -1888,7 +1888,7 @@ impl WorldMap {
         // [`WorldMap::gap`] answers it whenever the target has been placed by some dump, which is
         // the one thing a route needs and a direction does not: the target may sit in a component we
         // cannot reach and its position is still true. This is the potential function
-        // `docs/superpowers/notes/navigation-loops.md` says every navigation bug here came down to
+        // `docs/navigation.md` says every navigation bug here came down to
         // lacking, and this is the branch that most needed one.
         //
         // Its limit is worth stating next to it. A place no dump has ever shown us has **no position

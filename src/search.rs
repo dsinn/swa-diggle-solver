@@ -3706,7 +3706,7 @@ mod typeable_count {
     /// accepted, so this — not the dictionary size — is the loop that per-word scoring work lives
     /// in. Measured on the level-0 crypt board, 2026-08-09: **1750 of 345128, 0.51%**.
     ///
-    /// An earlier draft of `docs/superpowers/specs/2026-08-09-gear-word-bonuses-design.md` proposed
+    /// An earlier draft of the gear design proposed
     /// precomputing word facts into a table parallel to the dictionary, costing ~1.4 MB and a
     /// load-time pass. That would have built 345k entries to answer 1750 questions. The measurement
     /// is what killed it, and this test is here so the assumption cannot rot silently: if a future

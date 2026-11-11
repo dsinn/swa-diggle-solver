@@ -104,7 +104,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = Config::load(std::path::Path::new(&path))?;
 
     std::fs::create_dir_all(FRAMES_DIR)?;
-    std::fs::create_dir_all(".superpowers/sdd/2026-07-25-diggle-solver-milestone-1")?;
 
     reset_sandbox_save()?;
 

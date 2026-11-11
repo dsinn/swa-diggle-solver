@@ -1,7 +1,5 @@
 //! Log channel, attempt #2: ask LÖVE for a console with its own `--console` flag.
 //!
-//! Executes `docs/superpowers/plans/2026-07-29-log-channel-console-flag.md`.
-//!
 //! ## What attempt #1 got wrong
 //!
 //! It handed the game a console and assumed the game would use it. LÖVE gates its console

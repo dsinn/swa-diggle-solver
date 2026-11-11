@@ -119,8 +119,7 @@ pub struct WorldMap {
     /// still worth walking to — when they did, a run spent thirty steps crossing the same crypt.
     ///
     /// The oldest piece of this project's loop-prevention machinery, and the archetype for the rest:
-    /// **state a dump can never give us**. `docs/superpowers/notes/navigation-loops.md` catalogues
-    /// all six cycles found so far, the two guards that could never fire, and the rule this file's
+    /// **state a dump can never give us**. `docs/navigation.md` gives the rule this file's
     /// routing has to obey — memory or a monotone measure, never a ranking. Read it before adding
     /// another.
     abandoned: std::collections::HashSet<String>,
@@ -205,7 +204,7 @@ pub struct WorldMap {
     /// **The frontier a crossing is currently walking to**, with the container it belongs to.
     ///
     /// Memory, and the reason is the rule this file keeps re-learning: *memory or a monotone
-    /// measure, never a ranking* (`docs/superpowers/notes/navigation-loops.md`).
+    /// measure, never a ranking* (`docs/navigation.md`).
     ///
     /// The frontier walk below is argued to be cycle-free because "the BFS distance to the chosen
     /// frontier strictly decreases with each step". True — **of a fixed frontier**. The pick was
@@ -258,8 +257,8 @@ pub struct WorldMap {
     /// reason. [`WorldMap::exit_toward`] asks [`WorldMap::next_target`] afresh on every step, so the
     /// door being crossed toward was a function of the *whole map* — and of where we happen to be
     /// standing. Walk two nodes into a forest and the argmax can move; walk back and it moves again.
-    /// Two halves of a forest each sending the run to the other is the shape of all six cycles in
-    /// `docs/superpowers/notes/navigation-loops.md`.
+    /// Two halves of a forest each sending the run to the other is the shape of all six cycles found
+    /// in navigation.
     ///
     /// **The `Goal` is the load-bearing half of this pair.** Read those six together and they are
     /// one bug: *the goal never changed, the target flipped anyway, because `here` moved.* So this
@@ -779,7 +778,7 @@ impl WorldMap {
     /// Both runs took the door their numbers pointed at; only one of them was in a cycle.
     ///
     /// So the distinguishing fact is **repetition, not geometry**, which is the answer
-    /// `docs/superpowers/notes/navigation-loops.md` gives for every loop here: *memory, not a
+    /// `docs/navigation.md` gives for every loop here: *memory, not a
     /// ranking*. `abandon` is that memory for a node; this is it for a door. The next pass
     /// ranks `l44` at 6 instead, which still heads for `l9` and is not a cycle.
     ///
@@ -1065,7 +1064,7 @@ impl WorldMap {
     /// The units are the run's own and mean nothing on their own; only comparisons between two
     /// answers from the same run are meaningful, which is all any caller wants.
     ///
-    /// This is the **potential function** `docs/superpowers/notes/navigation-loops.md` says every
+    /// This is the **potential function** `docs/navigation.md` says every
     /// one of our navigation bugs came down to lacking. A ranking cannot stop a cycle, because a
     /// stable preference between two alternating states *is* a cycle; a quantity that strictly
     /// decreases as we approach can, and this is one. It is only a heuristic about *direction* —
@@ -1113,8 +1112,8 @@ impl WorldMap {
     ///
     /// The measure under the loop guard — see [`crate::navigate::Run::sterile_here`]. It exists
     /// because three ping-pongs in two days were each diagnosed to a different root cause and **not
-    /// one of them was caught by anything general**. `docs/superpowers/notes/navigation-loops.md`
-    /// has said all along that every navigation bug here comes down to lacking a monotone measure or
+    /// one of them was caught by anything general**. `docs/navigation.md`
+    /// says that every navigation bug here comes down to lacking a monotone measure or
     /// a memory; this is the measure.
     ///
     /// What belongs in it is anything whose change means the run got something done — a fight won, a

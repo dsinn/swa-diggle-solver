@@ -114,7 +114,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let baseline = ctrl_a.diff_fraction(&ctrl_b, FULL);
 
     std::fs::create_dir_all("spike-frames")?;
-    std::fs::create_dir_all("docs/superpowers/spikes")?;
     ctrl_a.write_bmp(std::path::Path::new("spike-frames/control-a.bmp"))?;
     ctrl_b.write_bmp(std::path::Path::new("spike-frames/control-b.bmp"))?;
 
@@ -132,8 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              could be trusted to mean anything. Per the brief, stopping here rather than\n\
              running or interpreting the keyboard loop.\n",
         );
-        std::fs::File::create("docs/superpowers/spikes/04-keycap.md")?
-            .write_all(report.as_bytes())?;
+        std::fs::File::create("spike-04-keycap.md")?.write_all(report.as_bytes())?;
         print!("{report}");
         let _ = game.kill();
         std::process::exit(1);
@@ -293,7 +291,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cursor_after.x, cursor_after.y,
     );
 
-    std::fs::File::create("docs/superpowers/spikes/04-keycap.md")?.write_all(report.as_bytes())?;
+    std::fs::File::create("spike-04-keycap.md")?.write_all(report.as_bytes())?;
     print!("{report}");
 
     let _ = game.kill();

@@ -393,7 +393,7 @@ impl Fight<'_> {
             // `PlayerTurn` is precisely the state the game sits in *while waiting for us*, so the
             // label cannot tell "nothing is happening" from "it is our move" — and a label is
             // neither memory nor a monotone measure, which is the same mistake the navigation guards
-            // made (`docs/superpowers/notes/navigation-loops.md`).
+            // made (`docs/navigation.md`, "What stops a loop").
             //
             // Live, 2026-08-09, in a level 5 crypt: nine turns won cleanly, `Clavicular` down from
             // 81 to 11, `CAPITATES` played for 40 and accepted — the HUD read `Turn: 10` and the

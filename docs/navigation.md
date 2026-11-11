@@ -80,7 +80,8 @@ Only two things do: **explicit memory of what was already tried** (`Run::committ
 measure**. A ranking is neither. A stable preference between two alternating states is a cycle.
 
 When adding a guard, state the condition that trips it and show that condition is reachable. A guard
-that can never fire looks exactly like one that works. Open questions: #125 (the door ranking and the
+that can never fire looks exactly like one that works; the [appendix](#appendix-the-loops-found-so-far)
+has two. Open questions: #125 (the door ranking and the
 router use different distances) and #126 (committing to one measurement).
 
 ## Errands that leave the map
@@ -89,3 +90,54 @@ router use different distances) and #126 (committing to one measurement).
 and `buyer.rs` (a shop is a pass-through, not a place to shop), `heroselect.rs` (refuses classes
 there is no routing for), and `tower.rs` (a placeholder: it decides whether the tower's free map is on
 offer and does not press it).
+
+## Appendix: the loops found so far
+
+The record behind "What stops a loop". Every one is the same shape: two nodes, each sending the run to
+the other, forever. "Add cycle detection" was tried twice before this, and neither attempt fired.
+
+| Cycle | Cause | What fixed it |
+|---|---|---|
+| A shrine and its neighbour | `next_target` excludes `here`, so arriving cancels the reason for arriving | `abandon` |
+| A node and a used shrine | the planner routed to a used shrine that `drive` always declined | wiring `worth_consecrating_here` to a branch that acts |
+| Two surface nodes | as the first | `Run::committed_to` |
+| The wrong exit door | the explore fallback ignored the *other* exit roads | a filter in `cross_toward` |
+| Two interior nodes | `retreats_running` counted **consecutive** retreats, a state that cannot occur | `Run::backed_out_of`, keyed by node |
+| An interior node and the plaza | a comparison under a comment saying "unvisited first" actually preferred **visited** | fixing the inversion, then replacing the guess with a route to the nearest frontier |
+| A door reversing mid-crossing | `exit_toward`'s ranking never applied inside a subworld, so the door was whichever exit the pan printed first | `WorldMap::crossing_to`, keyed by `Goal` |
+
+Two of these were *failed* fixes, which is the more useful lesson.
+
+- **`retreats_running` could never fire.** It tripped on two consecutive `Crossing::Retreat` verdicts.
+  A retreat lands on a completed node, departure from a completed node is never blocked, so the next
+  verdict is always a `Step`. The real cycle alternates retreat, step, retreat, step, and the `else`
+  branch reset the counter every other turn.
+- **"Unvisited first" was implemented as visited first.** An unvisited node scores `!seen == true`, a
+  visited one `false`, and `false < true`, so walked ground won every comparison. The comment was
+  right and the code was backwards.
+
+Both survived review because each looked like the anti-cycling measure it was named after. Be
+suspicious of a guard whose trigger condition nobody has shown to be reachable.
+
+### Derived state and recorded state
+
+Re-deriving a route every step does not cause cycles, and caching it would not cure them: three of
+the first six cycles had a good route and cycled anyway. What helps is the distinction between two
+kinds of state.
+
+- A route is **derived**. It can be recomputed from the map at any moment, and caching it only adds
+  staleness. The world moves under a cached route: fog lifts, corruption resets areas to incomplete,
+  subworld layouts can re-roll on re-entry (`subworld::Rules::edges_survive_reentry`), and fights
+  appear where there were none.
+- "We already tried that" is **non-derivable**. No dump will ever say so, so it has to be remembered
+  or it is lost.
+
+So the rule is not more state. It is **state that records our own history, never state that mirrors
+the game's**. Mirrored state has drifted from reality before: the sticky latest dump, the lore-screen
+tally and the pregame counter.
+
+Put another way, a policy has a value that strictly improves along its trajectory and cannot cycle.
+A plan re-derived from a myopic objective cycles whenever the objective depends on position in a way
+that flips the argmax. The first six cycles are one bug in that light: there is no potential function.
+The seventh is the degenerate case, a ranking that turned out never to run.
+

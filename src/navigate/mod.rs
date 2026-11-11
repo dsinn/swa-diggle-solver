@@ -23,7 +23,7 @@
 //!
 //! ## Before you add anything that stops the run walking in circles
 //!
-//! **Read `docs/superpowers/notes/navigation-loops.md` first.** Seven two-node cycles have been
+//! **Read "What stops a loop" in `docs/navigation.md` first.** Seven two-node cycles have been
 //! found and fixed here, and **two of the fixes were guards whose trigger condition could never
 //! occur** — including one in this file that counted consecutive retreats, a state the system cannot
 //! reach. Both looked exactly like the anti-cycling measure they were named after.
@@ -1903,7 +1903,7 @@ impl Run<'_> {
     /// Every one was spotted by the dev watching the screen, and cost an evening between the
     /// watching and the diagnosis.
     ///
-    /// `docs/superpowers/notes/navigation-loops.md` has said from the start that every navigation
+    /// `docs/navigation.md` says that every navigation
     /// bug here reduces to a missing monotone measure or a missing memory. Each fix supplied one
     /// locally — `abandon` for shrines, `heart_bought` for shops, `crossing_to` for doors. None of
     /// them generalises, because the next loop will be about something none of them tracks.

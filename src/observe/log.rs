@@ -1,6 +1,6 @@
 //! The live log channel: a console we own, which the game writes its `_VERBOSE` output into.
 //!
-//! Measured working 2026-07-29 (see `docs/superpowers/plans/2026-07-29-log-channel-console-flag.md`).
+//! Measured working 2026-07-29.
 //! The mechanism is LÖVE's own `--console` flag: `boot.lua:185-188` calls `love._openConsole`,
 //! which does `AttachConsole(ATTACH_PARENT_PROCESS)` then `freopen("CONOUT$", "w", stdout)`
 //! (`../love/src/modules/love/love.cpp:562-628`). So the game reopens stdout onto **our**

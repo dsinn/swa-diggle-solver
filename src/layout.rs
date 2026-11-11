@@ -143,7 +143,7 @@ pub const CALIBRATED: (i32, i32) = (1920, 1080);
 /// except the size. The cause is not ours: `utils/defaultconfig.lua:32-34` defaults
 /// `window.fullscreen` to **true** and carries no dimensions, so **with no `userConfig` the game
 /// opens fullscreen at the desktop size**. `checkpoint::clear` deletes that file and nothing here
-/// may write it back (`docs/superpowers/plans/2026-07-25-diggle-solver-milestone-1.md:48`).
+/// may write it back.
 ///
 /// The *windowed* size, for when the dev turns fullscreen off, is its own rule and worth stating
 /// exactly because it is easy to get backwards: `main.lua:49-64` computes one precisely **when**

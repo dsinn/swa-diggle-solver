@@ -1,8 +1,7 @@
 //! Launching the game so that its `_VERBOSE` output lands in a console we can read.
 //!
 //! Every detail here is load-bearing and was established by measurement — see
-//! [`crate::observe::log`] for the mechanism and
-//! `docs/superpowers/plans/2026-07-29-log-channel-console-flag.md` for the evidence.
+//! [`crate::observe::log`] for the mechanism and the evidence.
 
 use crate::config::Config;
 use crate::observe::log::Console;

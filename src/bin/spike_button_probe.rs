@@ -260,9 +260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::thread::sleep(Duration::from_secs(2));
     }
 
-    std::fs::create_dir_all("docs/superpowers/spikes")?;
-    std::fs::File::create("docs/superpowers/spikes/05-button-probe.md")?
-        .write_all(out.as_bytes())?;
+    std::fs::File::create("spike-05-button-probe.md")?.write_all(out.as_bytes())?;
     println!("\n===== SUMMARY =====\n{out}");
     Ok(())
 }
