@@ -35,7 +35,8 @@
 //! [`diggle_solver::advisor::censor`].
 //!
 //! **Collapse table out of combat** (unticked by default) rolls the window up to its header
-//! and checkboxes while no fight is on, with an elastic ease, and drops it back to the height it
+//! and checkboxes while no fight is on — from the moment it is won or fled, through the rewards
+//! ([`Mode::fight_over`]) — with an elastic ease, and drops it back to the height it
 //! had when a fight starts: see [`diggle_solver::advisor::shade`] for every transition. A
 //! maximised or minimised window is left alone until it is restored. While rolled up, dragging an
 //! edge changes only the width; the height saved is the open one.
@@ -237,8 +238,9 @@ struct State {
     drag: Option<i32>,
     /// The roll-up out of combat.
     shade: Shade,
-    /// Whether the last view shown was a fight; `None` until the worker's first view, so the
-    /// window does not roll up on the placeholder it opens with and drop again a moment later.
+    /// Whether the last view shown was a fight still being fought — not over, and not at its
+    /// Finish screen ([`Mode::fight_over`]). `None` until the worker's first view, so the window
+    /// does not roll up on the placeholder it opens with and drop again a moment later.
     combat: Option<bool>,
 }
 
@@ -1105,7 +1107,7 @@ enum ShadeMove {
 }
 
 /// Rolls the window up or drops it to match the box and the mode: up while the box is ticked and
-/// the last view was out of combat, down otherwise. Called whenever either changes and on every
+/// the last view was out of combat or a fight that is over, down otherwise. Called whenever either changes and on every
 /// restored resize, which also keeps a rolled-up window fitted to its checkbox rows as the width
 /// changes. `snap` lands at once instead of animating: for the first view after launch, so the
 /// window opens as it was left rather than bouncing.
@@ -2172,7 +2174,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     refresh(hwnd, ui);
                 }
             });
-            let combat = !matches!(view().lock().unwrap().mode, Mode::OutOfCombat);
+            let combat = {
+                let mode = &view().lock().unwrap().mode;
+                !matches!(mode, Mode::OutOfCombat) && !mode.fight_over()
+            };
             let first = STATE.with(|st| {
                 st.borrow_mut().as_mut().is_some_and(|st| st.combat.replace(combat).is_none())
             });

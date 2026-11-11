@@ -7,6 +7,12 @@ behaviour freely.
 
 ## [Unreleased]
 
+### Advisor
+
+- **"Collapse table out of combat" also collapses once a fight is won** (or fled by smoke bomb),
+  as the Finish button comes up, and stays collapsed through the rewards screen. "Fight on!" drops
+  it again with the next turn (`Mode::fight_over`).
+
 ## [0.3.0] - 2026-11-09
 
 Tested against game version v53.2.

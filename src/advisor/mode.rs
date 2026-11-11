@@ -36,13 +36,28 @@ pub enum Mode {
     CombatPlayerTurn,
 }
 
+impl Mode {
+    /// **The fight is over, though the save is still there**: the last enemy has fallen, or the
+    /// player threw a smoke bomb, and the game shows Finish (and "Fight on!" when it can go on).
+    ///
+    /// Only those two endings enter `WaitPhase` and `SmokebombWaitPhase` (`rpgview.lua:1691`,
+    /// `:1761-1766`; `:699`), and entering either writes the save (`:1512-1523`). Nothing is
+    /// written again until the reward is confirmed and the file removed, so this lasts through the
+    /// rewards screen. "Fight on!" goes back to a player turn, which writes again. In the user's
+    /// timing log to 2026-11-09, all 99 `WaitPhase` readings were followed by out of combat.
+    pub fn fight_over(&self) -> bool {
+        matches!(self, Mode::CombatWaiting { state } if state == "WaitPhase" || state == "SmokebombWaitPhase")
+    }
+}
+
 /// Decides the mode from what is on disk.
 pub fn classify(s: &Snapshot) -> Mode {
     // **Temporary, until a better signal for finishing a dungeon is found.** The fight is over the
     // moment `Finish` is clicked, but nothing on disk changes then: `combatSaveData` is written at
     // `PlayerTurn.onStart` and `WaitPhase.onStart` (`rpgview.lua:1450`, `:1567`) and removed only
     // when the reward is confirmed, by `viewPostgameAndReturn` (`overworld.lua:1154`). So between
-    // `Finish` and the reward this still reads as a fight, in whatever state the last write left.
+    // `Finish` and the reward this still reads as a fight, in whatever state the last write left —
+    // which is `WaitPhase`: see [`Mode::fight_over`].
     let Some(cs) = &s.combat else { return Mode::OutOfCombat };
     let state = cs.str_at("rpg.player.turnState").unwrap_or("").to_string();
     if state == "PlayerTurn" && !crate::turn::tiles_of(cs).is_empty() {
@@ -81,6 +96,19 @@ mod tests {
     fn any_other_state_is_waiting_and_names_it() {
         let s = r#"return { rpg = { player = { turnState = "WaitPhase" } }, tileboard = { letters = { "A" } } }"#;
         assert_eq!(classify(&snap(Some(s))), Mode::CombatWaiting { state: "WaitPhase".into() });
+    }
+
+    /// The won fight's `WaitPhase`, and the smoke bomb's, are over; any other wait is not.
+    #[test]
+    fn the_fight_is_over_in_its_wait_phases_only() {
+        let waiting = |s: &str| Mode::CombatWaiting { state: s.into() };
+        assert!(waiting("WaitPhase").fight_over());
+        assert!(waiting("SmokebombWaitPhase").fight_over());
+        for s in ["EnemyTurn", "PlayerEndTurn", "PlayerPreTurn", "CallbackPhase", ""] {
+            assert!(!waiting(s).fight_over(), "{s}");
+        }
+        assert!(!Mode::CombatPlayerTurn.fight_over());
+        assert!(!Mode::OutOfCombat.fight_over(), "out of combat is not a fight that ended");
     }
 
     /// `PlayerTurn` with nothing on the board has no words to offer.
