@@ -9,10 +9,10 @@ included.
 standing start, inside a single month of a Claude Pro subscription — begun late July 2026 and at the
 state you see here on **2026-08-24**. A human directed it, watched the live runs, ruled on the
 design questions and caught the wrong answers; a human did not write the code. However, rulings, and
-evidence for designs and changes are plastered all over the doc comments. `docs/` is excluded from
-Git on purpose, not gitignored — a local `.git/info/exclude` entry that never travels with a clone —
-to keep the slop that comes with the process off the record while the reasoning that survives it
-stays in the doc comments.
+evidence for designs and changes are plastered all over the doc comments, which is where the
+reasoning lives. `docs/` holds the high-level design documents, a map of how the pieces fit. The working notes behind
+them are kept out of Git on purpose, through a local `.git/info/exclude` entry that never travels
+with a clone, to keep the slop that comes with the process off the record.
 
 **Tested against game version v53.2** (the anomaly run below was on v52.4). Those are the only
 version numbers in this file, because they are the only ones a reader cannot get more reliably by
